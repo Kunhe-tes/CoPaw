@@ -16,7 +16,7 @@ import {
   SearchOutlined,
   UploadOutlined,
 } from "@ant-design/icons";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { chatApi, type FileManagerDirectoryListing, type FileManagerItem, type FileManagerRoot, type FileManagerTextPreview } from "@/api/modules/chat";
 import FileColumn from "./FileColumn";
 import FileDetail, { type FileDetailHandle } from "./FileDetail";
@@ -26,6 +26,7 @@ type Columns = [FileManagerDirectoryListing | null, FileManagerDirectoryListing 
 type Selected = [string | null, string | null, string | null];
 type ColumnQueries = [string, string, string];
 type PendingAction = (() => void) | null;
+type ChatAreaFrame = { left: number; width: number };
 
 const shortcutRoots: Array<{ root: FileManagerRoot; label: string; icon: React.ReactNode }> = [
   { root: "working", label: "工作目录", icon: <FolderOpenOutlined /> },
@@ -77,6 +78,7 @@ export default function FileManager() {
   const [dirty, setDirty] = useState(false);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [guardOpen, setGuardOpen] = useState(false);
+  const [chatAreaFrame, setChatAreaFrame] = useState<ChatAreaFrame | null>(null);
 
   const currentDirectory = columns[1] || columns[0];
   const uploadReason = uploadDisabledReason(root);
@@ -131,6 +133,24 @@ export default function FileManager() {
   useEffect(() => {
     if (open) void loadInitial(root);
   }, [loadInitial, open, root]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    const chatArea = document.querySelector<HTMLElement>("[data-chat-messages-area]");
+    if (!chatArea) return;
+    const updateFrame = () => {
+      const { left, width } = chatArea.getBoundingClientRect();
+      setChatAreaFrame({ left, width });
+    };
+    updateFrame();
+    const observer = new ResizeObserver(updateFrame);
+    observer.observe(chatArea);
+    window.addEventListener("resize", updateFrame);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", updateFrame);
+    };
+  }, [open]);
 
   const executeOrGuard = useCallback((action: () => void) => {
     if (!dirty) { action(); return; }
@@ -375,9 +395,12 @@ export default function FileManager() {
         footer={null}
         width="100%"
         style={{
-          width: "calc(100vw - 240px)",
+          width: chatAreaFrame?.width || "calc(100vw - 240px)",
           height: "100dvh",
-          margin: "0 0 0 auto",
+          minHeight: "100dvh",
+          maxHeight: "100dvh",
+          left: chatAreaFrame?.left,
+          margin: chatAreaFrame ? 0 : "0 0 0 auto",
           padding: 0,
           top: 0,
         }}

@@ -124,4 +124,52 @@ describe("FileManager", () => {
     expect(screen.queryByText("›")).not.toBeInTheDocument();
   });
 
+  it("keeps file size out of directory rows", () => {
+    render(
+      <FileColumn
+        column={1}
+        directory={{
+          ...rootPage,
+          items: [{
+            name: "report.txt",
+            path: "report.txt",
+            kind: "file",
+            size_bytes: 1536,
+            modified_at: "2026-07-29T00:00:00Z",
+            capabilities: rootPage.capabilities,
+          }],
+        }}
+        selectedPath={null}
+        onSelect={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("7/29/2026", { exact: false })).toBeInTheDocument();
+    expect(screen.queryByText("1.5 KB")).not.toBeInTheDocument();
+  });
+
+  it("shows file size in details and abandons the draft by leaving edit mode", () => {
+    render(<FileDetail
+      entry={{ name: "note.txt", path: "note.txt", kind: "file", size_bytes: 1536, capabilities: rootPage.capabilities }}
+      preview={{ path: "note.txt", size_bytes: 1536, is_text: true, content: "original", is_truncated: false, editable: true, revision: "r1" }}
+      editable
+      onDownload={() => undefined}
+      onSave={async () => undefined}
+      onArchive={() => undefined}
+      onRestore={() => undefined}
+      onPurge={() => undefined}
+    />);
+
+    fireEvent.click(screen.getByRole("tab", { name: "详情" }));
+    expect(screen.getByRole("row", { name: "大小 1.5 KB" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("tab", { name: "预览" }));
+    fireEvent.click(screen.getByRole("button", { name: /编辑/ }));
+    fireEvent.change(screen.getByLabelText("文件内容"), { target: { value: "draft" } });
+    fireEvent.click(screen.getByRole("button", { name: /放弃修改/ }));
+
+    expect(screen.queryByLabelText("文件内容")).not.toBeInTheDocument();
+    expect(screen.getByText("original")).toBeInTheDocument();
+  });
+
 });

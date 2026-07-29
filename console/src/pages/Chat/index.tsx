@@ -1853,6 +1853,7 @@ export default function ChatPage() {
               {/* ==================== 首页改版结束 ==================== */}
               <div
                 className={styles.chatMessagesArea}
+                data-chat-messages-area
                 style={{ flex: 1, minWidth: 0, position: "relative" }}
                 onDragEnter={isContentOnly ? undefined : handleDragEnter}
                 onDragLeave={isContentOnly ? undefined : handleDragLeave}

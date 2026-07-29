@@ -33,13 +33,6 @@ function formattedTime(value?: string | null) {
   return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString();
 }
 
-function formattedSize(value?: number | null) {
-  if (!value) return "";
-  if (value < 1024) return `${value} B`;
-  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
-  return `${(value / 1024 / 1024).toFixed(1)} MB`;
-}
-
 export default function FileColumn({
   column,
   directory,
@@ -100,7 +93,7 @@ export default function FileColumn({
                     <Typography.Text ellipsis className={styles.entryName}>{entry.name}</Typography.Text>
                   </Tooltip>
                   <span className={styles.entryMeta}>
-                    {entry.kind === "symlink" ? "受限链接" : [formattedSize(entry.size_bytes), formattedTime(entry.modified_at)].filter(Boolean).join(" · ")}
+                    {entry.kind === "symlink" ? "受限链接" : formattedTime(entry.modified_at)}
                   </span>
                 </span>
               </button>

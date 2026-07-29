@@ -97,6 +97,11 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
       setSaving(false);
     }
   };
+  const abandonEdit = () => {
+    setDraft(content);
+    setEditing(false);
+    onEditStateChange?.(false);
+  };
 
   useImperativeHandle(ref, () => ({
     saveDraft: async () => {
@@ -139,7 +144,7 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
     <section className={styles.detail} aria-label="文件详情">
       <header className={styles.detailHeader}>
         <span className={styles.detailIcon} aria-hidden="true">{icon}</span>
-        <div className={styles.detailTitle}><Typography.Text strong ellipsis>{entry.name}</Typography.Text><span>{formattedSize(entry.size_bytes)}</span></div>
+        <div className={styles.detailTitle}><Typography.Text strong ellipsis>{entry.name}</Typography.Text></div>
         <div className={styles.detailActions}>
           {entry.capabilities.download && <Button icon={<DownloadOutlined />} onClick={onDownload}>下载</Button>}
           {canEdit && !editing && <Button icon={<EditOutlined />} onClick={() => setEditing(true)}>编辑</Button>}
@@ -154,12 +159,13 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
           { key: "preview", label: "预览", children: visualPreview() },
           { key: "details", label: "详情", children: <Descriptions size="small" column={1} items={[
             { key: "path", label: "路径", children: entry.path || "工作区根目录" },
+            { key: "size", label: "大小", children: formattedSize(entry.size_bytes) },
             { key: "kind", label: "类型", children: entry.kind === "file" ? getContentType(entry.name) : entry.kind },
             { key: "changed", label: "修改时间", children: entry.modified_at || "未知" },
           ]} /> },
         ]}
       />
-      {editing && <div className={styles.editorFooter}><Button type="link" icon={<ReloadOutlined />} onClick={() => { setDraft(content); onEditStateChange?.(false); }}>放弃修改</Button></div>}
+      {editing && <div className={styles.editorFooter}><Button type="link" icon={<ReloadOutlined />} onClick={abandonEdit}>放弃修改</Button></div>}
     </section>
   );
 });
