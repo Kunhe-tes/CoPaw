@@ -2218,11 +2218,8 @@ class InitStatisticsConfigResult(TypedDict):
 async def init_skill_statistics_config(
     request: Request,
     req: InitStatisticsConfigRequest,
-    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
-    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
 ) -> InitStatisticsConfigResult:
-    """初始化技能统计配置（管理员）."""
-    _require_manager(x_manager)
+    """初始化技能统计配置."""
     svc = request.app.state.marketplace
 
     results: InitStatisticsConfigResult = {

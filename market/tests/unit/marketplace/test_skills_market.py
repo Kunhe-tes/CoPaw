@@ -477,12 +477,6 @@ def test_init_statistics_returns_200(tmp_path):
     resp = client.post(
         "/api/market/admin/skills/init-statistics",
         json={"source_ids": ["src_a"], "default_include": True},
-        headers={
-            "X-Source-Id": "src_a",
-            "X-Manager": "true",
-            "X-User-Id": "admin",
-            "X-User-Name": "Admin",
-        },
     )
     assert resp.status_code == 200
     data = resp.json()
