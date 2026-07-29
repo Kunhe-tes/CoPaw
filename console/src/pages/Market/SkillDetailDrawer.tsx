@@ -654,7 +654,7 @@ export function SkillDetailDrawer(
 
             {/* 统计配置（仅管理员可见） */}
             {isManager && (
-              <Tooltip title={includeInStatistics ? "该技能已纳入使用排行榜统计" : "该技能未纳入使用排行榜统计"}>
+              <Tooltip title={includeInStatistics ? "该技能已纳入统计" : "该技能未纳入统计"}>
                 <div
                   style={{
                     display: "inline-flex",

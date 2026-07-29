@@ -329,7 +329,7 @@ export default function UploadSkillModal({
           checked={includeInStatistics}
           onChange={(e) => setIncludeInStatistics(e.target.checked)}
         >
-          纳入使用排行榜统计
+          是否纳入统计
           <Tooltip title="勾选后，该技能的使用数据将展示在运营看板的使用排行榜中">
             <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
           </Tooltip>
