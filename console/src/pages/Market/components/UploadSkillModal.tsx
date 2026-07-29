@@ -221,7 +221,7 @@ export default function UploadSkillModal({
         disabled: !file || selectedCategory === null || skillIdUsedCount > 0,
       }}
       cancelText="取消"
-      destroyOnClose
+      destroyOnHidden
     >
       <div style={{ marginBottom: 16 }}>
         <Dragger {...uploadProps} style={{ marginBottom: 16 }}>
@@ -369,7 +369,7 @@ export default function UploadSkillModal({
         confirmLoading={addingCategory}
         okText="创建"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           placeholder="请输入分类名称"
