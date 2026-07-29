@@ -2,7 +2,7 @@ import type {
   FileManagerDirectoryListing,
   FileManagerItem,
   FileManagerRoot,
-} from "../../../../../api/modules/chat";
+} from "../../../../api/modules/chat";
 
 export interface FileManagerDetail {
   root: FileManagerRoot;

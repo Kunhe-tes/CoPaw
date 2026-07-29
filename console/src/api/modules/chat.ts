@@ -123,10 +123,10 @@ export interface FileManagerDownload {
 
 const FILES_PREVIEW = "/files/preview";
 
-function fileManagerQuery(params: Record<string, string | null | undefined>) {
+function fileManagerQuery(params: object) {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined && value !== null) query.set(key, value);
+    if (typeof value === "string") query.set(key, value);
   }
   return query.toString();
 }

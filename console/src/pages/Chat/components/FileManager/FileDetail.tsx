@@ -80,11 +80,6 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
     onEditStateChange?.(false);
   }, [entry?.path, onEditStateChange, preview?.content]);
 
-  if (!entry) {
-    return <section className={styles.detail} aria-label="文件详情"><Empty description="选择文件以预览详情" /></section>;
-  }
-
-  const { icon } = entry.kind === "file" ? getFileIcon(entry.name, 32) : { icon: <FileOutlined /> };
   const canEdit = editable && preview?.editable && !preview.is_truncated;
   const content = preview?.content || "";
   const handleDraft = (value: string) => {
@@ -110,12 +105,21 @@ const FileDetail = forwardRef<FileDetailHandle, FileDetailProps>(function FileDe
     },
   }), [draft, editing, preview?.revision]);
 
+  if (!entry) {
+    return <section className={styles.detail} aria-label="文件详情"><Empty description="选择文件以预览详情" /></section>;
+  }
+
+  const { icon } = entry.kind === "file" ? getFileIcon(entry.name, 32) : { icon: <FileOutlined /> };
+
   const visualPreview = () => {
     if (loading) return <div className={styles.previewState}><Spin /></div>;
     if (error) return <Alert type="error" showIcon message="无法读取文件" description={error} />;
     if (entry.kind !== "file") return <Alert type="warning" showIcon message="受限项目" description="符号链接和特殊文件不可读取或下载。" />;
     if (preview?.is_truncated) {
-      return <Alert type="info" showIcon message="仅预览前 1 MB 内容" description="文件超过 1 MB，完整内容请下载后处理，不能编辑。" />;
+      return <>
+        <Alert type="info" showIcon message="仅预览前 1 MB 内容" description="文件超过 1 MB，完整内容请下载后处理，不能编辑。" />
+        <pre className={styles.textPreview}>{content || "（空文件）"}</pre>
+      </>;
     }
     if (!preview?.is_text) {
       if (!binaryPreviewUrl) return <Alert type="info" showIcon message="此格式不提供内嵌预览" description="可下载单个文件后在本地打开。" />;

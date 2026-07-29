@@ -1,14 +1,15 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FileManager from "./index";
+import FileDetail from "./FileDetail";
 
-const { listDirectory } = vi.hoisted(() => ({ listDirectory: vi.fn() }));
+const { listDirectory, readFile } = vi.hoisted(() => ({ listDirectory: vi.fn(), readFile: vi.fn() }));
 
 vi.mock("@/api/modules/chat", () => ({
   chatApi: {
     fileManager: {
       listDirectory,
-      readFile: vi.fn(),
+      readFile,
       saveText: vi.fn(),
       upload: vi.fn(),
       downloadUrl: vi.fn(() => "/download"),
@@ -49,6 +50,7 @@ describe("FileManager", () => {
   beforeEach(() => {
     listDirectory.mockReset();
     listDirectory.mockResolvedValue(rootPage);
+    readFile.mockReset();
   });
 
   it("opens the reference-style overlay with shortcut toolbar and three column roles", async () => {
@@ -75,4 +77,35 @@ describe("FileManager", () => {
     fireEvent.click(screen.getByRole("button", { name: "对话目录" }));
     expect(await screen.findByText("对话目录仅供浏览，不能上传文件。")).toBeInTheDocument();
   });
+
+  it("keeps the available 1 MB text visible while marking a truncated preview read-only", () => {
+    render(<FileDetail
+      entry={{ name: "large.txt", path: "large.txt", kind: "file", capabilities: rootPage.capabilities }}
+      preview={{ path: "large.txt", size_bytes: 2_000_000, is_text: true, content: "first megabyte", is_truncated: true, editable: false, revision: "r1" }}
+      editable
+      onDownload={() => undefined}
+      onSave={async () => undefined}
+      onArchive={() => undefined}
+      onRestore={() => undefined}
+      onPurge={() => undefined}
+    />);
+
+    expect(screen.getByText("仅预览前 1 MB 内容")).toBeInTheDocument();
+    expect(screen.getByText("first megabyte")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "编辑" })).not.toBeInTheDocument();
+  });
+
+  it("does not render the selected file as a navigable breadcrumb", async () => {
+    const docsPage = { ...rootPage, path: "docs", items: [{ name: "note.txt", path: "docs/note.txt", kind: "file" as const, capabilities: rootPage.capabilities }] };
+    listDirectory.mockImplementation(({ path }: { path: string }) => Promise.resolve(path === "" ? rootPage : docsPage));
+    readFile.mockResolvedValue({ path: "docs/note.txt", size_bytes: 5, is_text: true, content: "hello", is_truncated: false, editable: true, revision: "r1" });
+    render(<FileManager />);
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+    await screen.findByRole("button", { name: "note.txt" });
+
+    fireEvent.click(screen.getByRole("button", { name: "note.txt" }));
+    await screen.findByRole("region", { name: "文件详情" });
+    expect(screen.getAllByRole("button", { name: "note.txt" })).toHaveLength(1);
+  });
+
 });

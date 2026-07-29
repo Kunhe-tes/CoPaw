@@ -12,7 +12,6 @@ import {
   DownloadOutlined,
   FolderOpenOutlined,
   HomeOutlined,
-  InboxOutlined,
   MessageOutlined,
   SearchOutlined,
   UploadOutlined,
@@ -233,17 +232,13 @@ export default function FileManager() {
     setColumnLoading(targetIndex, true);
     try {
       const results = await loadDirectory(root, target.path, null, search.trim());
-      setColumns((previous) => previous.map((item, index) => index === targetIndex ? results : index > targetIndex ? null : item) as Columns);
-      setSelected((previous) => previous.map((item, index) => index >= targetIndex ? null : item) as Selected);
-      setDetail(null);
-      setPreview(null);
-      revokeBinaryPreview();
+      setColumns((previous) => previous.map((item, index) => index === targetIndex ? results : item) as Columns);
     } catch (error) {
       setColumnError(targetIndex, requestError(error));
     } finally {
       setColumnLoading(targetIndex, false);
     }
-  }, [columns, loadDirectory, revokeBinaryPreview, root, search, setColumnError, setColumnLoading]);
+  }, [columns, loadDirectory, root, search, setColumnError, setColumnLoading]);
 
   const switchRoot = useCallback((nextRoot: FileManagerRoot) => {
     executeOrGuard(() => { setRoot(nextRoot); setSearch(""); });
@@ -319,23 +314,36 @@ export default function FileManager() {
   const mutate = useCallback((kind: "archive" | "restore" | "purge") => {
     if (!detail) return;
     const labels = { archive: "将文件移到回收站", restore: "还原此文件", purge: "永久删除此文件" };
+    const performMutation = async () => {
+      if (kind === "archive") await chatApi.fileManager.archive({ root, path: detail.path });
+      if (kind === "restore" && detail.archive_item_id) await chatApi.fileManager.restore(detail.archive_item_id);
+      if (kind === "purge" && detail.archive_item_id) await chatApi.fileManager.purge(detail.archive_item_id);
+      setDetail(null); setPreview(null); await refreshCurrentDirectory();
+      message.success("操作完成");
+    };
     Modal.confirm({
       title: labels[kind],
-      content: kind === "purge" ? "永久删除后无法恢复。" : "此操作会立即刷新当前目录。",
-      okText: kind === "purge" ? "永久删除" : "确认",
+      content: kind === "purge" ? "永久删除后无法恢复。下一步会再次确认原始路径。" : "此操作会立即刷新当前目录。",
+      okText: kind === "purge" ? "继续" : "确认",
       okButtonProps: kind === "purge" ? { danger: true } : undefined,
       cancelText: "取消",
       onOk: async () => {
-        if (kind === "archive") await chatApi.fileManager.archive({ root, path: detail.path });
-        if (kind === "restore" && detail.archive_item_id) await chatApi.fileManager.restore(detail.archive_item_id);
-        if (kind === "purge" && detail.archive_item_id) await chatApi.fileManager.purge(detail.archive_item_id);
-        setDetail(null); setPreview(null); await refreshCurrentDirectory();
-        message.success("操作完成");
+        if (kind !== "purge") return performMutation();
+        Modal.confirm({
+          title: "确认永久删除",
+          content: <>此文件的原始路径为：<strong>{detail.original_path || detail.path}</strong>。永久删除后无法恢复。</>,
+          okText: "永久删除",
+          okButtonProps: { danger: true },
+          cancelText: "取消",
+          onOk: performMutation,
+        });
       },
     });
   }, [detail, message, refreshCurrentDirectory, root]);
 
-  const currentPath = detail?.path || currentDirectory?.path || "";
+  const breadcrumbPath = detail
+    ? detail.path.split("/").slice(0, -1).join("/")
+    : currentDirectory?.path || "";
   const canUpload = !uploadReason && Boolean(currentDirectory?.capabilities.upload);
   const modalTitle = useMemo(() => <span id="file-manager-title">文件管理器</span>, []);
 
@@ -357,9 +365,9 @@ export default function FileManager() {
       >
         <div className={styles.manager}>
           <header className={styles.topBar}>
-            <Breadcrumb className={styles.breadcrumb} items={breadcrumbItems(root, currentPath, (path) => executeOrGuard(() => { void anchorPath(path); }))} />
+            <Breadcrumb className={styles.breadcrumb} items={breadcrumbItems(root, breadcrumbPath, (path) => executeOrGuard(() => { void anchorPath(path); }))} />
             <div className={styles.headerActions}>
-              <Input.Search allowClear placeholder={`在 ${currentDirectory?.path || "目录"} 中搜索`} value={search} onChange={(event) => setSearch(event.target.value)} onSearch={() => void submitSearch()} prefix={<SearchOutlined />} aria-label="搜索当前目录" />
+              <Input.Search allowClear placeholder={`在 ${currentDirectory?.path || "目录"} 中搜索`} value={search} onChange={(event) => setSearch(event.target.value)} onSearch={() => executeOrGuard(() => { void submitSearch(); })} prefix={<SearchOutlined />} aria-label="搜索当前目录" />
               <Tooltip title={uploadReason || "上传到中间栏目当前目录"}>
                 <span><Button type="primary" icon={<UploadOutlined />} disabled={!canUpload} onClick={() => fileInputRef.current?.click()}>上传</Button></span>
               </Tooltip>

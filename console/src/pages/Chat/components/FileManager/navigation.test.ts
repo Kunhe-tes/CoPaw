@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import type {
   FileManagerDirectoryListing,
   FileManagerItem,
-} from "../../../../../api/modules/chat";
+} from "../../../../api/modules/chat";
 import {
   canLeaveDirtyEditor,
   initialNavigation,
@@ -37,7 +37,7 @@ function directory(
 
 function folder(path: string): FileManagerItem {
   return {
-    name: path.split("/").at(-1) ?? path,
+    name: path.split("/").pop() ?? path,
     path,
     kind: "directory",
     capabilities,
@@ -46,7 +46,7 @@ function folder(path: string): FileManagerItem {
 
 function file(path: string): FileManagerItem {
   return {
-    name: path.split("/").at(-1) ?? path,
+    name: path.split("/").pop() ?? path,
     path,
     kind: "file",
     size_bytes: 4,
