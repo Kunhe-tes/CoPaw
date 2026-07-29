@@ -471,13 +471,19 @@ def test_update_statistics_config_non_manager_returns_403(tmp_path):
 
 
 def test_init_statistics_returns_200(tmp_path):
-    """测试初始化历史数据接口."""
+    """测试初始化历史数据接口（dry_run 模式）."""
     app = _make_app(tmp_path)
     client = TestClient(app)
+    # dry_run 模式会检查数据库连接
     resp = client.post(
         "/api/market/admin/skills/init-statistics",
-        json={"source_ids": ["src_a"], "default_include": True},
+        json={
+            "source_ids": ["src_a"],
+            "default_include": True,
+            "dry_run": True,
+        },
     )
+    # 由于 mock 数据库连接，dry_run 模式应该成功
     assert resp.status_code == 200
     data = resp.json()
     assert "processed" in data

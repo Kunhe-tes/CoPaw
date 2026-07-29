@@ -2276,6 +2276,15 @@ async def init_skill_statistics_config(
         "errors": [],
     }
 
+    # 检查数据库连接
+    if not svc.db or not svc.db.is_connected:
+        results["errors"].append(
+            {
+                "reason": "数据库未连接，无法初始化",
+            },
+        )
+        return results
+
     # 确定 source_ids 列表
     if req.source_ids:
         source_ids = req.source_ids
@@ -2293,10 +2302,19 @@ async def init_skill_statistics_config(
     # 初始化数据库操作类
     from ...marketplace.market_skill_registry import MarketSkillRegistry
 
-    registry = (
-        MarketSkillRegistry(svc.db) if svc.db and svc.db.is_connected else None
-    )
+    registry = MarketSkillRegistry(svc.db)
 
+    # dry_run 模式：只统计数量，不写入数据库和文件
+    if req.dry_run:
+        for source_id in source_ids:
+            items = load_index(svc.marketplace_root, source_id)
+            skill_items = [i for i in items if i.item_type == "skill"]
+            results["total_skills"] += len(skill_items)
+            results["processed"] += len(skill_items)
+            results["inserted"] = results["processed"]  # dry_run 假设全部成功
+        return results
+
+    # 实际执行模式
     for source_id in source_ids:
         items = load_index(svc.marketplace_root, source_id)
         skill_items = [i for i in items if i.item_type == "skill"]
@@ -2305,26 +2323,23 @@ async def init_skill_statistics_config(
         for item in skill_items:
             results["processed"] += 1
 
-            if registry:
-                success, error = await _init_single_skill_statistics(
-                    registry=registry,
-                    item=item,
-                    source_id=source_id,
-                    default_include=req.default_include,
-                    dry_run=req.dry_run,
-                )
-                if success:
-                    results["inserted"] += 1
-                    if not req.dry_run:
-                        item.include_in_statistics = req.default_include
-                else:
-                    results["skipped"] += 1
-                    if error:
-                        results["errors"].append(error)
-            elif not req.dry_run:
+            success, error = await _init_single_skill_statistics(
+                registry=registry,
+                item=item,
+                source_id=source_id,
+                default_include=req.default_include,
+                dry_run=False,
+            )
+            if success:
+                results["inserted"] += 1
+                # 只更新 skill 类型的 include_in_statistics 字段
                 item.include_in_statistics = req.default_include
+            else:
+                results["skipped"] += 1
+                if error:
+                    results["errors"].append(error)
 
-        if not req.dry_run:
-            save_index(svc.marketplace_root, source_id, items)
+        # 保存 index.json（只包含 skill 类型的变更）
+        save_index(svc.marketplace_root, source_id, items)
 
     return results

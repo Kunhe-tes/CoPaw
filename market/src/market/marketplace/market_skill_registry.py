@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """市场技能数据库操作类.
 
-隔离 swe_market_skills 表相关的数据库操作。
+隔离 swe_marketplace_skills 表相关的数据库操作。
 """
 
 import logging
@@ -57,7 +57,7 @@ class MarketSkillRegistry:
         """
         if not self.is_connected():
             logger.warning(
-                "Database not connected, skip upsert swe_market_skills",
+                "Database not connected, skip upsert swe_marketplace_skills",
             )
             return False
 
@@ -65,7 +65,7 @@ class MarketSkillRegistry:
             # 先查询是否存在
             existing = await self.db.fetch_one(
                 """
-                SELECT id FROM swe_market_skills
+                SELECT id FROM swe_marketplace_skills
                 WHERE source_id = %s AND item_id = %s
                 """,
                 (source_id, item_id),
@@ -75,7 +75,7 @@ class MarketSkillRegistry:
                 # 更新现有记录
                 await self.db.execute(
                     """
-                    UPDATE swe_market_skills
+                    UPDATE swe_marketplace_skills
                     SET skill_id = %s, skill_name = %s, cn_name = %s,
                         include_in_statistics = %s,
                         updator_id = %s, updator_name = %s,
@@ -93,7 +93,7 @@ class MarketSkillRegistry:
                     ),
                 )
                 logger.info(
-                    "Updated swe_market_skills: item_id=%s, skill_name=%s, include=%s",
+                    "Updated swe_marketplace_skills: item_id=%s, skill_name=%s, include=%s",
                     item_id,
                     skill_name,
                     include_in_statistics,
@@ -102,7 +102,7 @@ class MarketSkillRegistry:
                 # 插入新记录
                 await self.db.execute(
                     """
-                    INSERT INTO swe_market_skills
+                    INSERT INTO swe_marketplace_skills
                         (source_id, item_id, skill_id, skill_name, cn_name,
                          include_in_statistics, creator_id, creator_name,
                          updator_id, updator_name)
@@ -122,14 +122,14 @@ class MarketSkillRegistry:
                     ),
                 )
                 logger.info(
-                    "Inserted swe_market_skills: item_id=%s, skill_name=%s, include=%s",
+                    "Inserted swe_marketplace_skills: item_id=%s, skill_name=%s, include=%s",
                     item_id,
                     skill_name,
                     include_in_statistics,
                 )
             return True
         except Exception as e:
-            logger.warning("Failed to upsert swe_market_skills: %s", e)
+            logger.warning("Failed to upsert swe_marketplace_skills: %s", e)
             return False
 
     async def update_statistics_config(
@@ -161,7 +161,7 @@ class MarketSkillRegistry:
         try:
             await self.db.execute(
                 """
-                UPDATE swe_market_skills
+                UPDATE swe_marketplace_skills
                 SET include_in_statistics = %s,
                     updator_id = %s,
                     updator_name = %s,
@@ -205,7 +205,7 @@ class MarketSkillRegistry:
         try:
             rows = await self.db.fetch_all(
                 """
-                SELECT skill_name FROM swe_market_skills
+                SELECT skill_name FROM swe_marketplace_skills
                 WHERE source_id = %s AND include_in_statistics = 1
                 """,
                 (source_id,),

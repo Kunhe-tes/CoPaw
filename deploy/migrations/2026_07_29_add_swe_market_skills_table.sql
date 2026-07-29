@@ -1,7 +1,7 @@
 -- 技能统计配置功能：市场技能表
 -- 用于记录市场技能的统计配置
 
-CREATE TABLE IF NOT EXISTS swe_market_skills (
+CREATE TABLE IF NOT EXISTS swe_marketplace_skills (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     source_id VARCHAR(64) NOT NULL COMMENT '应用入口标识',
     item_id VARCHAR(64) NOT NULL COMMENT '市场条目ID',
