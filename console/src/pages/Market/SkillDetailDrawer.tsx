@@ -7,10 +7,10 @@ import {
   UserOutlined,
   DownloadOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
+import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Switch, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle } from "lucide-react";
+import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle, BarChart3 } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
 import type { DistributionRecord } from "../../api/types";
@@ -339,6 +339,10 @@ export function SkillDetailDrawer(
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [syncToUsers, setSyncToUsers] = useState(true);
 
+  // 统计配置相关状态
+  const [includeInStatistics, setIncludeInStatistics] = useState<boolean>(false);
+  const [isUpdatingStatistics, setIsUpdatingStatistics] = useState(false);
+
   const triggerBrowserDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -555,6 +559,32 @@ export function SkillDetailDrawer(
     };
   }, [open, skill, sourceId]);
 
+  // 初始化统计配置状态
+  useEffect(() => {
+    if (skill) {
+      setIncludeInStatistics(skill.include_in_statistics ?? false);
+    }
+  }, [skill]);
+
+  // 更新统计配置
+  const handleStatisticsConfigChange = useCallback(async (checked: boolean) => {
+    if (!skill || !sourceId) return;
+
+    setIsUpdatingStatistics(true);
+    try {
+      await marketApi.updateSkillStatisticsConfig(sourceId, skill.item_id, {
+        include_in_statistics: checked,
+      });
+      setIncludeInStatistics(checked);
+      message.success(checked ? "已纳入统计" : "已取消统计");
+      onRefresh?.();
+    } catch {
+      message.error("更新失败");
+    } finally {
+      setIsUpdatingStatistics(false);
+    }
+  }, [skill, sourceId, onRefresh]);
+
   const userStatsColumns = useMemo(
     () => [
       {
@@ -621,6 +651,35 @@ export function SkillDetailDrawer(
               <CheckCircle size={12} style={{ marginRight: 4 }} />
               {statusText}
             </Tag>
+
+            {/* 统计配置（仅管理员可见） */}
+            {isManager && (
+              <Tooltip title={includeInStatistics ? "该技能已纳入使用排行榜统计" : "该技能未纳入使用排行榜统计"}>
+                <div
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "2px 8px",
+                    borderRadius: 6,
+                    fontSize: 12,
+                    backgroundColor: includeInStatistics ? "#e6f4ff" : "#f5f5f5",
+                    border: `1px solid ${includeInStatistics ? "#91caff" : "#d9d9d9"}`,
+                  }}
+                >
+                  <BarChart3 size={12} style={{ color: includeInStatistics ? "#1677ff" : "#8c8c8c" }} />
+                  <span style={{ color: includeInStatistics ? "#1677ff" : "#8c8c8c" }}>
+                    {includeInStatistics ? "已纳入统计" : "未纳入统计"}
+                  </span>
+                  <Switch
+                    size="small"
+                    checked={includeInStatistics}
+                    loading={isUpdatingStatistics}
+                    onChange={handleStatisticsConfigChange}
+                  />
+                </div>
+              </Tooltip>
+            )}
 
             {/* 中文名（大号） + 技能名（小号） */}
             {isEditing ? (
