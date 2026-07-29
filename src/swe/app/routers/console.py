@@ -500,7 +500,7 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     native_payload: dict[str, Any] = {
         # /console/chat always executes through the Console runtime.  Do not
         # trust the client-provided channel when resolving effective skills.
-        "channel_id": "console",
+        "channel_id": _channel_id,
         "sender_id": sender_id,
         "content_parts": content_parts,
         "meta": {
