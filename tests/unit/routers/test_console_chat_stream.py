@@ -8,8 +8,6 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from starlette.background import BackgroundTask
-from starlette.responses import StreamingResponse
 
 from src.swe.app.file_manager import FileManagerService
 from src.swe.app.routers import console as console_router
@@ -191,6 +189,7 @@ def test_file_manager_conversation_can_read_and_download_regular_file(
     assert download_response.headers["content-disposition"] == (
         'attachment; filename="chat.txt"'
     )
+    assert "content-length" not in download_response.headers
 
 
 def test_file_manager_recycle_is_not_available_for_read_or_download(
@@ -224,16 +223,70 @@ def test_file_manager_download_rejects_symbolic_links(
     assert response.status_code == 403
 
 
-def test_file_manager_download_stream_closes_before_first_iteration() -> None:
+def test_file_manager_download_response_closes_if_response_start_fails() -> (
+    None
+):
     read_fd, write_fd = os.pipe()
     os.close(write_fd)
     stream = console_router._FileManagerDownloadStream(read_fd, 1)
-    response = StreamingResponse(
-        stream,
-        background=BackgroundTask(stream.close),
+    response = console_router._FileManagerDownloadResponse(stream)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            raise RuntimeError("response start failed")
+
+    with pytest.raises(RuntimeError, match="response start failed"):
+        asyncio.run(
+            response(
+                {
+                    "type": "http",
+                    "asgi": {"spec_version": "2.4"},
+                    "method": "GET",
+                    "path": "/download",
+                    "headers": [],
+                },
+                receive,
+                send,
+            ),
+        )
+
+    with pytest.raises(OSError):
+        os.fstat(read_fd)
+
+
+def test_file_manager_download_response_closes_if_response_start_is_cancelled() -> (
+    None
+):
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    response = console_router._FileManagerDownloadResponse(
+        console_router._FileManagerDownloadStream(read_fd, 1),
     )
 
-    asyncio.run(response.background())
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            response(
+                {
+                    "type": "http",
+                    "asgi": {"spec_version": "2.4"},
+                    "method": "GET",
+                    "path": "/download",
+                    "headers": [],
+                },
+                receive,
+                send,
+            ),
+        )
 
     with pytest.raises(OSError):
         os.fstat(read_fd)

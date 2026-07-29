@@ -24,7 +24,6 @@ from fastapi import (
     UploadFile,
 )
 from pydantic import BaseModel, Field
-from starlette.background import BackgroundTask
 from starlette.responses import StreamingResponse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -294,6 +293,29 @@ class _FileManagerDownloadStream:
         except OSError:
             # A cancelled stream or a completed iterator may already close it.
             pass
+
+
+class _FileManagerDownloadResponse(StreamingResponse):
+    """A download response that closes its descriptor on every exit path."""
+
+    def __init__(
+        self,
+        stream: _FileManagerDownloadStream,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self._file_manager_stream = stream
+        super().__init__(
+            stream,
+            media_type="application/octet-stream",
+            headers=headers,
+        )
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._file_manager_stream.close()
 
 
 def _looks_like_text_file(path: Path) -> bool:
@@ -1003,15 +1025,12 @@ async def get_file_manager_file_download(
         download.file_descriptor,
         download.size_bytes,
     )
-    return StreamingResponse(
+    return _FileManagerDownloadResponse(
         stream,
-        media_type="application/octet-stream",
-        background=BackgroundTask(stream.close),
         headers={
             "Content-Disposition": _file_manager_download_disposition(
                 download.filename,
             ),
-            "Content-Length": str(download.size_bytes),
         },
     )
 
