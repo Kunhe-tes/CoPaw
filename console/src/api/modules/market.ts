@@ -26,6 +26,8 @@ export interface MarketSkill {
   call_count: number;
   user_count: number;
   version_unchanged?: boolean;
+  // 新增字段：是否纳入统计
+  include_in_statistics?: boolean;
 }
 
 export interface MarketSkillDetail extends MarketSkill {
@@ -34,6 +36,17 @@ export interface MarketSkillDetail extends MarketSkill {
     user_name: string;
     call_count: number;
   }>;
+}
+
+// 更新统计配置请求
+export interface UpdateStatisticsConfigRequest {
+  include_in_statistics: boolean;
+}
+
+// 更新统计配置响应
+export interface UpdateStatisticsConfigResponse {
+  success: boolean;
+  message?: string;
 }
 
 // 用户技能状态
@@ -603,6 +616,27 @@ export const marketApi = {
     };
     return request<DistributionPreviewResponse>(
       `/market/skills/${itemId}/distribution-preview`,
+      opts
+    );
+  },
+
+  // 更新技能统计配置
+  updateSkillStatisticsConfig: async (
+    sourceId: string,
+    itemId: string,
+    data: UpdateStatisticsConfigRequest
+  ): Promise<UpdateStatisticsConfigResponse> => {
+    const opts: RequestInit = {
+      method: "PATCH",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+      body: JSON.stringify(data),
+    };
+    return request<UpdateStatisticsConfigResponse>(
+      `/market/skills/${itemId}/statistics`,
       opts
     );
   },
