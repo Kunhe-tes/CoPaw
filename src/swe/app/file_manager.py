@@ -833,6 +833,9 @@ class FileManagerService:
         assert archive_item_id is not None
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
+    # The staged archive transition intentionally keeps all rollback-free
+    # boundaries in one auditable method.
+    # pylint: disable=too-many-statements
     @_serialized_mutation
     def restore_recycle_item(
         self,
@@ -875,7 +878,17 @@ class FileManagerService:
                     target_parent_fd,
                     parts[-1],
                 )
+                target_identity = self._workspace_file_identity(original_path)
+                if target_identity is None:
+                    raise FileManagerConflictError(
+                        "Restored target disappeared during recovery",
+                    )
                 updated_index = dict(prepared_index)
+                prepared_transition = prepared_index.get("transition")
+                assert isinstance(prepared_transition, dict)
+                transition = dict(prepared_transition)
+                transition["target_identity"] = target_identity
+                updated_index["transition"] = transition
                 updated_index["items"] = [
                     row
                     for row in index.get("items", [])
@@ -1182,7 +1195,6 @@ class FileManagerService:
         )
         original_path = self._validate_archive_original_path(item)
         payload_exists = self._archive_payload_exists(archive_item_id)
-        original_exists = self._workspace_file_exists(original_path)
         existing_items = index.get("items")
         items = (
             list(existing_items) if isinstance(existing_items, list) else []
@@ -1194,15 +1206,22 @@ class FileManagerService:
             if payload_exists and archive_item_id not in item_ids:
                 items.append(item)
         elif operation == "restore":
-            if original_exists:
+            target_identity = transition.get("target_identity")
+            target_matches = isinstance(
+                target_identity,
+                dict,
+            ) and target_identity == self._workspace_file_identity(
+                original_path,
+            )
+            if payload_exists and archive_item_id not in item_ids:
+                items.append(item)
+            elif target_matches and not payload_exists:
                 items = [
                     row
                     for row in items
                     if not isinstance(row, dict)
                     or str(row.get("id") or "") != archive_item_id
                 ]
-            elif payload_exists and archive_item_id not in item_ids:
-                items.append(item)
         elif operation == "purge":
             if payload_exists and archive_item_id not in item_ids:
                 items.append(item)
@@ -1242,6 +1261,37 @@ class FileManagerService:
             return stat_module.S_ISREG(os.fstat(file_fd).st_mode)
         finally:
             os.close(file_fd)
+
+    def _workspace_file_identity(
+        self,
+        original_path: str,
+    ) -> dict[str, int | str] | None:
+        """Return a content-bound identity for one safely opened workspace file."""
+
+        root, relative_path = self._root_from_workspace_relative(original_path)
+        try:
+            file_fd = self._open_file_fd(root, relative_path)
+        except FileManagerNotFoundError:
+            return None
+        try:
+            initial_stat = os.fstat(file_fd)
+            digest = hashlib.sha256()
+            while chunk := os.read(file_fd, _FILE_READ_CHUNK_BYTES):
+                digest.update(chunk)
+            final_stat = os.fstat(file_fd)
+        finally:
+            os.close(file_fd)
+        if self._stat_identity(initial_stat) != self._stat_identity(
+            final_stat,
+        ):
+            return None
+        return {
+            "device": initial_stat.st_dev,
+            "inode": initial_stat.st_ino,
+            "size": initial_stat.st_size,
+            "mtime_ns": initial_stat.st_mtime_ns,
+            "sha256": digest.hexdigest(),
+        }
 
     @staticmethod
     def _validate_archive_item_id(archive_item_id: str) -> str:

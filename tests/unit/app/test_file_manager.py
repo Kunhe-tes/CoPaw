@@ -950,7 +950,14 @@ def test_restart_recovers_index_publish_fsync_uncertainty(
     recovered = _service(tmp_path).list_directory("recycle")
     if operation == "restore":
         assert path.read_text(encoding="utf-8") == "report"
-        assert recovered.items == []
+        assert (
+            tmp_path
+            / "governance"
+            / "archive"
+            / "files"
+            / archived.archive_item_id
+        ).read_text(encoding="utf-8") == "report"
+        assert len(recovered.items) == 1
     else:
         assert len(recovered.items) == 1
 
@@ -1003,6 +1010,36 @@ def test_save_and_upload_publish_fsync_failures_are_outcome_uncertain(
     with pytest.raises(FileManagerOutcomeUncertainError):
         service.upload_bytes("upload", "", "published.txt", b"body")
     assert (tmp_path / "media" / "published.txt").read_bytes() == b"body"
+
+
+def test_restore_transition_keeps_payload_when_target_was_created_externally(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "report.txt"
+    path.write_text("report", encoding="utf-8")
+    service = _service(tmp_path)
+    archived = service.archive_file("working", "report.txt", actor="tester")
+    index = service._load_archive_index()
+    item = next(
+        row for row in index["items"] if row["id"] == archived.archive_item_id
+    )
+    prepared = dict(index)
+    prepared["transition"] = {"operation": "restore", "item": item}
+    service._save_archive_index(prepared)
+    path.write_text("external replacement", encoding="utf-8")
+
+    recovered = _service(tmp_path).list_directory("recycle")
+
+    assert [row.archive_item_id for row in recovered.items] == [
+        archived.archive_item_id,
+    ]
+    assert (
+        tmp_path
+        / "governance"
+        / "archive"
+        / "files"
+        / archived.archive_item_id
+    ).read_text(encoding="utf-8") == "report"
 
 
 def test_concurrent_archives_do_not_drop_archive_index_items(
