@@ -480,6 +480,32 @@ export function SkillDetailDrawer(
     handleSave(syncToUsers, syncToUsers ? selectedUserIds : []);
   }, [handleSave, syncToUsers, selectedUserIds]);
 
+  // 初始化统计配置状态
+  useEffect(() => {
+    if (skill) {
+      setIncludeInStatistics(skill.include_in_statistics ?? false);
+    }
+  }, [skill]);
+
+  // 更新统计配置
+  const handleStatisticsConfigChange = useCallback(async (checked: boolean) => {
+    if (!skill || !sourceId) return;
+
+    setIsUpdatingStatistics(true);
+    try {
+      await marketApi.updateSkillStatisticsConfig(sourceId, skill.item_id, {
+        include_in_statistics: checked,
+      });
+      setIncludeInStatistics(checked);
+      message.success(checked ? "已纳入统计" : "已取消统计");
+      onRefresh?.();
+    } catch {
+      message.error("更新失败");
+    } finally {
+      setIsUpdatingStatistics(false);
+    }
+  }, [skill, sourceId, onRefresh]);
+
   const moreMenuItems: MenuProps["items"] = useMemo(() => {
     const items: MenuProps["items"] = [];
     if (onRecall) {
@@ -577,32 +603,6 @@ export function SkillDetailDrawer(
       cancelled = true;
     };
   }, [open, skill, sourceId]);
-
-  // 初始化统计配置状态
-  useEffect(() => {
-    if (skill) {
-      setIncludeInStatistics(skill.include_in_statistics ?? false);
-    }
-  }, [skill]);
-
-  // 更新统计配置
-  const handleStatisticsConfigChange = useCallback(async (checked: boolean) => {
-    if (!skill || !sourceId) return;
-
-    setIsUpdatingStatistics(true);
-    try {
-      await marketApi.updateSkillStatisticsConfig(sourceId, skill.item_id, {
-        include_in_statistics: checked,
-      });
-      setIncludeInStatistics(checked);
-      message.success(checked ? "已纳入统计" : "已取消统计");
-      onRefresh?.();
-    } catch {
-      message.error("更新失败");
-    } finally {
-      setIsUpdatingStatistics(false);
-    }
-  }, [skill, sourceId, onRefresh]);
 
   const userStatsColumns = useMemo(
     () => [
