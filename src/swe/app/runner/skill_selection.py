@@ -23,7 +23,7 @@ class SkillUseDirective:
     path: Path
 
     def render(self) -> str:
-        return f"""<SKILL-USE-V1>
+        return f"""<SKILL-USE>
 <instruction>
 用户显式选择了下面 <name> 指定的技能。请先使用 read_file 工具读取 <path> 指定的 SKILL.md 文件。读取后必须严格按照该技能说明执行本轮任务：
 - 不要跳过任何步骤，也不要把步骤改写成泛化或概括的回答；
@@ -35,7 +35,7 @@ class SkillUseDirective:
 <name>{escape(self.name)}</name>
 <description>{escape(self.description)}</description>
 <path>{escape(str(self.path))}</path>
-</SKILL-USE-V1>"""
+</SKILL-USE>"""
 
 
 def build_skill_use_directives(

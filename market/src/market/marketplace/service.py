@@ -761,11 +761,49 @@ class MarketplaceService:
                 }
 
         # 更新 manifest
+        moved_from: Path | None = None
+        moved_to: Path | None = None
+
         def _update(payload: dict) -> bool:
+            nonlocal moved_from, moved_to
+            registered_entry = payload.get("skills", {}).get(skill_name)
             entry = payload.setdefault("skills", {}).setdefault(skill_name, {})
+            if registered_entry is not None:
+                active_dir = skills_dir / skill_name
+                disabled_dir = (
+                    get_user_disabled_skills_dir(
+                        self.swe_root,
+                        user_id,
+                        agent_id,
+                        source_id,
+                    )
+                    / skill_name
+                )
+                if active_dir.exists() and disabled_dir.exists():
+                    return False
+                if not disabled_dir.exists():
+                    if not active_dir.exists():
+                        return False
+                else:
+                    active_dir.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        shutil.move(disabled_dir, active_dir)
+                    except OSError:
+                        return False
+                    moved_from = disabled_dir
+                    moved_to = active_dir
             entry["enabled"] = True
             entry["updated_at"] = datetime.now(timezone.utc).isoformat()
             return True
+
+        def _rollback_move() -> None:
+            if (
+                moved_from is not None
+                and moved_to is not None
+                and moved_to.exists()
+            ):
+                moved_from.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(moved_to, moved_from)
 
         updated = mutate_user_skill_manifest(
             self.swe_root,
@@ -773,6 +811,7 @@ class MarketplaceService:
             agent_id,
             _update,
             source_id,
+            rollback_fn=_rollback_move,
         )
 
         if updated:
@@ -1455,7 +1494,10 @@ class MarketplaceService:
         )
         if active_skills_dir.is_dir():
             for skill_dir in active_skills_dir.iterdir():
-                if skill_dir.is_dir() and skill_dir.name not in manifest_skills:
+                if (
+                    skill_dir.is_dir()
+                    and skill_dir.name not in manifest_skills
+                ):
                     skill_dirs[skill_dir.name] = skill_dir
 
         return [

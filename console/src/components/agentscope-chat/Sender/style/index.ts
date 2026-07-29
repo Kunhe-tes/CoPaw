@@ -31,7 +31,7 @@ const IndexStyle = createGlobalStyle`
     box-shadow: 0px 12px 24px -16px rgba(54, 54, 73, 0.04),
       0px 12px 40px 0px rgba(51, 51, 71, 0.08),
       0px 0px 1px 0px rgba(44, 44, 54, 0.02);
-    border-color: ${(p) => p.theme.colorPrimaryHover};
+    border-color: ${(p) => p.theme.colorBorderSecondary};
 
     &:after {
       border-width: ${(p) => p.theme.lineWidth}px;

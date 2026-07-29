@@ -1,18 +1,26 @@
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 
+export type ContextReferenceType = "skill" | "mcp_tool" | "workspace_file";
+
 export interface SkillMentionItem {
-  name: string;
+  id: string;
+  type: ContextReferenceType;
+  label: string;
   description: string;
+  name?: string;
+  server?: string;
+  root?: "media" | "static";
+  relative_path?: string;
 }
 
 export interface SkillMentionsData {
   items: SkillMentionItem[];
-  selected: string[];
+  selected: SkillMentionItem[];
   error?: boolean;
   loading?: boolean;
-  onOpen: () => void;
-  onChange: (names: string[]) => void;
+  onOpen: (query: string) => void;
+  onChange: (items: SkillMentionItem[]) => void;
   onRetry?: () => void;
 }
 
@@ -22,34 +30,31 @@ export interface UseSkillMentionsOptions extends SkillMentionsData {
   onValueChange: (value: string) => void;
 }
 
-const trailingSkillMentionPattern = /(?:^|\s)@([^\s@]*)$/;
+const trailingSkillMentionPattern = /(?:^|\s)@([^@]*)$/;
 
 interface MentionRange {
   end: number;
   start: number;
 }
 
+interface SelectedMention {
+  start: number;
+  text: string;
+}
+
+export function contextReferenceText(item: SkillMentionItem) {
+  if (item.type === "mcp_tool") return `@${item.server}/${item.name}`;
+  return `@${item.name || item.label}`;
+}
+
 function getMentionRange(
   value: string,
   caretOffset: number,
 ): MentionRange | null {
-  const textBeforeCaret = value.slice(0, caretOffset);
-  const match = textBeforeCaret.match(trailingSkillMentionPattern);
-  if (!match) {
-    return null;
-  }
-
-  return {
-    end: caretOffset,
-    start: caretOffset - match[1].length - 1,
-  };
-}
-
-function compareSkillNames(left: SkillMentionItem, right: SkillMentionItem) {
-  return left.name.localeCompare(right.name, undefined, {
-    numeric: true,
-    sensitivity: "base",
-  });
+  const match = value.slice(0, caretOffset).match(trailingSkillMentionPattern);
+  return match
+    ? { end: caretOffset, start: caretOffset - match[1].length - 1 }
+    : null;
 }
 
 export function useSkillMentions({
@@ -66,53 +71,80 @@ export function useSkillMentions({
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
   const openRef = useRef(false);
+  const requestedQueryRef = useRef<string | null>(null);
   const mentionRangeRef = useRef<MentionRange | null>(null);
+  const selectedMentionRef = useRef<SelectedMention | null>(null);
 
   const setMenuOpen = useCallback(
     (nextOpen: boolean) => {
-      if (openRef.current === nextOpen) {
-        return;
-      }
-
+      if (openRef.current === nextOpen) return;
       openRef.current = nextOpen;
       setOpen(nextOpen);
       if (nextOpen) {
-        onOpen();
+        requestedQueryRef.current = "";
+        onOpen("");
       }
     },
     [onOpen],
   );
 
+  useEffect(() => {
+    if (!open) return;
+    if (requestedQueryRef.current === query) return;
+    if (!query) {
+      requestedQueryRef.current = "";
+      onOpen("");
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      requestedQueryRef.current = query;
+      onOpen(query);
+    }, 200);
+    return () => window.clearTimeout(timer);
+  }, [onOpen, open, query]);
+
   const filteredItems = useMemo(() => {
-    const normalizedQuery = query.toLowerCase();
-    return items
-      .filter((item) => {
-        const name = item.name.toLowerCase();
-        const description = item.description.toLowerCase();
-        return (
-          name.includes(normalizedQuery) ||
-          description.includes(normalizedQuery)
-        );
-      })
-      .sort(compareSkillNames);
+    const needle = query.trim().toLocaleLowerCase();
+    if (!needle) return items;
+    return items.filter((item) => {
+      const values =
+        item.type === "workspace_file"
+          ? [item.label]
+          : [item.label, item.description, item.name, item.server];
+      return values.some(
+        (value) => value?.toLocaleLowerCase().includes(needle),
+      );
+    });
   }, [items, query]);
   const blocksSubmit = open && (loading || filteredItems.length > 0);
-
   const close = useCallback(() => setMenuOpen(false), [setMenuOpen]);
 
   const handleInputValueChange = useCallback(
     (nextValue: string, caretOffset = nextValue.length) => {
       onValueChange(nextValue);
-
       const range = getMentionRange(nextValue, caretOffset);
       if (!range) {
+        mentionRangeRef.current = null;
+        selectedMentionRef.current = null;
+        setMenuOpen(false);
+        return;
+      }
+      const selectedMention = selectedMentionRef.current;
+      if (
+        selectedMention &&
+        range.start === selectedMention.start &&
+        nextValue.slice(
+          range.start,
+          range.start + selectedMention.text.length,
+        ) === selectedMention.text
+      ) {
         mentionRangeRef.current = null;
         setMenuOpen(false);
         return;
       }
-
+      selectedMentionRef.current = null;
       mentionRangeRef.current = range;
-      setQuery(nextValue.slice(range.start + 1, range.end).toLowerCase());
+      setQuery(nextValue.slice(range.start + 1, range.end));
       setActiveIndex(0);
       setMenuOpen(true);
     },
@@ -121,24 +153,27 @@ export function useSkillMentions({
 
   const select = useCallback(
     (item: SkillMentionItem) => {
-      if (loading) {
+      if (
+        loading ||
+        !mentionRangeRef.current
+      )
         return;
-      }
-
       const range = mentionRangeRef.current;
-      if (!range) {
-        return;
-      }
-
+      const referenceText = contextReferenceText(item);
       onBeforeSelect?.();
-      onChange([...selected, item.name]);
+      onChange([...selected, item]);
       const trailingText = value.slice(range.end);
       const separator = /^\s/.test(trailingText) ? "" : " ";
       onValueChange(
-        `${value.slice(0, range.start)}@${
-          item.name
-        }${separator}${trailingText}`,
+        `${value.slice(
+          0,
+          range.start,
+        )}${referenceText}${separator}${trailingText}`,
       );
+      mentionRangeRef.current = null;
+      selectedMentionRef.current = { start: range.start, text: referenceText };
+      setQuery("");
+      setActiveIndex(0);
       setMenuOpen(false);
     },
     [
@@ -153,24 +188,18 @@ export function useSkillMentions({
   );
 
   const remove = useCallback(
-    (index: number) => {
-      onChange(selected.filter((_, itemIndex) => itemIndex !== index));
-    },
+    (index: number) =>
+      onChange(selected.filter((_, itemIndex) => itemIndex !== index)),
     [onChange, selected],
   );
-
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLElement>) => {
-      if (!openRef.current || event.nativeEvent.isComposing) {
-        return;
-      }
-
+      if (!openRef.current || event.nativeEvent.isComposing) return;
       if (event.key === "Escape") {
         event.preventDefault();
         setMenuOpen(false);
         return;
       }
-
       if (event.key === "ArrowDown" && filteredItems.length) {
         event.preventDefault();
         setActiveIndex((current) =>
@@ -178,28 +207,24 @@ export function useSkillMentions({
         );
         return;
       }
-
       if (event.key === "ArrowUp" && filteredItems.length) {
         event.preventDefault();
         setActiveIndex((current) => Math.max(current - 1, 0));
         return;
       }
-
       if (event.key === "Enter" && filteredItems[activeIndex] && !loading) {
         event.preventDefault();
         select(filteredItems[activeIndex]);
         return;
       }
-
-      if (event.key === "Enter" && loading) {
-        event.preventDefault();
-      }
+      if (event.key === "Enter" && loading) event.preventDefault();
     },
-    [activeIndex, filteredItems, loading, open, select, setMenuOpen],
+    [activeIndex, filteredItems, loading, select, setMenuOpen],
   );
 
   return {
     activeIndex,
+    activeItemId: filteredItems[activeIndex]?.id,
     blocksSubmit,
     close,
     filteredItems,
@@ -207,6 +232,7 @@ export function useSkillMentions({
     handleKeyDown,
     loading,
     open,
+    query,
     remove,
     select,
   };
