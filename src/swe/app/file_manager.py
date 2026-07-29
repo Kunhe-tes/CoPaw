@@ -370,7 +370,8 @@ class FileManagerService:
                 raise FileManagerPathError(
                     "Recycle does not support directory paths or cursors",
                 )
-            return self._list_recycle_items()
+            with self._workspace_lock:
+                return self._list_recycle_items()
         resolved_root, normalised_path = self._validate_root_and_path(
             root,
             relative_path,
@@ -606,6 +607,7 @@ class FileManagerService:
         assert parent_fd is not None
         temporary_name = self._temporary_name(parts[-1])
         temporary_fd: int | None = None
+        published = False
         try:
             if (
                 self._content_revision_for_entry(parent_fd, parts[-1])
@@ -640,12 +642,17 @@ class FileManagerService:
                 src_dir_fd=parent_fd,
                 dst_dir_fd=parent_fd,
             )
+            published = True
             os.fsync(parent_fd)
         except FileExistsError as exc:
             raise FileManagerConflictError(
                 "File revision no longer matches",
             ) from exc
         except OSError as exc:
+            if published:
+                raise FileManagerOutcomeUncertainError(
+                    "File-manager mutation outcome is uncertain",
+                ) from exc
             raise FileManagerPathError("Unable to save text file") from exc
         finally:
             if temporary_fd is not None:
@@ -685,6 +692,7 @@ class FileManagerService:
         assert directory_fd is not None
         temporary_name = self._temporary_name(safe_filename)
         temporary_fd: int | None = None
+        published = False
         try:
             temporary_fd = os.open(
                 temporary_name,
@@ -704,6 +712,7 @@ class FileManagerService:
                     dst_dir_fd=directory_fd,
                     follow_symlinks=False,
                 )
+                published = True
             except FileExistsError as exc:
                 raise FileManagerConflictError(
                     "A file with this name already exists",
@@ -714,6 +723,10 @@ class FileManagerService:
         except FileManagerPathError:
             raise
         except OSError as exc:
+            if published:
+                raise FileManagerOutcomeUncertainError(
+                    "File-manager mutation outcome is uncertain",
+                ) from exc
             raise FileManagerPathError("Unable to upload file") from exc
         finally:
             if temporary_fd is not None:
@@ -757,7 +770,6 @@ class FileManagerService:
         source_fd = self._open_file_fd(resolved_root, normalised_path)
         archive_directory_fd: int | None = None
         archive_item_id: str | None = None
-        index_saved = False
         try:
             source_stat = os.fstat(source_fd)
             if not stat_module.S_ISREG(source_stat.st_mode):
@@ -765,19 +777,10 @@ class FileManagerService:
                     "Only regular files can be archived",
                 )
             archive_item_id = os.urandom(16).hex()
-            archive_directory_fd = self._open_archive_files_directory_fd()
-            self._copy_fd_to_new_file(
-                source_fd,
-                archive_directory_fd,
-                archive_item_id,
-            )
-
             original_path = self._workspace_relative_path(
                 resolved_root,
                 normalised_path,
             )
-            index = self._load_archive_index()
-            updated_index = dict(index)
             item = {
                 "id": archive_item_id,
                 "original_path": original_path,
@@ -790,34 +793,38 @@ class FileManagerService:
                 "archived_by": actor,
                 "archive_reason": "file_manager_delete",
             }
+            index = self._load_recovered_archive_index()
+            prepared_index = dict(index)
+            prepared_index["transition"] = {
+                "operation": "archive",
+                "item": item,
+            }
+            self._save_archive_index(prepared_index)
+            archive_directory_fd = self._open_archive_files_directory_fd()
+            self._copy_fd_to_new_file(
+                source_fd,
+                archive_directory_fd,
+                archive_item_id,
+            )
+            updated_index = dict(prepared_index)
             existing_items = index.get("items")
             updated_index["items"] = [
                 *(existing_items if isinstance(existing_items, list) else []),
                 item,
             ]
             self._save_archive_index(updated_index)
-            index_saved = True
             self._unlink_if_same_file(
                 resolved_root,
                 normalised_path,
                 source_stat,
             )
+            final_index = dict(updated_index)
+            final_index.pop("transition", None)
+            self._save_archive_index(final_index)
         except FileManagerOutcomeUncertainError:
             raise
         except Exception:
-            if index_saved:
-                try:
-                    self._save_archive_index(index)
-                except Exception:
-                    logger.exception("Unable to roll back archive index")
-            if (
-                archive_directory_fd is not None
-                and archive_item_id is not None
-            ):
-                self._unlink_archive_payload_if_present(
-                    archive_directory_fd,
-                    archive_item_id,
-                )
+            # A persisted transition is intentionally left for safe recovery.
             raise
         finally:
             os.close(source_fd)
@@ -848,6 +855,12 @@ class FileManagerService:
                 pass
             else:
                 raise FileManagerConflictError("Restore target already exists")
+            prepared_index = dict(index)
+            prepared_index["transition"] = {
+                "operation": "restore",
+                "item": item,
+            }
+            self._save_archive_index(prepared_index)
             archive_fd, archive_parent_fd = self._open_archive_payload_fd(
                 archive_item_id,
             )
@@ -862,8 +875,7 @@ class FileManagerService:
                     target_parent_fd,
                     parts[-1],
                 )
-                target_stat = self._stat_entry(target_parent_fd, parts[-1])
-                updated_index = dict(index)
+                updated_index = dict(prepared_index)
                 updated_index["items"] = [
                     row
                     for row in index.get("items", [])
@@ -874,11 +886,6 @@ class FileManagerService:
                 except FileManagerOutcomeUncertainError:
                     raise
                 except Exception:
-                    self._unlink_if_same_file(
-                        root,
-                        relative_path,
-                        target_stat,
-                    )
                     raise
                 try:
                     self._unlink_archive_payload_confirmed(
@@ -889,20 +896,15 @@ class FileManagerService:
                 except FileManagerOutcomeUncertainError:
                     raise
                 except (FileManagerPathError, OSError):
-                    try:
-                        self._save_archive_index(index)
-                    finally:
-                        self._unlink_if_same_file(
-                            root,
-                            relative_path,
-                            target_stat,
-                        )
                     raise
             finally:
                 os.close(archive_fd)
                 os.close(archive_parent_fd)
         finally:
             os.close(target_parent_fd)
+        final_index = dict(updated_index)
+        final_index.pop("transition", None)
+        self._save_archive_index(final_index)
         _ = actor
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
@@ -917,6 +919,12 @@ class FileManagerService:
 
         index, item = self._recycle_index_item(archive_item_id)
         original_path = self._validate_archive_original_path(item)
+        prepared_index = dict(index)
+        prepared_index["transition"] = {
+            "operation": "purge",
+            "item": item,
+        }
+        self._save_archive_index(prepared_index)
         archive_fd, archive_parent_fd = self._open_archive_payload_fd(
             archive_item_id,
         )
@@ -925,7 +933,7 @@ class FileManagerService:
                 raise FileManagerPathError(
                     "Archived payload is not a regular file",
                 )
-            updated_index = dict(index)
+            updated_index = dict(prepared_index)
             updated_index["items"] = [
                 row
                 for row in index.get("items", [])
@@ -941,11 +949,13 @@ class FileManagerService:
             except FileManagerOutcomeUncertainError:
                 raise
             except OSError:
-                self._save_archive_index(index)
                 raise
         finally:
             os.close(archive_fd)
             os.close(archive_parent_fd)
+        final_index = dict(updated_index)
+        final_index.pop("transition", None)
+        self._save_archive_index(final_index)
         _ = actor
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
@@ -1103,7 +1113,7 @@ class FileManagerService:
         """Adapt archive metadata without exposing its control-file paths."""
 
         items: list[FileManagerItem] = []
-        for item in self._load_archive_index().get("items", []):
+        for item in self._load_recovered_archive_index().get("items", []):
             if not isinstance(item, dict):
                 continue
             try:
@@ -1147,7 +1157,7 @@ class FileManagerService:
         archive_item_id: str,
     ) -> tuple[dict[str, object], dict[str, object]]:
         archive_item_id = self._validate_archive_item_id(archive_item_id)
-        index = self._load_archive_index()
+        index = self._load_recovered_archive_index()
         for item in index.get("items", []):
             if (
                 isinstance(item, dict)
@@ -1155,6 +1165,83 @@ class FileManagerService:
             ):
                 return index, item
         raise FileManagerNotFoundError("Recycle item was not found")
+
+    def _load_recovered_archive_index(self) -> dict[str, object]:
+        """Recover an interrupted archive transition before exposing metadata."""
+
+        index = self._load_archive_index()
+        transition = index.get("transition")
+        if not isinstance(transition, dict):
+            return index
+        operation = transition.get("operation")
+        item = transition.get("item")
+        if not isinstance(operation, str) or not isinstance(item, dict):
+            raise FileManagerPathError("Invalid archive transition")
+        archive_item_id = self._validate_archive_item_id(
+            str(item.get("id") or ""),
+        )
+        original_path = self._validate_archive_original_path(item)
+        payload_exists = self._archive_payload_exists(archive_item_id)
+        original_exists = self._workspace_file_exists(original_path)
+        existing_items = index.get("items")
+        items = (
+            list(existing_items) if isinstance(existing_items, list) else []
+        )
+        item_ids = {
+            str(row.get("id") or "") for row in items if isinstance(row, dict)
+        }
+        if operation == "archive":
+            if payload_exists and archive_item_id not in item_ids:
+                items.append(item)
+        elif operation == "restore":
+            if original_exists:
+                items = [
+                    row
+                    for row in items
+                    if not isinstance(row, dict)
+                    or str(row.get("id") or "") != archive_item_id
+                ]
+            elif payload_exists and archive_item_id not in item_ids:
+                items.append(item)
+        elif operation == "purge":
+            if payload_exists and archive_item_id not in item_ids:
+                items.append(item)
+            elif not payload_exists:
+                items = [
+                    row
+                    for row in items
+                    if not isinstance(row, dict)
+                    or str(row.get("id") or "") != archive_item_id
+                ]
+        else:
+            raise FileManagerPathError("Invalid archive transition")
+        recovered = {"version": 1, "items": items}
+        self._save_archive_index(recovered)
+        return recovered
+
+    def _archive_payload_exists(self, archive_item_id: str) -> bool:
+        try:
+            payload_fd, payload_parent_fd = self._open_archive_payload_fd(
+                archive_item_id,
+            )
+        except FileManagerNotFoundError:
+            return False
+        try:
+            return stat_module.S_ISREG(os.fstat(payload_fd).st_mode)
+        finally:
+            os.close(payload_fd)
+            os.close(payload_parent_fd)
+
+    def _workspace_file_exists(self, original_path: str) -> bool:
+        root, relative_path = self._root_from_workspace_relative(original_path)
+        try:
+            file_fd = self._open_file_fd(root, relative_path)
+        except FileManagerNotFoundError:
+            return False
+        try:
+            return stat_module.S_ISREG(os.fstat(file_fd).st_mode)
+        finally:
+            os.close(file_fd)
 
     @staticmethod
     def _validate_archive_item_id(archive_item_id: str) -> str:
@@ -1350,9 +1437,11 @@ class FileManagerService:
         if not isinstance(data, dict):
             return {"version": 1, "items": []}
         items = data.get("items")
+        transition = data.get("transition")
         return {
             "version": 1,
             "items": items if isinstance(items, list) else [],
+            "transition": transition if isinstance(transition, dict) else None,
         }
 
     def _save_archive_index(self, data: Mapping[str, object]) -> None:
@@ -1361,8 +1450,11 @@ class FileManagerService:
         items = data.get("items")
         if not isinstance(items, list):
             items = []
+        payload: dict[str, object] = {"version": 1, "items": items}
+        if isinstance(data.get("transition"), dict):
+            payload["transition"] = data["transition"]
         encoded = json.dumps(
-            {"version": 1, "items": items},
+            payload,
             ensure_ascii=False,
             indent=2,
             sort_keys=True,
@@ -1441,6 +1533,7 @@ class FileManagerService:
     ) -> None:
         temporary_name = self._temporary_name(destination_name)
         temporary_fd: int | None = None
+        published = False
         try:
             temporary_fd = os.open(
                 temporary_name,
@@ -1462,6 +1555,7 @@ class FileManagerService:
                     dst_dir_fd=destination_directory_fd,
                     follow_symlinks=False,
                 )
+                published = True
             except FileExistsError as exc:
                 raise FileManagerConflictError(
                     "Destination already exists",
@@ -1469,6 +1563,10 @@ class FileManagerService:
             os.unlink(temporary_name, dir_fd=destination_directory_fd)
             os.fsync(destination_directory_fd)
         except OSError as exc:
+            if published:
+                raise FileManagerOutcomeUncertainError(
+                    "File-manager mutation outcome is uncertain",
+                ) from exc
             raise FileManagerPathError(
                 "Unable to write file-manager payload",
             ) from exc

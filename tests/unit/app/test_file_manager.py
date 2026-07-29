@@ -871,6 +871,8 @@ def test_recycle_unlink_then_fsync_failure_keeps_committed_outcome(
                 actor="tester",
             )
 
+    monkeypatch.setattr(file_manager.os, "fsync", original_fsync)
+
     if operation == "archive":
         assert not path.exists()
         assert len(service.list_directory("recycle").items) == 1
@@ -893,6 +895,114 @@ def test_recycle_index_symlink_is_rejected_without_following_target(
 
     with pytest.raises(FileManagerPathError):
         _service(tmp_path).list_directory("recycle")
+
+
+@pytest.mark.parametrize("operation", ["archive", "restore", "purge"])
+def test_restart_recovers_index_publish_fsync_uncertainty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    path = tmp_path / "report.txt"
+    path.write_text("report", encoding="utf-8")
+    service = _service(tmp_path)
+    archived = None
+    if operation != "archive":
+        archived = service.archive_file(
+            "working",
+            "report.txt",
+            actor="tester",
+        )
+
+    original_replace = file_manager.os.replace
+    original_fsync = file_manager.os.fsync
+    replace_count = 0
+
+    def count_index_publish(*args, **kwargs):
+        nonlocal replace_count
+        replace_count += 1
+        return original_replace(*args, **kwargs)
+
+    def fail_second_index_fsync(descriptor):
+        if replace_count >= 2:
+            raise OSError("index durability is uncertain")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(file_manager.os, "replace", count_index_publish)
+    monkeypatch.setattr(file_manager.os, "fsync", fail_second_index_fsync)
+    with pytest.raises(FileManagerOutcomeUncertainError):
+        if operation == "archive":
+            service.archive_file("working", "report.txt", actor="tester")
+        elif operation == "restore":
+            assert archived is not None
+            service.restore_recycle_item(
+                archived.archive_item_id,
+                actor="tester",
+            )
+        else:
+            assert archived is not None
+            service.purge_recycle_item(
+                archived.archive_item_id,
+                actor="tester",
+            )
+
+    monkeypatch.setattr(file_manager.os, "fsync", original_fsync)
+    recovered = _service(tmp_path).list_directory("recycle")
+    if operation == "restore":
+        assert path.read_text(encoding="utf-8") == "report"
+        assert recovered.items == []
+    else:
+        assert len(recovered.items) == 1
+
+
+def test_save_and_upload_publish_fsync_failures_are_outcome_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "note.txt").write_text("before", encoding="utf-8")
+    (tmp_path / "media").mkdir()
+    service = _service(tmp_path)
+    revision = service.read_text_preview("working", "note.txt").revision
+    original_replace = file_manager.os.replace
+    original_fsync = file_manager.os.fsync
+    save_published = False
+
+    def track_replace(*args, **kwargs):
+        nonlocal save_published
+        save_published = True
+        return original_replace(*args, **kwargs)
+
+    def fail_after_save_publish(descriptor):
+        if save_published:
+            raise OSError("save durability is uncertain")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(file_manager.os, "replace", track_replace)
+    monkeypatch.setattr(file_manager.os, "fsync", fail_after_save_publish)
+    with pytest.raises(FileManagerOutcomeUncertainError):
+        service.save_text("working", "note.txt", "after", revision)
+    assert (tmp_path / "note.txt").read_text(encoding="utf-8") == "after"
+
+    monkeypatch.setattr(file_manager.os, "fsync", original_fsync)
+    original_link = file_manager.os.link
+    upload_published = False
+
+    def track_link(*args, **kwargs):
+        nonlocal upload_published
+        result = original_link(*args, **kwargs)
+        upload_published = True
+        return result
+
+    def fail_after_upload_publish(descriptor):
+        if upload_published:
+            raise OSError("upload durability is uncertain")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(file_manager.os, "link", track_link)
+    monkeypatch.setattr(file_manager.os, "fsync", fail_after_upload_publish)
+    with pytest.raises(FileManagerOutcomeUncertainError):
+        service.upload_bytes("upload", "", "published.txt", b"body")
+    assert (tmp_path / "media" / "published.txt").read_bytes() == b"body"
 
 
 def test_concurrent_archives_do_not_drop_archive_index_items(
