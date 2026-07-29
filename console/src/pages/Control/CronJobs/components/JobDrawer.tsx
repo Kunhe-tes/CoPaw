@@ -5,20 +5,24 @@ import type { CronJobSpecOutput } from "../../../../api/types";
 import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
 import { DEFAULT_FORM_VALUES } from "./constants";
 import { CronJobFormBody } from "./CronJobFormBody";
+import type { CronJobFormValues } from "../helpers";
 import styles from "../index.module.less";
 
 type CronJob = CronJobSpecOutput;
+type SelectOption = { value: string; label: string };
 
 interface JobDrawerProps {
   open: boolean;
   editingJob: CronJob | null;
-  form: FormInstance<CronJob>;
+  form: FormInstance<CronJobFormValues>;
   saving: boolean;
   executionModelOptions: ExecutionModelOption[];
   executionModelLoading: boolean;
   tenantDefaultModelLabel: string;
+  skillOptions: SelectOption[];
+  skillOptionsLoading: boolean;
   onClose: () => void;
-  onSubmit: (values: CronJob) => void;
+  onSubmit: (values: CronJobFormValues) => void;
 }
 
 export function JobDrawer({
@@ -29,6 +33,8 @@ export function JobDrawer({
   executionModelOptions,
   executionModelLoading,
   tenantDefaultModelLabel,
+  skillOptions,
+  skillOptionsLoading,
   onClose,
   onSubmit,
 }: JobDrawerProps) {
@@ -62,6 +68,8 @@ export function JobDrawer({
           executionModelOptions={executionModelOptions}
           executionModelLoading={executionModelLoading}
           tenantDefaultModelLabel={tenantDefaultModelLabel}
+          skillOptions={skillOptions}
+          skillOptionsLoading={skillOptionsLoading}
           idDisabled={Boolean(editingJob)}
         />
       </Form>
