@@ -420,3 +420,99 @@ def test_large_invalid_utf8_after_sample_boundary_is_rejected(
 
     assert preview.is_text is False
     assert preview.content is None
+
+
+def test_large_text_with_invalid_utf8_after_preview_is_rejected(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "late-invalid.txt").write_bytes(
+        b"a" * (1024 * 1024 + 1024) + b"\xff",
+    )
+
+    preview = _service(tmp_path).read_text_preview(
+        FileManagerRoot.WORKING,
+        "late-invalid.txt",
+    )
+
+    assert preview.is_text is False
+    assert preview.content is None
+    assert preview.editable is False
+
+
+def test_file_read_rejects_a_symlink_without_following_its_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.txt"
+    target.write_text("private", encoding="utf-8")
+    (tmp_path / "link.txt").symlink_to(target)
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).read_text_preview(
+            FileManagerRoot.WORKING,
+            "link.txt",
+        )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        lambda service: service.list_directory("unknown"),
+        lambda service: service.list_directory(
+            FileManagerRoot.WORKING,
+            "missing",
+        ),
+        lambda service: service.read_text_preview(
+            FileManagerRoot.WORKING,
+            "missing.txt",
+        ),
+    ],
+)
+def test_unknown_or_missing_paths_raise_stable_file_manager_errors(
+    tmp_path: Path,
+    operation,
+) -> None:
+    with pytest.raises(FileManagerPathError):
+        operation(_service(tmp_path))
+
+
+def test_directory_scan_limit_returns_file_manager_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "swe.app.file_manager.FILE_MANAGER_DIRECTORY_SCAN_LIMIT",
+        2,
+    )
+    for name in ("one.txt", "two.txt", "three.txt"):
+        (tmp_path / name).write_text(name, encoding="utf-8")
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).list_directory(FileManagerRoot.WORKING)
+
+
+def test_permission_failures_are_translated_to_file_manager_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def denied(*args, **kwargs):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr("swe.app.file_manager.os.open", denied)
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).list_directory(FileManagerRoot.WORKING)
+
+
+def test_read_snapshot_has_bounded_preview_and_revision_hook(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "document.md").write_text("content", encoding="utf-8")
+
+    snapshot = _service(tmp_path).read_file_snapshot(
+        FileManagerRoot.WORKING,
+        "document.md",
+    )
+
+    assert snapshot.preview_bytes == b"content"
+    assert snapshot.revision.count(":") == 3
+    assert snapshot.size_bytes == len(snapshot.preview_bytes)

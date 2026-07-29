@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import codecs
 import hashlib
 import hmac
 import json
+import os
 import re
+import stat as stat_module
 import unicodedata
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
@@ -22,8 +26,9 @@ from typing import Mapping
 from pydantic import BaseModel
 
 FILE_MANAGER_PAGE_SIZE = 100
+FILE_MANAGER_DIRECTORY_SCAN_LIMIT = 10_000
 TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
-_TEXT_UTF8_VALIDATION_BYTES = 7
+_FILE_READ_CHUNK_BYTES = 64 * 1024
 _WORKING_HIDDEN_TOP_LEVEL = frozenset({"sessions", "governance"})
 _NATURAL_PARTS = re.compile(r"(\d+)")
 
@@ -83,8 +88,24 @@ class FileManagerTextPreview(BaseModel):
     editable: bool = False
 
 
+@dataclass(frozen=True)
+class FileManagerReadSnapshot:
+    """A bounded read result tied to one safely opened file descriptor."""
+
+    path: str
+    size_bytes: int
+    modified_at: datetime
+    revision: str
+    is_text: bool
+    is_truncated: bool
+    preview_bytes: bytes
+
+
 def root_capabilities(root: FileManagerRoot | str) -> FileManagerCapabilities:
-    root = FileManagerRoot(root)
+    try:
+        root = FileManagerRoot(root)
+    except (TypeError, ValueError) as exc:
+        raise FileManagerPathError("Unknown file manager root") from exc
     if root is FileManagerRoot.CONVERSATION:
         return FileManagerCapabilities(browse=True, read=True, download=True)
     if root is FileManagerRoot.RECYCLE:
@@ -128,32 +149,17 @@ class FileManagerService:
         POSIX relative representation returned to API consumers.
         """
 
-        resolved_root = FileManagerRoot(root)
-        if resolved_root is FileManagerRoot.RECYCLE:
-            raise FileManagerPathError("Recycle paths are not available here")
-
-        normalised_path = self._normalise_relative_path(relative_path)
-        if (
-            resolved_root is FileManagerRoot.WORKING
-            and normalised_path.split("/", 1)[0] in _WORKING_HIDDEN_TOP_LEVEL
-        ):
-            raise FileManagerPathError("Working path is hidden")
-
-        base_path = self._root_path(resolved_root)
-        if base_path.is_symlink():
-            raise FileManagerPathError("Controlled root cannot be a symlink")
-
-        candidate = base_path
-        for part in filter(None, normalised_path.split("/")):
-            candidate = candidate / part
-            if candidate.is_symlink():
-                raise FileManagerPathError("Symbolic links cannot be followed")
-
-        try:
-            candidate.resolve(strict=False).relative_to(self._workspace_dir)
-        except ValueError as exc:
-            raise FileManagerPathError("Path escapes workspace") from exc
-        return normalised_path, candidate
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
+            relative_path,
+        )
+        if normalised_path:
+            self._reject_symlink_path(resolved_root, normalised_path)
+        # This display path is not an access grant.  All filesystem operations
+        # below use _open_directory_fd/_open_file_fd with O_NOFOLLOW.
+        return normalised_path, self._root_path(resolved_root).joinpath(
+            *filter(None, normalised_path.split("/")),
+        )
 
     def list_directory(
         self,
@@ -163,12 +169,16 @@ class FileManagerService:
         cursor: str | None = None,
         query: str | None = None,
     ) -> FileManagerDirectoryListing:
-        resolved_root = FileManagerRoot(root)
-        normalised_path, directory = self.resolve_path(
-            resolved_root,
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
             relative_path,
         )
-        if not directory.exists() and normalised_path == "":
+        directory_fd = self._open_directory_fd(
+            resolved_root,
+            normalised_path,
+            allow_missing_root=True,
+        )
+        if directory_fd is None:
             self._validate_cursor_context(
                 cursor,
                 resolved_root,
@@ -176,15 +186,15 @@ class FileManagerService:
                 query,
             )
             return self._listing(resolved_root, normalised_path, [])
-        if not directory.is_dir():
-            raise FileManagerPathError("Path is not a directory")
-
-        items = self._directory_items(
-            resolved_root,
-            normalised_path,
-            directory,
-            query,
-        )
+        try:
+            items = self._directory_items(
+                resolved_root,
+                normalised_path,
+                directory_fd,
+                query,
+            )
+        finally:
+            os.close(directory_fd)
         start_index = self._cursor_index(
             cursor,
             resolved_root,
@@ -208,55 +218,98 @@ class FileManagerService:
         root: FileManagerRoot | str,
         relative_path: str,
     ) -> FileManagerTextPreview:
-        normalised_path, target = self.resolve_path(root, relative_path)
-        if not target.is_file():
-            raise FileManagerPathError("Path is not a file")
-
-        size_bytes = target.stat().st_size
-        with target.open("rb") as handle:
-            sample = handle.read(
-                TEXT_PREVIEW_LIMIT_BYTES + _TEXT_UTF8_VALIDATION_BYTES,
-            )
-        decoded_sample = self._decode_text_sample(
-            sample,
-            sample_is_truncated=size_bytes > len(sample),
-        )
-        if decoded_sample is None:
+        snapshot = self.read_file_snapshot(root, relative_path)
+        if not snapshot.is_text:
             return FileManagerTextPreview(
-                path=normalised_path,
-                size_bytes=size_bytes,
+                path=snapshot.path,
+                size_bytes=snapshot.size_bytes,
                 is_text=False,
-                is_truncated=size_bytes > TEXT_PREVIEW_LIMIT_BYTES,
+                is_truncated=snapshot.is_truncated,
             )
-        if self._contains_disallowed_control_character(decoded_sample):
-            return FileManagerTextPreview(
-                path=normalised_path,
-                size_bytes=size_bytes,
-                is_text=False,
-                is_truncated=size_bytes > TEXT_PREVIEW_LIMIT_BYTES,
-            )
-
-        is_truncated = size_bytes > TEXT_PREVIEW_LIMIT_BYTES
-        preview_bytes = (
-            sample[:TEXT_PREVIEW_LIMIT_BYTES] if is_truncated else sample
-        )
-        try:
-            content = preview_bytes.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            # The full sampled bytes are valid UTF-8.  Therefore a prefix can
-            # fail only by ending in one partial UTF-8 code point.
-            if not is_truncated or exc.end != len(preview_bytes):
-                raise FileManagerPathError(
-                    "Invalid UTF-8 preview boundary",
-                ) from exc
-            content = preview_bytes[: exc.start].decode("utf-8")
+        content = self._decode_preview_bytes(snapshot.preview_bytes)
         return FileManagerTextPreview(
-            path=normalised_path,
-            size_bytes=size_bytes,
+            path=snapshot.path,
+            size_bytes=snapshot.size_bytes,
             is_text=True,
             content=content,
-            is_truncated=is_truncated,
-            editable=not is_truncated,
+            is_truncated=snapshot.is_truncated,
+            editable=not snapshot.is_truncated,
+        )
+
+    def read_file_snapshot(
+        self,
+        root: FileManagerRoot | str,
+        relative_path: str,
+    ) -> FileManagerReadSnapshot:
+        """Read a bounded preview and validate the complete file on one fd.
+
+        The snapshot supplies a stable revision hook for subsequent save
+        operations without exposing the full file body to callers.
+        """
+
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
+            relative_path,
+        )
+        file_fd = self._open_file_fd(resolved_root, normalised_path)
+        try:
+            initial_stat = os.fstat(file_fd)
+            if not stat_module.S_ISREG(initial_stat.st_mode):
+                raise FileManagerPathError("Path is not a regular file")
+            preview = bytearray()
+            decoder = codecs.getincrementaldecoder("utf-8")("strict")
+            is_text = True
+            has_control_character = False
+            with os.fdopen(file_fd, "rb", closefd=False) as handle:
+                while chunk := handle.read(_FILE_READ_CHUNK_BYTES):
+                    remaining_preview = TEXT_PREVIEW_LIMIT_BYTES - len(preview)
+                    if remaining_preview > 0:
+                        preview.extend(chunk[:remaining_preview])
+                    if not is_text:
+                        continue
+                    try:
+                        decoded_chunk = decoder.decode(chunk, final=False)
+                    except UnicodeDecodeError:
+                        is_text = False
+                        continue
+                    if self._contains_disallowed_control_character(
+                        decoded_chunk,
+                    ):
+                        has_control_character = True
+                if is_text:
+                    try:
+                        tail = decoder.decode(b"", final=True)
+                    except UnicodeDecodeError:
+                        is_text = False
+                    else:
+                        has_control_character = (
+                            has_control_character
+                            or self._contains_disallowed_control_character(
+                                tail,
+                            )
+                        )
+            final_stat = os.fstat(file_fd)
+        except OSError as exc:
+            raise FileManagerPathError("Unable to read file") from exc
+        finally:
+            os.close(file_fd)
+
+        if self._stat_identity(initial_stat) != self._stat_identity(
+            final_stat,
+        ):
+            raise FileManagerPathError("File changed while being read")
+        is_text = is_text and not has_control_character
+        return FileManagerReadSnapshot(
+            path=normalised_path,
+            size_bytes=initial_stat.st_size,
+            modified_at=datetime.fromtimestamp(
+                initial_stat.st_mtime,
+                tz=timezone.utc,
+            ),
+            revision=self._revision_for_stat(initial_stat),
+            is_text=is_text,
+            is_truncated=initial_stat.st_size > TEXT_PREVIEW_LIMIT_BYTES,
+            preview_bytes=bytes(preview),
         )
 
     def _root_path(self, root: FileManagerRoot) -> Path:
@@ -267,6 +320,142 @@ class FileManagerService:
             FileManagerRoot.CONVERSATION: ("sessions",),
         }
         return self._workspace_dir.joinpath(*suffixes[root])
+
+    @staticmethod
+    def _root_components(root: FileManagerRoot) -> tuple[str, ...]:
+        suffixes = {
+            FileManagerRoot.WORKING: (),
+            FileManagerRoot.UPLOAD: ("media",),
+            FileManagerRoot.DOWNLOAD: ("static",),
+            FileManagerRoot.CONVERSATION: ("sessions",),
+        }
+        return suffixes[root]
+
+    def _validate_root_and_path(
+        self,
+        root: FileManagerRoot | str,
+        relative_path: str,
+    ) -> tuple[FileManagerRoot, str]:
+        try:
+            resolved_root = FileManagerRoot(root)
+        except (TypeError, ValueError) as exc:
+            raise FileManagerPathError("Unknown file manager root") from exc
+        if resolved_root is FileManagerRoot.RECYCLE:
+            raise FileManagerPathError("Recycle paths are not available here")
+        normalised_path = self._normalise_relative_path(relative_path)
+        if (
+            resolved_root is FileManagerRoot.WORKING
+            and normalised_path.split("/", 1)[0] in _WORKING_HIDDEN_TOP_LEVEL
+        ):
+            raise FileManagerPathError("Working path is hidden")
+        return resolved_root, normalised_path
+
+    @staticmethod
+    def _directory_open_flags() -> int:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        directory = getattr(os, "O_DIRECTORY", None)
+        if nofollow is None or directory is None:
+            raise FileManagerPathError("Safe directory access is unavailable")
+        return os.O_RDONLY | os.O_CLOEXEC | nofollow | directory
+
+    @staticmethod
+    def _file_open_flags() -> int:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        if nofollow is None:
+            raise FileManagerPathError("Safe file access is unavailable")
+        return os.O_RDONLY | os.O_CLOEXEC | nofollow
+
+    def _open_directory_fd(
+        self,
+        root: FileManagerRoot,
+        relative_path: str,
+        *,
+        allow_missing_root: bool = False,
+    ) -> int | None:
+        parts = self._root_components(root) + tuple(
+            filter(None, relative_path.split("/")),
+        )
+        try:
+            directory_fd = os.open(
+                self._workspace_dir,
+                self._directory_open_flags(),
+            )
+        except OSError as exc:
+            raise FileManagerPathError("Unable to open workspace") from exc
+        try:
+            for index, part in enumerate(parts):
+                try:
+                    child_fd = os.open(
+                        part,
+                        self._directory_open_flags(),
+                        dir_fd=directory_fd,
+                    )
+                except FileNotFoundError as exc:
+                    if (
+                        allow_missing_root
+                        and relative_path == ""
+                        and index == len(parts) - 1
+                    ):
+                        os.close(directory_fd)
+                        return None
+                    raise FileManagerPathError(
+                        "Directory was not found",
+                    ) from exc
+                except OSError as exc:
+                    raise FileManagerPathError(
+                        "Unable to open directory",
+                    ) from exc
+                os.close(directory_fd)
+                directory_fd = child_fd
+            return directory_fd
+        except Exception:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+            raise
+
+    def _open_file_fd(self, root: FileManagerRoot, relative_path: str) -> int:
+        parts = tuple(filter(None, relative_path.split("/")))
+        if not parts:
+            raise FileManagerPathError("Path is not a file")
+        parent_path = "/".join(parts[:-1])
+        parent_fd = self._open_directory_fd(root, parent_path)
+        assert parent_fd is not None
+        try:
+            return os.open(
+                parts[-1],
+                self._file_open_flags(),
+                dir_fd=parent_fd,
+            )
+        except OSError as exc:
+            raise FileManagerPathError("Unable to open file") from exc
+        finally:
+            os.close(parent_fd)
+
+    def _reject_symlink_path(
+        self,
+        root: FileManagerRoot,
+        relative_path: str,
+    ) -> None:
+        parts = tuple(filter(None, relative_path.split("/")))
+        parent_fd = self._open_directory_fd(root, "/".join(parts[:-1]))
+        assert parent_fd is not None
+        try:
+            try:
+                entry_stat = os.stat(
+                    parts[-1],
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except FileNotFoundError:
+                return
+            if stat_module.S_ISLNK(entry_stat.st_mode):
+                raise FileManagerPathError("Symbolic links cannot be followed")
+        except OSError as exc:
+            raise FileManagerPathError("Unable to inspect path") from exc
+        finally:
+            os.close(parent_fd)
 
     @staticmethod
     def _normalise_relative_path(relative_path: str) -> str:
@@ -286,42 +475,75 @@ class FileManagerService:
         self,
         root: FileManagerRoot,
         parent_path: str,
-        directory: Path,
+        directory_fd: int,
         query: str | None,
     ) -> list[FileManagerItem]:
         query_value = query.casefold() if query else None
         items: list[FileManagerItem] = []
-        for entry in directory.iterdir():
-            if (
-                root is FileManagerRoot.WORKING
-                and parent_path == ""
-                and entry.name in _WORKING_HIDDEN_TOP_LEVEL
-            ):
-                continue
-            if query_value and query_value not in entry.name.casefold():
-                continue
-            items.append(self._item_for_entry(root, parent_path, entry))
+        try:
+            with os.scandir(directory_fd) as entries:
+                for scanned_count, entry in enumerate(entries, start=1):
+                    if scanned_count > FILE_MANAGER_DIRECTORY_SCAN_LIMIT:
+                        raise FileManagerPathError(
+                            "Directory contains too many entries",
+                        )
+                    if (
+                        root is FileManagerRoot.WORKING
+                        and parent_path == ""
+                        and entry.name in _WORKING_HIDDEN_TOP_LEVEL
+                    ):
+                        continue
+                    if (
+                        query_value
+                        and query_value not in entry.name.casefold()
+                    ):
+                        continue
+                    try:
+                        entry_stat = os.stat(
+                            entry.name,
+                            dir_fd=directory_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        # An entry removed after scandir is safe to omit.
+                        continue
+                    except OSError as exc:
+                        raise FileManagerPathError(
+                            "Unable to inspect directory",
+                        ) from exc
+                    items.append(
+                        self._item_for_entry(
+                            root,
+                            parent_path,
+                            entry.name,
+                            entry_stat,
+                        ),
+                    )
+        except FileManagerPathError:
+            raise
+        except OSError as exc:
+            raise FileManagerPathError("Unable to list directory") from exc
         return sorted(items, key=self._item_sort_key)
 
     def _item_for_entry(
         self,
         root: FileManagerRoot,
         parent_path: str,
-        entry: Path,
+        name: str,
+        entry_stat: os.stat_result,
     ) -> FileManagerItem:
-        path = f"{parent_path}/{entry.name}" if parent_path else entry.name
-        if entry.is_symlink():
+        path = f"{parent_path}/{name}" if parent_path else name
+        if stat_module.S_ISLNK(entry_stat.st_mode):
             return FileManagerItem(
-                name=entry.name,
+                name=name,
                 path=path,
                 kind=FileManagerItemKind.SYMLINK,
                 capabilities=FileManagerCapabilities(),
             )
 
-        stat = entry.stat()
         kind = (
             FileManagerItemKind.DIRECTORY
-            if entry.is_dir()
+            if stat_module.S_ISDIR(entry_stat.st_mode)
             else FileManagerItemKind.FILE
         )
         capabilities = root_capabilities(root)
@@ -330,13 +552,18 @@ class FileManagerService:
                 update={"browse": False, "upload": False},
             )
         return FileManagerItem(
-            name=entry.name,
+            name=name,
             path=path,
             kind=kind,
             size_bytes=(
-                None if kind is FileManagerItemKind.DIRECTORY else stat.st_size
+                None
+                if kind is FileManagerItemKind.DIRECTORY
+                else entry_stat.st_size
             ),
-            modified_at=datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc),
+            modified_at=datetime.fromtimestamp(
+                entry_stat.st_mtime,
+                tz=timezone.utc,
+            ),
             capabilities=capabilities,
         )
 
@@ -346,6 +573,44 @@ class FileManagerService:
             unicodedata.category(character) == "Cc"
             and character not in {"\t", "\n", "\r"}
             for character in text
+        )
+
+    @staticmethod
+    def _decode_preview_bytes(preview_bytes: bytes) -> str:
+        try:
+            return preview_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # Complete-file validation succeeded, so only the final preview
+            # boundary may cut one otherwise-valid multi-byte code point.
+            if exc.reason != "unexpected end of data" or exc.end != len(
+                preview_bytes,
+            ):
+                raise FileManagerPathError(
+                    "Invalid UTF-8 preview boundary",
+                ) from exc
+            return preview_bytes[: exc.start].decode("utf-8")
+
+    @staticmethod
+    def _stat_identity(
+        entry_stat: os.stat_result,
+    ) -> tuple[int, int, int, int]:
+        return (
+            entry_stat.st_dev,
+            entry_stat.st_ino,
+            entry_stat.st_size,
+            entry_stat.st_mtime_ns,
+        )
+
+    @staticmethod
+    def _revision_for_stat(entry_stat: os.stat_result) -> str:
+        return ":".join(
+            str(value)
+            for value in (
+                entry_stat.st_dev,
+                entry_stat.st_ino,
+                entry_stat.st_mtime_ns,
+                entry_stat.st_size,
+            )
         )
 
     @staticmethod
