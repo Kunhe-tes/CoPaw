@@ -34,6 +34,7 @@ import {
 import { EventEditorDrawer } from "./components/EventEditorDrawer";
 import { EventOverview } from "./components/EventOverview";
 import { createScenarioEvent, scenarioTemplates } from "./scenarioTemplates";
+import { eventMetadata } from "./eventMetadata";
 import type {
   HookConfigDraft,
   HookEventName,
@@ -379,6 +380,15 @@ function HookManagementPage() {
     }
   };
 
+  const openManualTest = () => {
+    if (!handler || selected.kind !== "handler") return;
+    setFormError(null);
+    setTestError(null);
+    setTestResult(null);
+    setTestContext(JSON.stringify(defaultContext(selected.event), null, 2));
+    setTestOpen(true);
+  };
+
   const onHandlerChange = (changes: Partial<HookHandlerDraft>) => {
     if (!draft || selected.kind !== "handler") return;
     setDraft(updateHandler(draft, selected, changes));
@@ -423,15 +433,7 @@ function HookManagementPage() {
             <span>{handler.type} Handler</span>
           </div>
           <Button
-            onClick={() => {
-              setFormError(null);
-              setTestError(null);
-              setTestResult(null);
-              setTestContext(
-                JSON.stringify(defaultContext(selected.event), null, 2),
-              );
-              setTestOpen(true);
-            }}
+            onClick={openManualTest}
           >
             执行人工测试
           </Button>
@@ -713,6 +715,36 @@ function HookManagementPage() {
     );
   };
 
+  const basicDetails = editingEvent ? (
+    <section className={styles.eventBasics}>
+      <span className={styles.eventCode}>{editingEvent}</span>
+      <h3>{eventMetadata[editingEvent].label}</h3>
+      <p>{eventMetadata[editingEvent].description}</p>
+      <Tag color={draft.enabled ? "success" : "default"}>
+        {draft.enabled ? "该事件将参与 Hook 执行" : "全局 Hook 当前已停用"}
+      </Tag>
+    </section>
+  ) : null;
+
+  const testDetails = (
+    <section className={styles.testPublishPanel}>
+      <div>
+        <h3>人工测试</h3>
+        <p>真实执行当前草稿中的一个处理器，不会保存草稿或重载 Agent。</p>
+      </div>
+      <Button
+        disabled={!handler || selected.kind !== "handler"}
+        title={handler ? undefined : "请先选择一个处理器"}
+        onClick={openManualTest}
+      >
+        执行人工测试
+      </Button>
+      {testResult && (
+        <pre className={styles.summary}>{JSON.stringify(testResult, null, 2)}</pre>
+      )}
+    </section>
+  );
+
   return (
     <div className={styles.page}>
       <header className={styles.header}>
@@ -747,8 +779,16 @@ function HookManagementPage() {
                   onEdit={(event) => {
                     if (!draft.events[event]) setDraft(addEvent(draft, event));
                     const firstGroup = draft.events[event]?.[0];
+                    const firstHandler = firstGroup?.hooks[0];
                     setSelected(
-                      firstGroup
+                      firstGroup && firstHandler
+                        ? {
+                            kind: "handler",
+                            event,
+                            groupId: firstGroup.id,
+                            handlerId: firstHandler.id,
+                          }
+                        : firstGroup
                         ? { kind: "group", event, groupId: firstGroup.id }
                         : { kind: "root" },
                     );
@@ -834,6 +874,7 @@ function HookManagementPage() {
         event={editingEvent}
         groups={editingEvent ? (draft.events[editingEvent] ?? []) : []}
         templateLabel={templateLabel}
+        basicDetails={basicDetails}
         details={
           selected.kind !== "root" && selected.event === editingEvent ? (
             renderHandlerEditor() ?? renderGroupEditor()
@@ -841,6 +882,14 @@ function HookManagementPage() {
             <p>选择一个分组或处理器以编辑详细配置。</p>
           )
         }
+        dirty={dirty}
+        scopeDetails={
+          <p className={styles.scopeHint}>
+            选择一个分组后，可在处理器编排中维护其高级匹配条件。
+          </p>
+        }
+        saving={saving}
+        testDetails={testDetails}
         onAddGroup={() => {
           if (editingEvent) setDraft(addGroup(draft, editingEvent));
         }}
@@ -874,6 +923,7 @@ function HookManagementPage() {
           setDraft(removeHandler(draft, editingEvent, groupId, handlerId));
           setSelected({ kind: "root" });
         }}
+        onSave={() => void save()}
         onSelectGroup={(groupId) => {
           if (editingEvent) {
             setSelected({ kind: "group", event: editingEvent, groupId });

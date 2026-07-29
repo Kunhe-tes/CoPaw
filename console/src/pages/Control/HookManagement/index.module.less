@@ -324,12 +324,15 @@
 }
 .lifecycleTrack {
   align-items: center;
+  gap: 2px;
   min-height: 112px;
   padding: 16px 18px;
   overflow-x: auto;
 }
 .lifecycleItem {
-  flex: 1 0 152px;
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
   align-items: center;
 }
 .lifecycleStep {
@@ -337,8 +340,8 @@
   flex: 1;
   min-width: 0;
   align-items: center;
-  gap: 8px;
-  padding: 9px;
+  gap: 6px;
+  padding: 8px 6px;
   border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
@@ -362,6 +365,9 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.lifecycleStep > span:last-child {
+  min-width: 0;
 }
 .lifecycleStep strong {
   font-size: 12px;
@@ -389,7 +395,7 @@
 }
 .lifecycleArrow {
   flex: 0 0 auto;
-  margin: 0 6px;
+  margin: 0 2px;
   color: var(--console-management-text-muted);
   font-size: 12px;
 }
@@ -461,6 +467,202 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+.drawerTitle,
+.pipelineHeading,
+.pipelineStep,
+.pipelineStepButton,
+.pipelineActions,
+.testPublishPanel {
+  display: flex;
+}
+.drawerTitle {
+  align-items: center;
+  gap: 8px;
+}
+.drawerTitle strong {
+  color: var(--console-management-text);
+  font-size: 16px;
+}
+.drawerTabs :global(.ant-tabs-nav) {
+  margin-bottom: 20px;
+}
+.scopeWorkspace,
+.pipelineList,
+.handlerDetailPanel,
+.testPublishPanel,
+.eventBasics {
+  min-width: 0;
+  border: 1px solid var(--console-management-border);
+  border-radius: 10px;
+  background: var(--console-management-surface);
+}
+.scopeWorkspace,
+.testPublishPanel,
+.eventBasics {
+  padding: 18px;
+}
+.scopeWorkspace {
+  display: grid;
+  gap: 12px;
+}
+.scopeWorkspace .drawerSection {
+  margin: 0;
+}
+.scopeHint {
+  margin: 0;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.pipelineWorkspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(340px, 1.1fr);
+  gap: 16px;
+  min-height: 560px;
+}
+.pipelineList {
+  padding: 16px;
+  background: var(--console-management-surface-subtle);
+}
+.pipelineHeading {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.pipelineHeading h3,
+.testPublishPanel h3,
+.eventBasics h3 {
+  margin: 0;
+  color: var(--console-management-text);
+  font-size: 15px;
+}
+.pipelineHeading p,
+.testPublishPanel p,
+.eventBasics p {
+  margin: 4px 0 0;
+  color: var(--console-management-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.pipelineHeading > span {
+  flex: 0 0 auto;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.pipelineGroup + .pipelineGroup {
+  margin-top: 18px;
+}
+.pipelineGroupLabel {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.pipelineStep {
+  position: relative;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pipelineStep + .pipelineStep {
+  margin-top: 8px;
+}
+.pipelineStep + .pipelineStep::before {
+  position: absolute;
+  top: -10px;
+  left: 11px;
+  width: 1px;
+  height: 10px;
+  background: var(--console-management-primary);
+  content: "";
+}
+.pipelineStepNumber {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--console-management-primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.pipelineStepButton {
+  min-width: 0;
+  height: auto;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 8px;
+  background: var(--console-management-surface);
+  text-align: left;
+}
+.pipelineStepButton:hover,
+.pipelineStepButton:focus-visible {
+  border-color: var(--console-management-primary) !important;
+  background: var(--console-management-primary-soft) !important;
+}
+.pipelineStepButton strong,
+.pipelineStepButton span {
+  display: block;
+  min-width: 0;
+}
+.pipelineStepButton strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--console-management-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pipelineStepButton > span {
+  width: 100%;
+  overflow: hidden;
+  color: var(--console-management-text-muted);
+  font-family: var(--console-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pipelineActions {
+  flex: 0 0 auto;
+}
+.pipelineGroup .handlerTypeSelect {
+  width: 100%;
+  margin-top: 10px;
+}
+.handlerDetailPanel {
+  min-height: 0;
+  overflow: auto;
+}
+.handlerDetailPanel .editor {
+  max-width: none;
+  padding: 18px;
+}
+.testPublishPanel {
+  display: grid;
+  gap: 16px;
+}
+.testPublishPanel > :global(.ant-btn) {
+  justify-self: start;
+}
+.eventBasics {
+  max-width: 660px;
+}
+.eventCode {
+  display: inline-block;
+  margin-bottom: 12px;
+  color: var(--console-management-primary);
+  font-family: var(--console-font-mono);
+  font-size: 12px;
+}
 @media (max-width: 760px) {
   .page {
     padding: 16px;
@@ -476,5 +678,40 @@
   .overviewHeader {
     align-items: stretch;
     flex-direction: column;
+  }
+  .statusBanner,
+  .sectionHeading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .metricGrid {
+    flex-direction: column;
+  }
+  .eventRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+  }
+  .eventRowHeader,
+  .eventRow > :nth-child(2) {
+    display: none;
+  }
+  .eventRow > :nth-child(3) {
+    justify-self: start;
+  }
+  .eventRow > :nth-child(4) {
+    justify-self: end;
+  }
+  .unconfiguredEvent {
+    width: 100%;
+  }
+  .lifecycleItem {
+    min-width: 112px;
+  }
+  .pipelineWorkspace {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+  .handlerDetailPanel {
+    max-height: none;
   }
 }

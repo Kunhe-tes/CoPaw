@@ -5,7 +5,6 @@ import {
   render,
   screen,
   waitFor,
-  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -364,4 +363,20 @@ describe("HookManagementPage", () => {
       ),
     );
   }, 10_000);
+
+  it("opens a four-section event workspace with a processor pipeline", async () => {
+    render(<HookManagementPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
+    );
+
+    expect(
+      screen.getByRole("dialog", { name: "编辑 PreToolUse" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "基本设置" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "适用范围" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "处理器编排" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "测试与发布" })).toBeInTheDocument();
+    expect(screen.getByText("执行顺序")).toBeInTheDocument();
+  });
 });

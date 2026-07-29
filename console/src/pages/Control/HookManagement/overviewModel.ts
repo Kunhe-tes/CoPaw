@@ -18,7 +18,8 @@ const handlerLabels: Record<HookHandlerType, string> = {
   prompt: "Prompt",
 };
 
-export function getLifecycleEvents(_config: HookConfigDraft): HookEventName[] {
+export function getLifecycleEvents(config: HookConfigDraft): HookEventName[] {
+  void config;
   return (Object.keys(eventMetadata) as HookEventName[]).sort(
     (left, right) => eventMetadata[left].order - eventMetadata[right].order,
   );
