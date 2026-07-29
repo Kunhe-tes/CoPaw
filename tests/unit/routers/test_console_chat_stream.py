@@ -305,6 +305,38 @@ def test_file_manager_upload_and_delete_enforce_root_and_name_contracts(
     assert not (tmp_path / "media" / "fresh.txt").exists()
 
 
+def test_file_manager_oversized_upload_audits_failure_without_content(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    (tmp_path / "media").mkdir()
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    with caplog.at_level("INFO", logger="src.swe.app.routers.console"):
+        response = client.post(
+            "/console/file-manager/files/upload?root=upload&path=folder",
+            files={
+                "file": (
+                    "oversized.txt",
+                    b"x" * (console_router.MAX_UPLOAD_BYTES + 1),
+                    "text/plain",
+                ),
+            },
+        )
+
+    assert response.status_code == 400
+    audit = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "file_manager.audit"
+    )
+    assert audit.action == "upload"
+    assert audit.path == "folder/oversized.txt"
+    assert audit.outcome == "failure"
+    assert "x" * 32 not in audit.getMessage()
+
+
 def test_file_manager_recycle_restores_only_original_path_and_purges(
     tmp_path,
     monkeypatch,

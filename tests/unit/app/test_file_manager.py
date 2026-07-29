@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from swe.app import file_manager
 from swe.app.file_manager import (
     FILE_MANAGER_PAGE_SIZE,
     FileManagerConflictError,
+    FileManagerItemKind,
     FileManagerPathError,
     FileManagerRoot,
     FileManagerService,
@@ -569,7 +572,7 @@ def test_read_snapshot_has_bounded_preview_and_revision_hook(
     )
 
     assert snapshot.preview_bytes == b"content"
-    assert snapshot.revision.count(":") == 3
+    assert snapshot.revision == hashlib.sha256(b"content").hexdigest()
     assert snapshot.size_bytes == len(snapshot.preview_bytes)
 
 
@@ -593,6 +596,120 @@ def test_save_text_requires_matching_revision_and_replaces_safely(
     with pytest.raises(FileManagerConflictError):
         service.save_text("working", "document.md", "lost", revision)
     assert path.read_text(encoding="utf-8") == "after"
+
+
+def test_content_revision_rejects_same_stat_content_replacement(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "document.md"
+    path.write_text("before", encoding="utf-8")
+    service = _service(tmp_path)
+    revision = service.read_text_preview("working", "document.md").revision
+    original_stat = path.stat()
+
+    path.write_text("after!", encoding="utf-8")
+    os.utime(
+        path,
+        ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns),
+    )
+
+    with pytest.raises(FileManagerConflictError):
+        service.save_text("working", "document.md", "lost", revision)
+
+
+def test_archive_rejects_fifo_without_opening_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fifo = tmp_path / "events.pipe"
+    os.mkfifo(fifo)
+    service = _service(tmp_path)
+    original_open = file_manager.os.open
+
+    def fail_if_fifo_open(path, *args, **kwargs):
+        if path == "events.pipe":
+            raise AssertionError("FIFO must not be opened")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(file_manager.os, "open", fail_if_fifo_open)
+    listing = service.list_directory("working")
+
+    assert listing.items[0].kind is FileManagerItemKind.SPECIAL
+    assert listing.items[0].capabilities.model_dump() == {
+        "browse": False,
+        "read": False,
+        "upload": False,
+        "edit": False,
+        "download": False,
+        "archive": False,
+    }
+    with pytest.raises(FileManagerPathError):
+        service.archive_file("working", "events.pipe", actor="tester")
+
+
+@pytest.mark.parametrize("operation", ["archive", "restore", "purge"])
+def test_recycle_mutations_restore_visible_state_when_index_save_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    path = tmp_path / "report.txt"
+    path.write_text("report", encoding="utf-8")
+    service = _service(tmp_path)
+    archived = None
+    if operation != "archive":
+        archived = service.archive_file(
+            "working",
+            "report.txt",
+            actor="tester",
+        )
+
+    def fail_index_save(*args, **kwargs):
+        raise OSError("index unavailable")
+
+    monkeypatch.setattr(file_manager, "save_archive_index", fail_index_save)
+    with pytest.raises((FileManagerPathError, OSError)):
+        if operation == "archive":
+            service.archive_file("working", "report.txt", actor="tester")
+        elif operation == "restore":
+            assert archived is not None
+            service.restore_recycle_item(
+                archived.archive_item_id,
+                actor="tester",
+            )
+        else:
+            assert archived is not None
+            service.purge_recycle_item(
+                archived.archive_item_id,
+                actor="tester",
+            )
+
+    if operation == "archive":
+        assert path.read_text(encoding="utf-8") == "report"
+        assert not (
+            tmp_path / "governance" / "archive" / "files"
+        ).exists() or not list(
+            (tmp_path / "governance" / "archive" / "files").iterdir(),
+        )
+    elif operation == "restore":
+        assert not path.exists()
+        assert archived is not None
+        assert (
+            tmp_path
+            / "governance"
+            / "archive"
+            / "files"
+            / archived.archive_item_id
+        ).is_file()
+    else:
+        assert archived is not None
+        assert (
+            tmp_path
+            / "governance"
+            / "archive"
+            / "files"
+            / archived.archive_item_id
+        ).is_file()
 
 
 @pytest.mark.parametrize(

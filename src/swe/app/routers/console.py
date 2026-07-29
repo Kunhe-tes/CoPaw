@@ -289,6 +289,20 @@ def _audit_file_manager_mutation(
         pass
 
 
+def _file_manager_upload_audit_path(directory: str, filename: str) -> str:
+    """Keep early upload-rejection audit paths bounded and path-shaped."""
+
+    safe_filename = _safe_filename(filename or "file")
+    safe_parts = [
+        part
+        for part in directory.split("/")
+        if part not in {"", ".", ".."}
+        and "\\" not in part
+        and "\x00" not in part
+    ]
+    return "/".join([*safe_parts, safe_filename])
+
+
 def _file_manager_download_disposition(filename: str) -> str:
     """Create a header-safe attachment filename without leaking a path."""
 
@@ -1140,6 +1154,12 @@ async def post_file_manager_upload(
 
     content = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(content) > MAX_UPLOAD_BYTES:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=_file_manager_upload_audit_path(path, file.filename or ""),
+            outcome="failure",
+        )
         raise HTTPException(
             status_code=400,
             detail=(

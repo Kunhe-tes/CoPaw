@@ -14,6 +14,7 @@ import heapq
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import stat as stat_module
@@ -32,6 +33,8 @@ from .file_governance.archive_maintenance import (
     load_archive_index,
     save_archive_index,
 )
+
+logger = logging.getLogger(__name__)
 
 FILE_MANAGER_PAGE_SIZE = 100
 TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
@@ -66,6 +69,7 @@ class FileManagerItemKind(str, Enum):
     DIRECTORY = "directory"
     FILE = "file"
     SYMLINK = "symlink"
+    SPECIAL = "special"
 
 
 class FileManagerCapabilities(BaseModel):
@@ -466,11 +470,13 @@ class FileManagerService:
             if not stat_module.S_ISREG(initial_stat.st_mode):
                 raise FileManagerPathError("Path is not a regular file")
             preview = bytearray()
+            content_digest = hashlib.sha256()
             decoder = codecs.getincrementaldecoder("utf-8")("strict")
             is_text = True
             has_control_character = False
             with os.fdopen(file_fd, "rb", closefd=False) as handle:
                 while chunk := handle.read(_FILE_READ_CHUNK_BYTES):
+                    content_digest.update(chunk)
                     remaining_preview = TEXT_PREVIEW_LIMIT_BYTES - len(preview)
                     if remaining_preview > 0:
                         preview.extend(chunk[:remaining_preview])
@@ -515,7 +521,7 @@ class FileManagerService:
                 initial_stat.st_mtime,
                 tz=timezone.utc,
             ),
-            revision=self._revision_for_stat(initial_stat),
+            revision=content_digest.hexdigest(),
             is_text=is_text,
             is_truncated=initial_stat.st_size > TEXT_PREVIEW_LIMIT_BYTES,
             preview_bytes=bytes(preview),
@@ -572,8 +578,10 @@ class FileManagerService:
         temporary_name = self._temporary_name(parts[-1])
         temporary_fd: int | None = None
         try:
-            current_stat = self._stat_entry(parent_fd, parts[-1])
-            if self._revision_for_stat(current_stat) != revision:
+            if (
+                self._content_revision_for_entry(parent_fd, parts[-1])
+                != revision
+            ):
                 raise FileManagerConflictError(
                     "File revision no longer matches",
                 )
@@ -590,8 +598,10 @@ class FileManagerService:
             # Replacement never follows an existing destination symlink.  The
             # preceding no-follow stat binds the revision to the source seen
             # by the editor.
-            current_stat = self._stat_entry(parent_fd, parts[-1])
-            if self._revision_for_stat(current_stat) != revision:
+            if (
+                self._content_revision_for_entry(parent_fd, parts[-1])
+                != revision
+            ):
                 raise FileManagerConflictError(
                     "File revision no longer matches",
                 )
@@ -715,6 +725,9 @@ class FileManagerService:
                 "Archiving is not available for this root",
             )
         source_fd = self._open_file_fd(resolved_root, normalised_path)
+        archive_directory_fd: int | None = None
+        archive_item_id: str | None = None
+        index_saved = False
         try:
             source_stat = os.fstat(source_fd)
             if not stat_module.S_ISREG(source_stat.st_mode):
@@ -723,41 +736,61 @@ class FileManagerService:
                 )
             archive_item_id = os.urandom(16).hex()
             archive_directory_fd = self._open_archive_files_directory_fd()
-            try:
-                self._copy_fd_to_new_file(
-                    source_fd,
-                    archive_directory_fd,
-                    archive_item_id,
-                )
-            finally:
-                os.close(archive_directory_fd)
+            self._copy_fd_to_new_file(
+                source_fd,
+                archive_directory_fd,
+                archive_item_id,
+            )
+
+            original_path = self._workspace_relative_path(
+                resolved_root,
+                normalised_path,
+            )
+            index = load_archive_index(self._workspace_dir)
+            updated_index = dict(index)
+            item = {
+                "id": archive_item_id,
+                "original_path": original_path,
+                "archive_path": f"{ARCHIVE_FILES_DIR}/{archive_item_id}",
+                "size_bytes": source_stat.st_size,
+                "mtime": _isoformat_utc(source_stat.st_mtime),
+                "archived_at": _isoformat_utc(
+                    datetime.now(timezone.utc).timestamp(),
+                ),
+                "archived_by": actor,
+                "archive_reason": "file_manager_delete",
+            }
+            updated_index["items"] = [
+                *list(index.get("items") or []),
+                item,
+            ]
+            save_archive_index(self._workspace_dir, updated_index)
+            index_saved = True
             self._unlink_if_same_file(
                 resolved_root,
                 normalised_path,
                 source_stat,
             )
+        except Exception:
+            if index_saved:
+                try:
+                    save_archive_index(self._workspace_dir, index)
+                except Exception:
+                    logger.exception("Unable to roll back archive index")
+            if (
+                archive_directory_fd is not None
+                and archive_item_id is not None
+            ):
+                self._unlink_archive_payload_if_present(
+                    archive_directory_fd,
+                    archive_item_id,
+                )
+            raise
         finally:
             os.close(source_fd)
-
-        original_path = self._workspace_relative_path(
-            resolved_root,
-            normalised_path,
-        )
-        index = load_archive_index(self._workspace_dir)
-        item = {
-            "id": archive_item_id,
-            "original_path": original_path,
-            "archive_path": f"{ARCHIVE_FILES_DIR}/{archive_item_id}",
-            "size_bytes": source_stat.st_size,
-            "mtime": _isoformat_utc(source_stat.st_mtime),
-            "archived_at": _isoformat_utc(
-                datetime.now(timezone.utc).timestamp(),
-            ),
-            "archived_by": actor,
-            "archive_reason": "file_manager_delete",
-        }
-        index["items"] = [*list(index.get("items") or []), item]
-        save_archive_index(self._workspace_dir, index)
+            if archive_directory_fd is not None:
+                os.close(archive_directory_fd)
+        assert archive_item_id is not None
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
     def restore_recycle_item(
@@ -795,31 +828,52 @@ class FileManagerService:
                     target_parent_fd,
                     parts[-1],
                 )
-                current_archive_stat = self._stat_entry(
-                    archive_parent_fd,
-                    archive_item_id,
-                )
-                if self._stat_identity(
-                    current_archive_stat,
-                ) != self._stat_identity(
-                    source_stat,
-                ):
-                    raise FileManagerConflictError(
-                        "Archived payload changed during restore",
+                target_stat = self._stat_entry(target_parent_fd, parts[-1])
+                updated_index = dict(index)
+                updated_index["items"] = [
+                    row
+                    for row in index.get("items", [])
+                    if str(row.get("id") or "") != archive_item_id
+                ]
+                try:
+                    save_archive_index(self._workspace_dir, updated_index)
+                except Exception:
+                    self._unlink_if_same_file(
+                        root,
+                        relative_path,
+                        target_stat,
                     )
-                os.unlink(archive_item_id, dir_fd=archive_parent_fd)
-                os.fsync(archive_parent_fd)
+                    raise
+                try:
+                    current_archive_stat = self._stat_entry(
+                        archive_parent_fd,
+                        archive_item_id,
+                    )
+                    if self._stat_identity(
+                        current_archive_stat,
+                    ) != self._stat_identity(
+                        source_stat,
+                    ):
+                        raise FileManagerConflictError(
+                            "Archived payload changed during restore",
+                        )
+                    os.unlink(archive_item_id, dir_fd=archive_parent_fd)
+                    os.fsync(archive_parent_fd)
+                except (FileManagerPathError, OSError):
+                    try:
+                        save_archive_index(self._workspace_dir, index)
+                    finally:
+                        self._unlink_if_same_file(
+                            root,
+                            relative_path,
+                            target_stat,
+                        )
+                    raise
             finally:
                 os.close(archive_fd)
                 os.close(archive_parent_fd)
         finally:
             os.close(target_parent_fd)
-        index["items"] = [
-            row
-            for row in index.get("items", [])
-            if str(row.get("id") or "") != archive_item_id
-        ]
-        save_archive_index(self._workspace_dir, index)
         _ = actor
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
@@ -841,17 +895,22 @@ class FileManagerService:
                 raise FileManagerPathError(
                     "Archived payload is not a regular file",
                 )
-            os.unlink(archive_item_id, dir_fd=archive_parent_fd)
-            os.fsync(archive_parent_fd)
+            updated_index = dict(index)
+            updated_index["items"] = [
+                row
+                for row in index.get("items", [])
+                if str(row.get("id") or "") != archive_item_id
+            ]
+            save_archive_index(self._workspace_dir, updated_index)
+            try:
+                os.unlink(archive_item_id, dir_fd=archive_parent_fd)
+                os.fsync(archive_parent_fd)
+            except OSError:
+                save_archive_index(self._workspace_dir, index)
+                raise
         finally:
             os.close(archive_fd)
             os.close(archive_parent_fd)
-        index["items"] = [
-            row
-            for row in index.get("items", [])
-            if str(row.get("id") or "") != archive_item_id
-        ]
-        save_archive_index(self._workspace_dir, index)
         _ = actor
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
@@ -906,7 +965,7 @@ class FileManagerService:
         nofollow = getattr(os, "O_NOFOLLOW", None)
         if nofollow is None:
             raise FileManagerPathError("Safe file access is unavailable")
-        return os.O_RDONLY | os.O_CLOEXEC | nofollow
+        return os.O_RDONLY | os.O_CLOEXEC | os.O_NONBLOCK | nofollow
 
     def _open_directory_fd(
         self,
@@ -966,6 +1025,9 @@ class FileManagerService:
         parent_fd = self._open_directory_fd(root, parent_path)
         assert parent_fd is not None
         try:
+            entry_stat = self._stat_entry(parent_fd, parts[-1])
+            if not stat_module.S_ISREG(entry_stat.st_mode):
+                raise FileManagerPathError("Path is not a regular file")
             return os.open(
                 parts[-1],
                 self._file_open_flags(),
@@ -1136,6 +1198,32 @@ class FileManagerService:
             raise FileManagerPathError("Symbolic links cannot be followed")
         return entry_stat
 
+    def _content_revision_for_entry(
+        self,
+        directory_fd: int,
+        name: str,
+    ) -> str:
+        """Hash one safely opened stable regular-file snapshot."""
+
+        file_fd = os.open(name, self._file_open_flags(), dir_fd=directory_fd)
+        try:
+            initial_stat = os.fstat(file_fd)
+            if not stat_module.S_ISREG(initial_stat.st_mode):
+                raise FileManagerPathError("Path is not a regular file")
+            digest = hashlib.sha256()
+            while chunk := os.read(file_fd, _FILE_READ_CHUNK_BYTES):
+                digest.update(chunk)
+            final_stat = os.fstat(file_fd)
+        except OSError as exc:
+            raise FileManagerPathError("Unable to read file revision") from exc
+        finally:
+            os.close(file_fd)
+        if self._stat_identity(initial_stat) != self._stat_identity(
+            final_stat,
+        ):
+            raise FileManagerConflictError("File changed while being read")
+        return digest.hexdigest()
+
     def _open_archive_files_directory_fd(self) -> int:
         workspace_fd = os.open(
             self._workspace_dir,
@@ -1238,6 +1326,24 @@ class FileManagerService:
                 os.unlink(temporary_name, dir_fd=destination_directory_fd)
             except FileNotFoundError:
                 pass
+
+    def _unlink_archive_payload_if_present(
+        self,
+        archive_directory_fd: int,
+        archive_item_id: str,
+    ) -> None:
+        try:
+            entry_stat = self._stat_entry(
+                archive_directory_fd,
+                archive_item_id,
+            )
+            if stat_module.S_ISREG(entry_stat.st_mode):
+                os.unlink(archive_item_id, dir_fd=archive_directory_fd)
+                os.fsync(archive_directory_fd)
+        except FileManagerNotFoundError:
+            pass
+        except OSError:
+            logger.exception("Unable to remove unindexed archive payload")
 
     def _unlink_if_same_file(
         self,
@@ -1360,16 +1466,19 @@ class FileManagerService:
                 capabilities=FileManagerCapabilities(),
             )
 
-        kind = (
-            FileManagerItemKind.DIRECTORY
-            if stat_module.S_ISDIR(entry_stat.st_mode)
-            else FileManagerItemKind.FILE
-        )
+        if stat_module.S_ISDIR(entry_stat.st_mode):
+            kind = FileManagerItemKind.DIRECTORY
+        elif stat_module.S_ISREG(entry_stat.st_mode):
+            kind = FileManagerItemKind.FILE
+        else:
+            kind = FileManagerItemKind.SPECIAL
         capabilities = root_capabilities(root)
         if kind is FileManagerItemKind.FILE:
             capabilities = capabilities.model_copy(
                 update={"browse": False, "upload": False},
             )
+        elif kind is FileManagerItemKind.SPECIAL:
+            capabilities = FileManagerCapabilities()
         return FileManagerItem(
             name=name,
             path=path,
