@@ -101,6 +101,10 @@ class CronJobModel(BaseModel):
     job_origin: str = Field(default="manual", description="任务来源")
     subscription_key: str = Field(default="", description="订阅任务稳定分组ID")
     skill_ids: str = Field(default="", description="绑定技能ID，逗号分隔")
+    broadcast_source_job_id: str = Field(
+        default="",
+        description="分发源定时任务ID (从meta中提取)",
+    )
     meta: str = Field(default="", description="扩展元数据 (JSON字符串)")
 
     # 状态追踪
