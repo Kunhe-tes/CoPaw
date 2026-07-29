@@ -479,6 +479,18 @@ class ExecutionQueryParams(BaseModel):
     page_size: int = Field(default=10, ge=1, le=100, description="每页数量")
 
 
+class BroadcastSourceJobQueryParams(BaseModel):
+    """Query parameters for listing jobs by broadcast source."""
+
+    tenant_id: Optional[str] = Field(default=None, description="租户ID筛选")
+    bbk_id: Optional[str] = Field(
+        default=None,
+        description="分行号筛选（二级分行号）",
+    )
+    source_id: Optional[str] = Field(default=None, description="来源标识筛选")
+    broadcast_source_job_id: str = Field(..., description="分发源定时任务ID")
+
+
 class ExportQueryParams(BaseModel):
     """Query parameters for exporting data."""
 

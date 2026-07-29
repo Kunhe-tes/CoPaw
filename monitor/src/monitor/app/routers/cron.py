@@ -37,6 +37,7 @@ from ..models.cron import (
     SubscriptionDetailItem,
     SubscriptionOverviewItem,
     UnreadCountResponse,
+    BroadcastSourceJobQueryParams,
 )
 from ..services.cron import QueryService, get_query_service
 from ..services.cron.export_service import ExportService, get_export_service
@@ -125,8 +126,18 @@ async def list_dispatch_batches(
 async def get_dispatch_batch_detail(
     request: Request,
     batch_id: str,
-    intent_limit: int = Query(default=100, ge=1, le=500, description="Intent 数量"),
-    event_limit: int = Query(default=100, ge=1, le=500, description="事件数量"),
+    intent_limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="Intent 数量",
+    ),
+    event_limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="事件数量",
+    ),
     service: QueryService = Depends(get_query_service),
 ) -> CronDispatchBatchDetailResponse:
     """查询单个批调度 batch 的 intent 和事件明细。"""
@@ -203,6 +214,41 @@ async def list_jobs(
         page_size=page_size,
     )
     return await service.list_jobs(params)
+
+
+@router.get(
+    "/jobs/by-broadcast-source",
+    response_model=list[CronJobModel],
+)
+async def query_jobs_by_broadcast_source(
+    request: Request,
+    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
+    bbk_id: str | None = Query(
+        default=None,
+        description="分行号筛选（二级分行号）",
+    ),
+    broadcast_source_job_id: str = Query(..., description="分发源定时任务ID"),
+    service: QueryService = Depends(get_query_service),
+) -> list[CronJobModel]:
+    """根据分发源定时任务ID查询定时任务列表。
+
+    Args:
+        request: FastAPI request object
+        tenant_id: 租户ID筛选
+        bbk_id: 分行号筛选（二级分行号，会转换为一级分行号）
+        broadcast_source_job_id: 分发源定时任务ID
+        service: Query service
+
+    Returns:
+        定时任务列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.query_jobs_by_broadcast_source(
+        tenant_id=tenant_id,
+        bbk_id=bbk_id,
+        source_id=actual_source_id,
+        broadcast_source_job_id=broadcast_source_job_id,
+    )
 
 
 @router.get(

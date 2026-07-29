@@ -775,6 +775,63 @@ class QueryService:
             page_size=params.page_size,
         )
 
+    async def query_jobs_by_broadcast_source(
+        self,
+        tenant_id: Optional[str] = None,
+        bbk_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+        broadcast_source_job_id: Optional[str] = None,
+    ) -> List[CronJobModel]:
+        """Query cron jobs by broadcast source job ID.
+
+        Args:
+            tenant_id: 租户ID筛选
+            bbk_id: 二级分行号（会转换为一级分行号）
+            source_id: 来源标识筛选
+            broadcast_source_job_id: 分发源定时任务ID
+
+        Returns:
+            List of cron jobs matching the criteria
+        """
+        from ....utils.bbk import normalize_bbk_id_to_primary
+
+        db = get_db_connection()
+        conditions = ["deleted_at IS NULL"]
+        sql_params: List = []
+
+        if tenant_id:
+            conditions.append("tenant_id = %s")
+            sql_params.append(tenant_id)
+
+        if bbk_id:
+            # 将二级分行号转换为一级分行号
+            primary_bbk_id = normalize_bbk_id_to_primary(bbk_id)
+            if primary_bbk_id:
+                conditions.append("bbk_id = %s")
+                sql_params.append(primary_bbk_id)
+
+        if source_id:
+            conditions.append("source_id = %s")
+            sql_params.append(source_id)
+
+        if broadcast_source_job_id:
+            conditions.append("broadcast_source_job_id = %s")
+            sql_params.append(broadcast_source_job_id)
+
+        query_sql = f"""
+            SELECT * FROM swe_cron_jobs
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at DESC
+        """
+        rows = await db.fetch_all(query_sql, tuple(sql_params))
+
+        return [
+            CronJobModel.model_validate(
+                convert_row_times_direct(row, JOB_TIME_FIELDS),
+            )
+            for row in rows
+        ]
+
     async def get_job(
         self,
         job_id: str,
