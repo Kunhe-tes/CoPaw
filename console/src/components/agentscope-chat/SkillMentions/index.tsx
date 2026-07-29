@@ -62,7 +62,7 @@ function useDelayedLoadingIndicator(loading: boolean) {
   const visibleSinceRef = useRef<number | null>(null);
 
   useEffect(() => {
-    let timer: ReturnType<typeof window.setTimeout> | undefined;
+    let timer: number | undefined;
     if (loading) {
       if (!visible) {
         timer = window.setTimeout(() => {

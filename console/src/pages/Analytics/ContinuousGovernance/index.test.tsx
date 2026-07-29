@@ -296,7 +296,7 @@ describe("ContinuousGovernancePage", () => {
     expect(trendLabels).toHaveLength(6);
     expect(savingsLabels).toHaveLength(6);
     expect(trendLabels[0]).toHaveTextContent("06-26");
-    expect(trendLabels.at(-1)).toHaveTextContent("07-09");
+    expect(trendLabels[trendLabels.length - 1]).toHaveTextContent("07-09");
   });
 
   it("loads all source branches for the BBK filter", async () => {
