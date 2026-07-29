@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Modal, Upload, Select, Input, message, Spin, Button, Tooltip, Alert, Popover } from "antd";
+import { Modal, Upload, Select, Input, message, Spin, Button, Tooltip, Alert, Popover, Checkbox } from "antd";
 import { InboxOutlined, PlusOutlined, InfoCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import type { UploadProps } from "antd";
 import { marketApi, type Category } from "../../../api/modules/market";
@@ -39,6 +39,7 @@ export default function UploadSkillModal({
   const [addCategoryModalOpen, setAddCategoryModalOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
   const [addingCategory, setAddingCategory] = useState(false);
+  const [includeInStatistics, setIncludeInStatistics] = useState(false);  // 是否纳入统计，默认不纳入
 
   const loadCategories = async () => {
     setLoadingCategories(true);
@@ -68,6 +69,7 @@ export default function UploadSkillModal({
       setSelectedCategory(null);
       setSelectedBbkIds([]);
       setSkillExists(false);
+      setIncludeInStatistics(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -156,6 +158,7 @@ export default function UploadSkillModal({
           cn_name: cnName.trim(),
           skill_id: skillId,  // 传入 parse-zip 生成的 skill_id
           bbk_ids: selectedBbkIds,
+          include_in_statistics: includeInStatistics,
         }
       );
 
@@ -318,6 +321,19 @@ export default function UploadSkillModal({
           onChange={setSelectedBbkIds}
           options={BBK_ID_MAP}
         />
+      </div>
+
+      {/* 统计配置复选框 */}
+      <div style={{ marginBottom: 16 }}>
+        <Checkbox
+          checked={includeInStatistics}
+          onChange={(e) => setIncludeInStatistics(e.target.checked)}
+        >
+          纳入使用排行榜统计
+          <Tooltip title="勾选后，该技能的使用数据将展示在运营看板的使用排行榜中">
+            <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
+          </Tooltip>
+        </Checkbox>
       </div>
 
       {skillId && !parsingZip && (

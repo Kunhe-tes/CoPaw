@@ -163,6 +163,7 @@ async function _uploadZipToMarket(
     cn_name?: string;
     skill_id?: string;
     bbk_ids?: string[];
+    include_in_statistics?: boolean;
   }
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
@@ -192,6 +193,9 @@ async function _uploadZipToMarket(
   }
   if (options?.bbk_ids && options.bbk_ids.length > 0) {
     params.set("bbk_ids", options.bbk_ids.join(","));
+  }
+  if (options?.include_in_statistics !== undefined) {
+    params.set("include_in_statistics", String(options.include_in_statistics));
   }
   const qs = params.toString();
   const url = getApiUrl(`${endpoint}${qs ? `?${qs}` : ""}`);
@@ -474,6 +478,7 @@ export const marketApi = {
       cn_name?: string;
       skill_id?: string;
       bbk_ids?: string[];
+      include_in_statistics?: boolean;
     }
   ): Promise<{
     imported: string[];
