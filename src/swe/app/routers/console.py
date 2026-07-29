@@ -10,7 +10,7 @@ import os
 import re
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Union, Any, Optional, Dict
 from urllib.parse import quote
@@ -36,10 +36,11 @@ from ..context_references import (
     context_reference_directory,
 )
 from ..file_manager import (
+    FileManagerConflictError,
     FileManagerDirectoryListing,
+    FileManagerItem,
     FileManagerNotFoundError,
     FileManagerPathError,
-    FileManagerRoot,
     FileManagerTextPreview,
     get_file_manager_service,
 )
@@ -236,7 +237,56 @@ def _file_manager_http_error(error: FileManagerPathError) -> HTTPException:
             status_code=404,
             detail="File manager item not found",
         )
-    return HTTPException(status_code=403, detail="Invalid file manager path")
+    if isinstance(error, FileManagerConflictError):
+        return HTTPException(status_code=409, detail=str(error))
+    return HTTPException(status_code=403, detail=str(error))
+
+
+class FileManagerTextSaveRequest(BaseModel):
+    root: str
+    path: str
+    content: str
+    revision: str
+
+
+def _file_manager_actor(request: Request) -> str:
+    """Return a bounded audit actor without depending on one auth scheme."""
+
+    for candidate in (
+        request.headers.get("X-Actor"),
+        request.headers.get("X-User-Id"),
+        getattr(request.state, "actor", None),
+        getattr(request.state, "user_id", None),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()[:256]
+    return "unknown"
+
+
+def _audit_file_manager_mutation(
+    request: Request,
+    *,
+    action: str,
+    path: str,
+    outcome: str,
+) -> None:
+    """Best-effort mutation audit; never include or log file contents."""
+
+    try:
+        logger.info(
+            "file_manager.audit",
+            extra={
+                "actor": _file_manager_actor(request),
+                "time": datetime.now(timezone.utc).isoformat(),
+                "action": action,
+                "path": path,
+                "outcome": outcome,
+            },
+        )
+    except Exception:
+        # Audit delivery must not turn a successful filesystem mutation into a
+        # request failure.
+        pass
 
 
 def _file_manager_download_disposition(filename: str) -> str:
@@ -1033,6 +1083,202 @@ async def get_file_manager_file_download(
             ),
         },
     )
+
+
+@router.put(
+    "/file-manager/files/text",
+    response_model=FileManagerTextPreview,
+    summary="Save one revision-checked controlled text file",
+)
+async def put_file_manager_text_file(
+    request: Request,
+    body: FileManagerTextSaveRequest,
+) -> FileManagerTextPreview:
+    """Save small UTF-8 text only, rejecting stale revisions instead of overwrite."""
+
+    workspace = await get_agent_for_request(request)
+    service = get_file_manager_service(Path(workspace.workspace_dir))
+    try:
+        result = service.save_text(
+            body.root,
+            body.path,
+            body.content,
+            body.revision,
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="save",
+            path=body.path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="save",
+        path=body.path,
+        outcome="success",
+    )
+    return result
+
+
+@router.post(
+    "/file-manager/files/upload",
+    response_model=FileManagerItem,
+    summary="Upload a new controlled file without replacing an existing name",
+)
+async def post_file_manager_upload(
+    request: Request,
+    file: UploadFile = File(..., description="File to upload"),
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(
+        "",
+        description="Existing relative destination directory",
+    ),
+) -> FileManagerItem:
+    """Upload to the currently browsed directory, never renaming or replacing."""
+
+    content = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"
+            ),
+        )
+    workspace = await get_agent_for_request(request)
+    service = get_file_manager_service(Path(workspace.workspace_dir))
+    filename = file.filename or ""
+    try:
+        item = service.upload_bytes(root, path, filename, content)
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="upload",
+        path=item.path,
+        outcome="success",
+    )
+    return item
+
+
+@router.delete(
+    "/file-manager/files",
+    summary="Recoverably archive one controlled regular file",
+)
+async def delete_file_manager_file(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative regular file path"),
+) -> dict[str, str]:
+    """Move a file-manager file into the governance recycle-bin archive."""
+
+    workspace = await get_agent_for_request(request)
+    service = get_file_manager_service(Path(workspace.workspace_dir))
+    try:
+        archived = service.archive_file(
+            root,
+            path,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="archive",
+            path=path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="archive",
+        path=archived.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": archived.archive_item_id,
+        "original_path": archived.original_path,
+    }
+
+
+@router.post(
+    "/file-manager/recycle/{archive_item_id}/restore",
+    summary="Restore one recycle item to its original path without overwrite",
+)
+async def post_file_manager_recycle_restore(
+    request: Request,
+    archive_item_id: str,
+) -> dict[str, str]:
+    """Restore one archive item; a collision leaves the archive untouched."""
+
+    workspace = await get_agent_for_request(request)
+    service = get_file_manager_service(Path(workspace.workspace_dir))
+    try:
+        restored = service.restore_recycle_item(
+            archive_item_id,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="restore",
+            path=archive_item_id,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="restore",
+        path=restored.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": restored.archive_item_id,
+        "original_path": restored.original_path,
+    }
+
+
+@router.delete(
+    "/file-manager/recycle/{archive_item_id}",
+    summary="Permanently delete one recycle item",
+)
+async def delete_file_manager_recycle_item(
+    request: Request,
+    archive_item_id: str,
+) -> dict[str, str]:
+    """Remove archived bytes and index entry after the UI confirmation."""
+
+    workspace = await get_agent_for_request(request)
+    service = get_file_manager_service(Path(workspace.workspace_dir))
+    try:
+        purged = service.purge_recycle_item(
+            archive_item_id,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="purge",
+            path=archive_item_id,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="purge",
+        path=purged.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": purged.archive_item_id,
+        "original_path": purged.original_path,
+    }
 
 
 @router.get(

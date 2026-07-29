@@ -27,6 +27,11 @@ from typing import Mapping
 from pydantic import BaseModel
 
 from ..constant import SECRET_DIR
+from .file_governance.archive_maintenance import (
+    ARCHIVE_FILES_DIR,
+    load_archive_index,
+    save_archive_index,
+)
 
 FILE_MANAGER_PAGE_SIZE = 100
 TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
@@ -43,6 +48,10 @@ class FileManagerPathError(ValueError):
 
 class FileManagerNotFoundError(FileManagerPathError):
     """A valid controlled relative path does not currently exist."""
+
+
+class FileManagerConflictError(FileManagerPathError):
+    """A mutation would replace a newer or already-existing file."""
 
 
 class FileManagerRoot(str, Enum):
@@ -75,6 +84,9 @@ class FileManagerItem(BaseModel):
     size_bytes: int | None = None
     modified_at: datetime | None = None
     capabilities: FileManagerCapabilities
+    archive_item_id: str | None = None
+    original_path: str | None = None
+    archived_at: datetime | None = None
 
 
 class FileManagerDirectoryListing(BaseModel):
@@ -120,6 +132,14 @@ class FileManagerDownload:
 
 
 @dataclass(frozen=True)
+class FileManagerRecycleMutation:
+    """The public identity of one archived file-manager item."""
+
+    archive_item_id: str
+    original_path: str
+
+
+@dataclass(frozen=True)
 class _DirectoryCandidate:
     name: str
     entry_stat: os.stat_result
@@ -134,7 +154,7 @@ def root_capabilities(root: FileManagerRoot | str) -> FileManagerCapabilities:
     if root is FileManagerRoot.CONVERSATION:
         return FileManagerCapabilities(browse=True, read=True, download=True)
     if root is FileManagerRoot.RECYCLE:
-        return FileManagerCapabilities()
+        return FileManagerCapabilities(browse=True)
     return FileManagerCapabilities(
         browse=True,
         read=True,
@@ -231,6 +251,26 @@ def _write_all(descriptor: int, data: bytes) -> None:
         offset += os.write(descriptor, data[offset:])
 
 
+def _isoformat_utc(timestamp: float) -> str:
+    return (
+        datetime.fromtimestamp(timestamp, timezone.utc)
+        .isoformat()
+        .replace(
+            "+00:00",
+            "Z",
+        )
+    )
+
+
+def _parse_archive_datetime(value: object) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError("Missing archived time")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError("Archived time must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
 def get_file_manager_service(workspace_dir: Path) -> "FileManagerService":
     """Create the only service route handlers may use for a tenant workspace."""
 
@@ -289,6 +329,16 @@ class FileManagerService:
         cursor: str | None = None,
         query: str | None = None,
     ) -> FileManagerDirectoryListing:
+        try:
+            requested_root = FileManagerRoot(root)
+        except (TypeError, ValueError) as exc:
+            raise FileManagerPathError("Unknown file manager root") from exc
+        if requested_root is FileManagerRoot.RECYCLE:
+            if relative_path or cursor or query:
+                raise FileManagerPathError(
+                    "Recycle does not support directory paths or cursors",
+                )
+            return self._list_recycle_items()
         resolved_root, normalised_path = self._validate_root_and_path(
             root,
             relative_path,
@@ -471,6 +521,340 @@ class FileManagerService:
             preview_bytes=bytes(preview),
         )
 
+    def save_text(
+        self,
+        root: FileManagerRoot | str,
+        relative_path: str,
+        content: str,
+        revision: str,
+    ) -> FileManagerTextPreview:
+        """Atomically save one current, small UTF-8 text-file snapshot.
+
+        The revision is checked against an opened no-follow descriptor and is
+        checked again immediately before replacement.  This deliberately
+        rejects concurrent updates rather than silently overwriting them.
+        """
+
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
+            relative_path,
+        )
+        if not root_capabilities(resolved_root).edit:
+            raise FileManagerPathError(
+                "Text editing is not available for this root",
+            )
+        if not isinstance(content, str) or not isinstance(revision, str):
+            raise FileManagerPathError("Invalid text save payload")
+        encoded_content = content.encode("utf-8")
+        if len(encoded_content) > TEXT_PREVIEW_LIMIT_BYTES:
+            raise FileManagerPathError(
+                "Text content exceeds the editable limit",
+            )
+
+        snapshot = self.read_file_snapshot(resolved_root, normalised_path)
+        if (
+            not snapshot.is_text
+            or snapshot.is_truncated
+            or snapshot.revision != revision
+        ):
+            if snapshot.revision != revision:
+                raise FileManagerConflictError(
+                    "File revision no longer matches",
+                )
+            raise FileManagerPathError("File is not an editable text file")
+
+        parts = tuple(filter(None, normalised_path.split("/")))
+        parent_fd = self._open_directory_fd(
+            resolved_root,
+            "/".join(parts[:-1]),
+        )
+        assert parent_fd is not None
+        temporary_name = self._temporary_name(parts[-1])
+        temporary_fd: int | None = None
+        try:
+            current_stat = self._stat_entry(parent_fd, parts[-1])
+            if self._revision_for_stat(current_stat) != revision:
+                raise FileManagerConflictError(
+                    "File revision no longer matches",
+                )
+            temporary_fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            _write_all(temporary_fd, encoded_content)
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = None
+            # Replacement never follows an existing destination symlink.  The
+            # preceding no-follow stat binds the revision to the source seen
+            # by the editor.
+            current_stat = self._stat_entry(parent_fd, parts[-1])
+            if self._revision_for_stat(current_stat) != revision:
+                raise FileManagerConflictError(
+                    "File revision no longer matches",
+                )
+            os.replace(
+                temporary_name,
+                parts[-1],
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+            )
+            os.fsync(parent_fd)
+        except FileExistsError as exc:
+            raise FileManagerConflictError(
+                "File revision no longer matches",
+            ) from exc
+        except OSError as exc:
+            raise FileManagerPathError("Unable to save text file") from exc
+        finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(parent_fd)
+        return self.read_text_preview(resolved_root, normalised_path)
+
+    def upload_bytes(
+        self,
+        root: FileManagerRoot | str,
+        directory_path: str,
+        filename: str,
+        content: bytes,
+    ) -> FileManagerItem:
+        """Publish a new upload without following links or replacing names."""
+
+        resolved_root, normalised_directory = self._validate_root_and_path(
+            root,
+            directory_path,
+        )
+        if not root_capabilities(resolved_root).upload:
+            raise FileManagerPathError(
+                "Uploads are not available for this root",
+            )
+        safe_filename = self._validate_upload_filename(filename)
+        if not isinstance(content, bytes):
+            raise FileManagerPathError("Upload content must be bytes")
+        directory_fd = self._open_directory_fd(
+            resolved_root,
+            normalised_directory,
+        )
+        assert directory_fd is not None
+        temporary_name = self._temporary_name(safe_filename)
+        temporary_fd: int | None = None
+        try:
+            temporary_fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o600,
+                dir_fd=directory_fd,
+            )
+            _write_all(temporary_fd, content)
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = None
+            try:
+                os.link(
+                    temporary_name,
+                    safe_filename,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise FileManagerConflictError(
+                    "A file with this name already exists",
+                ) from exc
+            os.unlink(temporary_name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+            entry_stat = self._stat_entry(directory_fd, safe_filename)
+        except FileManagerPathError:
+            raise
+        except OSError as exc:
+            raise FileManagerPathError("Unable to upload file") from exc
+        finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            try:
+                os.unlink(temporary_name, dir_fd=directory_fd)
+            except FileNotFoundError:
+                pass
+            finally:
+                os.close(directory_fd)
+        return self._item_for_entry(
+            resolved_root,
+            normalised_directory,
+            safe_filename,
+            entry_stat,
+        )
+
+    def archive_file(
+        self,
+        root: FileManagerRoot | str,
+        relative_path: str,
+        *,
+        actor: str,
+    ) -> FileManagerRecycleMutation:
+        """Copy one safely opened regular file into the governance archive.
+
+        Unlike governance maintenance, the file manager intentionally permits
+        visible working-root files such as MEMORY.md.  Only sessions and
+        governance stay hidden through the controlled-root policy.
+        """
+
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
+            relative_path,
+        )
+        if not root_capabilities(resolved_root).archive:
+            raise FileManagerPathError(
+                "Archiving is not available for this root",
+            )
+        source_fd = self._open_file_fd(resolved_root, normalised_path)
+        try:
+            source_stat = os.fstat(source_fd)
+            if not stat_module.S_ISREG(source_stat.st_mode):
+                raise FileManagerPathError(
+                    "Only regular files can be archived",
+                )
+            archive_item_id = os.urandom(16).hex()
+            archive_directory_fd = self._open_archive_files_directory_fd()
+            try:
+                self._copy_fd_to_new_file(
+                    source_fd,
+                    archive_directory_fd,
+                    archive_item_id,
+                )
+            finally:
+                os.close(archive_directory_fd)
+            self._unlink_if_same_file(
+                resolved_root,
+                normalised_path,
+                source_stat,
+            )
+        finally:
+            os.close(source_fd)
+
+        original_path = self._workspace_relative_path(
+            resolved_root,
+            normalised_path,
+        )
+        index = load_archive_index(self._workspace_dir)
+        item = {
+            "id": archive_item_id,
+            "original_path": original_path,
+            "archive_path": f"{ARCHIVE_FILES_DIR}/{archive_item_id}",
+            "size_bytes": source_stat.st_size,
+            "mtime": _isoformat_utc(source_stat.st_mtime),
+            "archived_at": _isoformat_utc(
+                datetime.now(timezone.utc).timestamp(),
+            ),
+            "archived_by": actor,
+            "archive_reason": "file_manager_delete",
+        }
+        index["items"] = [*list(index.get("items") or []), item]
+        save_archive_index(self._workspace_dir, index)
+        return FileManagerRecycleMutation(archive_item_id, original_path)
+
+    def restore_recycle_item(
+        self,
+        archive_item_id: str,
+        *,
+        actor: str,
+    ) -> FileManagerRecycleMutation:
+        """Restore exactly one archived payload to its original safe path."""
+
+        index, item = self._recycle_index_item(archive_item_id)
+        original_path = self._validate_archive_original_path(item)
+        root, relative_path = self._root_from_workspace_relative(original_path)
+        parts = tuple(filter(None, relative_path.split("/")))
+        target_parent_fd = self._open_directory_fd(root, "/".join(parts[:-1]))
+        assert target_parent_fd is not None
+        try:
+            try:
+                self._stat_entry(target_parent_fd, parts[-1])
+            except FileManagerNotFoundError:
+                pass
+            else:
+                raise FileManagerConflictError("Restore target already exists")
+            archive_fd, archive_parent_fd = self._open_archive_payload_fd(
+                archive_item_id,
+            )
+            try:
+                source_stat = os.fstat(archive_fd)
+                if not stat_module.S_ISREG(source_stat.st_mode):
+                    raise FileManagerPathError(
+                        "Archived payload is not a regular file",
+                    )
+                self._copy_fd_to_new_file(
+                    archive_fd,
+                    target_parent_fd,
+                    parts[-1],
+                )
+                current_archive_stat = self._stat_entry(
+                    archive_parent_fd,
+                    archive_item_id,
+                )
+                if self._stat_identity(
+                    current_archive_stat,
+                ) != self._stat_identity(
+                    source_stat,
+                ):
+                    raise FileManagerConflictError(
+                        "Archived payload changed during restore",
+                    )
+                os.unlink(archive_item_id, dir_fd=archive_parent_fd)
+                os.fsync(archive_parent_fd)
+            finally:
+                os.close(archive_fd)
+                os.close(archive_parent_fd)
+        finally:
+            os.close(target_parent_fd)
+        index["items"] = [
+            row
+            for row in index.get("items", [])
+            if str(row.get("id") or "") != archive_item_id
+        ]
+        save_archive_index(self._workspace_dir, index)
+        _ = actor
+        return FileManagerRecycleMutation(archive_item_id, original_path)
+
+    def purge_recycle_item(
+        self,
+        archive_item_id: str,
+        *,
+        actor: str,
+    ) -> FileManagerRecycleMutation:
+        """Permanently remove one archive payload and its index record."""
+
+        index, item = self._recycle_index_item(archive_item_id)
+        original_path = self._validate_archive_original_path(item)
+        archive_fd, archive_parent_fd = self._open_archive_payload_fd(
+            archive_item_id,
+        )
+        try:
+            if not stat_module.S_ISREG(os.fstat(archive_fd).st_mode):
+                raise FileManagerPathError(
+                    "Archived payload is not a regular file",
+                )
+            os.unlink(archive_item_id, dir_fd=archive_parent_fd)
+            os.fsync(archive_parent_fd)
+        finally:
+            os.close(archive_fd)
+            os.close(archive_parent_fd)
+        index["items"] = [
+            row
+            for row in index.get("items", [])
+            if str(row.get("id") or "") != archive_item_id
+        ]
+        save_archive_index(self._workspace_dir, index)
+        _ = actor
+        return FileManagerRecycleMutation(archive_item_id, original_path)
+
     def _root_path(self, root: FileManagerRoot) -> Path:
         suffixes = {
             FileManagerRoot.WORKING: (),
@@ -615,6 +999,267 @@ class FileManagerService:
                 raise FileManagerPathError("Symbolic links cannot be followed")
         except OSError as exc:
             raise FileManagerPathError("Unable to inspect path") from exc
+        finally:
+            os.close(parent_fd)
+
+    def _list_recycle_items(self) -> FileManagerDirectoryListing:
+        """Adapt archive metadata without exposing its control-file paths."""
+
+        items: list[FileManagerItem] = []
+        for item in load_archive_index(self._workspace_dir).get("items", []):
+            if not isinstance(item, dict):
+                continue
+            try:
+                archive_item_id = self._validate_archive_item_id(
+                    str(item.get("id") or ""),
+                )
+                original_path = self._validate_archive_original_path(item)
+                archived_at = _parse_archive_datetime(item.get("archived_at"))
+                size_bytes = int(item.get("size_bytes") or 0)
+            except (TypeError, ValueError, FileManagerPathError):
+                continue
+            items.append(
+                FileManagerItem(
+                    name=original_path.rsplit("/", maxsplit=1)[-1],
+                    path=original_path,
+                    kind=FileManagerItemKind.FILE,
+                    size_bytes=max(0, size_bytes),
+                    modified_at=archived_at,
+                    capabilities=FileManagerCapabilities(),
+                    archive_item_id=archive_item_id,
+                    original_path=original_path,
+                    archived_at=archived_at,
+                ),
+            )
+        items.sort(
+            key=lambda item: (
+                item.archived_at or datetime.min.replace(tzinfo=timezone.utc),
+                item.archive_item_id or "",
+            ),
+            reverse=True,
+        )
+        return FileManagerDirectoryListing(
+            root=FileManagerRoot.RECYCLE,
+            path="",
+            items=items,
+            capabilities=root_capabilities(FileManagerRoot.RECYCLE),
+        )
+
+    def _recycle_index_item(
+        self,
+        archive_item_id: str,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        archive_item_id = self._validate_archive_item_id(archive_item_id)
+        index = load_archive_index(self._workspace_dir)
+        for item in index.get("items", []):
+            if (
+                isinstance(item, dict)
+                and str(item.get("id") or "") == archive_item_id
+            ):
+                return index, item
+        raise FileManagerNotFoundError("Recycle item was not found")
+
+    @staticmethod
+    def _validate_archive_item_id(archive_item_id: str) -> str:
+        if not re.fullmatch(r"[0-9a-f]{32}", archive_item_id):
+            raise FileManagerPathError("Invalid recycle item")
+        return archive_item_id
+
+    def _validate_archive_original_path(
+        self,
+        item: Mapping[str, object],
+    ) -> str:
+        original_path = self._normalise_relative_path(
+            str(item.get("original_path") or ""),
+        )
+        self._root_from_workspace_relative(original_path)
+        expected_archive_path = f"{ARCHIVE_FILES_DIR}/{self._validate_archive_item_id(str(item.get('id') or ''))}"
+        if str(item.get("archive_path") or "") != expected_archive_path:
+            raise FileManagerPathError("Invalid archived payload")
+        return original_path
+
+    def _root_from_workspace_relative(
+        self,
+        workspace_relative_path: str,
+    ) -> tuple[FileManagerRoot, str]:
+        parts = tuple(filter(None, workspace_relative_path.split("/")))
+        if not parts:
+            raise FileManagerPathError("Invalid archived original path")
+        if parts[0] == "media":
+            root, relative_path = FileManagerRoot.UPLOAD, "/".join(parts[1:])
+        elif parts[0] == "static":
+            root, relative_path = FileManagerRoot.DOWNLOAD, "/".join(parts[1:])
+        else:
+            root, relative_path = (
+                FileManagerRoot.WORKING,
+                workspace_relative_path,
+            )
+        self._validate_root_and_path(root, relative_path)
+        if not relative_path:
+            raise FileManagerPathError("Archived original path must be a file")
+        return root, relative_path
+
+    def _workspace_relative_path(
+        self,
+        root: FileManagerRoot,
+        relative_path: str,
+    ) -> str:
+        return "/".join((*self._root_components(root), relative_path))
+
+    @staticmethod
+    def _validate_upload_filename(filename: str) -> str:
+        if not isinstance(filename, str) or not filename:
+            raise FileManagerPathError("Invalid upload filename")
+        if filename in {".", ".."}:
+            raise FileManagerPathError("Invalid upload filename")
+        if any(character in filename for character in ("/", "\\", "\x00")):
+            raise FileManagerPathError("Invalid upload filename")
+        return filename
+
+    @staticmethod
+    def _temporary_name(basename: str) -> str:
+        return f".{basename}.file-manager-{os.getpid()}-{os.urandom(12).hex()}"
+
+    @staticmethod
+    def _stat_entry(directory_fd: int, name: str) -> os.stat_result:
+        try:
+            entry_stat = os.stat(
+                name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError as exc:
+            raise FileManagerNotFoundError("File was not found") from exc
+        except OSError as exc:
+            raise FileManagerPathError("Unable to inspect file") from exc
+        if stat_module.S_ISLNK(entry_stat.st_mode):
+            raise FileManagerPathError("Symbolic links cannot be followed")
+        return entry_stat
+
+    def _open_archive_files_directory_fd(self) -> int:
+        workspace_fd = os.open(
+            self._workspace_dir,
+            self._directory_open_flags(),
+        )
+        current_fd = workspace_fd
+        try:
+            for component in ("governance", "archive", "files"):
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=current_fd)
+                except FileExistsError:
+                    pass
+                try:
+                    next_fd = os.open(
+                        component,
+                        self._directory_open_flags(),
+                        dir_fd=current_fd,
+                    )
+                except OSError as exc:
+                    raise FileManagerPathError(
+                        "Unable to open file-manager archive",
+                    ) from exc
+                os.close(current_fd)
+                current_fd = next_fd
+            return current_fd
+        except Exception:
+            try:
+                os.close(current_fd)
+            except OSError:
+                pass
+            raise
+
+    def _open_archive_payload_fd(
+        self,
+        archive_item_id: str,
+    ) -> tuple[int, int]:
+        archive_item_id = self._validate_archive_item_id(archive_item_id)
+        archive_parent_fd = self._open_archive_files_directory_fd()
+        try:
+            archive_fd = os.open(
+                archive_item_id,
+                self._file_open_flags(),
+                dir_fd=archive_parent_fd,
+            )
+            return archive_fd, archive_parent_fd
+        except FileNotFoundError as exc:
+            os.close(archive_parent_fd)
+            raise FileManagerNotFoundError(
+                "Archived payload was not found",
+            ) from exc
+        except OSError as exc:
+            os.close(archive_parent_fd)
+            raise FileManagerPathError(
+                "Unable to open archived payload",
+            ) from exc
+
+    def _copy_fd_to_new_file(
+        self,
+        source_fd: int,
+        destination_directory_fd: int,
+        destination_name: str,
+    ) -> None:
+        temporary_name = self._temporary_name(destination_name)
+        temporary_fd: int | None = None
+        try:
+            temporary_fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o600,
+                dir_fd=destination_directory_fd,
+            )
+            os.lseek(source_fd, 0, os.SEEK_SET)
+            while chunk := os.read(source_fd, _FILE_READ_CHUNK_BYTES):
+                _write_all(temporary_fd, chunk)
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = None
+            try:
+                os.link(
+                    temporary_name,
+                    destination_name,
+                    src_dir_fd=destination_directory_fd,
+                    dst_dir_fd=destination_directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError as exc:
+                raise FileManagerConflictError(
+                    "Destination already exists",
+                ) from exc
+            os.unlink(temporary_name, dir_fd=destination_directory_fd)
+            os.fsync(destination_directory_fd)
+        except OSError as exc:
+            raise FileManagerPathError(
+                "Unable to write file-manager payload",
+            ) from exc
+        finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            try:
+                os.unlink(temporary_name, dir_fd=destination_directory_fd)
+            except FileNotFoundError:
+                pass
+
+    def _unlink_if_same_file(
+        self,
+        root: FileManagerRoot,
+        relative_path: str,
+        expected_stat: os.stat_result,
+    ) -> None:
+        parts = tuple(filter(None, relative_path.split("/")))
+        parent_fd = self._open_directory_fd(root, "/".join(parts[:-1]))
+        assert parent_fd is not None
+        try:
+            current_stat = self._stat_entry(parent_fd, parts[-1])
+            if self._stat_identity(current_stat) != self._stat_identity(
+                expected_stat,
+            ):
+                raise FileManagerConflictError(
+                    "File changed while being archived",
+                )
+            os.unlink(parts[-1], dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except OSError as exc:
+            raise FileManagerPathError("Unable to archive file") from exc
         finally:
             os.close(parent_fd)
 

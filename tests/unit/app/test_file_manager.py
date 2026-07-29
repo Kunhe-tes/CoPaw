@@ -10,6 +10,7 @@ import pytest
 from swe.app import file_manager
 from swe.app.file_manager import (
     FILE_MANAGER_PAGE_SIZE,
+    FileManagerConflictError,
     FileManagerPathError,
     FileManagerRoot,
     FileManagerService,
@@ -361,9 +362,9 @@ def test_mutable_roots_expose_the_full_directory_capability_set(
     }
 
 
-def test_recycle_root_exposes_no_directory_capabilities() -> None:
+def test_recycle_root_exposes_only_listing_capability() -> None:
     assert root_capabilities(FileManagerRoot.RECYCLE).model_dump() == {
-        "browse": False,
+        "browse": True,
         "read": False,
         "upload": False,
         "edit": False,
@@ -570,3 +571,127 @@ def test_read_snapshot_has_bounded_preview_and_revision_hook(
     assert snapshot.preview_bytes == b"content"
     assert snapshot.revision.count(":") == 3
     assert snapshot.size_bytes == len(snapshot.preview_bytes)
+
+
+def test_save_text_requires_matching_revision_and_replaces_safely(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "document.md"
+    path.write_text("before", encoding="utf-8")
+    service = _service(tmp_path)
+    revision = service.read_text_preview("working", "document.md").revision
+
+    result = service.save_text(
+        "working",
+        "document.md",
+        "after",
+        revision,
+    )
+
+    assert path.read_text(encoding="utf-8") == "after"
+    assert result.revision != revision
+    with pytest.raises(FileManagerConflictError):
+        service.save_text("working", "document.md", "lost", revision)
+    assert path.read_text(encoding="utf-8") == "after"
+
+
+@pytest.mark.parametrize(
+    "root,path,content",
+    [
+        ("conversation", "chat.txt", "no"),
+        ("working", "binary.bin", "no"),
+        ("working", "large.txt", "no"),
+    ],
+)
+def test_save_text_rejects_noneditable_file_snapshots(
+    tmp_path: Path,
+    root: str,
+    path: str,
+    content: str,
+) -> None:
+    if root == "conversation":
+        (tmp_path / "sessions").mkdir()
+        target = tmp_path / "sessions" / path
+        target.write_text("chat", encoding="utf-8")
+    else:
+        target = tmp_path / path
+        target.write_bytes(
+            (
+                b"\x00binary"
+                if path.endswith(".bin")
+                else b"x" * (1024 * 1024 + 1)
+            ),
+        )
+    service = _service(tmp_path)
+    revision = service.read_text_preview(root, path).revision
+
+    with pytest.raises(FileManagerPathError):
+        service.save_text(root, path, content, revision)
+
+
+def test_upload_rejects_collisions_and_never_writes_through_links(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "media").mkdir()
+    (tmp_path / "media" / "exists.txt").write_text("old", encoding="utf-8")
+    outside = tmp_path.parent / "file-manager-upload-outside.txt"
+    outside.write_text("outside", encoding="utf-8")
+    (tmp_path / "media" / "link.txt").symlink_to(outside)
+    service = _service(tmp_path)
+
+    with pytest.raises(FileManagerConflictError):
+        service.upload_bytes("upload", "", "exists.txt", b"new")
+    with pytest.raises(FileManagerConflictError):
+        service.upload_bytes("upload", "", "link.txt", b"new")
+    uploaded = service.upload_bytes("upload", "", "fresh.txt", b"fresh")
+
+    assert uploaded.path == "fresh.txt"
+    assert (tmp_path / "media" / "fresh.txt").read_bytes() == b"fresh"
+    assert outside.read_text(encoding="utf-8") == "outside"
+
+
+@pytest.mark.parametrize("root", ["conversation", "recycle"])
+def test_upload_rejects_read_only_roots(tmp_path: Path, root: str) -> None:
+    (tmp_path / "sessions").mkdir()
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).upload_bytes(root, "", "upload.txt", b"body")
+
+
+def test_archive_restore_and_purge_recycle_items_without_exposing_payload_paths(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "MEMORY.md"
+    path.write_text("user editable through file manager", encoding="utf-8")
+    service = _service(tmp_path)
+
+    archived = service.archive_file("working", "MEMORY.md", actor="tester")
+    listing = service.list_directory("recycle")
+
+    assert not path.exists()
+    assert listing.items[0].archive_item_id == archived.archive_item_id
+    assert listing.items[0].original_path == "MEMORY.md"
+    assert listing.items[0].archived_at is not None
+    assert "governance/archive/files" not in listing.items[0].model_dump_json()
+
+    (tmp_path / "MEMORY.md").write_text("collision", encoding="utf-8")
+    with pytest.raises(FileManagerConflictError):
+        service.restore_recycle_item(archived.archive_item_id, actor="tester")
+    assert (
+        listing.items[0].archive_item_id
+        == service.list_directory("recycle").items[0].archive_item_id
+    )
+    path.unlink()
+
+    restored = service.restore_recycle_item(
+        archived.archive_item_id,
+        actor="tester",
+    )
+    assert restored.original_path == "MEMORY.md"
+    assert (
+        path.read_text(encoding="utf-8")
+        == "user editable through file manager"
+    )
+
+    second = service.archive_file("working", "MEMORY.md", actor="tester")
+    service.purge_recycle_item(second.archive_item_id, actor="tester")
+    assert service.list_directory("recycle").items == []

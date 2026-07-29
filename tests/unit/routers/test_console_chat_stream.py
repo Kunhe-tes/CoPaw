@@ -192,18 +192,163 @@ def test_file_manager_conversation_can_read_and_download_regular_file(
     assert "content-length" not in download_response.headers
 
 
-def test_file_manager_recycle_is_not_available_for_read_or_download(
+def test_file_manager_recycle_is_listable_but_not_available_for_read_or_download(
     tmp_path,
     monkeypatch,
 ) -> None:
     client = _build_file_manager_client(monkeypatch, tmp_path)
 
+    assert (
+        client.get(
+            "/console/file-manager/directories?root=recycle",
+        ).status_code
+        == 200
+    )
     for endpoint in (
-        "/console/file-manager/directories?root=recycle",
         "/console/file-manager/files/read?root=recycle&path=file.txt",
         "/console/file-manager/files/download?root=recycle&path=file.txt",
     ):
         assert client.get(endpoint).status_code == 403
+
+
+def test_file_manager_text_save_requires_current_revision_and_audits_without_content(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    (tmp_path / "note.md").write_text("before", encoding="utf-8")
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+    preview = client.get(
+        "/console/file-manager/files/read",
+        params={"root": "working", "path": "note.md"},
+    ).json()
+
+    with caplog.at_level("INFO", logger="src.swe.app.routers.console"):
+        saved = client.put(
+            "/console/file-manager/files/text",
+            headers={"X-Actor": "tester"},
+            json={
+                "root": "working",
+                "path": "note.md",
+                "content": "after",
+                "revision": preview["revision"],
+            },
+        )
+
+    assert saved.status_code == 200
+    assert saved.json()["revision"] != preview["revision"]
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "after"
+    assert all("after" not in record.getMessage() for record in caplog.records)
+    audit = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "file_manager.audit"
+    )
+    assert audit.actor == "tester"
+    assert audit.action == "save"
+    assert audit.path == "note.md"
+    assert audit.outcome == "success"
+
+    conflict = client.put(
+        "/console/file-manager/files/text",
+        json={
+            "root": "working",
+            "path": "note.md",
+            "content": "lost update",
+            "revision": preview["revision"],
+        },
+    )
+    assert conflict.status_code == 409
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "after"
+
+
+def test_file_manager_upload_and_delete_enforce_root_and_name_contracts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "media").mkdir()
+    (tmp_path / "media" / "duplicate.txt").write_text("old", encoding="utf-8")
+    (tmp_path / "folder").mkdir()
+    (tmp_path / "sessions").mkdir()
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    uploaded = client.post(
+        "/console/file-manager/files/upload?root=upload&path=",
+        files={"file": ("fresh.txt", b"fresh", "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    assert (tmp_path / "media" / "fresh.txt").read_bytes() == b"fresh"
+    collision = client.post(
+        "/console/file-manager/files/upload?root=upload&path=",
+        files={"file": ("duplicate.txt", b"new", "text/plain")},
+    )
+    assert collision.status_code == 409
+    assert (tmp_path / "media" / "duplicate.txt").read_text(
+        encoding="utf-8",
+    ) == "old"
+    forbidden = client.post(
+        "/console/file-manager/files/upload?root=conversation&path=",
+        files={"file": ("no.txt", b"no", "text/plain")},
+    )
+    assert forbidden.status_code == 403
+
+    directory_delete = client.delete(
+        "/console/file-manager/files",
+        params={"root": "working", "path": "folder"},
+    )
+    assert directory_delete.status_code == 403
+    deleted = client.delete(
+        "/console/file-manager/files",
+        params={"root": "upload", "path": "fresh.txt"},
+    )
+    assert deleted.status_code == 200
+    assert not (tmp_path / "media" / "fresh.txt").exists()
+
+
+def test_file_manager_recycle_restores_only_original_path_and_purges(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "report.txt").write_text("report", encoding="utf-8")
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+    deleted = client.delete(
+        "/console/file-manager/files",
+        params={"root": "working", "path": "report.txt"},
+    )
+    assert deleted.status_code == 200
+    archive_item_id = deleted.json()["archive_item_id"]
+
+    recycle = client.get("/console/file-manager/directories?root=recycle")
+    assert recycle.status_code == 200
+    item = recycle.json()["items"][0]
+    assert item["original_path"] == "report.txt"
+    assert item["archived_at"]
+    assert "archive_path" not in recycle.text
+
+    (tmp_path / "report.txt").write_text("collision", encoding="utf-8")
+    conflict = client.post(
+        f"/console/file-manager/recycle/{archive_item_id}/restore",
+    )
+    assert conflict.status_code == 409
+    (tmp_path / "report.txt").unlink()
+    restored = client.post(
+        f"/console/file-manager/recycle/{archive_item_id}/restore",
+    )
+    assert restored.status_code == 200
+    assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "report"
+
+    second = client.delete(
+        "/console/file-manager/files",
+        params={"root": "working", "path": "report.txt"},
+    ).json()["archive_item_id"]
+    purged = client.delete(f"/console/file-manager/recycle/{second}")
+    assert purged.status_code == 200
+    assert (
+        client.get("/console/file-manager/directories?root=recycle").json()[
+            "items"
+        ]
+        == []
+    )
 
 
 def test_file_manager_download_rejects_symbolic_links(
