@@ -2663,6 +2663,39 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         # 转换为秒
         return int(avg_duration_ms / 1000)
 
+    async def _get_statistics_eligible_skill_names(
+        self,
+        source_id: str,
+    ) -> set[str]:
+        """获取纳入统计的技能名称集合.
+
+        从 swe_market_skills 表查询 include_in_statistics = 1 的技能。
+
+        Args:
+            source_id: 应用入口标识
+
+        Returns:
+            纳入统计的技能名称集合
+        """
+        if not self._db or not self._db.is_connected:
+            logger.warning(
+                "Database not connected, return empty set for statistics filter",
+            )
+            return set()
+
+        try:
+            rows = await self._db.fetch_all(
+                """
+                SELECT skill_name FROM swe_market_skills
+                WHERE source_id = %s AND include_in_statistics = 1
+                """,
+                (source_id,),
+            )
+            return {row["skill_name"] for row in rows if row.get("skill_name")}
+        except Exception as e:
+            logger.warning("Failed to get statistics eligible skills: %s", e)
+            return set()
+
     async def get_skills_paginated(
         self,
         source_id: str,
@@ -2677,6 +2710,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             start_date = datetime.now() - timedelta(days=30)
         if end_date is None:
             end_date = datetime.now() + timedelta(days=1)
+
+        # 获取纳入统计的技能名称集合
+        eligible_skills = await self._get_statistics_eligible_skill_names(
+            source_id,
+        )
 
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         # 构建基础查询条件
@@ -2708,6 +2746,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 end_date,
                 *bbk_filter_params,
             ]
+
+        # 如果有纳入统计的技能，添加过滤条件
+        if eligible_skills:
+            placeholders = ", ".join(["%s"] * len(eligible_skills))
+            base_where += f" AND skill_name IN ({placeholders})"
+            count_params.extend(eligible_skills)
 
         # 查询总数
         count_query = f"""
