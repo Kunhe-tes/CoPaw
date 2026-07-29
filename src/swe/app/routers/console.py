@@ -25,7 +25,14 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
-from ..agent_context import get_agent_for_request
+from ..agent_context import (
+    get_agent_and_config_for_request,
+    get_agent_for_request,
+)
+from ..context_references import (
+    ContextReferencesResponse,
+    context_reference_directory,
+)
 from ...config.context import resolve_request_effective_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -444,6 +451,19 @@ def _extract_payload_fields_from_mapping(
     )
 
 
+def _extract_context_references(
+    request_data: Union[AgentRequest, dict],
+) -> Any:
+    """Keep structured one-turn context references intact for the runner."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "context_references", None)
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("context_references")
+        return value
+    return request_data.get("context_references")
+
+
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """Extract run_key (ChatSpec.id), session_id, and native payload.
 
@@ -496,6 +516,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         native_payload["meta"]["file_url_network"] = file_url_network
     if selected_skill_names is not None:
         native_payload["meta"]["selected_skill_names"] = selected_skill_names
+    context_references = _extract_context_references(request_data)
+    if context_references is not None:
+        native_payload["meta"]["context_references"] = context_references
     if user_name:
         native_payload["meta"]["user_name"] = user_name
     if bbk_id:
@@ -831,6 +854,26 @@ async def get_console_generated_files(
     items.sort(key=lambda item: item.modified_at, reverse=reverse)
     return GeneratedFilesResponse(
         files=items[:_CHAT_FILE_LIST_LIMIT],
+    )
+
+
+@router.get(
+    "/context-references",
+    response_model=ContextReferencesResponse,
+    summary="Discover context references for the Console composer",
+)
+async def get_context_references(
+    request: Request,
+    q: str = Query("", max_length=512),
+) -> ContextReferencesResponse:
+    """Return cached, scope-bound Skills, MCP tools, and matching files."""
+    workspace, agent_config = await get_agent_and_config_for_request(request)
+    workspace_dir = Path(workspace.workspace_dir)
+    return await context_reference_directory.discover(
+        workspace=workspace,
+        agent_config=agent_config,
+        query=q,
+        media_dir=await _resolve_console_media_dir(workspace, workspace_dir),
     )
 
 

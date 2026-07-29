@@ -184,6 +184,10 @@ describe("CronJobs helpers", () => {
     expect(normalizeSkillIdsInput("a, b\nc a")).toBe("a,b,c");
   });
 
+  it("normalizes selected skill ids before submit", () => {
+    expect(normalizeSkillIdsInput(["a", "b", "a"])).toBe("a,b");
+  });
+
   it("rejects invalid skill id characters", () => {
     expect(() => normalizeSkillIdsInput("bad/id")).toThrow();
   });
@@ -195,7 +199,7 @@ describe("CronJobs helpers", () => {
   it("maps form skillIds to API skill_ids in submit payload", () => {
     const result = buildCronJobSubmitPayload({
       ...buildCronJob(),
-      skillIds: "a b",
+      skillIds: ["a", "b"],
     });
 
     expect(result.skill_ids).toBe("a,b");
@@ -208,7 +212,7 @@ describe("CronJobs helpers", () => {
       }),
     );
 
-    expect(result.skillIds).toBe("a,b");
+    expect(result.skillIds).toEqual(["a", "b"]);
   });
 
   it("clears model_slot for text jobs on submit", () => {

@@ -25,6 +25,7 @@ import type {
 } from "antd";
 import BeforeUIContainer from "./BeforeUIContainer";
 import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
+import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 
 export type SubmitType = "enter" | "shiftEnter" | false;
 
@@ -57,13 +58,7 @@ export interface SenderProps
    * ]
    */
   suggestions?: { label?: string | React.ReactNode; value: string }[];
-  skillMentions?: {
-    items: { name: string; description: string }[];
-    selected: string[];
-    loading?: boolean;
-    onOpen: () => void;
-    onChange: (names: string[]) => void;
-  };
+  skillMentions?: SkillMentionsData;
 
   /**
    * @description 输入框的默认初始值，仅在非受控模式下生效

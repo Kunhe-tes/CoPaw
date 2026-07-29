@@ -52,6 +52,7 @@ import type {
 import { BBK_ID_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { useIframeStore } from "../../../stores/iframeStore";
+import CronScheduleDistribution from "./CronScheduleDistribution";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
@@ -59,7 +60,7 @@ const DEFAULT_AGENT_ID = "default";
 const FILE_DETAIL_DEFAULT_PAGE_SIZE = 10;
 
 type DateRange = [Dayjs, Dayjs] | null;
-type ActiveTab = "governance" | "files";
+type ActiveTab = "governance" | "files" | "schedule";
 type DateShortcutKey = "today" | "last7" | "lastMonth";
 
 const DATE_SHORTCUT_OPTIONS: Array<{
@@ -1522,6 +1523,12 @@ export default function ContinuousGovernancePage() {
             key: "files",
             label: "文件清理与归档",
             children: renderFileGovernanceTab(),
+          },
+          {
+            key: "schedule",
+            label: "定时任务触发分布",
+            children:
+              activeTab === "schedule" ? <CronScheduleDistribution /> : null,
           },
         ]}
       />

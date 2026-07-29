@@ -29,8 +29,20 @@ vi.mock("./components/LoadingButton", () => ({ default: () => null }));
 vi.mock("./components/SendButton", () => ({ default: () => null }));
 
 const skills = [
-  { name: "browser", description: "Use a browser" },
-  { name: "Build", description: "Build an app" },
+  {
+    id: "skill:browser",
+    type: "skill" as const,
+    label: "browser",
+    name: "browser",
+    description: "Use a browser",
+  },
+  {
+    id: "skill:Build",
+    type: "skill" as const,
+    label: "Build",
+    name: "Build",
+    description: "Build an app",
+  },
 ];
 
 function renderSender() {
@@ -76,9 +88,9 @@ describe("Sender skill mentions", () => {
 
     expect(onOpen).toHaveBeenCalledTimes(1);
     expect(
-      screen.getByRole("listbox", { name: "可用技能" }),
+      screen.getByRole("listbox", { name: "可用上下文引用" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("未找到匹配的技能")).toBeInTheDocument();
+    expect(screen.getByText("未找到匹配的上下文引用")).toBeInTheDocument();
   });
 
   it("submits an unmatched mention when Enter cannot select a skill", () => {
@@ -123,7 +135,7 @@ describe("Sender skill mentions", () => {
     setTokenEditorValue(input, "@br");
     fireEvent.keyDown(input, { key: "Enter" });
 
-    expect(onChange).toHaveBeenCalledWith(["browser"]);
+    expect(onChange).toHaveBeenCalledWith([skills[0]]);
     expect(onSubmit).not.toHaveBeenCalled();
     expect(input.textContent).toBe("@browser ");
   });
@@ -158,7 +170,7 @@ describe("Sender skill mentions", () => {
     fireEvent.click(screen.getByRole("option", { name: /browser/ }));
 
     expect(clickSender.onOpen).toHaveBeenCalledTimes(1);
-    expect(clickSender.onChange).toHaveBeenCalledWith(["browser"]);
+    expect(clickSender.onChange).toHaveBeenCalledWith([skills[0]]);
     expect(clickSender.input.textContent).toBe("请用 @browser ");
 
     cleanup();
@@ -167,7 +179,7 @@ describe("Sender skill mentions", () => {
     fireEvent.keyDown(enterSender.input, { key: "Enter" });
 
     expect(enterSender.onOpen).toHaveBeenCalledTimes(1);
-    expect(enterSender.onChange).toHaveBeenCalledWith(["Build"]);
+    expect(enterSender.onChange).toHaveBeenCalledWith([skills[1]]);
     expect(enterSender.input.textContent).toBe("@Build ");
   });
 
@@ -189,7 +201,7 @@ describe("Sender skill mentions", () => {
 
     expect(screen.queryByText("Help")).toBeNull();
     expect(
-      screen.getByRole("listbox", { name: "可用技能" }),
+      screen.getByRole("listbox", { name: "可用上下文引用" }),
     ).toBeInTheDocument();
   });
 

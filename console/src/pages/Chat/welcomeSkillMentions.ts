@@ -4,46 +4,46 @@ import type {
 } from "@/components/agentscope-chat/SkillMentions/useSkillMentions";
 
 interface CreateWelcomeSkillMentionsOptions {
-  effectiveSkills: SkillMentionItem[];
-  effectiveSkillsError?: boolean;
-  effectiveSkillsLoading: boolean;
+  contextReferences: SkillMentionItem[];
+  contextReferencesError?: boolean;
+  contextReferencesLoading: boolean;
   isComposingRef: { current: boolean };
-  loadEffectiveSkills: () => void;
-  pendingSelectedSkillNamesRef: { current: string[] };
-  selectedSkillNames: string[];
-  setSelectedSkillNames: (names: string[]) => void;
+  loadContextReferences: (query: string) => void;
+  pendingContextReferencesRef: { current: SkillMentionItem[] };
+  selectedContextReferences: SkillMentionItem[];
+  setSelectedContextReferences: (items: SkillMentionItem[]) => void;
 }
 
 export function createWelcomeSkillMentions({
-  effectiveSkills,
-  effectiveSkillsError,
-  effectiveSkillsLoading,
+  contextReferences,
+  contextReferencesError,
+  contextReferencesLoading,
   isComposingRef,
-  loadEffectiveSkills,
-  pendingSelectedSkillNamesRef,
-  selectedSkillNames,
-  setSelectedSkillNames,
+  loadContextReferences,
+  pendingContextReferencesRef,
+  selectedContextReferences,
+  setSelectedContextReferences,
 }: CreateWelcomeSkillMentionsOptions): {
   beforeSubmit: () => Promise<boolean>;
   skillMentions: SkillMentionsData;
 } {
   const beforeSubmit = async () => {
     if (isComposingRef.current) return false;
-    pendingSelectedSkillNamesRef.current = selectedSkillNames;
-    setSelectedSkillNames([]);
+    pendingContextReferencesRef.current = selectedContextReferences;
+    setSelectedContextReferences([]);
     return true;
   };
 
   return {
     beforeSubmit,
     skillMentions: {
-      items: effectiveSkills,
-      error: effectiveSkillsError ?? false,
-      selected: selectedSkillNames,
-      loading: effectiveSkillsLoading,
-      onOpen: loadEffectiveSkills,
-      onChange: setSelectedSkillNames,
-      onRetry: loadEffectiveSkills,
+      items: contextReferences,
+      error: contextReferencesError ?? false,
+      selected: selectedContextReferences,
+      loading: contextReferencesLoading,
+      onOpen: loadContextReferences,
+      onChange: setSelectedContextReferences,
+      onRetry: () => loadContextReferences(""),
     },
   };
 }

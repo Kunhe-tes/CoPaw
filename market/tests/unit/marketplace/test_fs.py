@@ -689,7 +689,6 @@ def test_mutate_user_skill_manifest_missing_file_starts_from_layout_v2(
         add_skill,
         "source_a",
     )
-
     manifest_path = get_user_skill_manifest_path(
         swe_root,
         "user1",
@@ -702,6 +701,69 @@ def test_mutate_user_skill_manifest_missing_file_starts_from_layout_v2(
         "version": 0,
         "skills": {"demo": {"enabled": True}},
     }
+
+
+def test_mutate_user_skill_manifest_uses_workspace_manifest_lock(tmp_path):
+    from market.marketplace.fs import (
+        get_user_skill_manifest_path,
+        mutate_user_skill_manifest,
+    )
+
+    swe_root = tmp_path / "swe"
+    manifest_path = get_user_skill_manifest_path(
+        swe_root,
+        "user1",
+        "agent1",
+        "source_a",
+    )
+
+    def add_skill(manifest):
+        manifest["skills"]["demo"] = {"enabled": True}
+        return True
+
+    assert mutate_user_skill_manifest(
+        swe_root,
+        "user1",
+        "agent1",
+        add_skill,
+        "source_a",
+    )
+    assert manifest_path.with_name(f".{manifest_path.name}.lock").is_file()
+
+
+def test_mutate_user_skill_manifest_uses_file_descriptor_for_windows_lock(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace import fs
+
+    calls: list[tuple[int, int, int]] = []
+
+    class FakeMsvcrt:
+        LK_LOCK = 1
+        LK_UNLCK = 2
+
+        @staticmethod
+        def locking(file_descriptor: int, mode: int, size: int) -> None:
+            calls.append((file_descriptor, mode, size))
+
+    monkeypatch.setattr(fs, "fcntl", None)
+    monkeypatch.setattr(fs, "msvcrt", FakeMsvcrt)
+
+    assert fs.mutate_user_skill_manifest(
+        tmp_path / "swe",
+        "user1",
+        "agent1",
+        lambda manifest: manifest["skills"].update(
+            {"demo": {"enabled": True}},
+        )
+        or True,
+        "source_a",
+    )
+    assert [mode for _, mode, _ in calls] == [
+        FakeMsvcrt.LK_LOCK,
+        FakeMsvcrt.LK_UNLCK,
+    ]
 
 
 def test_mutate_user_skill_manifest_preserves_external_fields(tmp_path):

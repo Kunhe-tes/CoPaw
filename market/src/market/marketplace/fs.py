@@ -18,10 +18,21 @@ import logging
 import os
 import re
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX fallback
+    msvcrt = None
 
 from .models import MarketItem
 from ..runtime.context import (
@@ -667,6 +678,7 @@ def mutate_user_skill_manifest(
     agent_id: str,
     mutation_fn,
     source_id: str | None = None,
+    rollback_fn: Callable[[], None] | None = None,
 ) -> bool:
     """原子修改用户技能 manifest.
 
@@ -679,14 +691,44 @@ def mutate_user_skill_manifest(
         agent_id,
         source_id,
     )
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with _workspace_manifest_write_lock(manifest_path):
+        try:
+            current = _read_user_skill_manifest_for_mutation(manifest_path)
+            if not mutation_fn(current):
+                return False
 
-    current = _read_user_skill_manifest_for_mutation(manifest_path)
-    if not mutation_fn(current):
-        return False
+            _atomic_write_json(manifest_path, current)
+            return True
+        except Exception:
+            if rollback_fn is not None:
+                try:
+                    rollback_fn()
+                except OSError:
+                    logger.exception(
+                        "Failed to roll back workspace skill manifest mutation",
+                    )
+            raise
 
-    _atomic_write_json(manifest_path, current)
-    return True
+
+@contextmanager
+def _workspace_manifest_write_lock(manifest_path: Path) -> Iterator[None]:
+    """Serialize Marketplace mutations with src workspace reconciliation."""
+    lock_path = manifest_path.with_name(f".{manifest_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _mask_env_value(value: Optional[str]) -> Optional[str]:

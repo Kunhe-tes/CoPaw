@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
+import shutil
 import pytest
 from unittest.mock import AsyncMock, Mock
 
@@ -151,6 +152,7 @@ async def test_enable_registered_hidden_skill_updates_manifest_and_reloads(
     from market.marketplace.fs import (
         get_user_disabled_skills_dir,
         get_user_skill_manifest_path,
+        get_user_skills_dir,
     )
 
     svc = _make_service(tmp_path)
@@ -194,11 +196,226 @@ async def test_enable_registered_hidden_skill_updates_manifest_and_reloads(
         ]["enabled"]
         is True
     )
+    assert not hidden.exists()
+    assert (
+        get_user_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / "demo"
+        / "SKILL.md"
+    ).is_file()
     svc._trigger_agent_reload.assert_awaited_once_with(
         user_id,
         "default",
         source_id,
     )
+
+
+@pytest.mark.asyncio
+async def test_enable_skill_rejects_registered_package_in_both_roots(tmp_path):
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
+
+    svc = _make_service(tmp_path)
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.update_skill = AsyncMock()
+    user_id = "user1"
+    source_id = "source_a"
+    active = (
+        get_user_skills_dir(tmp_path / "swe", user_id, source_id=source_id)
+        / "demo"
+    )
+    hidden = (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / "demo"
+    )
+    active.mkdir(parents=True)
+    hidden.mkdir(parents=True)
+    (active / "SKILL.md").write_text("# Active", encoding="utf-8")
+    (hidden / "SKILL.md").write_text("# Hidden", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        user_id,
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {"demo": {"enabled": False}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    result = await svc.enable_skill(user_id, "demo", source_id=source_id)
+
+    assert result == {"success": False}
+    assert (
+        json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+            "demo"
+        ]["enabled"]
+        is False
+    )
+    assert (active / "SKILL.md").read_text(encoding="utf-8") == "# Active"
+    assert (hidden / "SKILL.md").read_text(encoding="utf-8") == "# Hidden"
+    svc._trigger_agent_reload.assert_not_awaited()
+    svc.skill_registry.update_skill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enable_skill_rechecks_registration_before_moving_package(
+    tmp_path,
+):
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
+
+    svc = _make_service(tmp_path)
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.update_skill = AsyncMock()
+    user_id = "user1"
+    source_id = "source_a"
+    active = (
+        get_user_skills_dir(tmp_path / "swe", user_id, source_id=source_id)
+        / "demo"
+    )
+    hidden = (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / "demo"
+    )
+    active.mkdir(parents=True)
+    (active / "SKILL.md").write_text("# Demo", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        user_id,
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    def register_and_disable_during_scan(*_args, **_kwargs):
+        hidden.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(active, hidden)
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "workspace-skill-manifest.v1",
+                    "layout_version": 2,
+                    "version": 0,
+                    "skills": {"demo": {"enabled": False}},
+                },
+            ),
+            encoding="utf-8",
+        )
+
+    svc._scan_skill_or_raise = register_and_disable_during_scan
+
+    result = await svc.enable_skill(user_id, "demo", source_id=source_id)
+
+    assert result == {"success": True}
+    assert not hidden.exists()
+    assert (active / "SKILL.md").is_file()
+    assert (
+        json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+            "demo"
+        ]["enabled"]
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_enable_skill_rolls_back_package_move_when_manifest_write_fails(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace import fs
+    from market.marketplace.fs import (
+        get_user_disabled_skills_dir,
+        get_user_skill_manifest_path,
+        get_user_skills_dir,
+    )
+
+    svc = _make_service(tmp_path)
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.update_skill = AsyncMock()
+    user_id = "user1"
+    source_id = "source_a"
+    hidden = (
+        get_user_disabled_skills_dir(
+            tmp_path / "swe",
+            user_id,
+            source_id=source_id,
+        )
+        / "demo"
+    )
+    hidden.mkdir(parents=True)
+    (hidden / "SKILL.md").write_text("# Demo", encoding="utf-8")
+    manifest_path = get_user_skill_manifest_path(
+        tmp_path / "swe",
+        user_id,
+        source_id=source_id,
+    )
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {"demo": {"enabled": False}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_manifest_write(*_args, **_kwargs):
+        raise OSError("manifest write failed")
+
+    monkeypatch.setattr(fs, "_atomic_write_json", fail_manifest_write)
+
+    with pytest.raises(OSError, match="manifest write failed"):
+        await svc.enable_skill(user_id, "demo", source_id=source_id)
+
+    active = (
+        get_user_skills_dir(tmp_path / "swe", user_id, source_id=source_id)
+        / "demo"
+    )
+    assert not active.exists()
+    assert (hidden / "SKILL.md").is_file()
+    assert (
+        json.loads(manifest_path.read_text(encoding="utf-8"))["skills"][
+            "demo"
+        ]["enabled"]
+        is False
+    )
+    svc._trigger_agent_reload.assert_not_awaited()
+    svc.skill_registry.update_skill.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -379,9 +596,12 @@ async def test_delete_skill_removes_registered_disabled_package(tmp_path):
 
     assert result is True
     assert not disabled.exists()
-    assert skill_name not in json.loads(
-        manifest_path.read_text(encoding="utf-8"),
-    )["skills"]
+    assert (
+        skill_name
+        not in json.loads(
+            manifest_path.read_text(encoding="utf-8"),
+        )["skills"]
+    )
     svc.skill_registry.delete_skill.assert_awaited_once_with(
         user_id,
         skill_name,
@@ -501,9 +721,12 @@ async def test_batch_delete_skills_removes_package_after_disabling(tmp_path):
     assert result == {skill_name: {"success": True}}
     assert not active.exists()
     assert not disabled.exists()
-    assert skill_name not in json.loads(
-        manifest_path.read_text(encoding="utf-8"),
-    )["skills"]
+    assert (
+        skill_name
+        not in json.loads(
+            manifest_path.read_text(encoding="utf-8"),
+        )["skills"]
+    )
     svc.skill_registry.delete_skill.assert_awaited_once_with(
         user_id,
         skill_name,
@@ -1144,9 +1367,12 @@ async def test_recall_skill_by_name_removes_disabled_package(tmp_path):
     assert result.recalled_count == 1
     assert result.failed_count == 0
     assert not disabled_dir.exists()
-    assert skill_name not in json.loads(
-        manifest_path.read_text(encoding="utf-8"),
-    )["skills"]
+    assert (
+        skill_name
+        not in json.loads(
+            manifest_path.read_text(encoding="utf-8"),
+        )["skills"]
+    )
     svc.skill_registry.delete_skill.assert_called_once_with(
         user_id,
         skill_name,
