@@ -24,6 +24,7 @@ from fastapi import (
     UploadFile,
 )
 from pydantic import BaseModel, Field
+from starlette.background import BackgroundTask
 from starlette.responses import StreamingResponse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -252,14 +253,47 @@ def _file_manager_download_disposition(filename: str) -> str:
     return f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
 
 
-def _stream_file_manager_download(file_descriptor: int):
-    """Yield a safely opened descriptor and always close it on disconnect."""
+class _FileManagerDownloadStream:
+    """A bounded, idempotently-closeable streaming download descriptor."""
 
-    try:
-        while chunk := os.read(file_descriptor, 64 * 1024):
-            yield chunk
-    finally:
-        os.close(file_descriptor)
+    def __init__(self, file_descriptor: int, size_bytes: int) -> None:
+        self._file_descriptor: int | None = file_descriptor
+        self._remaining = size_bytes
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        if self._file_descriptor is None or self._remaining <= 0:
+            self.close()
+            raise StopIteration
+        try:
+            chunk = os.read(
+                self._file_descriptor,
+                min(64 * 1024, self._remaining),
+            )
+        except OSError:
+            self.close()
+            raise
+        if not chunk:
+            self.close()
+            raise StopIteration
+        self._remaining -= len(chunk)
+        if self._remaining == 0:
+            self.close()
+        return chunk
+
+    def close(self) -> None:
+        """Release the descriptor even when a response never starts streaming."""
+
+        file_descriptor, self._file_descriptor = self._file_descriptor, None
+        if file_descriptor is None:
+            return
+        try:
+            os.close(file_descriptor)
+        except OSError:
+            # A cancelled stream or a completed iterator may already close it.
+            pass
 
 
 def _looks_like_text_file(path: Path) -> bool:
@@ -965,9 +999,14 @@ async def get_file_manager_file_download(
         download = service.open_file_for_download(root, path)
     except FileManagerPathError as exc:
         raise _file_manager_http_error(exc) from exc
+    stream = _FileManagerDownloadStream(
+        download.file_descriptor,
+        download.size_bytes,
+    )
     return StreamingResponse(
-        _stream_file_manager_download(download.file_descriptor),
+        stream,
         media_type="application/octet-stream",
+        background=BackgroundTask(stream.close),
         headers={
             "Content-Disposition": _file_manager_download_disposition(
                 download.filename,

@@ -8,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.background import BackgroundTask
+from starlette.responses import StreamingResponse
 
 from src.swe.app.file_manager import FileManagerService
 from src.swe.app.routers import console as console_router
@@ -220,6 +222,43 @@ def test_file_manager_download_rejects_symbolic_links(
     )
 
     assert response.status_code == 403
+
+
+def test_file_manager_download_stream_closes_before_first_iteration() -> None:
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    stream = console_router._FileManagerDownloadStream(read_fd, 1)
+    response = StreamingResponse(
+        stream,
+        background=BackgroundTask(stream.close),
+    )
+
+    asyncio.run(response.background())
+
+    with pytest.raises(OSError):
+        os.fstat(read_fd)
+
+
+def test_file_manager_download_stream_only_sends_open_snapshot_size(
+    tmp_path,
+) -> None:
+    file_path = tmp_path / "document.txt"
+    file_path.write_bytes(b"before")
+    download = FileManagerService(
+        tmp_path,
+        cursor_secret=b"test-file-manager-secret",
+    ).open_file_for_download("working", "document.txt")
+    with file_path.open("ab") as handle:
+        handle.write(b"-after")
+
+    stream = console_router._FileManagerDownloadStream(
+        download.file_descriptor,
+        download.size_bytes,
+    )
+
+    assert b"".join(stream) == b"before"
+    with pytest.raises(OSError):
+        os.fstat(download.file_descriptor)
 
 
 @pytest.mark.parametrize(
