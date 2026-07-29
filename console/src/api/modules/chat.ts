@@ -41,7 +41,92 @@ export interface GeneratedFilesResponse {
   files: GeneratedFileItem[];
 }
 
+export type FileManagerRoot =
+  | "working"
+  | "upload"
+  | "download"
+  | "conversation"
+  | "recycle";
+
+export type FileManagerItemKind = "directory" | "file" | "symlink" | "special";
+
+export interface FileManagerCapabilities {
+  browse: boolean;
+  read: boolean;
+  upload: boolean;
+  edit: boolean;
+  download: boolean;
+  archive: boolean;
+}
+
+export interface FileManagerItem {
+  name: string;
+  path: string;
+  kind: FileManagerItemKind;
+  size_bytes?: number | null;
+  modified_at?: string | null;
+  capabilities: FileManagerCapabilities;
+  archive_item_id?: string | null;
+  original_path?: string | null;
+  archived_at?: string | null;
+}
+
+export interface FileManagerDirectoryListing {
+  root: FileManagerRoot;
+  path: string;
+  items: FileManagerItem[];
+  next_cursor: string | null;
+  has_child_directory: boolean;
+  first_child_directory: string | null;
+  capabilities: FileManagerCapabilities;
+}
+
+export interface FileManagerTextPreview {
+  path: string;
+  size_bytes: number;
+  is_text: boolean;
+  content: string | null;
+  is_truncated: boolean;
+  editable: boolean;
+  revision: string;
+}
+
+export interface FileManagerPathParams {
+  root: FileManagerRoot;
+  path: string;
+}
+
+export interface FileManagerListDirectoryParams extends FileManagerPathParams {
+  cursor?: string | null;
+  query?: string;
+}
+
+export interface FileManagerSaveTextParams extends FileManagerPathParams {
+  content: string;
+  revision: string;
+}
+
+export interface FileManagerRecycleMutation {
+  archive_item_id: string;
+  original_path: string;
+}
+
 const FILES_PREVIEW = "/files/preview";
+
+function fileManagerQuery(params: Record<string, string | null | undefined>) {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) query.set(key, value);
+  }
+  return query.toString();
+}
+
+function fileManagerDownloadUrl(params: FileManagerPathParams): string {
+  const query = fileManagerQuery(params);
+  const url = getApiUrl(`/console/file-manager/files/download?${query}`);
+  const token = getApiToken();
+  return token ? `${url}&token=${encodeURIComponent(token)}` : url;
+}
 
 export const chatApi = {
   /** Upload a file for chat attachment. Returns URL path for content. */
@@ -145,6 +230,60 @@ export const chatApi = {
         sort,
       )}&source=${encodeURIComponent(source)}`,
     ),
+
+  fileManager: {
+    listDirectory: (params: FileManagerListDirectoryParams) =>
+      request<FileManagerDirectoryListing>(
+        `/console/file-manager/directories?${fileManagerQuery({
+          root: params.root,
+          path: params.path,
+          cursor: params.cursor,
+          q: params.query,
+        })}`,
+      ),
+
+    readFile: (params: FileManagerPathParams) =>
+      request<FileManagerTextPreview>(
+        `/console/file-manager/files/read?${fileManagerQuery(params)}`,
+      ),
+
+    saveText: (params: FileManagerSaveTextParams) =>
+      request<FileManagerTextPreview>("/console/file-manager/files/text", {
+        method: "PUT",
+        body: JSON.stringify(params),
+      }),
+
+    upload: (params: FileManagerPathParams, file: File) => {
+      const formData = new FormData();
+      formData.append("file", file);
+      return request<FileManagerItem>(
+        `/console/file-manager/files/upload?${fileManagerQuery(params)}`,
+        { method: "POST", body: formData },
+      );
+    },
+
+    downloadUrl: fileManagerDownloadUrl,
+
+    archive: (params: FileManagerPathParams) =>
+      request<FileManagerRecycleMutation>(
+        `/console/file-manager/files?${fileManagerQuery(params)}`,
+        { method: "DELETE" },
+      ),
+
+    restore: (archiveItemId: string) =>
+      request<FileManagerRecycleMutation>(
+        `/console/file-manager/recycle/${encodeURIComponent(
+          archiveItemId,
+        )}/restore`,
+        { method: "POST" },
+      ),
+
+    purge: (archiveItemId: string) =>
+      request<FileManagerRecycleMutation>(
+        `/console/file-manager/recycle/${encodeURIComponent(archiveItemId)}`,
+        { method: "DELETE" },
+      ),
+  },
 
   stopChat: (chatId: string) =>
     request<void>(`/console/chat/stop?chat_id=${encodeURIComponent(chatId)}`, {
