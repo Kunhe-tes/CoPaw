@@ -280,10 +280,10 @@ def build_mcp_tool_reference_id(server: str, name: str) -> str:
     )
 
 
-def _consume_task_outcome(task: asyncio.Task[Any]) -> None:
+def _consume_task_outcome(task: asyncio.Future[Any]) -> None:
     """Retrieve a background task outcome without delaying the response."""
 
-    def consume(completed: asyncio.Task[Any]) -> None:
+    def consume(completed: asyncio.Future[Any]) -> None:
         try:
             completed.result()
         except asyncio.CancelledError:

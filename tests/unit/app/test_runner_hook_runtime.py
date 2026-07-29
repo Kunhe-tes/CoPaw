@@ -153,6 +153,28 @@ def _patch_normal_agent_path(monkeypatch):
     )
 
 
+def test_query_runtime_inputs_keep_request_scoped_values() -> None:
+    from swe.app.runner.runner import _QueryRuntimeInputs
+
+    inputs = _QueryRuntimeInputs(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        agent_config=SimpleNamespace(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        env_context="base context",
+        selected_context_directives=["<SKILL-USE>"],
+        auth_token="token",
+        passthrough_headers={"cookie": "session=abc"},
+    )
+
+    assert inputs.session_id == "session-1"
+    assert inputs.selected_context_directives == ["<SKILL-USE>"]
+    assert inputs.passthrough_headers == {"cookie": "session=abc"}
+
+
 def test_hook_config_enabled_accepts_loaded_skill_sources() -> None:
     state = HookSessionState(
         loaded_skill_sources=[
@@ -1124,6 +1146,62 @@ async def test_prepare_query_runtime_logs_agent_build_duration(
         and call.args[2] == "test-agent"
         for call in mock_debug.call_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_prepare_query_runtime_returns_blocked_start_result(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    chat = SimpleNamespace(id="chat-1")
+    setattr(
+        runner,
+        "_chat_manager",
+        SimpleNamespace(get_or_create_chat=AsyncMock(return_value=chat)),
+    )
+    _patch_normal_agent_path(monkeypatch)
+    enabled_hooks = HookConfig(enabled=True)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(enabled_hooks),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: enabled_hooks,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._resolve_active_model_label",
+        lambda *args, **kwargs: "openai/gpt-test",
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        AsyncMock(
+            return_value=MergedHookResult(
+                decision=HookDecision.BLOCK,
+                reason="blocked",
+            ),
+        ),
+    )
+
+    result = await runner._prepare_query_runtime(
+        request=SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            channel_meta={},
+        ),
+        msgs=[Msg(name="user", role="user", content="hello")],
+        query="hello",
+        preflight=_QueryPreflight(),
+    )
+
+    assert result.runtime is None
+    assert result.block_response is not None
+    assert result.blocked_chat is chat
+    assert result.blocked_mcp_clients == []
+    assert result.blocked_session_id == "session-1"
 
 
 @pytest.mark.asyncio
