@@ -11,6 +11,7 @@ export default createGlobalStyle`
   width: 100%;
   padding: 40px 20px;
   gap: 0;
+  background: url('/chat-bg.png') center/cover no-repeat;
   background: linear-gradient(180deg, #E8EEFF 0%, #F1F2F7 40%, #F5F5FA 100%);
 }
 
@@ -31,9 +32,9 @@ export default createGlobalStyle`
   padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 28px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  gap: 12px;
   margin-bottom: 28px;
+  box-shadow: 0px 0px 8px 0px rgba(0, 0, 0, 0.08);
 }
 
 .welcome-input-placeholder {
@@ -49,6 +50,7 @@ export default createGlobalStyle`
   max-height: 120px;
   font-family: inherit;
   padding: 4px 0;
+  overflow: auto;
 }
 
 .welcome-skill-editor {

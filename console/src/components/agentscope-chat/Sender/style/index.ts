@@ -86,6 +86,8 @@ const IndexStyle = createGlobalStyle`
     align-self: center;
     font-size: 14px;
     line-height: 22px;
+    max-height: 300px;
+    overflow: auto;
   }
 
   &-skill-editor {
