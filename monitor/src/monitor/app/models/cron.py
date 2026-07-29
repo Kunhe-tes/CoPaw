@@ -579,6 +579,8 @@ class CronScheduleOccurrenceItem(BaseModel):
     scheduled_at: datetime = Field(..., description="计划触发时间（UTC）")
     job_id: str = Field(..., description="任务 ID")
     job_name: str = Field(..., description="任务名称")
+    user_name: str = Field(..., description="用户姓名")
+    user_id: str = Field(..., description="用户账号 ID")
     task_type: TaskType = Field(..., description="任务类型")
     cron_expr: str = Field(..., description="Cron 表达式")
     timezone: str = Field(..., description="任务配置时区")

@@ -168,6 +168,8 @@ class _ScheduleOccurrence:
     scheduled_at: datetime
     job_id: str
     job_name: str
+    user_name: str
+    user_id: str
     task_type: TaskType
     cron_expr: str
     timezone: str
@@ -177,6 +179,8 @@ class _ScheduleOccurrence:
 class _PreparedScheduleDefinition:
     job_id: str
     job_name: str
+    user_name: str
+    user_id: str
     task_type: TaskType
     cron_expr: str
     timezone_name: str
@@ -340,6 +344,8 @@ class QueryService:
             {
                 "id": str(row.get("id") or ""),
                 "name": str(row.get("name") or ""),
+                "user_name": str(row.get("tenant_name") or ""),
+                "user_id": str(row.get("tenant_id") or ""),
                 "task_type": str(row.get("task_type") or ""),
                 "cron_expr": str(row.get("cron_expr") or ""),
                 "timezone": str(row.get("timezone") or "UTC"),
@@ -371,7 +377,8 @@ class QueryService:
         return await db.fetch_all(
             """
             SELECT
-                id, name, source_id, enabled, task_type, cron_expr,
+                id, name, tenant_name, tenant_id, source_id, enabled,
+                task_type, cron_expr,
                 timezone, meta, status, updated_at, deleted_at
             FROM swe_cron_jobs
             WHERE source_id = %s
@@ -452,6 +459,8 @@ class QueryService:
         return _PreparedScheduleDefinition(
             job_id=str(row.get("id") or ""),
             job_name=str(row.get("name") or ""),
+            user_name=str(row.get("tenant_name") or ""),
+            user_id=str(row.get("tenant_id") or ""),
             task_type=task_type,
             cron_expr=cron_expr,
             timezone_name=timezone_name,
@@ -525,6 +534,8 @@ class QueryService:
                             scheduled_at=scheduled_at,
                             job_id=definition.job_id,
                             job_name=definition.job_name,
+                            user_name=definition.user_name,
+                            user_id=definition.user_id,
                             task_type=definition.task_type,
                             cron_expr=definition.cron_expr,
                             timezone=definition.timezone_name,
@@ -797,6 +808,8 @@ class QueryService:
                     scheduled_at=item.scheduled_at,
                     job_id=item.job_id,
                     job_name=item.job_name,
+                    user_name=item.user_name,
+                    user_id=item.user_id,
                     task_type=item.task_type,
                     cron_expr=item.cron_expr,
                     timezone=item.timezone,

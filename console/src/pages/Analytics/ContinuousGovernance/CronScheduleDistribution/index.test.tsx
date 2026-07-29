@@ -14,6 +14,7 @@ import type {
 import CronScheduleDistribution from "./index";
 
 const mocks = vi.hoisted(() => ({
+  dispatchAction: vi.fn(),
   getScheduleDistribution: vi.fn(),
   getScheduleDistributionDetails: vi.fn(),
 }));
@@ -56,7 +57,18 @@ vi.mock("echarts-for-react", () => ({
       tooltip?: { axisPointer?: { type?: string } };
     };
     onEvents?: {
-      click?: (params: { componentType: string; dataIndex: number }) => void;
+      click?: (
+        params: { componentType: string; dataIndex: number },
+        instance: { dispatchAction: typeof mocks.dispatchAction },
+      ) => void;
+      mouseover?: (
+        params: { componentType: string; dataIndex: number },
+        instance: { dispatchAction: typeof mocks.dispatchAction },
+      ) => void;
+      mouseout?: (
+        params: { componentType: string; dataIndex: number },
+        instance: { dispatchAction: typeof mocks.dispatchAction },
+      ) => void;
     };
   }) => (
     <div data-testid="schedule-chart">
@@ -65,11 +77,32 @@ vi.mock("echarts-for-react", () => ({
           key={`${label}-${index}`}
           type="button"
           aria-label={`查看图表时段 ${label}`}
+          onMouseOver={() =>
+            props.onEvents?.mouseover?.(
+              {
+                componentType: "series",
+                dataIndex: index,
+              },
+              { dispatchAction: mocks.dispatchAction },
+            )
+          }
+          onMouseOut={() =>
+            props.onEvents?.mouseout?.(
+              {
+                componentType: "series",
+                dataIndex: index,
+              },
+              { dispatchAction: mocks.dispatchAction },
+            )
+          }
           onClick={() =>
-            props.onEvents?.click?.({
-              componentType: "series",
-              dataIndex: index,
-            })
+            props.onEvents?.click?.(
+              {
+                componentType: "series",
+                dataIndex: index,
+              },
+              { dispatchAction: mocks.dispatchAction },
+            )
           }
         >
           {label}
@@ -131,6 +164,8 @@ const detailResponse: CronScheduleDistributionDetailsResponse = {
       scheduled_at: "2026-07-27T02:05:00Z",
       job_id: "job-1",
       job_name: "晨间提醒",
+      user_name: "张三",
+      user_id: "user-001",
       task_type: "text",
       cron_expr: "5 * * * *",
       timezone: "Asia/Shanghai",
@@ -139,6 +174,8 @@ const detailResponse: CronScheduleDistributionDetailsResponse = {
       scheduled_at: "2026-07-27T02:10:00Z",
       job_id: "job-1",
       job_name: "晨间提醒",
+      user_name: "张三",
+      user_id: "user-001",
       task_type: "text",
       cron_expr: "*/5 * * * *",
       timezone: "Asia/Shanghai",
@@ -186,13 +223,43 @@ describe("CronScheduleDistribution", () => {
       "5",
     );
     expect(screen.getByTestId("schedule-kpi-text")).toHaveTextContent("2");
+    expect(screen.getByTestId("schedule-kpi-text")).toHaveTextContent(
+      "Text型任务",
+    );
     expect(screen.getByTestId("schedule-kpi-agent")).toHaveTextContent("3");
+    expect(screen.getByTestId("schedule-kpi-agent")).toHaveTextContent(
+      "Agent型任务",
+    );
     expect(screen.getByTestId("schedule-kpi-peak")).toHaveTextContent("3");
     expect(screen.getByTestId("chart-series")).toHaveTextContent("Text,Agent");
     expect(screen.getByTestId("chart-axis-pointer")).toHaveTextContent("none");
     expect(
       screen.getByRole("img", { name: /计划触发次数分布，共 5 次/ }),
     ).toBeInTheDocument();
+  });
+
+  it("highlights both stacked bars for only the hovered bucket", async () => {
+    render(<CronScheduleDistribution />);
+    const [firstBucket] = await screen.findAllByRole("button", {
+      name: /查看图表时段/,
+    });
+
+    fireEvent.mouseOver(firstBucket);
+
+    expect(mocks.dispatchAction).toHaveBeenNthCalledWith(1, {
+      type: "downplay",
+    });
+    expect(mocks.dispatchAction).toHaveBeenNthCalledWith(2, {
+      type: "highlight",
+      seriesIndex: [0, 1],
+      dataIndex: 0,
+    });
+
+    fireEvent.mouseOut(firstBucket);
+
+    expect(mocks.dispatchAction).toHaveBeenNthCalledWith(3, {
+      type: "downplay",
+    });
   });
 
   it("keeps interval edits as draft until Query is clicked", async () => {
@@ -294,6 +361,11 @@ describe("CronScheduleDistribution", () => {
       /计划触发明细/,
     );
     expect(screen.getAllByText("晨间提醒")).toHaveLength(2);
+    expect(
+      screen.getByRole("columnheader", { name: "用户/账号" }),
+    ).toBeVisible();
+    expect(screen.getAllByText("张三")).toHaveLength(2);
+    expect(screen.getAllByText("user-001")).toHaveLength(2);
   });
 
   it("does not let an older detail response overwrite a newer bucket", async () => {
@@ -601,16 +673,192 @@ describe("CronScheduleDistribution", () => {
       diagnostics: {
         ...aggregateResponse.diagnostics,
         invalid_cron_jobs: 2,
+        invalid_timezone_jobs: 3,
         managed_child_jobs: 1,
       },
     });
 
     render(<CronScheduleDistribution />);
 
-    expect(await screen.findByRole("status")).toHaveTextContent("无效 Cron 2");
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "时区回退 UTC 3",
+    );
     expect(screen.getByRole("status")).toHaveTextContent("批调度托管子任务 1");
+    expect(screen.queryByText(/无效 Cron/)).not.toBeInTheDocument();
     expect(screen.queryByText(/不支持的任务类型 0/)).not.toBeInTheDocument();
     expect(screen.queryByText(/元数据异常 0/)).not.toBeInTheDocument();
+  });
+
+  it("windows every populated bucket while preserving global ranks and details", async () => {
+    const bucketCount = 2016;
+    const firstBucketStart = Date.parse("2026-07-27T02:00:00Z");
+    const buckets = Array.from({ length: bucketCount }, (_, index) => {
+      const permutedCount = ((index * 97) % bucketCount) + 1;
+      const totalCount =
+        index === 3 || index === 17 ? bucketCount + 1000 : permutedCount;
+      return {
+        start_time: new Date(
+          firstBucketStart + index * 15 * 60 * 1000,
+        ).toISOString(),
+        end_time: new Date(
+          firstBucketStart + (index + 1) * 15 * 60 * 1000,
+        ).toISOString(),
+        text_count: totalCount,
+        agent_count: 0,
+        total_count: totalCount,
+      };
+    });
+    const sortedBuckets = [...buckets].sort(
+      (left, right) =>
+        right.total_count - left.total_count ||
+        left.start_time.localeCompare(right.start_time),
+    );
+    mocks.getScheduleDistribution.mockResolvedValueOnce({
+      ...aggregateResponse,
+      text_count: buckets.reduce(
+        (total, bucket) => total + bucket.total_count,
+        0,
+      ),
+      agent_count: 0,
+      total_count: buckets.reduce(
+        (total, bucket) => total + bucket.total_count,
+        0,
+      ),
+      buckets,
+    });
+
+    render(<CronScheduleDistribution />);
+
+    const rankedList = await screen.findByTestId("schedule-ranked-buckets");
+    const virtualContent = rankedList.querySelector('[role="list"]');
+    expect(rankedList).toHaveAttribute("aria-label", "全部非空触发区段排名");
+    expect(rankedList).toHaveAttribute("tabindex", "0");
+    expect(rankedList.style.height).toBe("344px");
+    expect(rankedList.style.overflowY).toBe("auto");
+    const firstRank = rankedList.querySelector('[aria-posinset="1"]');
+    const secondRank = rankedList.querySelector('[aria-posinset="2"]');
+    const renderedRowHeight = Number.parseFloat(
+      (firstRank as HTMLElement).style.height,
+    );
+    expect(renderedRowHeight).toBeGreaterThan(0);
+    expect(virtualContent).toHaveStyle({
+      height: `${bucketCount * renderedRowHeight}px`,
+    });
+    expect(sortedBuckets[0]).toBe(buckets[3]);
+    expect(sortedBuckets[1]).toBe(buckets[17]);
+    expect(firstRank).toHaveTextContent("07-27 10:45");
+    expect(secondRank).toHaveTextContent("07-27 14:15");
+    expect(
+      rankedList.querySelectorAll('[role="listitem"]').length,
+    ).toBeLessThan(20);
+
+    const targetRank = 1001;
+    const targetBucket = sortedBuckets[targetRank - 1];
+    expect(targetBucket).not.toBe(buckets[targetRank - 1]);
+    rankedList.scrollTop = (targetRank - 1) * renderedRowHeight;
+    fireEvent.scroll(rankedList);
+
+    await waitFor(() => {
+      expect(
+        rankedList.querySelector(`[aria-posinset="${targetRank}"]`),
+      ).not.toBeNull();
+    });
+    expect(rankedList.querySelector('[aria-posinset="1"]')).toBeNull();
+    expect(
+      rankedList.querySelectorAll('[role="listitem"]').length,
+    ).toBeLessThan(20);
+
+    const laterRow = rankedList.querySelector(
+      `[aria-posinset="${targetRank}"]`,
+    );
+    const laterDetailButton = laterRow?.querySelector("button");
+    expect(laterDetailButton).not.toBeNull();
+    fireEvent.click(laterDetailButton!);
+
+    await waitFor(() => {
+      expect(mocks.getScheduleDistributionDetails).toHaveBeenCalledWith({
+        start_time: targetBucket.start_time,
+        end_time: targetBucket.end_time,
+        page: 1,
+        page_size: 20,
+      });
+    });
+  });
+
+  it("resets a deeply scrolled ranking before rendering replacement data", async () => {
+    const bucketCount = 120;
+    const firstBucketStart = Date.parse("2026-07-27T02:00:00Z");
+    const buckets = Array.from({ length: bucketCount }, (_, index) => ({
+      start_time: new Date(
+        firstBucketStart + index * 15 * 60 * 1000,
+      ).toISOString(),
+      end_time: new Date(
+        firstBucketStart + (index + 1) * 15 * 60 * 1000,
+      ).toISOString(),
+      text_count: bucketCount - index,
+      agent_count: 0,
+      total_count: bucketCount - index,
+    }));
+    mocks.getScheduleDistribution.mockResolvedValueOnce({
+      ...aggregateResponse,
+      text_count: buckets.reduce(
+        (total, bucket) => total + bucket.total_count,
+        0,
+      ),
+      agent_count: 0,
+      total_count: buckets.reduce(
+        (total, bucket) => total + bucket.total_count,
+        0,
+      ),
+      buckets,
+    });
+
+    render(<CronScheduleDistribution />);
+
+    const rankedList = await screen.findByTestId("schedule-ranked-buckets");
+    const firstRenderedRow = rankedList.querySelector(
+      '[role="listitem"]',
+    ) as HTMLElement;
+    const renderedRowHeight = Number.parseFloat(firstRenderedRow.style.height);
+    expect(renderedRowHeight).toBeGreaterThan(0);
+    let scrollTop = 0;
+    const setSizesWhenReset: Array<string | null> = [];
+    Object.defineProperty(rankedList, "scrollTop", {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+        if (value === 0) {
+          setSizesWhenReset.push(
+            rankedList
+              .querySelector('[role="listitem"]')
+              ?.getAttribute("aria-setsize") ?? null,
+          );
+        }
+      },
+    });
+
+    rankedList.scrollTop = 80 * renderedRowHeight;
+    fireEvent.scroll(rankedList);
+    await waitFor(() => {
+      expect(rankedList.querySelector('[aria-posinset="81"]')).not.toBeNull();
+    });
+
+    mocks.getScheduleDistribution.mockResolvedValueOnce({
+      ...aggregateResponse,
+      bucket_minutes: 30,
+    });
+    fireEvent.click(screen.getByText("30 分钟"));
+    fireEvent.click(screen.getByRole("button", { name: "查询" }));
+
+    await waitFor(() => {
+      expect(
+        rankedList.querySelector('[aria-posinset="1"][aria-setsize="2"]'),
+      ).not.toBeNull();
+    });
+    expect(setSizesWhenReset).toEqual([String(bucketCount)]);
+    expect(rankedList.scrollTop).toBe(0);
+    expect(rankedList.querySelector('[aria-posinset="81"]')).toBeNull();
   });
 
   it("retries the same aggregate query after a failure", async () => {

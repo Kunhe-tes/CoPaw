@@ -52,6 +52,8 @@ def job_row(
     *,
     source_id: str = "source-a",
     name: str | None = None,
+    tenant_name: str = "Test User",
+    tenant_id: str = "test-account",
     task_type: str = "text",
     cron_expr: str = "*/5 * * * *",
     timezone_name: str = "UTC",
@@ -63,6 +65,8 @@ def job_row(
     return {
         "id": job_id,
         "name": name or job_id,
+        "tenant_name": tenant_name,
+        "tenant_id": tenant_id,
         "source_id": source_id,
         "enabled": enabled,
         "status": status,
@@ -440,10 +444,25 @@ async def test_managed_broadcast_child_exclusion_respects_runtime_gate(
 async def test_detail_reconciles_with_bucket_and_returns_only_whitelisted_fields(
     patch_database,
 ) -> None:
-    patch_database(
+    fake_db = patch_database(
         [
-            job_row("job-b", task_type="agent", cron_expr="0,5 * * * *"),
-            job_row("job-a", task_type="text", cron_expr="0,5 * * * *"),
+            job_row(
+                "job-b",
+                tenant_name="Bob",
+                tenant_id="account-b",
+                task_type="agent",
+                cron_expr="0,5 * * * *",
+            ),
+            job_row(
+                "job-a",
+                tenant_name="Alice",
+                tenant_id="account-a",
+                task_type="text",
+                cron_expr="0,5 * * * *",
+            ),
+            job_row("disabled", enabled=False),
+            job_row("paused", status="paused"),
+            job_row("deleted", deleted_at=datetime(2026, 7, 1, tzinfo=UTC)),
         ],
     )
     service = QueryService()
@@ -484,11 +503,22 @@ async def test_detail_reconciles_with_bucket_and_returns_only_whitelisted_fields
         "scheduled_at",
         "job_id",
         "job_name",
+        "user_name",
+        "user_id",
         "task_type",
         "cron_expr",
         "timezone",
     }
+    assert {
+        (item.job_id, item.user_name, item.user_id) for item in all_items
+    } == {
+        ("job-a", "Alice", "account-a"),
+        ("job-b", "Bob", "account-b"),
+    }
     assert first_page.calculated_at.tzinfo is not None
+    sql, _ = fake_db.calls[0]
+    assert "tenant_name" in sql
+    assert "tenant_id" in sql
 
     agent_page = await service.get_schedule_distribution_details(
         source_id="source-a",
@@ -518,6 +548,51 @@ async def test_detail_rejects_changed_definition_revision(
         page_size=10,
     )
     fake_db.rows[0]["cron_expr"] = "*/10 * * * *"
+
+    with pytest.raises(ScheduleDefinitionRevisionConflictError):
+        await service.get_schedule_distribution_details(
+            source_id="source-a",
+            start_time=start,
+            end_time=end,
+            page=2,
+            page_size=10,
+            expected_revision=first.definition_revision,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field_name", "updated_value"),
+    [
+        ("tenant_name", "Alice Updated"),
+        ("tenant_id", "account-a-updated"),
+    ],
+)
+async def test_detail_rejects_changed_account_identity_revision(
+    patch_database,
+    field_name: str,
+    updated_value: str,
+) -> None:
+    fake_db = patch_database(
+        [
+            job_row(
+                "job-a",
+                tenant_name="Alice",
+                tenant_id="account-a",
+            ),
+        ],
+    )
+    service = QueryService()
+    start = datetime(2026, 7, 27, 10, 0, tzinfo=UTC)
+    end = start + timedelta(minutes=5)
+    first = await service.get_schedule_distribution_details(
+        source_id="source-a",
+        start_time=start,
+        end_time=end,
+        page=1,
+        page_size=10,
+    )
+    fake_db.rows[0][field_name] = updated_value
 
     with pytest.raises(ScheduleDefinitionRevisionConflictError):
         await service.get_schedule_distribution_details(
@@ -647,8 +722,18 @@ class ApiServiceStub:
 def api_client(patch_database):
     patch_database(
         [
-            job_row("trusted-job", source_id="trusted"),
-            job_row("default-job", source_id="default"),
+            job_row(
+                "trusted-job",
+                source_id="trusted",
+                tenant_name="Trusted User",
+                tenant_id="trusted-account",
+            ),
+            job_row(
+                "default-job",
+                source_id="default",
+                tenant_name="Default User",
+                tenant_id="default-account",
+            ),
         ],
     )
     from monitor.app.routers.cron import router
@@ -707,6 +792,12 @@ def test_schedule_distribution_detail_api_supports_filter_and_pagination(
     payload = response.json()
     assert payload["definition_revision"]
     assert [item["job_id"] for item in payload["items"]] == ["trusted-job"]
+    assert [
+        (item["user_name"], item["user_id"]) for item in payload["items"]
+    ] == [("Trusted User", "trusted-account")]
+    serialized_payload = json.dumps(payload, ensure_ascii=False)
+    assert "Default User" not in serialized_payload
+    assert "default-account" not in serialized_payload
 
 
 @pytest.mark.parametrize(

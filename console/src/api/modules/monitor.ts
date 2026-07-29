@@ -178,6 +178,8 @@ export interface CronScheduleOccurrenceItem {
   scheduled_at: string;
   job_id: string;
   job_name: string;
+  user_name: string;
+  user_id: string;
   task_type: CronScheduleTaskType;
   cron_expr: string;
   timezone: string;

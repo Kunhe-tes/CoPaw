@@ -12,6 +12,7 @@ import {
 import type { ColumnsType } from "antd/es/table";
 import type { Dayjs } from "dayjs";
 import dayjs from "dayjs";
+import type { EChartsType } from "echarts";
 import ReactECharts from "echarts-for-react";
 import {
   AlertTriangle,
@@ -37,6 +38,10 @@ import {
 import styles from "./index.module.less";
 
 type DetailTaskFilter = "all" | CronScheduleTaskType;
+type ChartEventParams = {
+  componentType?: string;
+  dataIndex?: number;
+};
 
 interface FilterDraft {
   start: Dayjs | null;
@@ -56,6 +61,9 @@ const BUCKET_OPTIONS: Array<{
 ];
 const DETAIL_PAGE_SIZE = 20;
 const MAX_RANGE_MS = 7 * 24 * 60 * 60 * 1000;
+const RANK_ROW_HEIGHT = 43;
+const RANK_VIEWPORT_HEIGHT = 344;
+const RANK_OVERSCAN_ROWS = 3;
 
 function buildDefaultDraft(): FilterDraft {
   const start = dayjs().startOf("minute");
@@ -129,7 +137,6 @@ function diagnosticText(
 ): string[] {
   if (!diagnostics) return [];
   const items: Array<[number, string]> = [
-    [diagnostics.invalid_cron_jobs, "无效 Cron"],
     [diagnostics.invalid_timezone_jobs, "时区回退 UTC"],
     [diagnostics.unsupported_task_type_jobs, "不支持的任务类型"],
     [diagnostics.invalid_metadata_jobs, "元数据异常"],
@@ -160,12 +167,14 @@ export default function CronScheduleDistribution() {
   const [detailPage, setDetailPage] = useState(1);
   const [detailPageSize, setDetailPageSize] = useState(DETAIL_PAGE_SIZE);
   const [detailRevision, setDetailRevision] = useState<string | null>(null);
+  const [rankScrollTop, setRankScrollTop] = useState(0);
 
   const aggregateRequestId = useRef(0);
   const detailRequestId = useRef(0);
   const lastAttemptRef = useRef<CronScheduleDistributionParams | null>(null);
   const lastTriggerRef = useRef<HTMLElement | null>(null);
   const drawerFocusRef = useRef<HTMLDivElement | null>(null);
+  const rankListRef = useRef<HTMLDivElement | null>(null);
 
   const runAggregate = useCallback(
     async (params: CronScheduleDistributionParams) => {
@@ -176,6 +185,10 @@ export default function CronScheduleDistribution() {
       try {
         const response = await monitorApi.getScheduleDistribution(params);
         if (requestId !== aggregateRequestId.current) return;
+        setRankScrollTop(0);
+        if (rankListRef.current) {
+          rankListRef.current.scrollTop = 0;
+        }
         setDistribution(response);
         setAppliedQuery(params);
         detailRequestId.current += 1;
@@ -308,10 +321,28 @@ export default function CronScheduleDistribution() {
           (left, right) =>
             right.total_count - left.total_count ||
             left.start_time.localeCompare(right.start_time),
-        )
-        .slice(0, 8),
+        ),
     [buckets],
   );
+  const rankWindow = useMemo(() => {
+    const firstVisibleIndex = Math.floor(rankScrollTop / RANK_ROW_HEIGHT);
+    const startIndex = Math.max(0, firstVisibleIndex - RANK_OVERSCAN_ROWS);
+    const endIndex = Math.min(
+      rankedBuckets.length,
+      firstVisibleIndex +
+        Math.ceil(RANK_VIEWPORT_HEIGHT / RANK_ROW_HEIGHT) +
+        RANK_OVERSCAN_ROWS,
+    );
+    return {
+      totalHeight: rankedBuckets.length * RANK_ROW_HEIGHT,
+      items: rankedBuckets
+        .slice(startIndex, endIndex)
+        .map((bucket, offset) => ({
+          bucket,
+          index: startIndex + offset,
+        })),
+    };
+  }, [rankScrollTop, rankedBuckets]);
 
   const chartOption = useMemo(
     () => ({
@@ -367,7 +398,6 @@ export default function CronScheduleDistribution() {
           barMaxWidth: 28,
           data: buckets.map((bucket) => bucket.text_count),
           emphasis: {
-            focus: "series",
             itemStyle: { borderWidth: 0 },
           },
           select: { disabled: true },
@@ -381,7 +411,6 @@ export default function CronScheduleDistribution() {
           data: buckets.map((bucket) => bucket.agent_count),
           itemStyle: { borderRadius: [3, 3, 0, 0] },
           emphasis: {
-            focus: "series",
             itemStyle: { borderWidth: 0 },
           },
           select: { disabled: true },
@@ -390,6 +419,36 @@ export default function CronScheduleDistribution() {
       ],
     }),
     [buckets],
+  );
+  const chartEvents = useMemo(
+    () => ({
+      mouseover: (params: ChartEventParams, instance: EChartsType) => {
+        if (
+          params.componentType === "series" &&
+          typeof params.dataIndex === "number"
+        ) {
+          instance.dispatchAction({ type: "downplay" });
+          instance.dispatchAction({
+            type: "highlight",
+            seriesIndex: [0, 1],
+            dataIndex: params.dataIndex,
+          });
+        }
+      },
+      mouseout: (_params: ChartEventParams, instance: EChartsType) => {
+        instance.dispatchAction({ type: "downplay" });
+      },
+      click: (params: ChartEventParams) => {
+        if (
+          params.componentType === "series" &&
+          typeof params.dataIndex === "number" &&
+          buckets[params.dataIndex]
+        ) {
+          openBucket(buckets[params.dataIndex]);
+        }
+      },
+    }),
+    [buckets, openBucket],
   );
 
   const detailColumns: ColumnsType<CronScheduleOccurrenceItem> = [
@@ -404,6 +463,21 @@ export default function CronScheduleDistribution() {
       dataIndex: "job_name",
       ellipsis: true,
       width: 180,
+    },
+    {
+      title: "用户/账号",
+      key: "user_identity",
+      width: 180,
+      render: (_value, record) => (
+        <div className={styles.userIdentity}>
+          <span className={styles.userName} title={record.user_name}>
+            {record.user_name || "-"}
+          </span>
+          <span className={styles.userId} title={record.user_id}>
+            {record.user_id || "-"}
+          </span>
+        </div>
+      ),
     },
     {
       title: "类型",
@@ -540,7 +614,7 @@ export default function CronScheduleDistribution() {
               >
                 <div className={styles.kpiHeader}>
                   <Type size={16} />
-                  <span>Text</span>
+                  <span>Text型任务</span>
                 </div>
                 <div className={styles.kpiValue}>
                   {formatNumber(distribution?.text_count || 0)}
@@ -552,7 +626,7 @@ export default function CronScheduleDistribution() {
               >
                 <div className={styles.kpiHeader}>
                   <Bot size={16} />
-                  <span>Agent</span>
+                  <span>Agent型任务</span>
                 </div>
                 <div className={styles.kpiValue}>
                   {formatNumber(distribution?.agent_count || 0)}
@@ -618,20 +692,7 @@ export default function CronScheduleDistribution() {
                           option={chartOption}
                           notMerge
                           style={{ height: 340, width: "100%" }}
-                          onEvents={{
-                            click: (params: {
-                              componentType?: string;
-                              dataIndex?: number;
-                            }) => {
-                              if (
-                                params.componentType === "series" &&
-                                typeof params.dataIndex === "number" &&
-                                buckets[params.dataIndex]
-                              ) {
-                                openBucket(buckets[params.dataIndex]);
-                              }
-                            },
-                          }}
+                          onEvents={chartEvents}
                         />
                       </div>
                       <p className={styles.srOnly}>
@@ -648,34 +709,67 @@ export default function CronScheduleDistribution() {
                     <span>触发高峰区段</span>
                     <span className={styles.panelMeta}>按次数排序</span>
                   </div>
-                  <div className={styles.rankList}>
-                    {rankedBuckets.map((bucket, index) => (
-                      <div className={styles.rankRow} key={bucket.start_time}>
-                        <span className={styles.rankIndex}>{index + 1}</span>
-                        <span className={styles.rankTime}>
-                          {formatBucketRange(bucket)}
-                        </span>
-                        <span className={styles.rankTypes}>
-                          <i className={styles.textDot} /> {bucket.text_count}
-                          <i className={styles.agentDot} /> {bucket.agent_count}
-                        </span>
-                        <span className={styles.rankTotal}>
-                          {formatNumber(bucket.total_count)}
-                        </span>
-                        <Button
-                          type="link"
-                          size="small"
-                          aria-label={`查看 ${formatBucketRange(
-                            bucket,
-                          )} 计划触发明细`}
-                          onClick={(event) =>
-                            openBucket(bucket, event.currentTarget)
-                          }
+                  <div
+                    ref={rankListRef}
+                    className={styles.rankList}
+                    data-testid="schedule-ranked-buckets"
+                    role="region"
+                    aria-label="全部非空触发区段排名"
+                    tabIndex={0}
+                    style={{
+                      height: RANK_VIEWPORT_HEIGHT,
+                      overflowY: "auto",
+                    }}
+                    onScroll={(event) =>
+                      setRankScrollTop(event.currentTarget.scrollTop)
+                    }
+                  >
+                    <div
+                      className={styles.rankListInner}
+                      role="list"
+                      style={{ height: rankWindow.totalHeight }}
+                    >
+                      {rankWindow.items.map(({ bucket, index }) => (
+                        <div
+                          className={styles.rankRow}
+                          key={bucket.start_time}
+                          role="listitem"
+                          aria-posinset={index + 1}
+                          aria-setsize={rankedBuckets.length}
+                          style={{
+                            height: RANK_ROW_HEIGHT,
+                            transform: `translateY(${
+                              index * RANK_ROW_HEIGHT
+                            }px)`,
+                          }}
                         >
-                          详情
-                        </Button>
-                      </div>
-                    ))}
+                          <span className={styles.rankIndex}>{index + 1}</span>
+                          <span className={styles.rankTime}>
+                            {formatBucketRange(bucket)}
+                          </span>
+                          <span className={styles.rankTypes}>
+                            <i className={styles.textDot} /> {bucket.text_count}
+                            <i className={styles.agentDot} />{" "}
+                            {bucket.agent_count}
+                          </span>
+                          <span className={styles.rankTotal}>
+                            {formatNumber(bucket.total_count)}
+                          </span>
+                          <Button
+                            type="link"
+                            size="small"
+                            aria-label={`查看 ${formatBucketRange(
+                              bucket,
+                            )} 计划触发明细`}
+                            onClick={(event) =>
+                              openBucket(bucket, event.currentTarget)
+                            }
+                          >
+                            详情
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
                   </div>
                 </section>
               </div>
@@ -756,7 +850,7 @@ export default function CronScheduleDistribution() {
           loading={detailLoading}
           columns={detailColumns}
           dataSource={detail?.items || []}
-          scroll={{ x: 920 }}
+          scroll={{ x: 1100 }}
           pagination={{
             current: detailPage,
             pageSize: detailPageSize,

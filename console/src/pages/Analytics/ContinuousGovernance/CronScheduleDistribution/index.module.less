@@ -187,29 +187,42 @@
 }
 
 .rankList {
-  display: flex;
-  flex-direction: column;
+  padding-right: 4px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+
+  &:focus-visible {
+    outline: 2px solid #2563eb;
+    outline-offset: 2px;
+  }
+}
+
+.rankListInner {
+  position: relative;
+  width: 100%;
+  min-height: 100%;
 }
 
 .rankRow {
+  position: absolute;
+  right: 0;
+  left: 0;
+  box-sizing: border-box;
   display: grid;
-  grid-template-columns: 24px minmax(120px, 1fr) auto 36px auto;
+  grid-template-columns: 40px minmax(120px, 1fr) auto 36px auto;
   align-items: center;
   gap: 8px;
-  min-height: 43px;
   border-bottom: 1px solid #eef2f7;
-
-  &:last-child {
-    border-bottom: 0;
-  }
 }
 
 .rankIndex {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
+  width: fit-content;
+  min-width: 20px;
   height: 20px;
+  padding: 0 4px;
   color: #64748b;
   font-size: 11px;
   font-weight: 700;
@@ -276,6 +289,30 @@
   font-size: 12px;
 }
 
+.userIdentity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.userName,
+.userId {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.userName {
+  color: #334155;
+}
+
+.userId {
+  color: #475569;
+  font-size: 12px;
+}
+
 .srOnly {
   position: absolute;
   width: 1px;
@@ -334,7 +371,7 @@
   }
 
   .rankRow {
-    grid-template-columns: 22px minmax(110px, 1fr) 40px auto;
+    grid-template-columns: 40px minmax(110px, 1fr) 40px auto;
   }
 
   .rankTypes {
