@@ -2614,6 +2614,19 @@ class AgentRunner(Runner):
                 approved_tool_call,
                 ensure_ascii=False,
             )
+        from ..source_tools.service import get_source_tool_service
+
+        source_tool_versions = ()
+        source_tool_service = get_source_tool_service()
+        if source_tool_service is not None and request_context["source_id"]:
+            try:
+                source_tool_versions = source_tool_service.get_active_catalog(
+                    request_context["source_id"],
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Source tool catalogue unavailable; source tools fail closed",
+                )
         return SWEAgent(
             agent_config=agent_config,
             env_context=env_context,
@@ -2622,6 +2635,7 @@ class AgentRunner(Runner):
             request_context=request_context,
             workspace_dir=self.workspace_dir,
             task_tracker=self._task_tracker,
+            source_tool_versions=source_tool_versions,
         )
 
     def _attach_session_skill_detector(

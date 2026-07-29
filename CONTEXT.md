@@ -252,6 +252,26 @@ _Avoid_: output_len=0, blank reply, empty cron output
 A source-scoped runtime configuration surface for behavior shared by requests from the same external source. It is not a tenant configuration and does not describe user, organization, or workspace identity.
 _Avoid_: system feature configuration, system feature config, 系统特性配置, tenant config, user config
 
+**Source Built-in Tool**:
+An executable custom tool asset owned by one source and available to every tenant under that source. It is distinct from an Agent Profile tool configuration; tenants may use it but cannot alter its source-owned script or lifecycle.
+_Avoid_: tenant tool script, source configuration JSON, Agent-owned shared tool
+
+**Source Tool Library**:
+The source-scoped management collection of Source Built-in Tools on the System Configuration page. It has independent source-owned storage and lifecycle, supports complete-file upload rather than browser editing, and is not Marketplace or tenant-workspace storage.
+_Avoid_: source configuration JSON, agent tool page, browser script editor
+
+**Source Built-in Tool Draft**:
+An unpublished source-tool version that has passed static validation and the mandatory blocking safety gate. A Source Tool Administrator may explicitly test, discard, or publish it; it does not alter any Agent catalog before publication.
+_Avoid_: implicit publication, unscanned source tool, active source tool
+
+**Source Built-in Tool Override**:
+The source-level precedence rule under which a Source Built-in Tool replaces a Swe code-defined built-in while preserving its complete tool JSON Schema. It never overrides Skill or MCP tools and cannot bypass an Agent's disabled choice.
+_Avoid_: registration-order override, Schema-changing override, Skill override, MCP override
+
+**Source Built-in Tool Activation Boundary**:
+The start of an Agent run, when it snapshots its effective Source Built-in Tool catalog. Publication, replacement, and deactivation affect only later Agent runs; a running Agent retains its starting catalog.
+_Avoid_: mid-run tool mutation, retroactive catalogue change
+
 **Source System Configuration Override**:
 A value explicitly saved in **Source System Configuration** that replaces the corresponding broader runtime setting for requests from that source. Missing values are inheritance, not implicit overrides.
 _Avoid_: source default, tenant override, page default
