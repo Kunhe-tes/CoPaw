@@ -1,7 +1,6 @@
 import { Empty, Spin, Tooltip, Typography } from "antd";
 import {
   FileOutlined,
-  FolderOpenOutlined,
   FolderOutlined,
   LinkOutlined,
   LoadingOutlined,
@@ -70,11 +69,7 @@ export default function FileColumn({
     >
       {directory && (
         <header className={styles.columnHeader}>
-          <FolderOpenOutlined />
-          <div>
-            <Typography.Text strong>{directory.path || "工作区"}</Typography.Text>
-            <span>{directory.items.length} 项</span>
-          </div>
+          <span>{directory.items.length} 项</span>
         </header>
       )}
 
@@ -108,7 +103,6 @@ export default function FileColumn({
                     {entry.kind === "symlink" ? "受限链接" : [formattedSize(entry.size_bytes), formattedTime(entry.modified_at)].filter(Boolean).join(" · ")}
                   </span>
                 </span>
-                {entry.kind === "directory" && <span className={styles.disclosure}>›</span>}
               </button>
             );
           })}

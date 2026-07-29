@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import FileColumn from "./FileColumn";
 import FileManager from "./index";
 import FileDetail from "./FileDetail";
 
@@ -106,6 +107,21 @@ describe("FileManager", () => {
     fireEvent.click(screen.getByRole("button", { name: "note.txt" }));
     await screen.findByRole("region", { name: "文件详情" });
     expect(screen.getAllByRole("button", { name: "note.txt" })).toHaveLength(1);
+  });
+
+  it("keeps directory columns compact with an item count and no disclosure arrow", () => {
+    render(
+      <FileColumn
+        column={1}
+        directory={rootPage}
+        selectedPath={null}
+        onSelect={() => undefined}
+      />,
+    );
+
+    expect(screen.getByText("1 项")).toBeInTheDocument();
+    expect(screen.queryByText("工作区")).not.toBeInTheDocument();
+    expect(screen.queryByText("›")).not.toBeInTheDocument();
   });
 
 });

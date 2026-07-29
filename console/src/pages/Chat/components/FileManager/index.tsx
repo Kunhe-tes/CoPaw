@@ -373,7 +373,14 @@ export default function FileManager() {
         open={open}
         title={modalTitle}
         footer={null}
-        width="min(1360px, calc(100vw - 48px))"
+        width="100%"
+        style={{
+          width: "calc(100vw - 240px)",
+          height: "100dvh",
+          margin: "0 0 0 auto",
+          padding: 0,
+          top: 0,
+        }}
         className={styles.modal}
         rootClassName={styles.modalRoot}
         closable={false}
