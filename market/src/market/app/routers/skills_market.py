@@ -2212,6 +2212,49 @@ class InitStatisticsConfigResult(TypedDict):
     errors: list[dict]
 
 
+async def _init_single_skill_statistics(
+    registry,
+    item: MarketItem,
+    source_id: str,
+    default_include: bool,
+    dry_run: bool,
+) -> tuple[bool, dict | None]:
+    """初始化单个技能的统计配置.
+
+    Returns:
+        (success, error_dict) - 成功时 error_dict 为 None
+    """
+    if dry_run:
+        return True, None
+
+    try:
+        success = await registry.upsert_market_skill(
+            source_id=source_id,
+            item_id=item.item_id,
+            skill_id=item.skill_id,
+            skill_name=item.name,
+            cn_name=item.chinese_name,
+            include_in_statistics=default_include,
+            creator_id=item.creator_id,
+            creator_name=item.creator_name,
+            updator_id=item.creator_id,
+            updator_name=item.creator_name,
+        )
+        if success:
+            return True, None
+        return False, {
+            "item_id": item.item_id,
+            "skill_name": item.name,
+            "reason": "数据库写入返回失败",
+        }
+    except Exception as e:
+        return False, {
+            "item_id": item.item_id,
+            "skill_name": item.name,
+            "reason": str(e),
+        }
+
+
 @router.post(
     "/market/admin/skills/init-statistics",
 )
@@ -2263,28 +2306,22 @@ async def init_skill_statistics_config(
             results["processed"] += 1
 
             if registry:
-                if not req.dry_run:
-                    success = await registry.upsert_market_skill(
-                        source_id=source_id,
-                        item_id=item.item_id,
-                        skill_id=item.skill_id,
-                        skill_name=item.name,
-                        cn_name=item.chinese_name,
-                        include_in_statistics=req.default_include,
-                        creator_id=item.creator_id,
-                        creator_name=item.creator_name,
-                        updator_id=item.creator_id,
-                        updator_name=item.creator_name,
-                    )
-                    if success:
-                        results["inserted"] += 1
-                    else:
-                        results["skipped"] += 1
-                else:
+                success, error = await _init_single_skill_statistics(
+                    registry=registry,
+                    item=item,
+                    source_id=source_id,
+                    default_include=req.default_include,
+                    dry_run=req.dry_run,
+                )
+                if success:
                     results["inserted"] += 1
-
-            # 更新 index.json
-            if not req.dry_run:
+                    if not req.dry_run:
+                        item.include_in_statistics = req.default_include
+                else:
+                    results["skipped"] += 1
+                    if error:
+                        results["errors"].append(error)
+            elif not req.dry_run:
                 item.include_in_statistics = req.default_include
 
         if not req.dry_run:

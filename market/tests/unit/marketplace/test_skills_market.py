@@ -481,3 +481,4 @@ def test_init_statistics_returns_200(tmp_path):
     assert resp.status_code == 200
     data = resp.json()
     assert "processed" in data
+    assert "errors" in data
