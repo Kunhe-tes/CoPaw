@@ -4,7 +4,9 @@
 import asyncio
 import json
 import logging
+import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -17,6 +19,7 @@ from ...models.tracing import (
     EventType,
     InputTokensMismatchItem,
     InputTokensFixItem,
+    ModelErrorCodeCount,
     ModelUsage,
     MCPToolUsage,
     MCPServerUsage,
@@ -57,6 +60,12 @@ EXCLUDED_SKILL_NAMES = (
     "skill_creator",
     "docx",
     "himalaya",
+)
+
+MODEL_ERROR_CODE_PATTERN = re.compile(
+    r"Error code:\s*([A-Za-z0-9_]+(?:-[A-Za-z0-9_]+)*)"
+    r"(?=\s|[,:;.)}\]]|-(?:\s|$)|$)",
+    re.IGNORECASE,
 )
 
 LATEST_FEEDBACK_JOIN_SQL = """
@@ -2972,12 +2981,76 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 tool_errors = row["count"]
 
         total_errors = model_errors + tool_errors
+        model_error_codes = await self._get_model_error_code_counts(
+            source_id,
+            start_date,
+            end_date,
+            bbk_filter_sql,
+            bbk_filter_params,
+            exclude_placeholders,
+        )
 
         return ErrorSummary(
             total_errors=total_errors,
             model_errors=model_errors,
             tool_errors=tool_errors,
+            model_error_codes=model_error_codes,
         )
+
+    async def _get_model_error_code_counts(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: list[str],
+        exclude_placeholders: str,
+    ) -> list[ModelErrorCodeCount]:
+        """Aggregate top model error codes from llm_input error text."""
+        if source_id == "all":
+            query = f"""
+                SELECT error
+                FROM swe_tracing_spans
+                WHERE start_time >= %s AND start_time < %s
+                  AND error IS NOT NULL
+                  AND error != ''
+                  AND error LIKE '%%Error code:%%'
+                  AND source_id NOT IN ({exclude_placeholders})
+                  AND event_type = 'llm_input'
+                  {bbk_filter_sql}
+            """
+            params = (
+                start_date,
+                end_date,
+                *EXCLUDED_SOURCE_IDS,
+                *bbk_filter_params,
+            )
+        else:
+            query = f"""
+                SELECT error
+                FROM swe_tracing_spans
+                WHERE start_time >= %s AND start_time < %s
+                  AND error IS NOT NULL
+                  AND error != ''
+                  AND error LIKE '%%Error code:%%'
+                  AND source_id = %s
+                  AND event_type = 'llm_input'
+                  {bbk_filter_sql}
+            """
+            params = (start_date, end_date, source_id, *bbk_filter_params)
+
+        rows = await self._db.fetch_all(query, params)
+        counts: Counter[str] = Counter()
+
+        for row in rows:
+            match = MODEL_ERROR_CODE_PATTERN.search(row.get("error") or "")
+            if match:
+                counts[match.group(1)] += 1
+
+        return [
+            ModelErrorCodeCount(code=code, count=count)
+            for code, count in counts.most_common(10)
+        ]
 
     def _build_error_list_params(
         self,
