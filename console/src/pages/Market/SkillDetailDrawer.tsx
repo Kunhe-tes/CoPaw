@@ -7,7 +7,7 @@ import {
   UserOutlined,
   DownloadOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Switch, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
+import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle, BarChart3 } from "lucide-react";
@@ -524,8 +524,27 @@ export function SkillDetailDrawer(
         },
       });
     }
+    // 统计配置修改（仅管理员）
+    if (isManager) {
+      items.push({
+        key: "toggle_statistics",
+        icon: <BarChart3 size={12} />,
+        label: includeInStatistics ? "取消纳入统计" : "纳入统计",
+        onClick: () => {
+          Modal.confirm({
+            title: includeInStatistics ? "确认取消纳入统计？" : "确认纳入统计？",
+            content: includeInStatistics
+              ? "取消后该技能将不再展示在运营看板的使用排行榜中"
+              : "纳入后该技能将展示在运营看板的使用排行榜中",
+            okText: "确认",
+            cancelText: "取消",
+            onOk: () => handleStatisticsConfigChange(!includeInStatistics),
+          });
+        },
+      });
+    }
     return items;
-  }, [onRecall, onUnpublish, onDelete]);
+  }, [onRecall, onUnpublish, onDelete, isManager, includeInStatistics, handleStatisticsConfigChange]);
 
   useEffect(() => {
     if (!open || !skill || !sourceId) {
@@ -652,33 +671,22 @@ export function SkillDetailDrawer(
               {statusText}
             </Tag>
 
-            {/* 统计配置（仅管理员可见） */}
+            {/* 统计状态徽章（仅管理员可见，只显示状态） */}
             {isManager && (
-              <Tooltip title={includeInStatistics ? "该技能已纳入统计" : "该技能未纳入统计"}>
-                <div
-                  style={{
-                    display: "inline-flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "2px 8px",
-                    borderRadius: 6,
-                    fontSize: 12,
-                    backgroundColor: includeInStatistics ? "#e6f4ff" : "#f5f5f5",
-                    border: `1px solid ${includeInStatistics ? "#91caff" : "#d9d9d9"}`,
-                  }}
-                >
-                  <BarChart3 size={12} style={{ color: includeInStatistics ? "#1677ff" : "#8c8c8c" }} />
-                  <span style={{ color: includeInStatistics ? "#1677ff" : "#8c8c8c" }}>
-                    {includeInStatistics ? "已纳入统计" : "未纳入统计"}
-                  </span>
-                  <Switch
-                    size="small"
-                    checked={includeInStatistics}
-                    loading={isUpdatingStatistics}
-                    onChange={handleStatisticsConfigChange}
-                  />
-                </div>
-              </Tooltip>
+              <Tag
+                bordered={false}
+                style={{
+                  margin: 0,
+                  borderRadius: 6,
+                  padding: "2px 8px",
+                  fontSize: 12,
+                  backgroundColor: includeInStatistics ? "#e6f4ff" : "#f5f5f5",
+                  color: includeInStatistics ? "#1677ff" : "#8c8c8c",
+                }}
+              >
+                <BarChart3 size={12} style={{ marginRight: 4 }} />
+                {includeInStatistics ? "已纳入统计" : "未纳入统计"}
+              </Tag>
             )}
 
             {/* 中文名（大号） + 技能名（小号） */}
