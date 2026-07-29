@@ -2106,3 +2106,191 @@ async def get_distribution_preview(
         users=[UserSkillStatus(**u) for u in result["users"]],
         distributed_user_ids=result["distributed_user_ids"],
     )
+
+
+# ===== 统计配置管理 =====
+
+
+class UpdateStatisticsConfigRequest(BaseModel):
+    """更新统计配置请求."""
+
+    include_in_statistics: bool = Field(
+        ...,
+        description="是否纳入统计",
+    )
+    updator_id: str = Field(default="", description="更新人ID")
+    updator_name: str = Field(default="", description="更新人名称")
+
+
+class UpdateStatisticsConfigResponse(BaseModel):
+    """更新统计配置响应."""
+
+    success: bool
+    item_id: str
+    skill_name: str
+    include_in_statistics: bool
+
+
+@router.patch(
+    "/market/skills/{item_id}/statistics",
+    response_model=UpdateStatisticsConfigResponse,
+)
+async def update_skill_statistics_config(
+    item_id: str,
+    req: UpdateStatisticsConfigRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+) -> UpdateStatisticsConfigResponse:
+    """更新技能统计配置（管理员）."""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 从 index.json 获取技能
+    items = load_index(svc.marketplace_root, source_id)
+    item = next(
+        (i for i in items if i.item_id == item_id and i.item_type == "skill"),
+        None,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    # 更新 index.json
+    item.include_in_statistics = req.include_in_statistics
+    item.updated_at = datetime.now(timezone.utc).isoformat()
+    save_index(svc.marketplace_root, source_id, items)
+
+    # 同步更新数据库
+    if svc.db and svc.db.is_connected:
+        from ...marketplace.market_skill_registry import MarketSkillRegistry
+
+        registry = MarketSkillRegistry(svc.db)
+        await registry.update_statistics_config(
+            source_id=source_id,
+            item_id=item_id,
+            include_in_statistics=req.include_in_statistics,
+            updator_id=req.updator_id,
+            updator_name=req.updator_name,
+        )
+
+    return UpdateStatisticsConfigResponse(
+        success=True,
+        item_id=item_id,
+        skill_name=item.name,
+        include_in_statistics=req.include_in_statistics,
+    )
+
+
+class InitStatisticsConfigRequest(BaseModel):
+    """初始化统计配置请求."""
+
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="来源ID列表，不传或为空时初始化所有来源",
+    )
+    default_include: bool = Field(
+        default=True,
+        description="默认是否纳入统计",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="试运行模式，仅统计不实际写入",
+    )
+
+
+class InitStatisticsConfigResult(TypedDict):
+    """初始化统计配置结果."""
+
+    dry_run: bool
+    source_ids: list[str]
+    total_skills: int
+    processed: int
+    inserted: int
+    updated: int
+    skipped: int
+    errors: list[dict]
+
+
+@router.post(
+    "/market/admin/skills/init-statistics",
+)
+async def init_skill_statistics_config(
+    request: Request,
+    req: InitStatisticsConfigRequest,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+) -> InitStatisticsConfigResult:
+    """初始化技能统计配置（管理员）."""
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    results: InitStatisticsConfigResult = {
+        "dry_run": req.dry_run,
+        "source_ids": [],
+        "total_skills": 0,
+        "processed": 0,
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+    }
+
+    # 确定 source_ids 列表
+    if req.source_ids:
+        source_ids = req.source_ids
+    else:
+        # 遍历 marketplace_root 下所有目录
+        source_ids = []
+        for dir_path in svc.marketplace_root.iterdir():
+            if dir_path.is_dir():
+                index_path = dir_path / "index.json"
+                if index_path.exists():
+                    source_ids.append(dir_path.name)
+
+    results["source_ids"] = source_ids
+
+    # 初始化数据库操作类
+    from ...marketplace.market_skill_registry import MarketSkillRegistry
+
+    registry = (
+        MarketSkillRegistry(svc.db) if svc.db and svc.db.is_connected else None
+    )
+
+    for source_id in source_ids:
+        items = load_index(svc.marketplace_root, source_id)
+        skill_items = [i for i in items if i.item_type == "skill"]
+        results["total_skills"] += len(skill_items)
+
+        for item in skill_items:
+            results["processed"] += 1
+
+            if registry:
+                if not req.dry_run:
+                    success = await registry.upsert_market_skill(
+                        source_id=source_id,
+                        item_id=item.item_id,
+                        skill_id=item.skill_id,
+                        skill_name=item.name,
+                        cn_name=item.chinese_name,
+                        include_in_statistics=req.default_include,
+                        creator_id=item.creator_id,
+                        creator_name=item.creator_name,
+                        updator_id=item.creator_id,
+                        updator_name=item.creator_name,
+                    )
+                    if success:
+                        results["inserted"] += 1
+                    else:
+                        results["skipped"] += 1
+                else:
+                    results["inserted"] += 1
+
+            # 更新 index.json
+            if not req.dry_run:
+                item.include_in_statistics = req.default_include
+
+        if not req.dry_run:
+            save_index(svc.marketplace_root, source_id, items)
+
+    return results
