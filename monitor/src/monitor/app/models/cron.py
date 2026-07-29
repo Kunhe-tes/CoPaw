@@ -11,7 +11,7 @@ Defines models for:
 import json
 from datetime import datetime
 from enum import Enum
-from typing import Any, Dict, Generic, List, Optional, TypeVar
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 
 from pydantic import BaseModel, Field
 
@@ -496,6 +496,7 @@ class ExportQueryParams(BaseModel):
 
 
 T = TypeVar("T")
+CronScheduleBucketMinutes = Literal[5, 10, 15, 30, 60]
 
 
 class PaginatedResponse(BaseModel, Generic[T]):
@@ -505,6 +506,122 @@ class PaginatedResponse(BaseModel, Generic[T]):
     total: int = Field(default=0, description="总数量")
     page: int = Field(default=1, description="当前页码")
     page_size: int = Field(default=10, description="每页数量")
+
+
+class CronScheduleDistributionDiagnostics(BaseModel):
+    """Bounded definition diagnostics for a schedule calculation."""
+
+    invalid_cron_jobs: int = Field(default=0, ge=0, description="无效 Cron 任务数")
+    invalid_timezone_jobs: int = Field(
+        default=0,
+        ge=0,
+        description="使用 UTC 回退的无效时区任务数",
+    )
+    unsupported_task_type_jobs: int = Field(
+        default=0,
+        ge=0,
+        description="被排除的不支持任务类型数",
+    )
+    invalid_metadata_jobs: int = Field(
+        default=0,
+        ge=0,
+        description="元数据无法解析的任务数",
+    )
+    managed_child_jobs: int = Field(
+        default=0,
+        ge=0,
+        description="被批调度托管并排除的子任务数",
+    )
+
+
+class CronScheduleDistributionBucket(BaseModel):
+    """One start-aligned, half-open planned firing bucket."""
+
+    start_time: datetime = Field(..., description="区间开始时间（UTC，含）")
+    end_time: datetime = Field(..., description="区间结束时间（UTC，不含）")
+    text_count: int = Field(default=0, ge=0, description="Text 计划触发次数")
+    agent_count: int = Field(default=0, ge=0, description="Agent 计划触发次数")
+    total_count: int = Field(default=0, ge=0, description="计划触发总次数")
+
+
+class CronScheduleDistributionResponse(BaseModel):
+    """Planned firing distribution for the selected range."""
+
+    start_time: datetime = Field(..., description="统计开始时间（UTC，含）")
+    end_time: datetime = Field(..., description="统计结束时间（UTC，不含）")
+    bucket_minutes: CronScheduleBucketMinutes = Field(
+        ...,
+        description="桶间隔分钟数",
+    )
+    calculated_at: datetime = Field(..., description="计算完成时间（UTC）")
+    definition_revision: str = Field(..., description="任务定义确定性版本")
+    eligible_job_count: int = Field(
+        default=0,
+        ge=0,
+        description="通过定义校验并参与计划计算的任务数",
+    )
+    text_count: int = Field(default=0, ge=0, description="Text 计划触发次数")
+    agent_count: int = Field(default=0, ge=0, description="Agent 计划触发次数")
+    total_count: int = Field(default=0, ge=0, description="计划触发总次数")
+    buckets: List[CronScheduleDistributionBucket] = Field(
+        default_factory=list,
+        description="按时间顺序排列的统计桶",
+    )
+    diagnostics: CronScheduleDistributionDiagnostics = Field(
+        default_factory=CronScheduleDistributionDiagnostics,
+        description="被排除或回退的任务定义诊断",
+    )
+
+
+class CronScheduleOccurrenceItem(BaseModel):
+    """Whitelisted planned firing detail row."""
+
+    scheduled_at: datetime = Field(..., description="计划触发时间（UTC）")
+    job_id: str = Field(..., description="任务 ID")
+    job_name: str = Field(..., description="任务名称")
+    user_name: str = Field(..., description="用户姓名")
+    user_id: str = Field(..., description="用户账号 ID")
+    task_type: TaskType = Field(..., description="任务类型")
+    cron_expr: str = Field(..., description="Cron 表达式")
+    timezone: str = Field(..., description="任务配置时区")
+
+
+class CronScheduleDistributionDetailsResponse(BaseModel):
+    """Paginated planned firing occurrences for one selected bucket."""
+
+    start_time: datetime = Field(..., description="区间开始时间（UTC，含）")
+    end_time: datetime = Field(..., description="区间结束时间（UTC，不含）")
+    task_type: Optional[TaskType] = Field(default=None, description="任务类型筛选")
+    calculated_at: datetime = Field(..., description="计算完成时间（UTC）")
+    definition_revision: str = Field(..., description="任务定义确定性版本")
+    items: List[CronScheduleOccurrenceItem] = Field(
+        default_factory=list,
+        description="计划触发明细",
+    )
+    total: int = Field(default=0, ge=0, description="明细总数")
+    page: int = Field(default=1, ge=1, description="当前页码")
+    page_size: int = Field(default=20, ge=1, le=100, description="每页数量")
+    diagnostics: CronScheduleDistributionDiagnostics = Field(
+        default_factory=CronScheduleDistributionDiagnostics,
+        description="被排除或回退的任务定义诊断",
+    )
+
+
+class CronScheduleDistributionErrorDetail(BaseModel):
+    """Stable error detail returned only by schedule distribution routes."""
+
+    code: str = Field(..., description="稳定错误码")
+    message: str = Field(..., description="可读错误信息")
+    actual_revision: Optional[str] = Field(
+        default=None,
+        description="定义变更冲突时的当前版本",
+    )
+
+
+class CronScheduleDistributionErrorResponse(BaseModel):
+    """Stable HTTP error envelope for schedule distribution routes."""
+
+    detail: CronScheduleDistributionErrorDetail
 
 
 class SyncJobResponse(BaseModel):
