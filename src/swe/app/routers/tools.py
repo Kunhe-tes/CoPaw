@@ -32,6 +32,14 @@ class ToolInfo(BaseModel):
         default=False,
         description="Whether to execute the tool asynchronously in background",
     )
+    origin: str = Field(
+        default="builtin",
+        description="Whether this effective tool comes from code or source library",
+    )
+    source_version: int | None = Field(
+        default=None,
+        description="Active source-tool version when origin is source",
+    )
 
 
 @router.get("", response_model=List[ToolInfo])
@@ -58,18 +66,53 @@ async def list_tools(
     else:
         builtin_tools = agent_config.tools.builtin_tools
 
-    tools_list = []
+    source_id = getattr(request.state, "source_id", None)
+    source_tool_service = getattr(
+        request.app.state,
+        "source_tool_service",
+        None,
+    )
+    source_tools = (
+        source_tool_service.list_metadata(source_id)
+        if source_id and source_tool_service is not None
+        else ()
+    )
+    active_source_names = {tool.name for tool in source_tools}
+
+    tools_list: dict[str, ToolInfo] = {}
     for tool_config in builtin_tools.values():
-        tools_list.append(
-            ToolInfo(
-                name=tool_config.name,
-                enabled=tool_config.enabled,
-                description=tool_config.description,
-                async_execution=tool_config.async_execution,
-            ),
+        if (
+            not _is_code_builtin(tool_config.name)
+            and tool_config.name not in active_source_names
+        ):
+            continue
+        tools_list[tool_config.name] = ToolInfo(
+            name=tool_config.name,
+            enabled=tool_config.enabled,
+            description=tool_config.description,
+            async_execution=tool_config.async_execution,
         )
 
-    return tools_list
+    if source_id and source_tool_service is not None:
+        for source_tool in source_tools:
+            configured = builtin_tools.get(source_tool.name)
+            tools_list[source_tool.name] = ToolInfo(
+                name=source_tool.name,
+                enabled=(
+                    configured.enabled if configured is not None else True
+                ),
+                description=source_tool.description,
+                async_execution=(
+                    configured.async_execution
+                    if configured is not None
+                    and source_tool.name == "execute_shell_command"
+                    else False
+                ),
+                origin="source",
+                source_version=source_tool.version,
+            )
+
+    return list(tools_list.values())
 
 
 @router.patch("/{tool_name}/toggle", response_model=ToolInfo)
@@ -94,16 +137,30 @@ async def toggle_tool(
 
     workspace, agent_config = await get_agent_and_config_for_request(request)
 
-    if (
-        not agent_config.tools
-        or tool_name not in agent_config.tools.builtin_tools
+    source_tool = _get_active_source_tool(request, tool_name)
+    is_code_builtin = _is_code_builtin(tool_name)
+    if not agent_config.tools or (
+        tool_name not in agent_config.tools.builtin_tools
+        and source_tool is None
+        and not is_code_builtin
     ):
         raise HTTPException(
             status_code=404,
             detail=f"Tool '{tool_name}' not found",
         )
 
-    # Toggle enabled status
+    # New source tools are default-enabled and only acquire an Agent record
+    # when the user explicitly changes that default.
+    if tool_name not in agent_config.tools.builtin_tools:
+        from ...config.config import BuiltinToolConfig
+
+        agent_config.tools.builtin_tools[tool_name] = BuiltinToolConfig(
+            name=tool_name,
+            enabled=True,
+            description=(
+                source_tool.description if source_tool is not None else ""
+            ),
+        )
     tool_config = agent_config.tools.builtin_tools[tool_name]
     tool_config.enabled = not tool_config.enabled
 
@@ -125,8 +182,16 @@ async def toggle_tool(
     return ToolInfo(
         name=tool_config.name,
         enabled=tool_config.enabled,
-        description=tool_config.description,
+        description=(
+            source_tool.description
+            if source_tool is not None
+            else tool_config.description
+        ),
         async_execution=tool_config.async_execution,
+        origin="source" if source_tool is not None else "builtin",
+        source_version=(
+            source_tool.version if source_tool is not None else None
+        ),
     )
 
 
@@ -154,6 +219,12 @@ async def update_tool_async_execution(
 
     workspace, agent_config = await get_agent_and_config_for_request(request)
 
+    source_tool = _get_active_source_tool(request, tool_name)
+    if source_tool is not None and tool_name != "execute_shell_command":
+        raise HTTPException(
+            status_code=400,
+            detail="Only execute_shell_command supports async execution",
+        )
     if (
         not agent_config.tools
         or tool_name not in agent_config.tools.builtin_tools
@@ -187,4 +258,34 @@ async def update_tool_async_execution(
         enabled=tool_config.enabled,
         description=tool_config.description,
         async_execution=tool_config.async_execution,
+        origin="source" if source_tool is not None else "builtin",
+        source_version=(
+            source_tool.version if source_tool is not None else None
+        ),
     )
+
+
+def _get_active_source_tool(
+    request: Request,
+    tool_name: str,
+):
+    """Resolve current-source metadata without exposing script content."""
+    source_id = getattr(request.state, "source_id", None)
+    service = getattr(request.app.state, "source_tool_service", None)
+    if not source_id or service is None:
+        return None
+    return next(
+        (
+            tool
+            for tool in service.list_metadata(source_id)
+            if tool.name == tool_name
+        ),
+        None,
+    )
+
+
+def _is_code_builtin(tool_name: str) -> bool:
+    """Return whether a name remains available without an active source tool."""
+    from ...config.config import _default_builtin_tools
+
+    return tool_name in _default_builtin_tools()

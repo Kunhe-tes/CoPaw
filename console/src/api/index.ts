@@ -31,6 +31,7 @@ import { approvalApi } from "./modules/approval";
 import { htmlPreviewEventsApi } from "./modules/htmlPreviewEvents";
 import { systemCheckApi } from "./modules/systemCheck";
 import { skillReadinessApi } from "./modules/skillReadiness";
+import { sourceToolsApi } from "./modules/sourceTools";
 
 export const api = {
   // Root
@@ -112,6 +113,8 @@ export const api = {
 
   // Skill Readiness
   ...skillReadinessApi,
+  // Source-owned custom built-in tools
+  ...sourceToolsApi,
 };
 
 export default api;

@@ -69,6 +69,7 @@ import {
   ConfigDetailDrawer,
   SystemPromptSegments,
 } from "./components";
+import { SourceToolLibrary } from "./SourceToolLibrary";
 import {
   addPromptSegment,
   buildCapabilitySummaries,
@@ -1213,6 +1214,7 @@ export default function SystemConfigPage() {
                 </div>
               </div>
             </Card>
+            <SourceToolLibrary sourceId={activeSourceId} />
 
             <CapabilityGrid
               summaries={visibleCapabilitySummaries}
