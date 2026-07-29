@@ -30,7 +30,7 @@ import HookManagementPage from ".";
 
 async function openPreToolHandler(handlerId = "guard-shell") {
   fireEvent.click(
-    await screen.findByRole("button", { name: "编辑 PreToolUse" }),
+    await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
   );
   fireEvent.click(
     await screen.findByRole("button", {
@@ -41,7 +41,7 @@ async function openPreToolHandler(handlerId = "guard-shell") {
 
 async function openPreToolGroup() {
   fireEvent.click(
-    await screen.findByRole("button", { name: "编辑 PreToolUse" }),
+    await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
   );
   fireEvent.click(await screen.findByRole("button", { name: "所有工具" }));
 }
@@ -119,11 +119,11 @@ describe("HookManagementPage", () => {
   it("adds an empty event to the local draft", async () => {
     render(<HookManagementPage />);
     fireEvent.click(
-      await screen.findByRole("button", { name: "开始配置 SessionStart" }),
+      await screen.findByRole("button", { name: "新建规则 SessionStart" }),
     );
 
     expect(
-      screen.getByRole("button", { name: "编辑 SessionStart" }),
+      screen.getByRole("button", { name: "编辑配置 SessionStart" }),
     ).toBeInTheDocument();
   });
 
@@ -258,9 +258,23 @@ describe("HookManagementPage", () => {
     expect(screen.getByText("PreToolUse")).toBeInTheDocument();
     expect(screen.getByText(/1 个分组 · 1 个处理器/)).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "开始配置 SessionStart" }),
+      screen.getByRole("button", { name: "新建规则 SessionStart" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("事件与处理链")).not.toBeInTheDocument();
+  });
+
+  it("shows hook health, lifecycle and processor chains in the overview", async () => {
+    render(<HookManagementPage />);
+
+    expect(await screen.findByText("Hook 已启用")).toBeInTheDocument();
+    expect(screen.getByText("已配置事件")).toBeInTheDocument();
+    expect(screen.getByText("处理器数量")).toBeInTheDocument();
+    expect(screen.getByText("生命周期总览")).toBeInTheDocument();
+    expect(screen.getByText("PreToolUse")).toBeInTheDocument();
+    expect(screen.getByText("Command")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "编辑配置 PreToolUse" }),
+    ).toBeInTheDocument();
   });
 
   it("marks a changed configuration as unsaved until it is saved", async () => {
@@ -280,7 +294,7 @@ describe("HookManagementPage", () => {
     render(<HookManagementPage />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "编辑 PreToolUse" }),
+      await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
     );
     fireEvent.click(screen.getByRole("button", { name: "删除事件" }));
     fireEvent.click(await screen.findByRole("button", { name: "确认删除" }));
@@ -293,7 +307,9 @@ describe("HookManagementPage", () => {
   it("creates a scenario event from the new-event flow", async () => {
     render(<HookManagementPage />);
 
-    fireEvent.click(await screen.findByRole("button", { name: "新建事件" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "新建 Hook 规则" }),
+    );
     fireEvent.click(screen.getByRole("button", { name: "从场景模板开始" }));
     fireEvent.click(screen.getByRole("button", { name: /工具调用审计/ }));
 
@@ -323,7 +339,7 @@ describe("HookManagementPage", () => {
     render(<HookManagementPage />);
 
     fireEvent.click(
-      await screen.findByRole("button", { name: "编辑 PreToolUse" }),
+      await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
     );
     fireEvent.click(
       screen.getByRole("button", { name: "guard-shell 下移" }),

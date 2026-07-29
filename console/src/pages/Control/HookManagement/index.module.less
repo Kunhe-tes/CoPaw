@@ -218,6 +218,249 @@
   color: var(--console-management-text-secondary);
   white-space: normal;
 }
+
+.statusBanner,
+.statusCopy,
+.metricGrid,
+.sectionHeading,
+.lifecycleTrack,
+.lifecycleItem,
+.eventRow,
+.eventName,
+.processorChain,
+.unconfiguredList,
+.unconfiguredEvent {
+  display: flex;
+}
+.statusBanner {
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 12px;
+  background: var(--console-management-surface-subtle);
+}
+.statusCopy {
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+.statusCopy > svg {
+  flex: 0 0 auto;
+  font-size: 26px;
+}
+.statusEnabled {
+  color: var(--console-management-success);
+}
+.statusDisabled {
+  color: var(--console-management-text-muted);
+}
+.statusCopy strong,
+.statusCopy span {
+  display: block;
+}
+.statusCopy strong {
+  color: var(--console-management-text);
+  font-size: 15px;
+}
+.statusCopy span,
+.sectionHeading span,
+.metricCard small,
+.eventName span,
+.unconfiguredEvent span {
+  margin-top: 3px;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.metricGrid {
+  gap: 12px;
+}
+.metricCard {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 16px 18px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 12px;
+  background: var(--console-management-surface);
+}
+.metricCard > span,
+.metricCard strong,
+.metricCard small {
+  display: block;
+}
+.metricCard > span {
+  color: var(--console-management-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.metricCard strong {
+  margin-top: 6px;
+  color: var(--console-management-text);
+  font-size: 26px;
+  line-height: 1.1;
+}
+.lifecyclePanel,
+.eventTable,
+.unconfiguredEvents {
+  border: 1px solid var(--console-management-border);
+  border-radius: 12px;
+  background: var(--console-management-surface);
+}
+.lifecyclePanel {
+  overflow: hidden;
+}
+.sectionHeading {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--console-management-border);
+}
+.sectionHeading h3 {
+  margin: 0;
+  color: var(--console-management-text);
+  font-size: 15px;
+}
+.lifecycleTrack {
+  align-items: center;
+  min-height: 112px;
+  padding: 16px 18px;
+  overflow-x: auto;
+}
+.lifecycleItem {
+  flex: 1 0 152px;
+  align-items: center;
+}
+.lifecycleStep {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--console-management-text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+.lifecycleStep:hover,
+.lifecycleStep:focus-visible {
+  border-color: var(--console-management-primary);
+  background: var(--console-management-primary-soft);
+  outline: none;
+}
+.lifecycleStep[data-configured="true"] {
+  background: var(--console-management-surface-subtle);
+  color: var(--console-management-text);
+}
+.lifecycleStep strong,
+.lifecycleStep small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lifecycleStep strong {
+  font-size: 12px;
+}
+.lifecycleStep small {
+  margin-top: 2px;
+  color: var(--console-management-text-muted);
+  font-size: 11px;
+}
+.lifecycleMarker {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--console-management-border);
+  border-radius: 50%;
+  color: var(--console-management-text-muted);
+  font-size: 11px;
+}
+.lifecycleStep[data-configured="true"] .lifecycleMarker {
+  border-color: transparent;
+  color: var(--console-management-primary);
+  font-size: 20px;
+}
+.lifecycleArrow {
+  flex: 0 0 auto;
+  margin: 0 6px;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.eventTable {
+  overflow: hidden;
+}
+.eventRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.1fr) minmax(280px, 1.8fr) 88px 104px;
+  min-height: 68px;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--console-management-border);
+}
+.eventRow:first-child {
+  border-top: 0;
+}
+.eventRowHeader {
+  min-height: 40px;
+  background: var(--console-management-surface-subtle);
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.eventName {
+  min-width: 0;
+  flex-direction: column;
+}
+.eventName strong {
+  overflow: hidden;
+  color: var(--console-management-text);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.processorChain {
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.processorChain > span {
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.unconfiguredEvents {
+  overflow: hidden;
+}
+.unconfiguredList {
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 18px 18px;
+}
+.unconfiguredEvent {
+  height: auto;
+  min-width: 190px;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  text-align: left;
+}
+.unconfiguredEvent strong,
+.unconfiguredEvent span {
+  display: block;
+}
+.unconfiguredEvent strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 @media (max-width: 760px) {
   .page {
     padding: 16px;
