@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ from swe.app.file_manager import (
     FILE_MANAGER_PAGE_SIZE,
     FileManagerConflictError,
     FileManagerItemKind,
+    FileManagerOutcomeUncertainError,
     FileManagerPathError,
     FileManagerRoot,
     FileManagerService,
@@ -667,7 +669,7 @@ def test_recycle_mutations_restore_visible_state_when_index_save_fails(
     def fail_index_save(*args, **kwargs):
         raise OSError("index unavailable")
 
-    monkeypatch.setattr(file_manager, "save_archive_index", fail_index_save)
+    monkeypatch.setattr(service, "_save_archive_index", fail_index_save)
     with pytest.raises((FileManagerPathError, OSError)):
         if operation == "archive":
             service.archive_file("working", "report.txt", actor="tester")
@@ -812,3 +814,132 @@ def test_archive_restore_and_purge_recycle_items_without_exposing_payload_paths(
     second = service.archive_file("working", "MEMORY.md", actor="tester")
     service.purge_recycle_item(second.archive_item_id, actor="tester")
     assert service.list_directory("recycle").items == []
+
+
+@pytest.mark.parametrize("operation", ["archive", "restore", "purge"])
+def test_recycle_unlink_then_fsync_failure_keeps_committed_outcome(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    path = tmp_path / "report.txt"
+    path.write_text("report", encoding="utf-8")
+    service = _service(tmp_path)
+    archived = None
+    if operation != "archive":
+        archived = service.archive_file(
+            "working",
+            "report.txt",
+            actor="tester",
+        )
+
+    original_unlink = file_manager.os.unlink
+    original_fsync = file_manager.os.fsync
+    unlinked_target = False
+
+    def track_unlink(name, *args, **kwargs):
+        nonlocal unlinked_target
+        if name == (
+            "report.txt"
+            if operation == "archive"
+            else archived.archive_item_id
+        ):
+            unlinked_target = True
+        return original_unlink(name, *args, **kwargs)
+
+    def fail_fsync_after_unlink(descriptor):
+        if unlinked_target:
+            raise OSError("directory durability is uncertain")
+        return original_fsync(descriptor)
+
+    monkeypatch.setattr(file_manager.os, "unlink", track_unlink)
+    monkeypatch.setattr(file_manager.os, "fsync", fail_fsync_after_unlink)
+
+    with pytest.raises(FileManagerOutcomeUncertainError):
+        if operation == "archive":
+            service.archive_file("working", "report.txt", actor="tester")
+        elif operation == "restore":
+            assert archived is not None
+            service.restore_recycle_item(
+                archived.archive_item_id,
+                actor="tester",
+            )
+        else:
+            assert archived is not None
+            service.purge_recycle_item(
+                archived.archive_item_id,
+                actor="tester",
+            )
+
+    if operation == "archive":
+        assert not path.exists()
+        assert len(service.list_directory("recycle").items) == 1
+    elif operation == "restore":
+        assert path.read_text(encoding="utf-8") == "report"
+        assert service.list_directory("recycle").items == []
+    else:
+        assert not path.exists()
+        assert service.list_directory("recycle").items == []
+
+
+def test_recycle_index_symlink_is_rejected_without_following_target(
+    tmp_path: Path,
+) -> None:
+    archive_dir = tmp_path / "governance" / "archive"
+    archive_dir.mkdir(parents=True)
+    outside = tmp_path.parent / "file-manager-outside-index.json"
+    outside.write_text('{"version": 1, "items": []}', encoding="utf-8")
+    (archive_dir / "index.json").symlink_to(outside)
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).list_directory("recycle")
+
+
+def test_concurrent_archives_do_not_drop_archive_index_items(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    for index in range(8):
+        (tmp_path / f"report-{index}.txt").write_text(
+            "report",
+            encoding="utf-8",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [
+            executor.submit(
+                service.archive_file,
+                "working",
+                f"report-{index}.txt",
+                actor="tester",
+            )
+            for index in range(8)
+        ]
+        archived = [future.result() for future in futures]
+
+    listed = service.list_directory("recycle")
+    assert {item.archive_item_id for item in listed.items} == {
+        item.archive_item_id for item in archived
+    }
+
+
+def test_concurrent_saves_with_one_revision_allow_only_one_winner(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "note.txt"
+    path.write_text("before", encoding="utf-8")
+    service = _service(tmp_path)
+    revision = service.read_text_preview("working", "note.txt").revision
+
+    def save(content: str) -> str:
+        try:
+            service.save_text("working", "note.txt", content, revision)
+        except FileManagerConflictError:
+            return "conflict"
+        return "saved"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = list(executor.map(save, ("first", "second")))
+
+    assert sorted(outcomes) == ["conflict", "saved"]
+    assert path.read_text(encoding="utf-8") in {"first", "second"}

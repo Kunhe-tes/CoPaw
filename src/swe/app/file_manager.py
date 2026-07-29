@@ -18,23 +18,23 @@ import logging
 import os
 import re
 import stat as stat_module
+import threading
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
+from functools import wraps
 from pathlib import Path, PurePosixPath
 from typing import Mapping
 
 from pydantic import BaseModel
 
 from ..constant import SECRET_DIR
-from .file_governance.archive_maintenance import (
-    ARCHIVE_FILES_DIR,
-    load_archive_index,
-    save_archive_index,
-)
+from .file_governance.archive_maintenance import ARCHIVE_FILES_DIR
 
 logger = logging.getLogger(__name__)
+_WORKSPACE_LOCKS_GUARD = threading.Lock()
+_WORKSPACE_LOCKS: dict[str, threading.RLock] = {}
 
 FILE_MANAGER_PAGE_SIZE = 100
 TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
@@ -55,6 +55,10 @@ class FileManagerNotFoundError(FileManagerPathError):
 
 class FileManagerConflictError(FileManagerPathError):
     """A mutation would replace a newer or already-existing file."""
+
+
+class FileManagerOutcomeUncertainError(FileManagerPathError):
+    """A mutation committed a rename/unlink but durability confirmation failed."""
 
 
 class FileManagerRoot(str, Enum):
@@ -275,6 +279,29 @@ def _parse_archive_datetime(value: object) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _workspace_lock(workspace_dir: Path) -> threading.RLock:
+    """Return the process-local serialization lock for one tenant workspace."""
+
+    key = str(workspace_dir.resolve())
+    with _WORKSPACE_LOCKS_GUARD:
+        lock = _WORKSPACE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _WORKSPACE_LOCKS[key] = lock
+        return lock
+
+
+def _serialized_mutation(method):
+    """Serialize mutation validation and publication within one workspace."""
+
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._workspace_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapped
+
+
 def get_file_manager_service(workspace_dir: Path) -> "FileManagerService":
     """Create the only service route handlers may use for a tenant workspace."""
 
@@ -294,6 +321,7 @@ class FileManagerService:
         cursor_secret: bytes | str,
     ) -> None:
         self._workspace_dir = workspace_dir.resolve()
+        self._workspace_lock = _workspace_lock(self._workspace_dir)
         self._cursor_secret = (
             cursor_secret.encode("utf-8")
             if isinstance(cursor_secret, str)
@@ -527,6 +555,7 @@ class FileManagerService:
             preview_bytes=bytes(preview),
         )
 
+    @_serialized_mutation
     def save_text(
         self,
         root: FileManagerRoot | str,
@@ -702,6 +731,7 @@ class FileManagerService:
             entry_stat,
         )
 
+    @_serialized_mutation
     def archive_file(
         self,
         root: FileManagerRoot | str,
@@ -746,7 +776,7 @@ class FileManagerService:
                 resolved_root,
                 normalised_path,
             )
-            index = load_archive_index(self._workspace_dir)
+            index = self._load_archive_index()
             updated_index = dict(index)
             item = {
                 "id": archive_item_id,
@@ -760,21 +790,24 @@ class FileManagerService:
                 "archived_by": actor,
                 "archive_reason": "file_manager_delete",
             }
+            existing_items = index.get("items")
             updated_index["items"] = [
-                *list(index.get("items") or []),
+                *(existing_items if isinstance(existing_items, list) else []),
                 item,
             ]
-            save_archive_index(self._workspace_dir, updated_index)
+            self._save_archive_index(updated_index)
             index_saved = True
             self._unlink_if_same_file(
                 resolved_root,
                 normalised_path,
                 source_stat,
             )
+        except FileManagerOutcomeUncertainError:
+            raise
         except Exception:
             if index_saved:
                 try:
-                    save_archive_index(self._workspace_dir, index)
+                    self._save_archive_index(index)
                 except Exception:
                     logger.exception("Unable to roll back archive index")
             if (
@@ -793,6 +826,7 @@ class FileManagerService:
         assert archive_item_id is not None
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
+    @_serialized_mutation
     def restore_recycle_item(
         self,
         archive_item_id: str,
@@ -836,7 +870,9 @@ class FileManagerService:
                     if str(row.get("id") or "") != archive_item_id
                 ]
                 try:
-                    save_archive_index(self._workspace_dir, updated_index)
+                    self._save_archive_index(updated_index)
+                except FileManagerOutcomeUncertainError:
+                    raise
                 except Exception:
                     self._unlink_if_same_file(
                         root,
@@ -845,23 +881,16 @@ class FileManagerService:
                     )
                     raise
                 try:
-                    current_archive_stat = self._stat_entry(
+                    self._unlink_archive_payload_confirmed(
                         archive_parent_fd,
                         archive_item_id,
-                    )
-                    if self._stat_identity(
-                        current_archive_stat,
-                    ) != self._stat_identity(
                         source_stat,
-                    ):
-                        raise FileManagerConflictError(
-                            "Archived payload changed during restore",
-                        )
-                    os.unlink(archive_item_id, dir_fd=archive_parent_fd)
-                    os.fsync(archive_parent_fd)
+                    )
+                except FileManagerOutcomeUncertainError:
+                    raise
                 except (FileManagerPathError, OSError):
                     try:
-                        save_archive_index(self._workspace_dir, index)
+                        self._save_archive_index(index)
                     finally:
                         self._unlink_if_same_file(
                             root,
@@ -877,6 +906,7 @@ class FileManagerService:
         _ = actor
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
+    @_serialized_mutation
     def purge_recycle_item(
         self,
         archive_item_id: str,
@@ -901,12 +931,17 @@ class FileManagerService:
                 for row in index.get("items", [])
                 if str(row.get("id") or "") != archive_item_id
             ]
-            save_archive_index(self._workspace_dir, updated_index)
+            self._save_archive_index(updated_index)
             try:
-                os.unlink(archive_item_id, dir_fd=archive_parent_fd)
-                os.fsync(archive_parent_fd)
+                self._unlink_archive_payload_confirmed(
+                    archive_parent_fd,
+                    archive_item_id,
+                    os.fstat(archive_fd),
+                )
+            except FileManagerOutcomeUncertainError:
+                raise
             except OSError:
-                save_archive_index(self._workspace_dir, index)
+                self._save_archive_index(index)
                 raise
         finally:
             os.close(archive_fd)
@@ -1068,7 +1103,7 @@ class FileManagerService:
         """Adapt archive metadata without exposing its control-file paths."""
 
         items: list[FileManagerItem] = []
-        for item in load_archive_index(self._workspace_dir).get("items", []):
+        for item in self._load_archive_index().get("items", []):
             if not isinstance(item, dict):
                 continue
             try:
@@ -1112,7 +1147,7 @@ class FileManagerService:
         archive_item_id: str,
     ) -> tuple[dict[str, object], dict[str, object]]:
         archive_item_id = self._validate_archive_item_id(archive_item_id)
-        index = load_archive_index(self._workspace_dir)
+        index = self._load_archive_index()
         for item in index.get("items", []):
             if (
                 isinstance(item, dict)
@@ -1225,13 +1260,34 @@ class FileManagerService:
         return digest.hexdigest()
 
     def _open_archive_files_directory_fd(self) -> int:
+        archive_fd = self._open_archive_directory_fd()
+        try:
+            try:
+                os.mkdir("files", mode=0o700, dir_fd=archive_fd)
+            except FileExistsError:
+                pass
+            try:
+                files_fd = os.open(
+                    "files",
+                    self._directory_open_flags(),
+                    dir_fd=archive_fd,
+                )
+            except OSError as exc:
+                raise FileManagerPathError(
+                    "Unable to open file-manager archive",
+                ) from exc
+            return files_fd
+        finally:
+            os.close(archive_fd)
+
+    def _open_archive_directory_fd(self) -> int:
         workspace_fd = os.open(
             self._workspace_dir,
             self._directory_open_flags(),
         )
         current_fd = workspace_fd
         try:
-            for component in ("governance", "archive", "files"):
+            for component in ("governance", "archive"):
                 try:
                     os.mkdir(component, mode=0o700, dir_fd=current_fd)
                 except FileExistsError:
@@ -1255,6 +1311,103 @@ class FileManagerService:
             except OSError:
                 pass
             raise
+
+    def _load_archive_index(self) -> dict[str, object]:
+        """Read archive metadata through a no-follow descriptor only."""
+
+        archive_fd = self._open_archive_directory_fd()
+        try:
+            try:
+                index_fd = os.open(
+                    "index.json",
+                    self._file_open_flags(),
+                    dir_fd=archive_fd,
+                )
+            except FileNotFoundError:
+                return {"version": 1, "items": []}
+            except OSError as exc:
+                raise FileManagerPathError(
+                    "Unable to open archive index",
+                ) from exc
+            try:
+                index_stat = os.fstat(index_fd)
+                if not stat_module.S_ISREG(index_stat.st_mode):
+                    raise FileManagerPathError(
+                        "Archive index is not a regular file",
+                    )
+                chunks: list[bytes] = []
+                while chunk := os.read(index_fd, _FILE_READ_CHUNK_BYTES):
+                    chunks.append(chunk)
+            finally:
+                os.close(index_fd)
+        finally:
+            os.close(archive_fd)
+        try:
+            data = json.loads(b"".join(chunks).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            logger.warning("Ignoring malformed file-manager archive index")
+            return {"version": 1, "items": []}
+        if not isinstance(data, dict):
+            return {"version": 1, "items": []}
+        items = data.get("items")
+        return {
+            "version": 1,
+            "items": items if isinstance(items, list) else [],
+        }
+
+    def _save_archive_index(self, data: Mapping[str, object]) -> None:
+        """Atomically publish a no-follow archive index beneath governance."""
+
+        items = data.get("items")
+        if not isinstance(items, list):
+            items = []
+        encoded = json.dumps(
+            {"version": 1, "items": items},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8")
+        archive_fd = self._open_archive_directory_fd()
+        temporary_name = self._temporary_name("index.json")
+        temporary_fd: int | None = None
+        published = False
+        try:
+            temporary_fd = os.open(
+                temporary_name,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o600,
+                dir_fd=archive_fd,
+            )
+            _write_all(temporary_fd, encoded)
+            os.fsync(temporary_fd)
+            os.close(temporary_fd)
+            temporary_fd = None
+            os.replace(
+                temporary_name,
+                "index.json",
+                src_dir_fd=archive_fd,
+                dst_dir_fd=archive_fd,
+            )
+            published = True
+            try:
+                os.fsync(archive_fd)
+            except OSError as exc:
+                raise FileManagerOutcomeUncertainError(
+                    "File-manager mutation outcome is uncertain",
+                ) from exc
+        except FileManagerOutcomeUncertainError:
+            raise
+        except OSError as exc:
+            raise FileManagerPathError("Unable to save archive index") from exc
+        finally:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            if not published:
+                try:
+                    os.unlink(temporary_name, dir_fd=archive_fd)
+                except FileNotFoundError:
+                    pass
+            os.close(archive_fd)
 
     def _open_archive_payload_fd(
         self,
@@ -1345,6 +1498,25 @@ class FileManagerService:
         except OSError:
             logger.exception("Unable to remove unindexed archive payload")
 
+    def _unlink_archive_payload_confirmed(
+        self,
+        archive_directory_fd: int,
+        archive_item_id: str,
+        expected_stat: os.stat_result,
+    ) -> None:
+        current_stat = self._stat_entry(archive_directory_fd, archive_item_id)
+        if self._stat_identity(current_stat) != self._stat_identity(
+            expected_stat,
+        ):
+            raise FileManagerConflictError("Archived payload changed")
+        os.unlink(archive_item_id, dir_fd=archive_directory_fd)
+        try:
+            os.fsync(archive_directory_fd)
+        except OSError as exc:
+            raise FileManagerOutcomeUncertainError(
+                "File-manager mutation outcome is uncertain",
+            ) from exc
+
     def _unlink_if_same_file(
         self,
         root: FileManagerRoot,
@@ -1363,7 +1535,12 @@ class FileManagerService:
                     "File changed while being archived",
                 )
             os.unlink(parts[-1], dir_fd=parent_fd)
-            os.fsync(parent_fd)
+            try:
+                os.fsync(parent_fd)
+            except OSError as exc:
+                raise FileManagerOutcomeUncertainError(
+                    "File-manager mutation outcome is uncertain",
+                ) from exc
         except OSError as exc:
             raise FileManagerPathError("Unable to archive file") from exc
         finally:
