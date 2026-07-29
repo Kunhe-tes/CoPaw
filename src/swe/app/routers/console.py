@@ -6,12 +6,14 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
 import re
 import asyncio
 import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Union, Any, Optional, Dict
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -32,6 +34,14 @@ from ..agent_context import (
 from ..context_references import (
     ContextReferencesResponse,
     context_reference_directory,
+)
+from ..file_manager import (
+    FileManagerDirectoryListing,
+    FileManagerNotFoundError,
+    FileManagerPathError,
+    FileManagerRoot,
+    FileManagerTextPreview,
+    get_file_manager_service,
 )
 from ...config.context import resolve_request_effective_tenant_id
 
@@ -216,6 +226,40 @@ class GeneratedFilesResponse(BaseModel):
     """聊天相关文件列表响应。"""
 
     files: list[GeneratedFileItem] = Field(default_factory=list)
+
+
+def _file_manager_http_error(error: FileManagerPathError) -> HTTPException:
+    """Map controlled filesystem errors without revealing host paths."""
+
+    if isinstance(error, FileManagerNotFoundError):
+        return HTTPException(
+            status_code=404,
+            detail="File manager item not found",
+        )
+    return HTTPException(status_code=403, detail="Invalid file manager path")
+
+
+def _file_manager_download_disposition(filename: str) -> str:
+    """Create a header-safe attachment filename without leaking a path."""
+
+    if (
+        filename.isascii()
+        and all(32 <= ord(character) <= 126 for character in filename)
+        and '"' not in filename
+        and "\\" not in filename
+    ):
+        return f'attachment; filename="{filename}"'
+    return f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+def _stream_file_manager_download(file_descriptor: int):
+    """Yield a safely opened descriptor and always close it on disconnect."""
+
+    try:
+        while chunk := os.read(file_descriptor, 64 * 1024):
+            yield chunk
+    finally:
+        os.close(file_descriptor)
 
 
 def _looks_like_text_file(path: Path) -> bool:
@@ -854,6 +898,82 @@ async def get_console_generated_files(
     items.sort(key=lambda item: item.modified_at, reverse=reverse)
     return GeneratedFilesResponse(
         files=items[:_CHAT_FILE_LIST_LIMIT],
+    )
+
+
+@router.get(
+    "/file-manager/directories",
+    response_model=FileManagerDirectoryListing,
+    summary="List a controlled chat file-manager directory",
+)
+async def get_file_manager_directory(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query("", description="Relative POSIX directory path"),
+    cursor: str | None = Query(None, description="Signed directory cursor"),
+    q: str = Query("", max_length=512, description="Direct-child name filter"),
+) -> FileManagerDirectoryListing:
+    """List direct children for the workspace bound to this request only."""
+
+    workspace = await get_agent_for_request(request)
+    service = get_file_manager_service(Path(workspace.workspace_dir))
+    try:
+        return service.list_directory(
+            root,
+            path,
+            cursor=cursor,
+            query=q or None,
+        )
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+
+
+@router.get(
+    "/file-manager/files/read",
+    response_model=FileManagerTextPreview,
+    summary="Read a bounded controlled text-file preview",
+)
+async def get_file_manager_file_preview(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative POSIX file path"),
+) -> FileManagerTextPreview:
+    """Return at most one MiB of UTF-8 text without auditing reads."""
+
+    workspace = await get_agent_for_request(request)
+    service = get_file_manager_service(Path(workspace.workspace_dir))
+    try:
+        return service.read_text_preview(root, path)
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+
+
+@router.get(
+    "/file-manager/files/download",
+    summary="Download one controlled regular file as an attachment",
+)
+async def get_file_manager_file_download(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative POSIX file path"),
+) -> StreamingResponse:
+    """Stream a single regular file from a no-follow descriptor, unaudited."""
+
+    workspace = await get_agent_for_request(request)
+    service = get_file_manager_service(Path(workspace.workspace_dir))
+    try:
+        download = service.open_file_for_download(root, path)
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+    return StreamingResponse(
+        _stream_file_manager_download(download.file_descriptor),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": _file_manager_download_disposition(
+                download.filename,
+            ),
+            "Content-Length": str(download.size_bytes),
+        },
     )
 
 

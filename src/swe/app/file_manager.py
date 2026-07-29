@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
+import heapq
 import hashlib
 import hmac
 import json
@@ -25,16 +26,23 @@ from typing import Mapping
 
 from pydantic import BaseModel
 
+from ..constant import SECRET_DIR
+
 FILE_MANAGER_PAGE_SIZE = 100
-FILE_MANAGER_DIRECTORY_SCAN_LIMIT = 10_000
 TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
 _FILE_READ_CHUNK_BYTES = 64 * 1024
 _WORKING_HIDDEN_TOP_LEVEL = frozenset({"sessions", "governance"})
 _NATURAL_PARTS = re.compile(r"(\d+)")
+_CURSOR_SECRET_ENV_VAR = "SWE_FILE_MANAGER_CURSOR_SECRET"
+_CURSOR_SECRET_FILE_NAME = "file-manager-cursor-secret"
 
 
 class FileManagerPathError(ValueError):
     """A requested path is outside the controlled directory contract."""
+
+
+class FileManagerNotFoundError(FileManagerPathError):
+    """A valid controlled relative path does not currently exist."""
 
 
 class FileManagerRoot(str, Enum):
@@ -86,6 +94,7 @@ class FileManagerTextPreview(BaseModel):
     content: str | None = None
     is_truncated: bool = False
     editable: bool = False
+    revision: str
 
 
 @dataclass(frozen=True)
@@ -99,6 +108,22 @@ class FileManagerReadSnapshot:
     is_text: bool
     is_truncated: bool
     preview_bytes: bytes
+
+
+@dataclass(frozen=True)
+class FileManagerDownload:
+    """A regular file descriptor that remains safe until its stream closes."""
+
+    file_descriptor: int
+    filename: str
+    size_bytes: int
+
+
+@dataclass(frozen=True)
+class _DirectoryCandidate:
+    name: str
+    entry_stat: os.stat_result
+    sort_key: tuple[int, tuple[tuple[int, int | str], ...], str]
 
 
 def root_capabilities(root: FileManagerRoot | str) -> FileManagerCapabilities:
@@ -117,6 +142,101 @@ def root_capabilities(root: FileManagerRoot | str) -> FileManagerCapabilities:
         edit=True,
         download=True,
         archive=True,
+    )
+
+
+def _load_or_create_cursor_secret() -> bytes:
+    """Return one process-independent cursor HMAC secret.
+
+    The environment value supports managed deployments.  Local deployments
+    share a private, atomically-created secret beneath ``SECRET_DIR`` so a
+    cursor signed by one worker remains valid after a restart or on another
+    worker.  Tenant workspaces must never hold this signing material.
+    """
+
+    configured_secret = os.environ.get(_CURSOR_SECRET_ENV_VAR)
+    if configured_secret is not None:
+        if not configured_secret:
+            raise ValueError(
+                "SWE_FILE_MANAGER_CURSOR_SECRET must not be empty",
+            )
+        return configured_secret.encode("utf-8")
+
+    SECRET_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    secret_path = SECRET_DIR / _CURSOR_SECRET_FILE_NAME
+
+    try:
+        return _read_cursor_secret(secret_path)
+    except FileNotFoundError:
+        pass
+
+    secret = os.urandom(48)
+    temporary_path = SECRET_DIR / (
+        f".{_CURSOR_SECRET_FILE_NAME}.{os.getpid()}.{os.urandom(12).hex()}"
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+            0o600,
+        )
+        _write_all(descriptor, secret)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.link(temporary_path, secret_path, follow_symlinks=False)
+    except FileExistsError:
+        return _read_cursor_secret(secret_path)
+    except OSError as exc:
+        raise RuntimeError(
+            "Unable to create file-manager cursor secret",
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        try:
+            temporary_path.unlink()
+        except FileNotFoundError:
+            pass
+    return secret
+
+
+def _read_cursor_secret(secret_path: Path) -> bytes:
+    """Read one fully-published, private fallback secret."""
+
+    descriptor = os.open(
+        secret_path,
+        os.O_RDONLY | os.O_CLOEXEC | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        entry_stat = os.fstat(descriptor)
+        if not stat_module.S_ISREG(entry_stat.st_mode):
+            raise RuntimeError(
+                "File-manager cursor secret must be a regular file",
+            )
+        secret = os.read(descriptor, 1024)
+    finally:
+        os.close(descriptor)
+    if len(secret) != 48:
+        raise RuntimeError("File-manager cursor secret is invalid")
+    return secret
+
+
+def _write_all(descriptor: int, data: bytes) -> None:
+    """Write the fallback secret completely before publishing it by link."""
+
+    offset = 0
+    while offset < len(data):
+        offset += os.write(descriptor, data[offset:])
+
+
+def get_file_manager_service(workspace_dir: Path) -> "FileManagerService":
+    """Create the only service route handlers may use for a tenant workspace."""
+
+    return FileManagerService(
+        workspace_dir,
+        cursor_secret=_load_or_create_cursor_secret(),
     )
 
 
@@ -173,43 +293,47 @@ class FileManagerService:
             root,
             relative_path,
         )
+        after_sort_key = self._cursor_sort_key(
+            cursor,
+            resolved_root,
+            normalised_path,
+            query,
+        )
         directory_fd = self._open_directory_fd(
             resolved_root,
             normalised_path,
             allow_missing_root=True,
         )
         if directory_fd is None:
-            self._validate_cursor_context(
-                cursor,
-                resolved_root,
-                normalised_path,
-                query,
-            )
             return self._listing(resolved_root, normalised_path, [])
         try:
-            items = self._directory_items(
+            candidates = self._directory_candidates(
                 resolved_root,
                 normalised_path,
                 directory_fd,
                 query,
+                after_sort_key,
             )
         finally:
             os.close(directory_fd)
-        start_index = self._cursor_index(
-            cursor,
-            resolved_root,
-            normalised_path,
-            query,
-            items,
-        )
-        page = items[start_index : start_index + FILE_MANAGER_PAGE_SIZE]
+        page_candidates = candidates[:FILE_MANAGER_PAGE_SIZE]
+        page = [
+            self._item_for_entry(
+                resolved_root,
+                normalised_path,
+                candidate.name,
+                candidate.entry_stat,
+            )
+            for candidate in page_candidates
+        ]
         next_cursor = None
-        if start_index + FILE_MANAGER_PAGE_SIZE < len(items):
+        if len(candidates) > FILE_MANAGER_PAGE_SIZE:
             next_cursor = self._encode_cursor(
                 resolved_root,
                 normalised_path,
                 query,
                 page[-1].path,
+                page[-1].kind,
             )
         return self._listing(resolved_root, normalised_path, page, next_cursor)
 
@@ -219,12 +343,14 @@ class FileManagerService:
         relative_path: str,
     ) -> FileManagerTextPreview:
         snapshot = self.read_file_snapshot(root, relative_path)
+        resolved_root, _ = self._validate_root_and_path(root, relative_path)
         if not snapshot.is_text:
             return FileManagerTextPreview(
                 path=snapshot.path,
                 size_bytes=snapshot.size_bytes,
                 is_text=False,
                 is_truncated=snapshot.is_truncated,
+                revision=snapshot.revision,
             )
         content = self._decode_preview_bytes(snapshot.preview_bytes)
         return FileManagerTextPreview(
@@ -233,8 +359,41 @@ class FileManagerService:
             is_text=True,
             content=content,
             is_truncated=snapshot.is_truncated,
-            editable=not snapshot.is_truncated,
+            editable=(
+                not snapshot.is_truncated
+                and root_capabilities(resolved_root).edit
+            ),
+            revision=snapshot.revision,
         )
+
+    def open_file_for_download(
+        self,
+        root: FileManagerRoot | str,
+        relative_path: str,
+    ) -> FileManagerDownload:
+        """Open one regular, non-symlink file for attachment streaming."""
+
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
+            relative_path,
+        )
+        if not root_capabilities(resolved_root).download:
+            raise FileManagerPathError(
+                "Downloads are not available for this root",
+            )
+        file_fd = self._open_file_fd(resolved_root, normalised_path)
+        try:
+            entry_stat = os.fstat(file_fd)
+            if not stat_module.S_ISREG(entry_stat.st_mode):
+                raise FileManagerPathError("Path is not a regular file")
+            return FileManagerDownload(
+                file_descriptor=file_fd,
+                filename=normalised_path.rsplit("/", maxsplit=1)[-1],
+                size_bytes=entry_stat.st_size,
+            )
+        except Exception:
+            os.close(file_fd)
+            raise
 
     def read_file_snapshot(
         self,
@@ -398,7 +557,7 @@ class FileManagerService:
                     ):
                         os.close(directory_fd)
                         return None
-                    raise FileManagerPathError(
+                    raise FileManagerNotFoundError(
                         "Directory was not found",
                     ) from exc
                 except OSError as exc:
@@ -428,6 +587,8 @@ class FileManagerService:
                 self._file_open_flags(),
                 dir_fd=parent_fd,
             )
+        except FileNotFoundError as exc:
+            raise FileManagerNotFoundError("File was not found") from exc
         except OSError as exc:
             raise FileManagerPathError("Unable to open file") from exc
         finally:
@@ -471,22 +632,26 @@ class FileManagerService:
             raise FileManagerPathError("Path must not escape its root")
         return "/".join(parts)
 
-    def _directory_items(
+    def _directory_candidates(
         self,
         root: FileManagerRoot,
         parent_path: str,
         directory_fd: int,
         query: str | None,
-    ) -> list[FileManagerItem]:
+        after_sort_key: (
+            tuple[
+                int,
+                tuple[tuple[int, int | str], ...],
+                str,
+            ]
+            | None
+        ),
+    ) -> list[_DirectoryCandidate]:
         query_value = query.casefold() if query else None
-        items: list[FileManagerItem] = []
-        try:
+
+        def candidates():
             with os.scandir(directory_fd) as entries:
-                for scanned_count, entry in enumerate(entries, start=1):
-                    if scanned_count > FILE_MANAGER_DIRECTORY_SCAN_LIMIT:
-                        raise FileManagerPathError(
-                            "Directory contains too many entries",
-                        )
+                for entry in entries:
                     if (
                         root is FileManagerRoot.WORKING
                         and parent_path == ""
@@ -511,19 +676,28 @@ class FileManagerService:
                         raise FileManagerPathError(
                             "Unable to inspect directory",
                         ) from exc
-                    items.append(
-                        self._item_for_entry(
-                            root,
-                            parent_path,
-                            entry.name,
-                            entry_stat,
-                        ),
+                    sort_key = self._entry_sort_key(entry.name, entry_stat)
+                    if (
+                        after_sort_key is not None
+                        and sort_key <= after_sort_key
+                    ):
+                        continue
+                    yield _DirectoryCandidate(
+                        name=entry.name,
+                        entry_stat=entry_stat,
+                        sort_key=sort_key,
                     )
+
+        try:
+            return heapq.nsmallest(
+                FILE_MANAGER_PAGE_SIZE + 1,
+                candidates(),
+                key=lambda candidate: candidate.sort_key,
+            )
         except FileManagerPathError:
             raise
         except OSError as exc:
             raise FileManagerPathError("Unable to list directory") from exc
-        return sorted(items, key=self._item_sort_key)
 
     def _item_for_entry(
         self,
@@ -614,16 +788,31 @@ class FileManagerService:
         )
 
     @staticmethod
-    def _item_sort_key(
-        item: FileManagerItem,
+    def _entry_sort_key(
+        name: str,
+        entry_stat: os.stat_result,
     ) -> tuple[int, tuple[tuple[int, int | str], ...], str]:
-        kind_rank = 0 if item.kind is FileManagerItemKind.DIRECTORY else 1
+        kind_rank = 0 if stat_module.S_ISDIR(entry_stat.st_mode) else 1
         natural_name = tuple(
             (0, int(part)) if part.isdecimal() else (1, part.casefold())
-            for part in _NATURAL_PARTS.split(item.name)
+            for part in _NATURAL_PARTS.split(name)
             if part != ""
         )
-        return kind_rank, natural_name, item.name
+        return kind_rank, natural_name, name
+
+    @staticmethod
+    def _sort_key_for_cursor(
+        last_path: str,
+        last_kind: FileManagerItemKind,
+    ) -> tuple[int, tuple[tuple[int, int | str], ...], str]:
+        name = last_path.rsplit("/", maxsplit=1)[-1]
+        kind_rank = 0 if last_kind is FileManagerItemKind.DIRECTORY else 1
+        natural_name = tuple(
+            (0, int(part)) if part.isdecimal() else (1, part.casefold())
+            for part in _NATURAL_PARTS.split(name)
+            if part != ""
+        )
+        return kind_rank, natural_name, name
 
     def _listing(
         self,
@@ -650,25 +839,18 @@ class FileManagerService:
             capabilities=root_capabilities(root),
         )
 
-    def _cursor_index(
+    def _cursor_sort_key(
         self,
         cursor: str | None,
         root: FileManagerRoot,
         path: str,
         query: str | None,
-        items: list[FileManagerItem],
-    ) -> int:
-        if cursor is None:
-            return 0
-        last_path = self._validate_cursor_context(cursor, root, path, query)
-        try:
-            return next(
-                index + 1
-                for index, item in enumerate(items)
-                if item.path == last_path
-            )
-        except StopIteration as exc:
-            raise FileManagerPathError("Invalid directory cursor") from exc
+    ) -> tuple[int, tuple[tuple[int, int | str], ...], str] | None:
+        cursor_state = self._validate_cursor_context(cursor, root, path, query)
+        if cursor_state is None:
+            return None
+        last_path, last_kind = cursor_state
+        return self._sort_key_for_cursor(last_path, last_kind)
 
     def _validate_cursor_context(
         self,
@@ -676,7 +858,7 @@ class FileManagerService:
         root: FileManagerRoot,
         path: str,
         query: str | None,
-    ) -> str | None:
+    ) -> tuple[str, FileManagerItemKind] | None:
         if cursor is None:
             return None
         try:
@@ -696,14 +878,21 @@ class FileManagerService:
                 "root": root.value,
                 "path": path,
                 "query": query or "",
-                "version": 1,
+                "version": 2,
                 "last_path": cursor_payload["last_path"],
+                "last_kind": cursor_payload["last_kind"],
             }:
                 raise ValueError
             last_path = cursor_payload["last_path"]
-            if not isinstance(last_path, str):
+            last_kind = FileManagerItemKind(cursor_payload["last_kind"])
+            parent_path = last_path.rpartition("/")[0]
+            if (
+                not isinstance(last_path, str)
+                or self._normalise_relative_path(last_path) != last_path
+                or parent_path != path
+            ):
                 raise ValueError
-            return last_path
+            return last_path, last_kind
         except (
             AttributeError,
             binascii.Error,
@@ -739,13 +928,15 @@ class FileManagerService:
         path: str,
         query: str | None,
         last_path: str,
+        last_kind: FileManagerItemKind,
     ) -> str:
         payload: dict[str, str | int] = {
             "root": root.value,
             "path": path,
             "query": query or "",
-            "version": 1,
+            "version": 2,
             "last_path": last_path,
+            "last_kind": last_kind.value,
         }
         payload["signature"] = self._cursor_signature(payload)
         return base64.urlsafe_b64encode(

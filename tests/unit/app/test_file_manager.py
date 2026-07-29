@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from swe.app import file_manager
 from swe.app.file_manager import (
     FILE_MANAGER_PAGE_SIZE,
     FileManagerPathError,
@@ -21,6 +22,45 @@ def _service(workspace: Path) -> FileManagerService:
         workspace,
         cursor_secret=b"test-file-manager-secret",
     )
+
+
+def test_service_factory_uses_configured_cursor_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_FILE_MANAGER_CURSOR_SECRET", "configured-secret")
+
+    service = file_manager.get_file_manager_service(tmp_path)
+
+    assert service._cursor_secret == b"configured-secret"
+
+
+def test_service_factory_persists_a_private_fallback_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_dir = tmp_path / "secrets"
+    monkeypatch.delenv("SWE_FILE_MANAGER_CURSOR_SECRET", raising=False)
+    monkeypatch.setattr(file_manager, "SECRET_DIR", secret_dir)
+
+    first = file_manager.get_file_manager_service(tmp_path / "tenant-a")
+    second = file_manager.get_file_manager_service(tmp_path / "tenant-b")
+
+    secret_file = secret_dir / "file-manager-cursor-secret"
+    assert first._cursor_secret == second._cursor_secret
+    assert len(first._cursor_secret) >= 32
+    assert secret_file.exists()
+    assert secret_file.stat().st_mode & 0o077 == 0
+
+
+def test_service_factory_rejects_an_explicit_empty_cursor_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SWE_FILE_MANAGER_CURSOR_SECRET", "")
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        file_manager.get_file_manager_service(tmp_path)
 
 
 def test_working_listing_hides_only_sessions_and_governance(
@@ -100,6 +140,20 @@ def test_listing_uses_stable_100_item_cursor_pages(tmp_path: Path) -> None:
         "item101.txt",
     ]
     assert second_page.next_cursor is None
+
+
+def test_listing_allows_more_than_ten_thousand_items_with_cursor(
+    tmp_path: Path,
+) -> None:
+    for index in range(10_001):
+        (tmp_path / f"item{index:05d}.txt").write_text("x", encoding="utf-8")
+
+    listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
+
+    assert len(listing.items) == FILE_MANAGER_PAGE_SIZE
+    assert listing.items[0].name == "item00000.txt"
+    assert listing.items[-1].name == "item00099.txt"
+    assert listing.next_cursor is not None
 
 
 def test_cursor_rejects_forgery_and_context_mismatches(tmp_path: Path) -> None:
@@ -475,19 +529,19 @@ def test_unknown_or_missing_paths_raise_stable_file_manager_errors(
         operation(_service(tmp_path))
 
 
-def test_directory_scan_limit_returns_file_manager_error(
+def test_directory_listing_has_no_hard_scan_limit(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "swe.app.file_manager.FILE_MANAGER_DIRECTORY_SCAN_LIMIT",
-        2,
-    )
     for name in ("one.txt", "two.txt", "three.txt"):
         (tmp_path / name).write_text(name, encoding="utf-8")
 
-    with pytest.raises(FileManagerPathError):
-        _service(tmp_path).list_directory(FileManagerRoot.WORKING)
+    listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
+
+    assert [item.name for item in listing.items] == [
+        "one.txt",
+        "three.txt",
+        "two.txt",
+    ]
 
 
 def test_permission_failures_are_translated_to_file_manager_errors(

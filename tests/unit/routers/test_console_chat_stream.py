@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from src.swe.app.file_manager import FileManagerService
 from src.swe.app.routers import console as console_router
 
 
@@ -79,6 +80,146 @@ def _build_upload_client(monkeypatch, media_dir):
         _fake_get_agent_for_request,
     )
     return TestClient(app)
+
+
+def _build_file_manager_client(monkeypatch, workspace_dir):
+    app = FastAPI()
+    app.include_router(console_router.router)
+    workspace = SimpleNamespace(workspace_dir=workspace_dir)
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    monkeypatch.setattr(
+        console_router,
+        "get_file_manager_service",
+        lambda directory: FileManagerService(
+            directory,
+            cursor_secret=b"test-file-manager-secret",
+        ),
+    )
+    return TestClient(app)
+
+
+def test_file_manager_listing_is_bound_to_request_workspace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "visible.txt").write_text("visible", encoding="utf-8")
+    (tmp_path / "sessions").mkdir()
+    (tmp_path / "governance").mkdir()
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    response = client.get("/console/file-manager/directories?root=working")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["root"] == "working"
+    assert body["path"] == ""
+    assert [item["name"] for item in body["items"]] == ["visible.txt"]
+    assert str(tmp_path) not in response.text
+
+
+@pytest.mark.parametrize("path", ["../outside", "/etc/passwd"])
+def test_file_manager_rejects_escaping_paths(
+    tmp_path,
+    monkeypatch,
+    path,
+) -> None:
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    response = client.get(
+        "/console/file-manager/directories",
+        params={"root": "working", "path": path},
+    )
+
+    assert response.status_code == 403
+
+
+def test_file_manager_read_returns_bounded_preview_and_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    large_text = "x" * (1024 * 1024 + 1)
+    (tmp_path / "large.txt").write_text(large_text, encoding="utf-8")
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    response = client.get(
+        "/console/file-manager/files/read",
+        params={"root": "working", "path": "large.txt"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["is_text"] is True
+    assert body["is_truncated"] is True
+    assert body["editable"] is False
+    assert len(body["content"].encode("utf-8")) == 1024 * 1024
+    assert body["revision"]
+
+
+def test_file_manager_conversation_can_read_and_download_regular_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "chat.txt").write_text("conversation", encoding="utf-8")
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    read_response = client.get(
+        "/console/file-manager/files/read",
+        params={"root": "conversation", "path": "chat.txt"},
+    )
+    download_response = client.get(
+        "/console/file-manager/files/download",
+        params={"root": "conversation", "path": "chat.txt"},
+    )
+
+    assert read_response.status_code == 200
+    assert read_response.json()["content"] == "conversation"
+    assert read_response.json()["editable"] is False
+    assert download_response.status_code == 200
+    assert download_response.content == b"conversation"
+    assert download_response.headers["content-disposition"] == (
+        'attachment; filename="chat.txt"'
+    )
+
+
+def test_file_manager_recycle_is_not_available_for_read_or_download(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    for endpoint in (
+        "/console/file-manager/directories?root=recycle",
+        "/console/file-manager/files/read?root=recycle&path=file.txt",
+        "/console/file-manager/files/download?root=recycle&path=file.txt",
+    ):
+        assert client.get(endpoint).status_code == 403
+
+
+def test_file_manager_download_rejects_symbolic_links(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    outside = tmp_path.parent / "outside-download.txt"
+    outside.write_text("not downloadable", encoding="utf-8")
+    (tmp_path / "outside-link.txt").symlink_to(outside)
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    response = client.get(
+        "/console/file-manager/files/download",
+        params={"root": "working", "path": "outside-link.txt"},
+    )
+
+    assert response.status_code == 403
 
 
 @pytest.mark.parametrize(
