@@ -5,6 +5,7 @@ import asyncio
 import os
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, get_type_hints
 
 import pytest
 from fastapi import FastAPI
@@ -17,6 +18,12 @@ class _Clock:
 
     def __call__(self) -> float:
         return self.value
+
+
+def test_consume_task_outcome_accepts_future_contract() -> None:
+    from swe.app.context_references import _consume_task_outcome
+
+    assert get_type_hints(_consume_task_outcome)["task"] == asyncio.Future[Any]
 
 
 def test_directory_cache_isolates_scopes_and_expires_categories() -> None:

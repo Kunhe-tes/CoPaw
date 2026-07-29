@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -14,6 +15,53 @@ def _write_skill(workspace: Path, name: str) -> None:
         f"---\nname: {name}\ndescription: Selected guidance\n---\nbody\n",
         encoding="utf-8",
     )
+
+
+def test_normalize_context_references_preserves_order_and_deduplicates() -> (
+    None
+):
+    from swe.app.runner.context_references import (
+        _normalize_context_references,
+    )
+
+    assert _normalize_context_references(
+        [
+            {"type": "skill", "id": "skill:chosen", "name": "chosen"},
+            {"type": "skill", "id": "skill:chosen", "name": "chosen"},
+            {"type": "mcp_tool", "id": "mcp_tool:docs/search"},
+        ],
+    ) == [
+        ("skill", {"type": "skill", "id": "skill:chosen", "name": "chosen"}),
+        ("mcp_tool", {"type": "mcp_tool", "id": "mcp_tool:docs/search"}),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_context_reference_directives_skip_mcp_discovery_without_mcp_reference(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from swe.app.runner import context_references
+
+    discover = AsyncMock(return_value=[])
+    monkeypatch.setattr(context_references, "discover_mcp_tools", discover)
+
+    directives = await context_references.build_context_reference_directives(
+        workspace_dir=tmp_path,
+        channel="console",
+        agent_config=SimpleNamespace(mcp=None),
+        references=[
+            {
+                "type": "workspace_file",
+                "id": "workspace_file:media/missing.txt",
+                "root": "media",
+                "relative_path": "missing.txt",
+            },
+        ],
+    )
+
+    assert directives == []
+    discover.assert_not_awaited()
 
 
 @pytest.mark.asyncio

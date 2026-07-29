@@ -120,14 +120,10 @@ def _validate_workspace_file_reference(
     )
 
 
-async def build_context_reference_directives(
-    *,
-    workspace_dir: Path,
-    channel: str,
-    agent_config: Any,
+def _normalize_context_references(
     references: Iterable[object],
-) -> list[ContextReferenceDirective]:
-    """Revalidate structured client references and build trusted directives."""
+) -> list[tuple[ContextReferenceType, dict[str, object]]]:
+    """Keep bounded, valid references in their first-seen order."""
     normalized: list[tuple[ContextReferenceType, dict[str, object]]] = []
     seen: set[tuple[str, str]] = set()
     for raw in islice(references, MAX_CONTEXT_REFERENCES):
@@ -140,7 +136,15 @@ async def build_context_reference_directives(
             continue
         seen.add(identity)
         normalized.append((reference_type, values))
+    return normalized
 
+
+def _skill_directives_by_name(
+    *,
+    workspace_dir: Path,
+    channel: str,
+    normalized: Iterable[tuple[ContextReferenceType, dict[str, object]]],
+) -> dict[str, SkillUseDirective]:
     skill_names = [
         raw["name"]
         for reference_type, raw in normalized
@@ -153,27 +157,39 @@ async def build_context_reference_directives(
         channel=channel,
         selected_skill_names=skill_names,
     )
-    skills_by_name = {
-        directive.name: directive for directive in skill_directives
-    }
+    return {directive.name: directive for directive in skill_directives}
 
+
+async def _requested_mcp_tools_by_id(
+    *,
+    normalized: Iterable[tuple[ContextReferenceType, dict[str, object]]],
+    agent_config: Any,
+) -> dict[str, tuple[str, str]]:
     requested_mcp_ids = {
         str(raw["id"])
         for reference_type, raw in normalized
         if reference_type == "mcp_tool"
     }
-    mcp_by_id: dict[str, tuple[str, str]] = {}
-    if requested_mcp_ids:
-        available_tools = await discover_mcp_tools(
-            manager=_AgentRunnerMCPClientProvider(),
-            agent_config=agent_config,
-        )
-        mcp_by_id = {
-            tool.id: (tool.server, tool.name)
-            for tool in available_tools
-            if tool.id in requested_mcp_ids
-        }
+    if not requested_mcp_ids:
+        return {}
+    available_tools = await discover_mcp_tools(
+        manager=_AgentRunnerMCPClientProvider(),
+        agent_config=agent_config,
+    )
+    return {
+        tool.id: (tool.server, tool.name)
+        for tool in available_tools
+        if tool.id in requested_mcp_ids
+    }
 
+
+def _build_directives_from_normalized_references(
+    *,
+    workspace_dir: Path,
+    normalized: Iterable[tuple[ContextReferenceType, dict[str, object]]],
+    skills_by_name: dict[str, SkillUseDirective],
+    mcp_by_id: dict[str, tuple[str, str]],
+) -> list[ContextReferenceDirective]:
     directives: list[ContextReferenceDirective] = []
     for reference_type, raw in normalized:
         if reference_type == "skill":
@@ -200,3 +216,29 @@ async def build_context_reference_directives(
         if directive is not None:
             directives.append(directive)
     return directives
+
+
+async def build_context_reference_directives(
+    *,
+    workspace_dir: Path,
+    channel: str,
+    agent_config: Any,
+    references: Iterable[object],
+) -> list[ContextReferenceDirective]:
+    """Revalidate structured client references and build trusted directives."""
+    normalized = _normalize_context_references(references)
+    skills_by_name = _skill_directives_by_name(
+        workspace_dir=workspace_dir,
+        channel=channel,
+        normalized=normalized,
+    )
+    mcp_by_id = await _requested_mcp_tools_by_id(
+        normalized=normalized,
+        agent_config=agent_config,
+    )
+    return _build_directives_from_normalized_references(
+        workspace_dir=workspace_dir,
+        normalized=normalized,
+        skills_by_name=skills_by_name,
+        mcp_by_id=mcp_by_id,
+    )
