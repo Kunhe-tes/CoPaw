@@ -8,11 +8,16 @@ authentication and translate its small, typed surface into HTTP responses.
 from __future__ import annotations
 
 import base64
+import binascii
+import hashlib
+import hmac
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path, PurePosixPath
+from typing import Mapping
 
 from pydantic import BaseModel
 
@@ -96,8 +101,20 @@ def root_capabilities(root: FileManagerRoot | str) -> FileManagerCapabilities:
 class FileManagerService:
     """Confines operations to the roots exposed by the chat file manager."""
 
-    def __init__(self, workspace_dir: Path) -> None:
+    def __init__(
+        self,
+        workspace_dir: Path,
+        *,
+        cursor_secret: bytes | str,
+    ) -> None:
         self._workspace_dir = workspace_dir.resolve()
+        self._cursor_secret = (
+            cursor_secret.encode("utf-8")
+            if isinstance(cursor_secret, str)
+            else cursor_secret
+        )
+        if not self._cursor_secret:
+            raise ValueError("cursor_secret must not be empty")
 
     def resolve_path(
         self,
@@ -191,7 +208,16 @@ class FileManagerService:
         size_bytes = target.stat().st_size
         with target.open("rb") as handle:
             sample = handle.read(TEXT_PREVIEW_LIMIT_BYTES + 4)
-        if b"\x00" in sample:
+        try:
+            decoded_sample = sample.decode("utf-8")
+        except UnicodeDecodeError:
+            return FileManagerTextPreview(
+                path=normalised_path,
+                size_bytes=size_bytes,
+                is_text=False,
+                is_truncated=size_bytes > TEXT_PREVIEW_LIMIT_BYTES,
+            )
+        if self._contains_disallowed_control_character(decoded_sample):
             return FileManagerTextPreview(
                 path=normalised_path,
                 size_bytes=size_bytes,
@@ -199,32 +225,25 @@ class FileManagerService:
                 is_truncated=size_bytes > TEXT_PREVIEW_LIMIT_BYTES,
             )
 
-        try:
-            sample.decode("utf-8")
-        except UnicodeDecodeError:
-            # A valid UTF-8 code point can straddle the 1 MB preview boundary.
-            try:
-                sample[:TEXT_PREVIEW_LIMIT_BYTES].decode(
-                    "utf-8",
-                    errors="ignore",
-                )
-            except UnicodeDecodeError:
-                return FileManagerTextPreview(
-                    path=normalised_path,
-                    size_bytes=size_bytes,
-                    is_text=False,
-                    is_truncated=size_bytes > TEXT_PREVIEW_LIMIT_BYTES,
-                )
-
         is_truncated = size_bytes > TEXT_PREVIEW_LIMIT_BYTES
         preview_bytes = (
             sample[:TEXT_PREVIEW_LIMIT_BYTES] if is_truncated else sample
         )
+        try:
+            content = preview_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            # The full sampled bytes are valid UTF-8.  Therefore a prefix can
+            # fail only by ending in one partial UTF-8 code point.
+            if not is_truncated or exc.end != len(preview_bytes):
+                raise FileManagerPathError(
+                    "Invalid UTF-8 preview boundary",
+                ) from exc
+            content = preview_bytes[: exc.start].decode("utf-8")
         return FileManagerTextPreview(
             path=normalised_path,
             size_bytes=size_bytes,
             is_text=True,
-            content=preview_bytes.decode("utf-8", errors="ignore"),
+            content=content,
             is_truncated=is_truncated,
             editable=not is_truncated,
         )
@@ -311,12 +330,20 @@ class FileManagerService:
         )
 
     @staticmethod
+    def _contains_disallowed_control_character(text: str) -> bool:
+        return any(
+            unicodedata.category(character) == "Cc"
+            and character not in {"\t", "\n", "\r"}
+            for character in text
+        )
+
+    @staticmethod
     def _item_sort_key(
         item: FileManagerItem,
-    ) -> tuple[int, tuple[object, ...], str]:
+    ) -> tuple[int, tuple[tuple[int, int | str], ...], str]:
         kind_rank = 0 if item.kind is FileManagerItemKind.DIRECTORY else 1
         natural_name = tuple(
-            int(part) if part.isdecimal() else part.casefold()
+            (0, int(part)) if part.isdecimal() else (1, part.casefold())
             for part in _NATURAL_PARTS.split(item.name)
             if part != ""
         )
@@ -358,45 +385,74 @@ class FileManagerService:
         if cursor is None:
             return 0
         try:
-            payload = json.loads(
-                base64.urlsafe_b64decode(cursor.encode("ascii")),
+            encoded_payload = base64.b64decode(
+                cursor.encode("ascii"),
+                altchars=b"-_",
+                validate=True,
             )
-            if payload != {
+            cursor_payload = json.loads(encoded_payload)
+            signature = cursor_payload.pop("signature")
+            if not isinstance(signature, str) or not hmac.compare_digest(
+                signature,
+                self._cursor_signature(cursor_payload),
+            ):
+                raise ValueError
+            if cursor_payload != {
                 "root": root.value,
                 "path": path,
                 "query": query or "",
                 "version": 1,
-                "last_path": payload["last_path"],
+                "last_path": cursor_payload["last_path"],
             }:
                 raise ValueError
             return next(
                 index + 1
                 for index, item in enumerate(items)
-                if item.path == payload["last_path"]
+                if item.path == cursor_payload["last_path"]
             )
         except (
+            AttributeError,
+            binascii.Error,
             KeyError,
             StopIteration,
+            TypeError,
             UnicodeDecodeError,
             ValueError,
             json.JSONDecodeError,
         ) as exc:
             raise FileManagerPathError("Invalid directory cursor") from exc
 
-    @staticmethod
     def _encode_cursor(
+        self,
         root: FileManagerRoot,
         path: str,
         query: str | None,
         last_path: str,
     ) -> str:
-        payload = {
+        payload: dict[str, str | int] = {
             "root": root.value,
             "path": path,
             "query": query or "",
             "version": 1,
             "last_path": last_path,
         }
+        payload["signature"] = self._cursor_signature(payload)
         return base64.urlsafe_b64encode(
-            json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+            json.dumps(
+                payload,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8"),
         ).decode("ascii")
+
+    def _cursor_signature(self, payload: Mapping[str, object]) -> str:
+        canonical_payload = json.dumps(
+            payload,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        return hmac.new(
+            self._cursor_secret,
+            canonical_payload,
+            hashlib.sha256,
+        ).hexdigest()
