@@ -6,6 +6,12 @@ import FileDetail from "./FileDetail";
 
 const { listDirectory, readFile } = vi.hoisted(() => ({ listDirectory: vi.fn(), readFile: vi.fn() }));
 
+class ResizeObserverMock {
+  observe() {}
+  disconnect() {}
+  unobserve() {}
+}
+
 vi.mock("@/api/modules/chat", () => ({
   chatApi: {
     fileManager: {
@@ -47,8 +53,13 @@ const rootPage = {
 };
 
 describe("FileManager", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    document.querySelector("[data-chat-messages-area]")?.remove();
+    vi.unstubAllGlobals();
+  });
   beforeEach(() => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     listDirectory.mockReset();
     listDirectory.mockResolvedValue(rootPage);
     readFile.mockReset();
@@ -68,6 +79,31 @@ describe("FileManager", () => {
     expect(screen.getByLabelText("文件列表第 1 栏")).toBeInTheDocument();
     expect(screen.getByLabelText("文件列表第 2 栏")).toBeInTheDocument();
     expect(screen.getByLabelText("文件列表第 3 栏")).toBeInTheDocument();
+  });
+
+  it("uses the chat message area width instead of a full-width modal", async () => {
+    const chatArea = document.createElement("div");
+    chatArea.dataset.chatMessagesArea = "";
+    vi.spyOn(chatArea, "getBoundingClientRect").mockReturnValue({
+      left: 240,
+      top: 0,
+      right: 880,
+      bottom: 800,
+      width: 640,
+      height: 800,
+      x: 240,
+      y: 0,
+      toJSON: () => ({}),
+    });
+    document.body.append(chatArea);
+
+    render(<FileManager />);
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+
+    expect(await screen.findByRole("dialog", { name: "文件管理器" })).toHaveStyle({
+      width: "640px",
+      left: "240px",
+    });
   });
 
   it("explains why uploads are unavailable in conversation and recycle roots", async () => {

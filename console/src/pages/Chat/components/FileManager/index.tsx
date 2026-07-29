@@ -393,9 +393,8 @@ export default function FileManager() {
         open={open}
         title={modalTitle}
         footer={null}
-        width="100%"
+        width={chatAreaFrame?.width || "calc(100vw - 240px)"}
         style={{
-          width: chatAreaFrame?.width || "calc(100vw - 240px)",
           height: "100dvh",
           minHeight: "100dvh",
           maxHeight: "100dvh",
