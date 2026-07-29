@@ -1,6 +1,11 @@
 import { request } from "../request";
-import { getApiUrl, getApiToken } from "../config";
+import { clearAuthToken, getApiUrl, getApiToken } from "../config";
 import { buildAuthHeaders } from "../authHeaders";
+import {
+  clearExternalToken,
+  ensureValidToken,
+  isExternalTokenEnabled,
+} from "../externalToken";
 import type {
   ChatPage,
   ChatSpec,
@@ -111,6 +116,11 @@ export interface FileManagerRecycleMutation {
   original_path: string;
 }
 
+export interface FileManagerDownload {
+  blob: Blob;
+  filename: string;
+}
+
 const FILES_PREVIEW = "/files/preview";
 
 function fileManagerQuery(params: Record<string, string | null | undefined>) {
@@ -121,11 +131,61 @@ function fileManagerQuery(params: Record<string, string | null | undefined>) {
   return query.toString();
 }
 
-function fileManagerDownloadUrl(params: FileManagerPathParams): string {
-  const query = fileManagerQuery(params);
-  const url = getApiUrl(`/console/file-manager/files/download?${query}`);
-  const token = getApiToken();
-  return token ? `${url}&token=${encodeURIComponent(token)}` : url;
+function downloadFilename(contentDisposition: string | null): string {
+  const utf8Filename = contentDisposition?.match(
+    /filename\*=UTF-8''([^;]+)/i,
+  )?.[1];
+  if (utf8Filename) {
+    try {
+      return decodeURIComponent(utf8Filename);
+    } catch {
+      // Fall through to a safe generic name when a malformed header arrives.
+    }
+  }
+  const quotedFilename = contentDisposition?.match(/filename="([^"]+)"/i)?.[1];
+  return quotedFilename || "download";
+}
+
+async function fileManagerDownload(
+  params: FileManagerPathParams,
+): Promise<FileManagerDownload> {
+  const url = getApiUrl(
+    `/console/file-manager/files/download?${fileManagerQuery(params)}`,
+  );
+  const fetchDownload = () =>
+    fetch(url, { method: "GET", headers: buildAuthHeaders() });
+
+  let response = await fetchDownload();
+  if (response.status === 401 && isExternalTokenEnabled()) {
+    try {
+      await ensureValidToken(true);
+    } catch {
+      clearExternalToken();
+      throw new Error("登录状态已失效，请刷新页面或重新进入系统后再试");
+    }
+    response = await fetchDownload();
+    if (response.status === 401) {
+      clearExternalToken();
+      throw new Error("登录状态已失效，请刷新页面或重新进入系统后再试");
+    }
+  } else if (response.status === 401) {
+    clearAuthToken();
+    throw new Error("认证已失效，请刷新页面或重新进入系统后再试");
+  }
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => "");
+    throw new Error(
+      `File download failed: ${response.status} ${response.statusText}${
+        text ? ` - ${text}` : ""
+      }`,
+    );
+  }
+
+  return {
+    blob: await response.blob(),
+    filename: downloadFilename(response.headers.get("Content-Disposition")),
+  };
 }
 
 export const chatApi = {
@@ -262,7 +322,7 @@ export const chatApi = {
       );
     },
 
-    downloadUrl: fileManagerDownloadUrl,
+    downloadFile: fileManagerDownload,
 
     archive: (params: FileManagerPathParams) =>
       request<FileManagerRecycleMutation>(
