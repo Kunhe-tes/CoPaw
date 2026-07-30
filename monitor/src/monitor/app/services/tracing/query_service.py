@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from ...database import get_db_connection, DatabaseConnection
 from ....utils.bbk import get_bbk_name_by_id
+from ....utils.timing import MethodTimer
 from ...models.tracing import (
     ErrorItem,
     ErrorListResponse,
@@ -275,46 +276,51 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_ids: Optional[str] = None,
     ) -> OverviewStats:
         """获取运营概览统计."""
-        if start_date is None:
-            start_date = datetime.now() - timedelta(days=30)
-        if end_date is None:
-            end_date = datetime.now() + timedelta(days=1)
+        with MethodTimer(
+            "get_overview_stats",
+            source_id=source_id,
+            bbk_ids=bbk_ids,
+        ):
+            if start_date is None:
+                start_date = datetime.now() - timedelta(days=30)
+            if end_date is None:
+                end_date = datetime.now() + timedelta(days=1)
 
-        # 并行获取当前周期各项统计数据
-        (
-            (total_users, it_users, business_users),
-            (online_users, online_user_ids),
-            token_row,
-            model_distribution,
-            top_tools,
-            top_skills,
-            (top_mcp_tools, mcp_servers),
-            branch_breakdown,
-            total_skill_calls,
-            customer_click_stats,
-        ) = await self._fetch_overview_data(
-            source_id,
-            start_date,
-            end_date,
-            bbk_ids,
-        )
+            # 并行获取当前周期各项统计数据
+            (
+                (total_users, it_users, business_users),
+                (online_users, online_user_ids),
+                token_row,
+                model_distribution,
+                top_tools,
+                top_skills,
+                (top_mcp_tools, mcp_servers),
+                branch_breakdown,
+                total_skill_calls,
+                customer_click_stats,
+            ) = await self._fetch_overview_data(
+                source_id,
+                start_date,
+                end_date,
+                bbk_ids,
+            )
 
-        return self._build_overview_stats(
-            total_users=total_users,
-            it_users=it_users,
-            business_users=business_users,
-            online_users=online_users,
-            online_user_ids=online_user_ids,
-            model_distribution=model_distribution,
-            token_row=token_row,
-            top_tools=top_tools,
-            top_skills=top_skills,
-            top_mcp_tools=top_mcp_tools,
-            mcp_servers=mcp_servers,
-            branch_breakdown=branch_breakdown,
-            total_skill_calls=total_skill_calls,
-            customer_click_stats=customer_click_stats,
-        )
+            return self._build_overview_stats(
+                total_users=total_users,
+                it_users=it_users,
+                business_users=business_users,
+                online_users=online_users,
+                online_user_ids=online_user_ids,
+                model_distribution=model_distribution,
+                token_row=token_row,
+                top_tools=top_tools,
+                top_skills=top_skills,
+                top_mcp_tools=top_mcp_tools,
+                mcp_servers=mcp_servers,
+                branch_breakdown=branch_breakdown,
+                total_skill_calls=total_skill_calls,
+                customer_click_stats=customer_click_stats,
+            )
 
     async def _fetch_overview_data(
         self,
@@ -697,6 +703,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
           `sessions/users`。
         """
         # pylint: disable=too-many-statements
+        method_start = time.time()
+        logger.info(
+            "[get_growth_stats] 开始处理: source_id=%s, time_range=%s",
+            source_id,
+            time_range,
+        )
         # 环比回溯长度与看板筛选粒度保持一致，确保上一周期和当前周期
         # 在展示层具备可直接比较的业务含义。
         period_days = 1
@@ -958,6 +970,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             prev_avg_sessions_per_user,
         )
 
+        logger.info(
+            "[get_growth_stats] 方法总耗时: %.3fms",
+            (time.time() - method_start) * 1000,
+        )
         return {
             "callsGrowth": calc_growth(
                 curr["calls"],
@@ -997,6 +1013,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_ids: Optional[str] = None,
     ) -> list[dict[str, Any]]:
         """获取日趋势数据."""
+        method_start = time.time()
+        logger.info("[get_daily_trend] 开始处理: source_id=%s", source_id)
         if start_date is None:
             start_date = datetime.now() - timedelta(days=30)
         if end_date is None:
@@ -1042,6 +1060,10 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             click_rows = await self._db.fetch_all(click_query, click_params)
             click_map = self._build_daily_trend_click_map(click_rows)
 
+        logger.info(
+            "[get_daily_trend] 方法总耗时: %.3fms",
+            (time.time() - method_start) * 1000,
+        )
         return self._build_daily_trend_response(
             rows=rows,
             read_tasks_map=read_tasks_map,
@@ -2700,6 +2722,39 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         # 转换为秒
         return int(avg_duration_ms / 1000)
 
+    async def _get_statistics_eligible_skill_names(
+        self,
+        source_id: str,
+    ) -> set[str]:
+        """获取纳入统计的技能名称集合.
+
+        从 swe_marketplace_skills 表查询 include_in_statistics = 1 的技能。
+
+        Args:
+            source_id: 应用入口标识
+
+        Returns:
+            纳入统计的技能名称集合
+        """
+        if not self._db or not self._db.is_connected:
+            logger.warning(
+                "Database not connected, return empty set for statistics filter",
+            )
+            return set()
+
+        try:
+            rows = await self._db.fetch_all(
+                """
+                SELECT skill_name FROM swe_marketplace_skills
+                WHERE source_id = %s AND include_in_statistics = 1
+                """,
+                (source_id,),
+            )
+            return {row["skill_name"] for row in rows if row.get("skill_name")}
+        except Exception as e:
+            logger.warning("Failed to get statistics eligible skills: %s", e)
+            return set()
+
     async def get_skills_paginated(
         self,
         source_id: str,
@@ -2710,10 +2765,21 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_ids: Optional[str] = None,
     ) -> tuple[list[SkillUsage], int]:
         """获取技能调用排行榜（分页）."""
+        method_start = time.time()
+        logger.info(
+            "[get_skills_paginated] 开始处理: source_id=%s, page=%s",
+            source_id,
+            page,
+        )
         if start_date is None:
             start_date = datetime.now() - timedelta(days=30)
         if end_date is None:
             end_date = datetime.now() + timedelta(days=1)
+
+        # 获取纳入统计的技能名称集合
+        eligible_skills = await self._get_statistics_eligible_skill_names(
+            source_id,
+        )
 
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         skill_filter_sql, skill_filter_params = build_excluded_skill_filter()
@@ -2751,6 +2817,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 *bbk_filter_params,
             ]
 
+        # 如果有纳入统计的技能，添加过滤条件
+        if eligible_skills:
+            placeholders = ", ".join(["%s"] * len(eligible_skills))
+            base_where += f" AND skill_name IN ({placeholders})"
+            count_params.extend(eligible_skills)
+
         # 查询总数
         count_query = f"""
             SELECT COUNT(DISTINCT skill_name) as total
@@ -2784,6 +2856,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             )
             for row in rows
         ]
+        logger.info(
+            "[get_skills_paginated] 方法总耗时: %.3fms, total=%d",
+            (time.time() - method_start) * 1000,
+            total,
+        )
         return skills, total
 
     async def get_mcp_summary(
@@ -3164,6 +3241,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         仅返回 llm_input（模型报错）和 tool_call_end（工具报错）。
         支持按错误类型过滤和关键词搜索。
         """
+        method_start = time.time()
+        logger.info(
+            "[get_error_list] 开始处理: source_id=%s, page=%s",
+            source_id,
+            page,
+        )
         if start_date is None:
             start_date = datetime.now() - timedelta(days=30)
         if end_date is None:
@@ -3267,6 +3350,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         total = total_row["total"] if total_row else 0
 
         items = [self._row_to_error_item(row) for row in rows]
+        logger.info(
+            "[get_error_list] 方法总耗时: %.3fms, total=%d",
+            (time.time() - method_start) * 1000,
+            total,
+        )
         return ErrorListResponse(items=items, total=total)
 
     async def get_depth_summary(
@@ -3364,6 +3452,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_ids: Optional[str] = None,
     ) -> tuple[list[MCPServerUsage], int]:
         """获取 MCP 服务调用排行榜（分页）."""
+        method_start = time.time()
+        logger.info(
+            "[get_mcp_servers_paginated] 开始处理: source_id=%s, page=%s",
+            source_id,
+            page,
+        )
         if start_date is None:
             start_date = datetime.now() - timedelta(days=30)
         if end_date is None:
@@ -3439,6 +3533,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     tools=[],  # 分页查询不返回工具详情
                 ),
             )
+        logger.info(
+            "[get_mcp_servers_paginated] 方法总耗时: %.3fms, total=%d",
+            (time.time() - method_start) * 1000,
+            total,
+        )
         return mcp_servers, total
 
     async def get_skill_traces(
@@ -3451,6 +3550,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         end_date: Optional[datetime] = None,
     ) -> tuple[list[TraceListItem], int]:
         """获取指定技能调用的对话列表（分页）."""
+        method_start = time.time()
+        logger.info(
+            "[get_skill_traces] 开始处理: skill_name=%s, page=%s",
+            skill_name,
+            page,
+        )
         if start_date is None:
             start_date = datetime.now() - timedelta(days=30)
         if end_date is None:
@@ -3526,6 +3631,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             )
             for row in rows
         ]
+        logger.info(
+            "[get_skill_traces] 方法总耗时: %.3fms, total=%d",
+            (time.time() - method_start) * 1000,
+            total,
+        )
         return traces, total
 
     async def _get_mcp_stats(
@@ -4279,6 +4389,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         3. 批量查询用户名、bbk_id、session_name
         4. 应用层组装结果
         """
+        method_start = time.time()
+        logger.info(
+            "[get_sessions] 开始处理: source_id=%s, page=%s",
+            source_id,
+            page,
+        )
         # 构建 WHERE 条件
         where_clauses, params = self._build_sessions_where_clauses(
             source_id,
@@ -4372,6 +4488,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 ),
             )
 
+        logger.info(
+            "[get_sessions] 方法总耗时: %.3fms, total=%d",
+            (time.time() - method_start) * 1000,
+            total,
+        )
         return sessions, total
 
     async def _batch_query_session_skills(
@@ -4992,6 +5113,12 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_ids: Optional[str] = None,
     ) -> tuple[list[TraceListItem], int]:
         """获取对话列表."""
+        method_start = time.time()
+        logger.info(
+            "[get_traces] 开始处理: source_id=%s, page=%s",
+            source_id,
+            page,
+        )
         if source_id == "all":
             exclude_placeholders = ", ".join(
                 ["%s"] * len(EXCLUDED_SOURCE_IDS),
@@ -5112,6 +5239,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             )
             for row in rows
         ]
+        logger.info(
+            "[get_traces] 方法总耗时: %.3fms, total=%d",
+            (time.time() - method_start) * 1000,
+            total,
+        )
         return traces, total
 
     async def get_trace(
@@ -5704,6 +5836,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         Returns:
             (不匹配列表, 总数)
         """
+        method_start = time.time()
+        logger.info("[check_input_tokens_mismatch] 开始处理: page=%s", page)
         # 构建日期过滤条件
         date_filter = ""
         params: list[Any] = []
@@ -5770,6 +5904,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             for row in rows
         ]
 
+        logger.info(
+            "[check_input_tokens_mismatch] 方法总耗时: %.3fms, total=%d",
+            (time.time() - method_start) * 1000,
+            total,
+        )
         return items, total
 
     async def fix_input_tokens_mismatch(

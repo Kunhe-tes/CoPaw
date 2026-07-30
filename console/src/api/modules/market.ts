@@ -22,6 +22,8 @@ export interface MarketSkill {
   call_count: number;
   user_count: number;
   version_unchanged?: boolean;
+  // 新增字段：是否纳入统计
+  include_in_statistics?: boolean;
 }
 
 export interface MarketSkillDetail extends MarketSkill {
@@ -30,6 +32,17 @@ export interface MarketSkillDetail extends MarketSkill {
     user_name: string;
     call_count: number;
   }>;
+}
+
+// 更新统计配置请求
+export interface UpdateStatisticsConfigRequest {
+  include_in_statistics: boolean;
+}
+
+// 更新统计配置响应
+export interface UpdateStatisticsConfigResponse {
+  success: boolean;
+  message?: string;
 }
 
 // 用户技能状态
@@ -73,6 +86,8 @@ export interface PublishSkillRequest {
   // 同步模式：直接传递用户已有的 skill_id 和 cn_name，无需再解析
   skill_id?: string;
   cn_name?: string;
+  // 是否纳入统计
+  include_in_statistics?: boolean;
 }
 
 export interface DistributeRequest {
@@ -149,6 +164,7 @@ async function _uploadZipToMarket(
     cn_name?: string;
     skill_id?: string;
     bbk_ids?: string[];
+    include_in_statistics?: boolean;
   },
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
@@ -178,6 +194,9 @@ async function _uploadZipToMarket(
   }
   if (options?.bbk_ids && options.bbk_ids.length > 0) {
     params.set("bbk_ids", options.bbk_ids.join(","));
+  }
+  if (options?.include_in_statistics !== undefined) {
+    params.set("include_in_statistics", String(options.include_in_statistics));
   }
   const qs = params.toString();
   const url = getApiUrl(`${endpoint}${qs ? `?${qs}` : ""}`);
@@ -459,6 +478,7 @@ export const marketApi = {
       cn_name?: string;
       skill_id?: string;
       bbk_ids?: string[];
+      include_in_statistics?: boolean;
     },
   ): Promise<{
     imported: string[];
@@ -608,6 +628,27 @@ export const marketApi = {
     return request<DistributionPreviewResponse>(
       `/market/skills/${itemId}/distribution-preview`,
       opts,
+    );
+  },
+
+  // 更新技能统计配置
+  updateSkillStatisticsConfig: async (
+    sourceId: string,
+    itemId: string,
+    data: UpdateStatisticsConfigRequest
+  ): Promise<UpdateStatisticsConfigResponse> => {
+    const opts: RequestInit = {
+      method: "PATCH",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+      body: JSON.stringify(data),
+    };
+    return request<UpdateStatisticsConfigResponse>(
+      `/market/skills/${itemId}/statistics`,
+      opts
     );
   },
 };

@@ -399,6 +399,7 @@ def _upsert_skill_item(
         existing.creator_name = req.creator_name
         existing.category_id = req.category_id
         existing.bbk_ids = req.bbk_ids
+        existing.include_in_statistics = req.include_in_statistics
         # 直接使用请求中的 skill_id
         if req.skill_id:
             existing.skill_id = req.skill_id
@@ -424,6 +425,7 @@ def _upsert_skill_item(
         status="active",
         created_at=now,
         updated_at=now,
+        include_in_statistics=req.include_in_statistics,
     )
     items.append(item)
     return item
@@ -1093,6 +1095,29 @@ class MarketplaceService:
             except Exception as e:
                 logger.warning("Failed to log publish operation: %s", e)
 
+        # 同步写入 swe_marketplace_skills 表
+        if self.db.is_connected:
+            try:
+                from market.marketplace.market_skill_registry import (
+                    MarketSkillRegistry,
+                )
+
+                registry = MarketSkillRegistry(self.db)
+                await registry.upsert_market_skill(
+                    source_id=source_id,
+                    item_id=item.item_id,
+                    skill_id=item.skill_id,
+                    skill_name=item.name,
+                    cn_name=item.chinese_name,
+                    include_in_statistics=item.include_in_statistics,
+                    creator_id=item.creator_id,
+                    creator_name=item.creator_name,
+                    updator_id=operator_id or item.creator_id,
+                    updator_name=operator_name or item.creator_name,
+                )
+            except Exception as e:
+                logger.warning("Failed to upsert market skill: %s", e)
+
         return item, version_unchanged
 
     async def unpublish_skill(
@@ -1117,6 +1142,19 @@ class MarketplaceService:
         item.status = "inactive"
         item.updated_at = datetime.now(timezone.utc).isoformat()
         save_index(self.marketplace_root, source_id, items)
+
+        # 同步删除 swe_marketplace_skills 表中的记录
+        if self.db.is_connected:
+            try:
+                await self.db.execute(
+                    "DELETE FROM swe_marketplace_skills WHERE source_id = %s AND item_id = %s",
+                    (source_id, item_id),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete from swe_marketplace_skills: %s",
+                    e,
+                )
 
         if self.db.is_connected:
             try:
@@ -1177,6 +1215,19 @@ class MarketplaceService:
         # 从索引中移除该技能
         items = [i for i in items if i.item_id != item_id]
         save_index(self.marketplace_root, source_id, items)
+
+        # 同步删除 swe_marketplace_skills 表中的记录
+        if self.db.is_connected:
+            try:
+                await self.db.execute(
+                    "DELETE FROM swe_marketplace_skills WHERE source_id = %s AND item_id = %s",
+                    (source_id, item_id),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete from swe_marketplace_skills: %s",
+                    e,
+                )
 
         if self.db.is_connected:
             try:
@@ -1245,6 +1296,7 @@ class MarketplaceService:
                     updated_at=item.updated_at,
                     call_count=call_count,
                     user_count=user_count,
+                    include_in_statistics=item.include_in_statistics,
                 ),
             )
         return result
@@ -1280,6 +1332,7 @@ class MarketplaceService:
             call_count=call_count,
             user_count=user_count,
             user_stats=user_stats,
+            include_in_statistics=item.include_in_statistics,
         )
 
     def _get_visible_skill_item(
@@ -3556,7 +3609,16 @@ class MarketplaceService:
             chinese_name,
         )
 
-        # 2. 若 sync_to_users=True，同步用户空间
+        # 2. 同步更新 swe_marketplace_skills 表
+        if self.db.is_connected:
+            await self.db.execute(
+                """UPDATE swe_marketplace_skills
+                SET cn_name = %s, updated_at = NOW()
+                WHERE source_id = %s AND item_id = %s""",
+                (chinese_name, source_id, item_id),
+            )
+
+        # 3. 若 sync_to_users=True，同步用户空间
         synced_users = 0
         errors = []
         distribution_count = 0

@@ -547,7 +547,15 @@ def _process_skill_upload_single(
     cn_name: Optional[str] = None,
     skill_id: Optional[str] = None,
     bbk_ids: Optional[list[str]] = None,
-) -> tuple[Optional[str], Optional[dict], Optional[str], str, bool]:
+    include_in_statistics: bool = False,
+) -> tuple[
+    Optional[str],
+    Optional[dict],
+    Optional[str],
+    str,
+    bool,
+    Optional[str],
+]:
     """处理单个技能的上架逻辑.
 
     Args:
@@ -555,9 +563,10 @@ def _process_skill_upload_single(
         cn_name: 用户输入的中文展示名
         skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
         bbk_ids: 所属分行 ID 列表
+        include_in_statistics: 是否纳入排行榜统计
 
     Returns:
-        (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
+        (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged, item_id)
     """
     skill_json, skill_md, name, description, version = _parse_skill_metadata(
         skill_dir,
@@ -595,7 +604,7 @@ def _process_skill_upload_single(
             "existing_creator_name": existing.creator_name,
             "existing_version": existing.version,
         }
-        return None, conflict_info, name, resolved_cn_name, False
+        return None, conflict_info, name, resolved_cn_name, False, None
 
     version_unchanged = False
     cn_name_changed = False
@@ -612,6 +621,7 @@ def _process_skill_upload_single(
             category_id,
             bbk_ids,
         )
+        existing.include_in_statistics = include_in_statistics
         item = existing
     else:
         # 创建新市场条目，市场首发版本固定为 1.0.0
@@ -626,6 +636,7 @@ def _process_skill_upload_single(
             skill_id=final_skill_id,
             bbk_ids=bbk_ids or [],
         )
+        item.include_in_statistics = include_in_statistics
         items.append(item)
 
     # 复制技能文件到市场目录
@@ -649,7 +660,7 @@ def _process_skill_upload_single(
 
     save_index(svc.marketplace_root, source_id, items)
 
-    return name, None, name, resolved_cn_name, version_unchanged
+    return name, None, name, resolved_cn_name, version_unchanged, item.item_id
 
 
 async def _process_published_skill_record(
@@ -704,6 +715,37 @@ async def _process_published_skill_record(
     return parsed_name, parsed_description, parsed_cn_name
 
 
+async def _sync_skill_to_market_db(
+    svc,
+    source_id: str,
+    item_id: str | None,
+    skill_id: str,
+    imported_name: str,
+    resolved_cn_name: str,
+    include_in_statistics: bool,
+    x_user_id: str,
+    user_name: str,
+) -> None:
+    """同步技能到 swe_marketplace_skills 数据库表."""
+    if not (item_id and svc.db and svc.db.is_connected):
+        return
+    from market.marketplace.market_skill_registry import MarketSkillRegistry
+
+    registry = MarketSkillRegistry(svc.db)
+    await registry.upsert_market_skill(
+        source_id=source_id,
+        item_id=item_id,
+        skill_id=skill_id,
+        skill_name=imported_name,
+        cn_name=resolved_cn_name,
+        include_in_statistics=include_in_statistics,
+        creator_id=x_user_id,
+        creator_name=user_name,
+        updator_id=x_user_id,
+        updator_name=user_name,
+    )
+
+
 @router.post(
     "/market/skills/publish-upload",
     response_model=UploadSkillResponse,
@@ -717,6 +759,10 @@ async def publish_skill_upload(
     cn_name: str = Query(default=""),
     skill_id: str = Query(default=""),
     bbk_ids: str = Query(default=""),
+    include_in_statistics: bool = Query(
+        default=False,
+        description="是否纳入排行榜统计",
+    ),
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
@@ -774,6 +820,7 @@ async def publish_skill_upload(
                 first_name,
                 resolved_cn_name,
                 version_unchanged,
+                item_id,
             ) = await asyncio.to_thread(
                 _process_skill_upload_single,
                 skill_dir,
@@ -787,6 +834,7 @@ async def publish_skill_upload(
                 cn_name,
                 skill_id,  # 传递 parse-zip 生成的 skill_id
                 parsed_bbk_ids,  # 传递所属分行
+                include_in_statistics,  # 传递是否纳入统计
             )
 
             if conflict:
@@ -812,6 +860,19 @@ async def publish_skill_upload(
                         parsed_description,
                         parsed_cn_name,
                     )
+                )
+
+                # 同步写入 swe_marketplace_skills 表
+                await _sync_skill_to_market_db(
+                    svc=svc,
+                    source_id=source_id,
+                    item_id=item_id,
+                    skill_id=skill_id,
+                    imported_name=imported_name,
+                    resolved_cn_name=resolved_cn_name,
+                    include_in_statistics=include_in_statistics,
+                    x_user_id=x_user_id,
+                    user_name=user_name,
                 )
     finally:
         if tmp_dir.exists():
@@ -899,6 +960,7 @@ async def publish_skill(
         created_at=item.created_at,
         updated_at=item.updated_at,
         version_unchanged=version_unchanged,
+        include_in_statistics=item.include_in_statistics,
     )
 
 
@@ -2291,3 +2353,240 @@ async def get_distribution_preview(
         users=[UserSkillStatus(**u) for u in result["users"]],
         distributed_user_ids=result["distributed_user_ids"],
     )
+
+
+# ===== 统计配置管理 =====
+
+
+class UpdateStatisticsConfigRequest(BaseModel):
+    """更新统计配置请求."""
+
+    include_in_statistics: bool = Field(
+        ...,
+        description="是否纳入统计",
+    )
+    updator_id: str = Field(default="", description="更新人ID")
+    updator_name: str = Field(default="", description="更新人名称")
+
+
+class UpdateStatisticsConfigResponse(BaseModel):
+    """更新统计配置响应."""
+
+    success: bool
+    item_id: str
+    skill_name: str
+    include_in_statistics: bool
+
+
+@router.patch(
+    "/market/skills/{item_id}/statistics",
+    response_model=UpdateStatisticsConfigResponse,
+)
+async def update_skill_statistics_config(
+    item_id: str,
+    req: UpdateStatisticsConfigRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+) -> UpdateStatisticsConfigResponse:
+    """更新技能统计配置（管理员）."""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 从 index.json 获取技能
+    items = load_index(svc.marketplace_root, source_id)
+    item = next(
+        (i for i in items if i.item_id == item_id and i.item_type == "skill"),
+        None,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    # 更新 index.json
+    item.include_in_statistics = req.include_in_statistics
+    item.updated_at = datetime.now(timezone.utc).isoformat()
+    save_index(svc.marketplace_root, source_id, items)
+
+    # 同步更新数据库
+    if svc.db and svc.db.is_connected:
+        from ...marketplace.market_skill_registry import MarketSkillRegistry
+
+        registry = MarketSkillRegistry(svc.db)
+        await registry.update_statistics_config(
+            source_id=source_id,
+            item_id=item_id,
+            include_in_statistics=req.include_in_statistics,
+            updator_id=req.updator_id,
+            updator_name=req.updator_name,
+        )
+
+    return UpdateStatisticsConfigResponse(
+        success=True,
+        item_id=item_id,
+        skill_name=item.name,
+        include_in_statistics=req.include_in_statistics,
+    )
+
+
+class InitStatisticsConfigRequest(BaseModel):
+    """初始化统计配置请求."""
+
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="来源ID列表，不传或为空时初始化所有来源",
+    )
+    default_include: bool = Field(
+        default=True,
+        description="默认是否纳入统计",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="试运行模式，仅统计不实际写入",
+    )
+
+
+class InitStatisticsConfigResult(TypedDict):
+    """初始化统计配置结果."""
+
+    dry_run: bool
+    source_ids: list[str]
+    total_skills: int
+    processed: int
+    inserted: int
+    updated: int
+    skipped: int
+    errors: list[dict]
+
+
+async def _init_single_skill_statistics(
+    registry,
+    item: MarketItem,
+    source_id: str,
+    default_include: bool,
+    dry_run: bool,
+) -> tuple[bool, dict | None]:
+    """初始化单个技能的统计配置.
+
+    Returns:
+        (success, error_dict) - 成功时 error_dict 为 None
+    """
+    if dry_run:
+        return True, None
+
+    try:
+        success = await registry.upsert_market_skill(
+            source_id=source_id,
+            item_id=item.item_id,
+            skill_id=item.skill_id,
+            skill_name=item.name,
+            cn_name=item.chinese_name,
+            include_in_statistics=default_include,
+            creator_id=item.creator_id,
+            creator_name=item.creator_name,
+            updator_id=item.creator_id,
+            updator_name=item.creator_name,
+        )
+        if success:
+            return True, None
+        return False, {
+            "item_id": item.item_id,
+            "skill_name": item.name,
+            "reason": "数据库写入返回失败",
+        }
+    except Exception as e:
+        return False, {
+            "item_id": item.item_id,
+            "skill_name": item.name,
+            "reason": str(e),
+        }
+
+
+@router.post(
+    "/market/admin/skills/init-statistics",
+)
+async def init_skill_statistics_config(
+    request: Request,
+    req: InitStatisticsConfigRequest,
+) -> InitStatisticsConfigResult:
+    """初始化技能统计配置."""
+    svc = request.app.state.marketplace
+
+    results: InitStatisticsConfigResult = {
+        "dry_run": req.dry_run,
+        "source_ids": [],
+        "total_skills": 0,
+        "processed": 0,
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+    }
+
+    # 检查数据库连接
+    if not svc.db or not svc.db.is_connected:
+        results["errors"].append(
+            {
+                "reason": "数据库未连接，无法初始化",
+            },
+        )
+        return results
+
+    # 确定 source_ids 列表
+    if req.source_ids:
+        source_ids = req.source_ids
+    else:
+        # 遍历 marketplace_root 下所有目录
+        source_ids = []
+        for dir_path in svc.marketplace_root.iterdir():
+            if dir_path.is_dir():
+                index_path = dir_path / "index.json"
+                if index_path.exists():
+                    source_ids.append(dir_path.name)
+
+    results["source_ids"] = source_ids
+
+    # 初始化数据库操作类
+    from ...marketplace.market_skill_registry import MarketSkillRegistry
+
+    registry = MarketSkillRegistry(svc.db)
+
+    # dry_run 模式：只统计数量，不写入数据库和文件
+    if req.dry_run:
+        for source_id in source_ids:
+            items = load_index(svc.marketplace_root, source_id)
+            skill_items = [i for i in items if i.item_type == "skill"]
+            results["total_skills"] += len(skill_items)
+            results["processed"] += len(skill_items)
+            results["inserted"] = results["processed"]  # dry_run 假设全部成功
+        return results
+
+    # 实际执行模式
+    for source_id in source_ids:
+        items = load_index(svc.marketplace_root, source_id)
+        skill_items = [i for i in items if i.item_type == "skill"]
+        results["total_skills"] += len(skill_items)
+
+        for item in skill_items:
+            results["processed"] += 1
+
+            success, error = await _init_single_skill_statistics(
+                registry=registry,
+                item=item,
+                source_id=source_id,
+                default_include=req.default_include,
+                dry_run=False,
+            )
+            if success:
+                results["inserted"] += 1
+                # 只更新 skill 类型的 include_in_statistics 字段
+                item.include_in_statistics = req.default_include
+            else:
+                results["skipped"] += 1
+                if error:
+                    results["errors"].append(error)
+
+        # 保存 index.json（只包含 skill 类型的变更）
+        save_index(svc.marketplace_root, source_id, items)
+
+    return results
