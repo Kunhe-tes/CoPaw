@@ -228,6 +228,7 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
                     ),
                     passthrough_headers={"Authorization-Extra": "extra"},
                     session_id="session-1",
+                    chat_id="chat-uuid-1",
                     trace_id="trace-1",
                 )
             )
@@ -252,6 +253,8 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-session-id": "session-1",
         "sessionid": "session-1",
+        "x-swe-chat-id": "chat-uuid-1",
+        "chatid": "chat-uuid-1",
         "x-swe-trace-id": "trace-1",
         "traceid": "trace-1",
     }
@@ -271,6 +274,8 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-session-id": "session-1",
         "sessionid": "session-1",
+        "x-swe-chat-id": "chat-uuid-1",
+        "chatid": "chat-uuid-1",
         "x-swe-trace-id": "trace-1",
         "traceid": "trace-1",
     }
