@@ -1276,19 +1276,6 @@ class FileManagerService:
     ) -> FileManagerDirectoryListing:
         """Adapt archive metadata without exposing its control-file paths."""
 
-        index_path = (
-            self._workspace_dir / "governance" / "archive" / "index.json"
-        )
-        try:
-            index_stat = index_path.stat()
-        except FileNotFoundError:
-            identity = (0, 0, 0)
-        else:
-            identity = (
-                index_stat.st_dev,
-                index_stat.st_ino,
-                index_stat.st_mtime_ns,
-            )
         key = (str(self._workspace_dir), FileManagerRoot.RECYCLE.value, "", "")
         cursor_state = self._validate_cursor_context(
             cursor,
@@ -1297,77 +1284,17 @@ class FileManagerService:
             None,
         )
         if cursor_state is not None:
-            last_path, last_kind, snapshot_version = cursor_state
-            if snapshot_version is None:
-                raise FileManagerConflictError(
-                    "Directory listing changed; refresh and retry",
-                )
-            snapshot = self._get_directory_snapshot(
+            return self._recycle_snapshot_page(
                 key,
-                snapshot_version,
-                identity,
-            )
-            if snapshot is None:
-                raise FileManagerConflictError(
-                    "Directory listing changed; refresh and retry",
-                )
-            snapshot_items = list(snapshot.items)
-            start = next(
-                (
-                    index + 1
-                    for index, item in enumerate(snapshot_items)
-                    if item.path == last_path and item.kind is last_kind
-                ),
-                -1,
-            )
-            if start < 0:
-                raise FileManagerConflictError(
-                    "Directory listing changed; refresh and retry",
-                )
-            page = snapshot_items[start : start + FILE_MANAGER_PAGE_SIZE]
-            next_cursor = None
-            if start + FILE_MANAGER_PAGE_SIZE < len(snapshot_items):
-                next_cursor = self._encode_cursor(
-                    FileManagerRoot.RECYCLE,
-                    "",
-                    None,
-                    page[-1].path,
-                    page[-1].kind,
-                    snapshot_version,
-                )
-            return self._listing(
-                FileManagerRoot.RECYCLE,
-                "",
-                page,
-                next_cursor,
+                self._recycle_index_identity(),
+                cursor_state,
             )
 
-        items: list[FileManagerItem] = []
-        for item in self._load_recovered_archive_index().get("items", []):
-            if not isinstance(item, dict):
-                continue
-            try:
-                archive_item_id = self._validate_archive_item_id(
-                    str(item.get("id") or ""),
-                )
-                original_path = self._validate_archive_original_path(item)
-                archived_at = _parse_archive_datetime(item.get("archived_at"))
-                size_bytes = int(item.get("size_bytes") or 0)
-            except (TypeError, ValueError, FileManagerPathError):
-                continue
-            items.append(
-                FileManagerItem(
-                    name=original_path.rsplit("/", maxsplit=1)[-1],
-                    path=original_path,
-                    kind=FileManagerItemKind.FILE,
-                    size_bytes=max(0, size_bytes),
-                    modified_at=archived_at,
-                    capabilities=FileManagerCapabilities(),
-                    archive_item_id=archive_item_id,
-                    original_path=original_path,
-                    archived_at=archived_at,
-                ),
-            )
+        items = [
+            listing_item
+            for item in self._load_recovered_archive_index().get("items", [])
+            if (listing_item := self._recycle_listing_item(item)) is not None
+        ]
         items.sort(
             key=lambda item: (
                 item.archived_at or datetime.min.replace(tzinfo=timezone.utc),
@@ -1375,28 +1302,70 @@ class FileManagerService:
             ),
             reverse=True,
         )
+        return self._recycle_snapshot_page(
+            key,
+            self._recycle_index_identity(),
+            None,
+            items,
+        )
+
+    def _recycle_index_identity(self) -> tuple[int, int, int]:
+        """Return the archive index identity used to validate a snapshot."""
+
         index_path = (
             self._workspace_dir / "governance" / "archive" / "index.json"
         )
         try:
             index_stat = index_path.stat()
         except FileNotFoundError:
-            identity = (0, 0, 0)
-        else:
-            identity = (
-                index_stat.st_dev,
-                index_stat.st_ino,
-                index_stat.st_mtime_ns,
-            )
-        key = (str(self._workspace_dir), FileManagerRoot.RECYCLE.value, "", "")
-        cursor_state = self._validate_cursor_context(
-            cursor,
-            FileManagerRoot.RECYCLE,
-            "",
-            None,
+            return (0, 0, 0)
+        return (
+            index_stat.st_dev,
+            index_stat.st_ino,
+            index_stat.st_mtime_ns,
         )
+
+    def _recycle_listing_item(
+        self,
+        item: object,
+    ) -> FileManagerItem | None:
+        """Convert one valid archive-index row into a public listing item."""
+
+        if not isinstance(item, dict):
+            return None
+        try:
+            archive_item_id = self._validate_archive_item_id(
+                str(item.get("id") or ""),
+            )
+            original_path = self._validate_archive_original_path(item)
+            archived_at = _parse_archive_datetime(item.get("archived_at"))
+            size_bytes = int(item.get("size_bytes") or 0)
+        except (TypeError, ValueError, FileManagerPathError):
+            return None
+        return FileManagerItem(
+            name=original_path.rsplit("/", maxsplit=1)[-1],
+            path=original_path,
+            kind=FileManagerItemKind.FILE,
+            size_bytes=max(0, size_bytes),
+            modified_at=archived_at,
+            capabilities=FileManagerCapabilities(),
+            archive_item_id=archive_item_id,
+            original_path=original_path,
+            archived_at=archived_at,
+        )
+
+    def _recycle_snapshot_page(
+        self,
+        key: tuple[str, str, str, str],
+        identity: tuple[int, int, int],
+        cursor_state: tuple[str, FileManagerItemKind, str | None] | None,
+        initial_items: list[FileManagerItem] | None = None,
+    ) -> FileManagerDirectoryListing:
+        """Build one recycle listing page from a new or validated snapshot."""
+
         if cursor_state is None:
             snapshot_version = secrets.token_urlsafe(18)
+            items = initial_items or []
             snapshot = _DirectorySnapshot(
                 snapshot_version,
                 identity,

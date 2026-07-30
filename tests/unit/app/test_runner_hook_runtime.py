@@ -461,6 +461,61 @@ async def test_stream_single_query_attempt_skips_duplicate_detector_setup(
 
 
 @pytest.mark.asyncio
+async def test_stream_single_query_attempt_binds_chat_id_to_runtime_claims(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.runtime_invocation_claims import build_runtime_invocation_claims
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    fake_agent = SimpleNamespace(
+        setup_skill_detector=AsyncMock(),
+        rebuild_sys_prompt=lambda: None,
+    )
+    runtime = _QueryRuntime(
+        agent=fake_agent,
+        agent_config=_agent_config(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        chat=SimpleNamespace(id="chat-uuid-1"),
+        session_skill_detector=object(),
+        mcp_clients=[],
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        pending_confirmed_skill_snapshots={},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_prepare_query_runtime",
+        AsyncMock(return_value=_RuntimeStartResult(runtime=runtime)),
+    )
+
+    async def assert_chat_claim(*args, **kwargs):
+        del args, kwargs
+        assert build_runtime_invocation_claims().chat_id == "chat-uuid-1"
+        raise RuntimeError("stop after chat claim")
+
+    monkeypatch.setattr(runner, "get_state_loaded", assert_chat_claim)
+
+    with pytest.raises(RuntimeError, match="stop after chat claim"):
+        async for _ in runner._stream_single_query_attempt(
+            attempt_input=_QueryAttemptInput(
+                request=SimpleNamespace(),
+                msgs=[],
+                query=None,
+                preflight=_QueryPreflight(),
+                trace_id=None,
+            ),
+            outcome=_QueryTurnOutcome(),
+            retry_state=_RetryState(),
+            attempt_state=_QueryAttemptState(),
+        ):
+            pass
+
+
+@pytest.mark.asyncio
 async def test_stream_single_query_attempt_rebinds_trace_detector_from_runtime(
     monkeypatch,
     tmp_path,
@@ -1146,6 +1201,85 @@ async def test_prepare_query_runtime_logs_agent_build_duration(
         and call.args[2] == "test-agent"
         for call in mock_debug.call_args_list
     )
+
+
+@pytest.mark.asyncio
+async def test_prepare_query_runtime_resolves_chat_before_connecting_mcp(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    chat = SimpleNamespace(id="chat-uuid-1")
+    events: list[object] = []
+
+    def get_or_create_chat(*args, **kwargs):
+        del args, kwargs
+        events.append("chat")
+        return chat
+
+    async def build_context_reference_directives(*args, **kwargs):
+        del args, kwargs
+        from swe.runtime_invocation_claims import (
+            build_runtime_invocation_claims,
+        )
+
+        events.append(("discovery", build_runtime_invocation_claims().chat_id))
+        return []
+
+    setattr(
+        runner,
+        "_chat_manager",
+        SimpleNamespace(
+            get_or_create_chat=AsyncMock(side_effect=get_or_create_chat),
+        ),
+    )
+    _patch_normal_agent_path(monkeypatch)
+
+    async def build_clients(*args, **kwargs):
+        del args
+        events.append(("mcp", kwargs.get("chat_id")))
+        return []
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        build_clients,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        build_context_reference_directives,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        AsyncMock(return_value=MergedHookResult()),
+    )
+
+    result = await runner._prepare_query_runtime(
+        request=SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            channel_meta={},
+        ),
+        msgs=[Msg(name="user", role="user", content="hello")],
+        query="hello",
+        preflight=_QueryPreflight(),
+    )
+
+    assert result.runtime is not None
+    assert events == [
+        "chat",
+        ("discovery", "chat-uuid-1"),
+        ("mcp", "chat-uuid-1"),
+    ]
 
 
 @pytest.mark.asyncio

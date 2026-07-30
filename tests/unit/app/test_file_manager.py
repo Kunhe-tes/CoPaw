@@ -1008,6 +1008,76 @@ def test_archive_restore_and_purge_recycle_items_without_exposing_payload_paths(
     assert service.list_directory("recycle").items == []
 
 
+def test_recycle_listing_skips_malformed_archive_index_rows(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    archive_dir = tmp_path / "governance" / "archive"
+    archive_dir.mkdir(parents=True)
+    archive_item_id = "1" * 32
+    (archive_dir / "index.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "items": [
+                    {
+                        "id": archive_item_id,
+                        "original_path": "reports/valid.txt",
+                        "archive_path": (
+                            f"{file_manager.ARCHIVE_FILES_DIR}/{archive_item_id}"
+                        ),
+                        "archived_at": "2026-07-30T00:00:00+00:00",
+                        "size_bytes": 12,
+                    },
+                    {"id": "", "original_path": "bad.txt"},
+                    "not-a-record",
+                ],
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    listing = service.list_directory("recycle")
+
+    assert [item.archive_item_id for item in listing.items] == [
+        archive_item_id,
+    ]
+
+
+def test_recycle_listing_pages_through_a_stable_snapshot(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    archive_dir = tmp_path / "governance" / "archive"
+    archive_dir.mkdir(parents=True)
+    rows = [
+        {
+            "id": f"{index:032x}",
+            "original_path": f"report-{index:03d}.txt",
+            "archive_path": (f"{file_manager.ARCHIVE_FILES_DIR}/{index:032x}"),
+            "archived_at": (
+                f"2026-07-30T00:{index // 60:02d}:{index % 60:02d}+00:00"
+            ),
+            "size_bytes": index,
+        }
+        for index in range(FILE_MANAGER_PAGE_SIZE + 1)
+    ]
+    (archive_dir / "index.json").write_text(
+        json.dumps({"version": 1, "items": rows}),
+        encoding="utf-8",
+    )
+
+    first = service.list_directory("recycle")
+    assert first.next_cursor is not None
+    second = service.list_directory("recycle", cursor=first.next_cursor)
+
+    assert len(first.items) == FILE_MANAGER_PAGE_SIZE
+    assert second.next_cursor is None
+    assert {
+        item.archive_item_id for item in [*first.items, *second.items]
+    } == {row["id"] for row in rows}
+
+
 @pytest.mark.parametrize("operation", ["archive", "restore", "purge"])
 def test_recycle_unlink_then_fsync_failure_keeps_committed_outcome(
     tmp_path: Path,

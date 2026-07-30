@@ -107,3 +107,37 @@ def test_runtime_claim_headers_use_aliases_only_when_requested():
         "x-swe-trace-id": "trace-1",
         "traceid": "trace-1",
     }
+
+
+def test_runtime_claim_env_replaces_static_chat_id():
+    from swe.runtime_invocation_claims import apply_runtime_claim_env
+
+    env = apply_runtime_claim_env(
+        {"SWE_CHAT_ID": "untrusted", "APP_TOKEN": "ok"},
+        chat_id="chat-uuid-1",
+    )
+
+    assert env == {
+        "APP_TOKEN": "ok",
+        "SWE_CHAT_ID": "chat-uuid-1",
+    }
+
+
+def test_runtime_claim_headers_replace_static_chat_id_with_alias():
+    from swe.runtime_invocation_claims import build_runtime_claim_headers
+
+    headers = build_runtime_claim_headers(
+        {
+            "X-Swe-Chat-Id": "untrusted",
+            "chatid": "untrusted",
+            "X-Static": "static",
+        },
+        chat_id="chat-uuid-1",
+        include_aliases=True,
+    )
+
+    assert headers == {
+        "X-Static": "static",
+        "x-swe-chat-id": "chat-uuid-1",
+        "chatid": "chat-uuid-1",
+    }
