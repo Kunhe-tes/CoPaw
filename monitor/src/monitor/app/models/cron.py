@@ -101,6 +101,10 @@ class CronJobModel(BaseModel):
     job_origin: str = Field(default="manual", description="任务来源")
     subscription_key: str = Field(default="", description="订阅任务稳定分组ID")
     skill_ids: str = Field(default="", description="绑定技能ID，逗号分隔")
+    broadcast_source_job_id: str = Field(
+        default="",
+        description="分发源定时任务ID (从meta中提取)",
+    )
     meta: str = Field(default="", description="扩展元数据 (JSON字符串)")
 
     # 状态追踪
@@ -473,6 +477,18 @@ class ExecutionQueryParams(BaseModel):
     )
     page: int = Field(default=1, ge=1, description="页码")
     page_size: int = Field(default=10, ge=1, le=100, description="每页数量")
+
+
+class BroadcastSourceJobQueryParams(BaseModel):
+    """Query parameters for listing jobs by broadcast source."""
+
+    tenant_id: Optional[str] = Field(default=None, description="租户ID筛选")
+    bbk_id: Optional[str] = Field(
+        default=None,
+        description="分行号筛选（二级分行号）",
+    )
+    source_id: Optional[str] = Field(default=None, description="来源标识筛选")
+    broadcast_source_job_id: str = Field(..., description="分发源定时任务ID")
 
 
 class ExportQueryParams(BaseModel):
