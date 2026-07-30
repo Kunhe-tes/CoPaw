@@ -253,24 +253,127 @@ A source-scoped runtime configuration surface for behavior shared by requests fr
 _Avoid_: system feature configuration, system feature config, 系统特性配置, tenant config, user config
 
 **Source Built-in Tool**:
-An executable custom tool asset owned by one source and available to every tenant under that source. It is distinct from an Agent Profile tool configuration; tenants may use it but cannot alter its source-owned script or lifecycle.
-_Avoid_: tenant tool script, source configuration JSON, Agent-owned shared tool
+An executable custom tool asset owned by one source and available to every tenant under that source. A Source Built-in Tool is distinct from an Agent Profile's built-in-tool configuration, and no tenant owns or may alter it.
+_Avoid_: source tool config, shared tenant tool, tenant tool script
 
-**Source Tool Library**:
-The source-scoped management collection of Source Built-in Tools on the System Configuration page. It has independent source-owned storage and lifecycle, supports complete-file upload rather than browser editing, and is not Marketplace or tenant-workspace storage.
-_Avoid_: source configuration JSON, agent tool page, browser script editor
+**Source Built-in Tool Contract**:
+The AgentScope-compatible callable identity, purpose, and input shape of one Source Built-in Tool. Its identity is a stable restricted tool name, independent of its script filename; the first release establishes it through statically inspectable declarations for a complete tool JSON Schema, credentials, and a Python script with one fixed invocation entry point. Neither the number of active tools nor individual Schema size or complexity is capped.
+_Avoid_: free-form script invocation, filename-only tool definition, dynamic Schema, dynamic credential declaration, tool-count quota, Schema complexity quota
 
-**Source Built-in Tool Draft**:
-An unpublished source-tool version that has passed static validation and the mandatory blocking safety gate. A Source Tool Administrator may explicitly test, discard, or publish it; it does not alter any Agent catalog before publication.
-_Avoid_: implicit publication, unscanned source tool, active source tool
+**Source Built-in Tool Adapter**:
+The Swe-owned adapter that registers a Source Built-in Tool with the regular Toolkit, validates calls against its Source Built-in Tool Contract, invokes the script across its execution boundary, and normalizes the result into the regular tool response contract.
+_Avoid_: in-process uploaded script, custom model protocol, raw script result
 
-**Source Built-in Tool Override**:
-The source-level precedence rule under which a Source Built-in Tool replaces a Swe code-defined built-in while preserving its complete tool JSON Schema. It never overrides Skill or MCP tools and cannot bypass an Agent's disabled choice.
-_Avoid_: registration-order override, Schema-changing override, Skill override, MCP override
+**Source Built-in Tool Execution Boundary**:
+The per-invocation boundary that runs a Source Built-in Tool with only the current tenant's workspace and authorized runtime capabilities. Every call passes the ordinary Tool Guard and approval chain and enforces the Python tenant path guard, resource boundary, and credential declaration; if any guard cannot be established, the call fails closed. The source shares tool code, never tenant data, credentials, or management authority.
+_Avoid_: source-wide tenant access, shared credential context, backend-process execution, guard bypass, permissive fallback
+
+**Source Built-in Tool Resource Boundary**:
+The resource boundary for a Source Built-in Tool call. It inherits the current tenant's process CPU, memory, and concurrency limits and has the standard sixty-second timeout; a source tool cannot raise those limits.
+_Avoid_: source-level resource escalation, unlimited shared tool, script-defined resource cap
+
+**Source Built-in Tool Async Execution**:
+The first-release execution mode for Source Built-in Tools. Newly added source tools run synchronously; only an Override of `execute_shell_command` inherits that Agent's existing asynchronous-execution choice.
+_Avoid_: general source-tool background mode, source-owned async toggle, lost shell async choice
+
+**Source Built-in Tool Credential Declaration**:
+The explicit list of runtime environment variable names a Source Built-in Tool needs. A call receives only the declared values from its current tenant; missing values produce a structured configuration failure, and source or backend credentials are never eligible.
+_Avoid_: whole tenant environment, source secret, backend secret, implicit credential access
+
+**Source Built-in Tool Dependency Boundary**:
+The first-release rule that a Source Built-in Tool is one Python source file of at most 1 MB, using only the standard library and Swe's fixed runtime interface. It cannot install, bundle, or select third-party dependencies or a custom runtime.
+_Avoid_: requirements file, package upload, runtime installation, custom virtual environment, oversized source file
+
+**Source Built-in Tool Safety Gate**:
+The mandatory upload scan for every Source Built-in Tool version. A safety finding or unavailable scan rejects publication; source management cannot bypass this gate.
+_Avoid_: warning-only publication, scan bypass, unscanned source tool
+
+**Source Built-in Tool Manual Test**:
+An explicitly confirmed real execution of an unpublished Source Built-in Tool version using the current Source Tool Administrator's selected Agent Profile, tenant workspace, declared credentials, and JSON input validated against the draft's Contract. Its displayed result uses the normal redaction and output limits; audit excludes test inputs, script content, and credentials. It neither publishes the version nor changes availability for other tenants.
+_Avoid_: dry-run, source-wide test, implicit publish, side-effect-free preview, unchecked test input, unrelated Agent context, unbounded test output
 
 **Source Built-in Tool Activation Boundary**:
-The start of an Agent run, when it snapshots its effective Source Built-in Tool catalog. Publication, replacement, and deactivation affect only later Agent runs; a running Agent retains its starting catalog.
-_Avoid_: mid-run tool mutation, retroactive catalogue change
+The start of an Agent run, when it snapshots its effective Source Built-in Tool catalog. Publication, replacement, and deactivation affect the next Agent run only; a running Agent retains its starting catalog.
+_Avoid_: mid-run tool mutation, next-call-only reload, retroactive catalog change
+
+**Source Built-in Tool Historical Record**:
+The retained scripts, version snapshots, content identities, and audit records for a Source Built-in Tool. The first release permits deactivation but no rollback or permanent deletion of this record.
+_Avoid_: destructive source-tool deletion, erased audit trail, rollback history
+
+**Source Built-in Tool Result Boundary**:
+The rule that a Source Built-in Tool returns only a JSON-serializable business result. The Source Built-in Tool Adapter turns it into the normal tool response and applies Swe's standard failure, redaction, output-limit, conversation-record, and observability behavior. A runtime failure never falls back to a code-defined built-in, even for an Override.
+_Avoid_: script-defined UI card, raw script output, custom error transport, fallback to built-in implementation
+
+**Source Built-in Tool Network Boundary**:
+The rule that a Source Built-in Tool may use only the platform's existing network egress policy. It cannot configure or bypass network destinations, and external authentication remains limited to its current tenant's declared credentials.
+_Avoid_: source-controlled egress allowlist, network bypass, shared integration credential
+
+**Source Built-in Tool Invocation Attribution**:
+The source-tool identity, tool name, and published version or content identity recorded with a standard tool invocation, alongside its tenant, source, Agent, and result. It excludes call arguments, script bodies, and credential values.
+_Avoid_: unattributed shared-tool call, logged tool secret, persisted script body
+
+**Source Built-in Tool Change Notification**:
+The cross-tenant notification of a Source Built-in Tool publication, replacement, or deactivation. The first release sends none; the change is observable through the next Agent run's effective catalog and source-level audit records.
+_Avoid_: tenant broadcast, source-tool change message, silent untraceable change
+
+**Source Built-in Tool Override**:
+The precedence rule under which a Source Built-in Tool with the same tool name replaces a Swe code-defined built-in tool for that source. An Override retains the built-in's complete tool JSON Schema while changing only implementation and description. It never overrides a Skill- or MCP-provided tool; such a name collision is invalid.
+_Avoid_: registration-order override, Schema-changing built-in override, Skill override, MCP override
+
+**Source Built-in Tool Replacement**:
+The explicitly confirmed publication of a staged same-name Source Built-in Tool draft. It is audited and affects later calls only; a call already executing retains the version with which it began.
+_Avoid_: retroactive replacement, execution interruption, silent overwrite, unconfirmed replacement
+
+**Source Built-in Tool Draft**:
+An unpublished Source Built-in Tool version that has passed static validation and the Source Built-in Tool Safety Gate. A Source Tool Administrator may manually test it or explicitly publish it; it does not change any Agent's effective catalog before publication.
+_Avoid_: implicit publication, unscanned test script, active source tool
+
+**Source Built-in Tool Draft Discard**:
+The explicit removal of an unpublished Source Built-in Tool Draft by a Source Tool Administrator. It does not remove published tool history; its creation, testing, and discard remain auditable as metadata.
+_Avoid_: published-version deletion, unaudited draft removal, source-tool rollback
+
+**Source Built-in Tool Draft Uniqueness**:
+The rule that each source and tool name has at most one unpublished Source Built-in Tool Draft. A later upload must explicitly replace or discard the existing draft before it can become the sole draft.
+_Avoid_: multiple pending versions, ambiguous publication target, parallel draft set
+**Source Built-in Tool Availability**:
+The source determines which Source Built-in Tools are available to an Agent, while the Agent's own enabled or disabled choice determines whether an available tool is callable for that Agent. An Override replaces implementation only and cannot bypass a disabled choice.
+_Avoid_: source-forced enablement, override bypass, tenant implementation ownership
+
+**Source Built-in Tool Default Enablement**:
+A newly published non-conflicting Source Built-in Tool is initially enabled for every Agent under its source through lazily resolved source defaults, without bulk-writing Agent configuration. Each Agent may later disable it through its own tool configuration.
+_Avoid_: opt-in-only source tool, permanently forced tool, bulk tenant configuration write
+
+**Source Built-in Tool Agent Choice Persistence**:
+An Agent's explicit enabled or disabled choice for a Source Built-in Tool survives that tool's source-level deactivation and later reactivation. Only an Agent that has never encountered the tool receives its default enablement.
+_Avoid_: reactivation reset, source-forced re-enable, forgotten Agent choice
+
+**Source Built-in Tool Catalog Exposure**:
+The complete registration of every source-enabled Source Built-in Tool that the Agent has not disabled when an Agent run begins. It is not filtered by user intent, keywords, or on-demand discovery.
+_Avoid_: lazy source tool, keyword-selected tool, partial source catalog
+
+**Source Tool Library**:
+The source-scoped management collection of Source Built-in Tools. It is presented within the Source System Configuration page but has independent storage and lifecycle from Source System Configuration. Its first release accepts complete-file upload and same-name replacement, not browser-based script editing, and does not cap the number of enabled Source Built-in Tools.
+_Avoid_: source configuration JSON, agent tool list, tenant script library, browser script editor, source tool-count quota
+
+**Source Tool Library Storage**:
+The Swe-controlled, source-isolated storage of Source Built-in Tool scripts and their version history. It is separate from Marketplace storage while retaining atomic publication, content identity, and audit history.
+_Avoid_: Marketplace item storage, tenant workspace storage, Source System Configuration storage, rollback store
+
+**Source Built-in Tool Script Read Access**:
+The read-only viewing or download of current and historical Source Built-in Tool scripts by a Source Tool Administrator. Ordinary tenants may see effective tool metadata but not script content.
+_Avoid_: tenant script download, browser editing, public source code
+
+**Source Built-in Tool Deactivation**:
+The source-level withdrawal of a Source Built-in Tool. It affects later calls only: a deactivated Override restores the code-defined built-in, while a deactivated unique source tool is unavailable; historical versions and audit records remain for tracing only.
+_Avoid_: destructive deletion, interrupted call, disabled Agent tool, rollback
+
+**Source Built-in Tool Failure Availability**:
+The rule that a runtime failure of a Source Built-in Tool affects only that invocation and does not deactivate the tool. Source-level availability changes only through an explicit Source Tool Administrator action.
+_Avoid_: automatic circuit-breaker deactivation, failure-driven source mutation, implicit source disablement
+
+**Source Tool Administrator**:
+The manager or administrator authorized for the current source and permitted to upload or replace a Source Built-in Tool. A tenant administrator may use such a tool but may not manage it.
+_Avoid_: tenant tool administrator, any tenant uploader
 
 **Source System Configuration Override**:
 A value explicitly saved in **Source System Configuration** that replaces the corresponding broader runtime setting for requests from that source. Missing values are inheritance, not implicit overrides.
@@ -998,3 +1101,11 @@ Domain Expert: "`execute` accepts the persisted Proposed Plan and can move the c
 Developer: "Is the hook attached to a SubAgent Definition or to an Agent Profile?"
 
 Domain Expert: "It is an Agent Profile Hook. Its script belongs to that Agent Profile and is not a shared Skill asset."
+
+Developer: "Can a tenant administrator replace the source's `read_file` implementation?"
+
+Domain Expert: "No. Only a Source Tool Administrator may publish a Source Built-in Tool. An Override keeps `read_file`'s complete tool Schema, runs through the normal safety boundaries, and still respects each Agent's enabled or disabled choice."
+
+Developer: "Will a new source tool appear only when the model asks for it?"
+
+Domain Expert: "No. Every source-enabled tool that the Agent has not disabled is part of the Agent run's catalog from the start of that run."
