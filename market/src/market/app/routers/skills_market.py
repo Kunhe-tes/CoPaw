@@ -715,6 +715,37 @@ async def _process_published_skill_record(
     return parsed_name, parsed_description, parsed_cn_name
 
 
+async def _sync_skill_to_market_db(
+    svc,
+    source_id: str,
+    item_id: str | None,
+    skill_id: str,
+    imported_name: str,
+    resolved_cn_name: str,
+    include_in_statistics: bool,
+    x_user_id: str,
+    user_name: str,
+) -> None:
+    """同步技能到 swe_marketplace_skills 数据库表."""
+    if not (item_id and svc.db and svc.db.is_connected):
+        return
+    from market.marketplace.market_skill_registry import MarketSkillRegistry
+
+    registry = MarketSkillRegistry(svc.db)
+    await registry.upsert_market_skill(
+        source_id=source_id,
+        item_id=item_id,
+        skill_id=skill_id,
+        skill_name=imported_name,
+        cn_name=resolved_cn_name,
+        include_in_statistics=include_in_statistics,
+        creator_id=x_user_id,
+        creator_name=user_name,
+        updator_id=x_user_id,
+        updator_name=user_name,
+    )
+
+
 @router.post(
     "/market/skills/publish-upload",
     response_model=UploadSkillResponse,
@@ -832,24 +863,17 @@ async def publish_skill_upload(
                 )
 
                 # 同步写入 swe_marketplace_skills 表
-                if item_id and svc.db and svc.db.is_connected:
-                    from market.marketplace.market_skill_registry import (
-                        MarketSkillRegistry,
-                    )
-
-                    registry = MarketSkillRegistry(svc.db)
-                    await registry.upsert_market_skill(
-                        source_id=source_id,
-                        item_id=item_id,
-                        skill_id=skill_id,
-                        skill_name=imported_name,
-                        cn_name=resolved_cn_name,
-                        include_in_statistics=include_in_statistics,
-                        creator_id=x_user_id,
-                        creator_name=user_name,
-                        updator_id=x_user_id,
-                        updator_name=user_name,
-                    )
+                await _sync_skill_to_market_db(
+                    svc=svc,
+                    source_id=source_id,
+                    item_id=item_id,
+                    skill_id=skill_id,
+                    imported_name=imported_name,
+                    resolved_cn_name=resolved_cn_name,
+                    include_in_statistics=include_in_statistics,
+                    x_user_id=x_user_id,
+                    user_name=user_name,
+                )
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
