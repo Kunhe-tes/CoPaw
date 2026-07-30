@@ -174,6 +174,7 @@ class _DirectorySnapshot:
 
 _DIRECTORY_SNAPSHOT_TTL_SECONDS = 10.0
 _DIRECTORY_SNAPSHOT_CAPACITY = 128
+_DIRECTORY_SNAPSHOT_WORKSPACE_CAPACITY = 8
 _DIRECTORY_SNAPSHOTS: OrderedDict[
     tuple[str, str, str, str],
     _DirectorySnapshot,
@@ -427,6 +428,10 @@ class FileManagerService:
             allow_missing_root=True,
         )
         if directory_fd is None:
+            if cursor_state is not None:
+                raise FileManagerConflictError(
+                    "Directory listing changed; refresh and retry",
+                )
             return self._listing(resolved_root, normalised_path, [])
         try:
             directory_stat = os.fstat(directory_fd)
@@ -2075,6 +2080,21 @@ class FileManagerService:
         snapshot: _DirectorySnapshot,
     ) -> None:
         with _DIRECTORY_SNAPSHOTS_LOCK:
+            _DIRECTORY_SNAPSHOTS.pop(key, None)
+            workspace_key = key[0]
+            while (
+                sum(
+                    existing_key[0] == workspace_key
+                    for existing_key in _DIRECTORY_SNAPSHOTS
+                )
+                >= _DIRECTORY_SNAPSHOT_WORKSPACE_CAPACITY
+            ):
+                oldest_workspace_key = next(
+                    existing_key
+                    for existing_key in _DIRECTORY_SNAPSHOTS
+                    if existing_key[0] == workspace_key
+                )
+                _DIRECTORY_SNAPSHOTS.pop(oldest_workspace_key)
             _DIRECTORY_SNAPSHOTS[key] = snapshot
             _DIRECTORY_SNAPSHOTS.move_to_end(key)
             while len(_DIRECTORY_SNAPSHOTS) > _DIRECTORY_SNAPSHOT_CAPACITY:

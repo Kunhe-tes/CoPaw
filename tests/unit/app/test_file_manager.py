@@ -9,6 +9,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -216,6 +217,70 @@ def test_directory_cursor_reuses_snapshot_and_rejects_changed_directory(
     (tmp_path / "changed.txt").write_text("changed", encoding="utf-8")
     with pytest.raises(FileManagerConflictError, match="refresh and retry"):
         service.list_directory("working", cursor=first.next_cursor)
+
+
+def test_directory_cursor_rejects_deleted_directory(
+    tmp_path: Path,
+) -> None:
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    for index in range(FILE_MANAGER_PAGE_SIZE + 1):
+        (media_dir / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+    service = _service(tmp_path)
+    first = service.list_directory("upload")
+
+    shutil.rmtree(media_dir)
+
+    with pytest.raises(FileManagerConflictError, match="refresh and retry"):
+        service.list_directory("upload", cursor=first.next_cursor)
+
+
+def test_snapshot_workspace_quota_preserves_other_workspace_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        file_manager,
+        "_DIRECTORY_SNAPSHOT_WORKSPACE_CAPACITY",
+        1,
+    )
+    file_manager._DIRECTORY_SNAPSHOTS.clear()
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    for workspace in (first_workspace, second_workspace):
+        workspace.mkdir()
+        for index in range(FILE_MANAGER_PAGE_SIZE + 1):
+            (workspace / f"item{index:03d}.txt").write_text(
+                "x",
+                encoding="utf-8",
+            )
+
+    first_service = _service(first_workspace)
+    second_service = _service(second_workspace)
+    first_page = first_service.list_directory("working")
+    second_page = second_service.list_directory("working")
+    first_service.list_directory("working", query="item")
+
+    assert (
+        second_service.list_directory(
+            "working",
+            cursor=second_page.next_cursor,
+        )
+        .items[0]
+        .name
+        == "item100.txt"
+    )
+    assert (
+        len(
+            [
+                key
+                for key in file_manager._DIRECTORY_SNAPSHOTS
+                if key[0] == str(first_workspace.resolve())
+            ],
+        )
+        == 1
+    )
+    assert first_page.next_cursor is not None
 
 
 def test_listing_allows_more_than_ten_thousand_items_with_cursor(
