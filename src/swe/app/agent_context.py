@@ -6,6 +6,7 @@ with tenant-first resolution order.
 """
 
 from contextvars import ContextVar
+from pathlib import Path
 from typing import Optional, TYPE_CHECKING
 from fastapi import Request
 
@@ -157,6 +158,69 @@ def _get_tenant_aware_config(
     if storage_tenant_id is None:
         return load_config()
     return load_config(get_tenant_storage_config_path(storage_tenant_id))
+
+
+async def resolve_file_manager_workspace_dir(request: Request) -> Path:
+    """Resolve a verified Agent directory without starting its runtime."""
+
+    from fastapi import HTTPException
+
+    tenant_id = _resolve_tenant_id(request)
+    source_id = _resolve_source_id(request)
+    scope_id = _resolve_scope_id(request)
+    effective_tenant_id = _resolve_effective_tenant_id(
+        tenant_id,
+        source_id,
+        scope_id,
+    )
+    tenant_workspace = getattr(request.state, "workspace", None)
+    if not isinstance(tenant_workspace, TenantWorkspaceContext):
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant workspace is unavailable",
+        )
+    if effective_tenant_id is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Tenant context required",
+        )
+
+    config = _get_tenant_aware_config(
+        tenant_id,
+        source_id=source_id,
+        scope_id=scope_id,
+    )
+    requested_agent_id, _ = _resolve_target_agent_id(request)
+    agent_id = requested_agent_id or config.agents.active_agent or "default"
+    profile = config.agents.profiles.get(agent_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent '{agent_id}' not found",
+        )
+    if not getattr(profile, "enabled", True):
+        raise HTTPException(
+            status_code=403,
+            detail=f"Agent '{agent_id}' is disabled",
+        )
+
+    workspace_dir = Path(profile.workspace_dir).expanduser().resolve()
+    allowed_root = (
+        Path(tenant_workspace.workspace_dir).resolve() / "workspaces"
+    )
+    try:
+        workspace_dir.relative_to(allowed_root)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=403,
+            detail="Agent workspace is unavailable",
+        ) from exc
+    if not workspace_dir.is_dir():
+        raise HTTPException(
+            status_code=404,
+            detail=f"Agent '{agent_id}' not found",
+        )
+    return workspace_dir
 
 
 async def get_agent_for_request(
@@ -360,6 +424,7 @@ def get_tenant_workspace_strict(request: Request) -> "Workspace":
 
 
 __all__ = [
+    "resolve_file_manager_workspace_dir",
     "get_agent_for_request",
     "get_agent_and_config_for_request",
     "get_active_agent_id",

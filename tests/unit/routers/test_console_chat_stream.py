@@ -85,15 +85,22 @@ def _build_upload_client(monkeypatch, media_dir):
 def _build_file_manager_client(monkeypatch, workspace_dir):
     app = FastAPI()
     app.include_router(console_router.router)
-    workspace = SimpleNamespace(workspace_dir=workspace_dir)
 
-    async def _fake_get_agent_for_request(_request):
-        return workspace
+    async def _fake_resolve_file_manager_workspace_dir(_request):
+        return workspace_dir
+
+    async def _fail_if_runtime_requested(_request):
+        raise AssertionError("File Manager must not resolve an Agent runtime")
 
     monkeypatch.setattr(
         console_router,
+        "resolve_file_manager_workspace_dir",
+        _fake_resolve_file_manager_workspace_dir,
+    )
+    monkeypatch.setattr(
+        console_router,
         "get_agent_for_request",
-        _fake_get_agent_for_request,
+        _fail_if_runtime_requested,
     )
     monkeypatch.setattr(
         console_router,
@@ -189,7 +196,9 @@ def test_file_manager_conversation_can_read_and_download_regular_file(
     assert download_response.headers["content-disposition"] == (
         'attachment; filename="chat.txt"'
     )
-    assert "content-length" not in download_response.headers
+    assert download_response.headers["content-length"] == str(
+        len(b"conversation"),
+    )
 
 
 def test_file_manager_recycle_is_listable_but_not_available_for_read_or_download(
