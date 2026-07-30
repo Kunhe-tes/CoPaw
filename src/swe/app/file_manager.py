@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
+from collections import OrderedDict
 import heapq
 import hashlib
 import hmac
@@ -18,8 +19,10 @@ import json
 import logging
 import os
 import re
+import secrets
 import stat as stat_module
 import threading
+import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -159,6 +162,23 @@ class _DirectoryCandidate:
     name: str
     entry_stat: os.stat_result
     sort_key: tuple[int, tuple[tuple[int, int | str], ...], str]
+
+
+@dataclass(frozen=True)
+class _DirectorySnapshot:
+    version: str
+    identity: tuple[int, int, int]
+    items: tuple[FileManagerItem, ...]
+    expires_at: float
+
+
+_DIRECTORY_SNAPSHOT_TTL_SECONDS = 10.0
+_DIRECTORY_SNAPSHOT_CAPACITY = 128
+_DIRECTORY_SNAPSHOTS: OrderedDict[
+    tuple[str, str, str, str],
+    _DirectorySnapshot,
+] = OrderedDict()
+_DIRECTORY_SNAPSHOTS_LOCK = threading.Lock()
 
 
 def root_capabilities(root: FileManagerRoot | str) -> FileManagerCapabilities:
@@ -379,21 +399,27 @@ class FileManagerService:
         except (TypeError, ValueError) as exc:
             raise FileManagerPathError("Unknown file manager root") from exc
         if requested_root is FileManagerRoot.RECYCLE:
-            if relative_path or cursor or query:
+            if relative_path or query:
                 raise FileManagerPathError(
-                    "Recycle does not support directory paths or cursors",
+                    "Recycle does not support directory paths or queries",
                 )
             with self._workspace_lock:
-                return self._list_recycle_items()
+                return self._list_recycle_items(cursor)
         resolved_root, normalised_path = self._validate_root_and_path(
             root,
             relative_path,
         )
-        after_sort_key = self._cursor_sort_key(
+        cursor_state = self._validate_cursor_context(
             cursor,
             resolved_root,
             normalised_path,
             query,
+        )
+        snapshot_key = (
+            str(self._workspace_dir),
+            resolved_root.value,
+            normalised_path,
+            query or "",
         )
         directory_fd = self._open_directory_fd(
             resolved_root,
@@ -403,33 +429,80 @@ class FileManagerService:
         if directory_fd is None:
             return self._listing(resolved_root, normalised_path, [])
         try:
-            candidates = self._directory_candidates(
-                resolved_root,
-                normalised_path,
-                directory_fd,
-                query,
-                after_sort_key,
+            directory_stat = os.fstat(directory_fd)
+            directory_identity = (
+                directory_stat.st_dev,
+                directory_stat.st_ino,
+                directory_stat.st_mtime_ns,
             )
+            if cursor_state is not None:
+                last_path, last_kind, snapshot_version = cursor_state
+                if snapshot_version is None:
+                    raise FileManagerConflictError(
+                        "Directory listing changed; refresh and retry",
+                    )
+                snapshot = self._get_directory_snapshot(
+                    snapshot_key,
+                    snapshot_version,
+                    directory_identity,
+                )
+                if snapshot is None:
+                    raise FileManagerConflictError(
+                        "Directory listing changed; refresh and retry",
+                    )
+                items = list(snapshot.items)
+                try:
+                    start = next(
+                        index + 1
+                        for index, item in enumerate(items)
+                        if item.path == last_path and item.kind is last_kind
+                    )
+                except StopIteration as exc:
+                    raise FileManagerConflictError(
+                        "Directory listing changed; refresh and retry",
+                    ) from exc
+                snapshot_version = snapshot.version
+            else:
+                candidates = self._directory_candidates(
+                    resolved_root,
+                    normalised_path,
+                    directory_fd,
+                    query,
+                    None,
+                )
+                items = [
+                    self._item_for_entry(
+                        resolved_root,
+                        normalised_path,
+                        candidate.name,
+                        candidate.entry_stat,
+                    )
+                    for candidate in candidates
+                ]
+                snapshot_version = secrets.token_urlsafe(18)
+                self._put_directory_snapshot(
+                    snapshot_key,
+                    _DirectorySnapshot(
+                        version=snapshot_version,
+                        identity=directory_identity,
+                        items=tuple(items),
+                        expires_at=time.monotonic()
+                        + _DIRECTORY_SNAPSHOT_TTL_SECONDS,
+                    ),
+                )
+                start = 0
         finally:
             os.close(directory_fd)
-        page_candidates = candidates[:FILE_MANAGER_PAGE_SIZE]
-        page = [
-            self._item_for_entry(
-                resolved_root,
-                normalised_path,
-                candidate.name,
-                candidate.entry_stat,
-            )
-            for candidate in page_candidates
-        ]
+        page = items[start : start + FILE_MANAGER_PAGE_SIZE]
         next_cursor = None
-        if len(candidates) > FILE_MANAGER_PAGE_SIZE:
+        if start + FILE_MANAGER_PAGE_SIZE < len(items):
             next_cursor = self._encode_cursor(
                 resolved_root,
                 normalised_path,
                 query,
                 page[-1].path,
                 page[-1].kind,
+                snapshot_version,
             )
         return self._listing(resolved_root, normalised_path, page, next_cursor)
 
@@ -517,14 +590,18 @@ class FileManagerService:
                     sampled = handle.read(
                         TEXT_PREVIEW_LIMIT_BYTES + _LARGE_PREVIEW_PROBE_BYTES,
                     )
+                decoded_sample = self._decode_text_sample(
+                    sampled,
+                    sample_is_truncated=True,
+                )
                 decoded = self._decode_text_sample(
                     sampled[:TEXT_PREVIEW_LIMIT_BYTES],
                     sample_is_truncated=True,
                 )
                 is_text = (
-                    decoded is not None
+                    decoded_sample is not None
                     and not self._contains_disallowed_control_character(
-                        decoded,
+                        decoded_sample,
                     )
                 )
                 preview = (
@@ -1188,7 +1265,10 @@ class FileManagerService:
         finally:
             os.close(parent_fd)
 
-    def _list_recycle_items(self) -> FileManagerDirectoryListing:
+    def _list_recycle_items(
+        self,
+        cursor: str | None = None,
+    ) -> FileManagerDirectoryListing:
         """Adapt archive metadata without exposing its control-file paths."""
 
         items: list[FileManagerItem] = []
@@ -1224,12 +1304,76 @@ class FileManagerService:
             ),
             reverse=True,
         )
-        return FileManagerDirectoryListing(
-            root=FileManagerRoot.RECYCLE,
-            path="",
-            items=items,
-            capabilities=root_capabilities(FileManagerRoot.RECYCLE),
+        index_path = (
+            self._workspace_dir / "governance" / "archive" / "index.json"
         )
+        try:
+            index_stat = index_path.stat()
+        except FileNotFoundError:
+            identity = (0, 0, 0)
+        else:
+            identity = (
+                index_stat.st_dev,
+                index_stat.st_ino,
+                index_stat.st_mtime_ns,
+            )
+        key = (str(self._workspace_dir), FileManagerRoot.RECYCLE.value, "", "")
+        cursor_state = self._validate_cursor_context(
+            cursor,
+            FileManagerRoot.RECYCLE,
+            "",
+            None,
+        )
+        if cursor_state is None:
+            snapshot_version = secrets.token_urlsafe(18)
+            snapshot = _DirectorySnapshot(
+                snapshot_version,
+                identity,
+                tuple(items),
+                time.monotonic() + _DIRECTORY_SNAPSHOT_TTL_SECONDS,
+            )
+            self._put_directory_snapshot(key, snapshot)
+            start = 0
+        else:
+            last_path, last_kind, snapshot_version = cursor_state
+            if snapshot_version is None:
+                raise FileManagerConflictError(
+                    "Directory listing changed; refresh and retry",
+                )
+            snapshot = self._get_directory_snapshot(
+                key,
+                snapshot_version,
+                identity,
+            )
+            if snapshot is None:
+                raise FileManagerConflictError(
+                    "Directory listing changed; refresh and retry",
+                )
+            items = list(snapshot.items)
+            start = next(
+                (
+                    index + 1
+                    for index, item in enumerate(items)
+                    if item.path == last_path and item.kind is last_kind
+                ),
+                -1,
+            )
+            if start < 0:
+                raise FileManagerConflictError(
+                    "Directory listing changed; refresh and retry",
+                )
+        page = items[start : start + FILE_MANAGER_PAGE_SIZE]
+        next_cursor = None
+        if start + FILE_MANAGER_PAGE_SIZE < len(items):
+            next_cursor = self._encode_cursor(
+                FileManagerRoot.RECYCLE,
+                "",
+                None,
+                page[-1].path,
+                page[-1].kind,
+                snapshot_version,
+            )
+        return self._listing(FileManagerRoot.RECYCLE, "", page, next_cursor)
 
     def _recycle_index_item(
         self,
@@ -1831,8 +1975,7 @@ class FileManagerService:
                     )
 
         try:
-            return heapq.nsmallest(
-                FILE_MANAGER_PAGE_SIZE + 1,
+            return sorted(
                 candidates(),
                 key=lambda candidate: candidate.sort_key,
             )
@@ -1840,6 +1983,36 @@ class FileManagerService:
             raise
         except OSError as exc:
             raise FileManagerPathError("Unable to list directory") from exc
+
+    @staticmethod
+    def _get_directory_snapshot(
+        key: tuple[str, str, str, str],
+        version: str,
+        identity: tuple[int, int, int],
+    ) -> _DirectorySnapshot | None:
+        with _DIRECTORY_SNAPSHOTS_LOCK:
+            snapshot = _DIRECTORY_SNAPSHOTS.get(key)
+            if (
+                snapshot is None
+                or snapshot.version != version
+                or snapshot.identity != identity
+                or snapshot.expires_at <= time.monotonic()
+            ):
+                _DIRECTORY_SNAPSHOTS.pop(key, None)
+                return None
+            _DIRECTORY_SNAPSHOTS.move_to_end(key)
+            return snapshot
+
+    @staticmethod
+    def _put_directory_snapshot(
+        key: tuple[str, str, str, str],
+        snapshot: _DirectorySnapshot,
+    ) -> None:
+        with _DIRECTORY_SNAPSHOTS_LOCK:
+            _DIRECTORY_SNAPSHOTS[key] = snapshot
+            _DIRECTORY_SNAPSHOTS.move_to_end(key)
+            while len(_DIRECTORY_SNAPSHOTS) > _DIRECTORY_SNAPSHOT_CAPACITY:
+                _DIRECTORY_SNAPSHOTS.popitem(last=False)
 
     def _item_for_entry(
         self,
@@ -1994,7 +2167,7 @@ class FileManagerService:
         cursor_state = self._validate_cursor_context(cursor, root, path, query)
         if cursor_state is None:
             return None
-        last_path, last_kind = cursor_state
+        last_path, last_kind, _ = cursor_state
         return self._sort_key_for_cursor(last_path, last_kind)
 
     def _validate_cursor_context(
@@ -2003,7 +2176,7 @@ class FileManagerService:
         root: FileManagerRoot,
         path: str,
         query: str | None,
-    ) -> tuple[str, FileManagerItemKind] | None:
+    ) -> tuple[str, FileManagerItemKind, str | None] | None:
         if cursor is None:
             return None
         try:
@@ -2019,14 +2192,28 @@ class FileManagerService:
                 self._cursor_signature(cursor_payload),
             ):
                 raise ValueError
-            if cursor_payload != {
-                "root": root.value,
-                "path": path,
-                "query": query or "",
-                "version": 2,
-                "last_path": cursor_payload["last_path"],
-                "last_kind": cursor_payload["last_kind"],
-            }:
+            if cursor_payload.get("version") == 2:
+                expected_payload = {
+                    "root": root.value,
+                    "path": path,
+                    "query": query or "",
+                    "version": 2,
+                    "last_path": cursor_payload["last_path"],
+                    "last_kind": cursor_payload["last_kind"],
+                }
+                snapshot_version = None
+            else:
+                expected_payload = {
+                    "root": root.value,
+                    "path": path,
+                    "query": query or "",
+                    "version": 3,
+                    "last_path": cursor_payload["last_path"],
+                    "last_kind": cursor_payload["last_kind"],
+                    "snapshot": cursor_payload["snapshot"],
+                }
+                snapshot_version = cursor_payload["snapshot"]
+            if cursor_payload != expected_payload:
                 raise ValueError
             last_path = cursor_payload["last_path"]
             last_kind = FileManagerItemKind(cursor_payload["last_kind"])
@@ -2037,7 +2224,12 @@ class FileManagerService:
                 or parent_path != path
             ):
                 raise ValueError
-            return last_path, last_kind
+            if snapshot_version is not None and not isinstance(
+                snapshot_version,
+                str,
+            ):
+                raise ValueError
+            return last_path, last_kind, snapshot_version
         except (
             AttributeError,
             binascii.Error,
@@ -2074,14 +2266,16 @@ class FileManagerService:
         query: str | None,
         last_path: str,
         last_kind: FileManagerItemKind,
+        snapshot_version: str,
     ) -> str:
         payload: dict[str, str | int] = {
             "root": root.value,
             "path": path,
             "query": query or "",
-            "version": 2,
+            "version": 3,
             "last_path": last_path,
             "last_kind": last_kind.value,
+            "snapshot": snapshot_version,
         }
         payload["signature"] = self._cursor_signature(payload)
         return base64.urlsafe_b64encode(

@@ -187,6 +187,37 @@ def test_listing_uses_stable_100_item_cursor_pages(tmp_path: Path) -> None:
     assert second_page.next_cursor is None
 
 
+def test_directory_cursor_reuses_snapshot_and_rejects_changed_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(FILE_MANAGER_PAGE_SIZE + 2):
+        (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+    service = _service(tmp_path)
+    original_candidates = service._directory_candidates
+    calls = 0
+
+    def track_candidates(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_directory_candidates", track_candidates)
+
+    first = service.list_directory("working")
+    second = service.list_directory("working", cursor=first.next_cursor)
+
+    assert calls == 1
+    assert [item.name for item in second.items] == [
+        "item100.txt",
+        "item101.txt",
+    ]
+
+    (tmp_path / "changed.txt").write_text("changed", encoding="utf-8")
+    with pytest.raises(FileManagerConflictError, match="refresh and retry"):
+        service.list_directory("working", cursor=first.next_cursor)
+
+
 def test_listing_allows_more_than_ten_thousand_items_with_cursor(
     tmp_path: Path,
 ) -> None:
@@ -504,7 +535,7 @@ def test_large_utf8_with_codepoint_started_after_sample_is_still_text(
     assert preview.content == "a" * (1024 * 1024)
 
 
-def test_large_invalid_utf8_after_sample_boundary_is_rejected(
+def test_large_invalid_utf8_after_sample_boundary_stays_read_only_text(
     tmp_path: Path,
 ) -> None:
     prefix = b"a" * (1024 * 1024 + 3)
@@ -517,8 +548,8 @@ def test_large_invalid_utf8_after_sample_boundary_is_rejected(
         "invalid-boundary.txt",
     )
 
-    assert preview.is_text is False
-    assert preview.content is None
+    assert preview.is_text is True
+    assert preview.content == "a" * (1024 * 1024)
 
 
 def test_large_text_with_invalid_utf8_after_preview_stays_read_only_text(
