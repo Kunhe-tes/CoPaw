@@ -1455,6 +1455,7 @@ class TestExecuteShellCommand:
             "'source': os.environ.get('SWE_SOURCE_ID'), "
             "'scope': os.environ.get('SWE_RUNTIME_SCOPE_ID'), "
             "'session': os.environ.get('SWE_SESSION_ID'), "
+            "'chat': os.environ.get('SWE_CHAT_ID'), "
             "'trace': os.environ.get('SWE_TRACE_ID')}))\""
         )
         (mock_working_dir / encode_scope_id("test_tenant", "source-a")).mkdir(
@@ -1466,6 +1467,7 @@ class TestExecuteShellCommand:
             tenant_context(tenant_id="test_tenant", source_id="source-a"),
             runtime_invocation_claims_context(
                 session_id="session-1",
+                chat_id="chat-uuid-1",
                 trace_id="trace-1",
             ),
         ):
@@ -1478,6 +1480,7 @@ class TestExecuteShellCommand:
             '"scope": "' + encode_scope_id("test_tenant", "source-a") in text
         )
         assert '"session": "session-1"' in text
+        assert '"chat": "chat-uuid-1"' in text
         assert '"trace": "trace-1"' in text
 
     @pytest.mark.asyncio

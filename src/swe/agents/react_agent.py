@@ -1027,6 +1027,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     rebuild_info.get("args", []),
                     rebuild_info.get("env", {}),
                     rebuild_info.get("cwd"),
+                    chat_id=rebuild_info.get("chat_id"),
                 )
                 rebuilt_client = StdIOStatefulClient(
                     name=name,
@@ -1053,6 +1054,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     "passthrough_headers",
                 ),
                 session_id=rebuild_info.get("session_id"),
+                chat_id=rebuild_info.get("chat_id"),
                 trace_id=rebuild_info.get("trace_id"),
             )
             timeout = rebuild_info.get(
