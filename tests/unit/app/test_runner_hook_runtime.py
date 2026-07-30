@@ -2296,7 +2296,7 @@ async def test_session_start_hook_conversation_snapshot_uses_persisted_memory(
 
 
 @pytest.mark.asyncio
-async def test_query_handler_stop_hook_blocks_completion(
+async def test_query_handler_stop_hook_ignores_handler_effects(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -2340,10 +2340,7 @@ async def test_query_handler_stop_hook_blocks_completion(
         item async for item in runner.query_handler(msgs, request=request)
     ]
 
-    assert [item[0].get_text_content() for item in outputs] == [
-        "agent reply",
-        "stop blocked",
-    ]
+    assert [item[0].get_text_content() for item in outputs] == ["agent reply"]
     stop_call = emit_hook.await_args_list[-1]
     assert stop_call.args[0] == HookEventName.STOP
     assert stop_call.kwargs["assistant_response"] == "agent reply"

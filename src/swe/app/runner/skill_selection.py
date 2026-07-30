@@ -9,6 +9,7 @@ from typing import Iterable
 from xml.sax.saxutils import escape
 
 import frontmatter
+from yaml import YAMLError
 
 from ...agents.skills_manager import (
     resolve_effective_skill_dir,
@@ -70,7 +71,7 @@ def build_skill_use_directives(
             description = str(
                 frontmatter.loads(content).get("description") or "",
             )
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, YAMLError):
             description = ""
         directives.append(
             SkillUseDirective(

@@ -3476,7 +3476,7 @@ class AgentRunner(Runner):
         ):
             return None
 
-        stop_hook_result = await _emit_runner_hook(
+        await _emit_runner_hook(
             HookEventName.STOP,
             request=request,
             runner=self,
@@ -3487,22 +3487,6 @@ class AgentRunner(Runner):
             assistant_response=outcome.assistant_response,
             agent=runtime.agent,
         )
-        stop_context = _format_hook_additional_context(stop_hook_result)
-        if stop_context:
-            await runtime.agent.memory.add(
-                Msg(
-                    name="system",
-                    role="system",
-                    content=("[Hook additional context]\n" f"{stop_context}"),
-                ),
-            )
-        if stop_hook_result.decision in {
-            HookDecision.BLOCK,
-            HookDecision.DENY,
-            HookDecision.STOP,
-        }:
-            outcome.task_completed = False
-            return _hook_block_message(stop_hook_result)
         return None
 
     async def _generate_backend_suggestions_if_needed(

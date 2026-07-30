@@ -301,24 +301,127 @@ A source-scoped runtime configuration surface for behavior shared by requests fr
 _Avoid_: system feature configuration, system feature config, 系统特性配置, tenant config, user config
 
 **Source Built-in Tool**:
-An executable custom tool asset owned by one source and available to every tenant under that source. It is distinct from an Agent Profile tool configuration; tenants may use it but cannot alter its source-owned script or lifecycle.
-_Avoid_: tenant tool script, source configuration JSON, Agent-owned shared tool
+An executable custom tool asset owned by one source and available to every tenant under that source. A Source Built-in Tool is distinct from an Agent Profile's built-in-tool configuration, and no tenant owns or may alter it.
+_Avoid_: source tool config, shared tenant tool, tenant tool script
 
-**Source Tool Library**:
-The source-scoped management collection of Source Built-in Tools on the System Configuration page. It has independent source-owned storage and lifecycle, supports complete-file upload rather than browser editing, and is not Marketplace or tenant-workspace storage.
-_Avoid_: source configuration JSON, agent tool page, browser script editor
+**Source Built-in Tool Contract**:
+The AgentScope-compatible callable identity, purpose, and input shape of one Source Built-in Tool. Its identity is a stable restricted tool name, independent of its script filename; the first release establishes it through statically inspectable declarations for a complete tool JSON Schema, credentials, and a Python script with one fixed invocation entry point. Neither the number of active tools nor individual Schema size or complexity is capped.
+_Avoid_: free-form script invocation, filename-only tool definition, dynamic Schema, dynamic credential declaration, tool-count quota, Schema complexity quota
 
-**Source Built-in Tool Draft**:
-An unpublished source-tool version that has passed static validation and the mandatory blocking safety gate. A Source Tool Administrator may explicitly test, discard, or publish it; it does not alter any Agent catalog before publication.
-_Avoid_: implicit publication, unscanned source tool, active source tool
+**Source Built-in Tool Adapter**:
+The Swe-owned adapter that registers a Source Built-in Tool with the regular Toolkit, validates calls against its Source Built-in Tool Contract, invokes the script across its execution boundary, and normalizes the result into the regular tool response contract.
+_Avoid_: in-process uploaded script, custom model protocol, raw script result
 
-**Source Built-in Tool Override**:
-The source-level precedence rule under which a Source Built-in Tool replaces a Swe code-defined built-in while preserving its complete tool JSON Schema. It never overrides Skill or MCP tools and cannot bypass an Agent's disabled choice.
-_Avoid_: registration-order override, Schema-changing override, Skill override, MCP override
+**Source Built-in Tool Execution Boundary**:
+The per-invocation boundary that runs a Source Built-in Tool with only the current tenant's workspace and authorized runtime capabilities. Every call passes the ordinary Tool Guard and approval chain and enforces the Python tenant path guard, resource boundary, and credential declaration; if any guard cannot be established, the call fails closed. The source shares tool code, never tenant data, credentials, or management authority.
+_Avoid_: source-wide tenant access, shared credential context, backend-process execution, guard bypass, permissive fallback
+
+**Source Built-in Tool Resource Boundary**:
+The resource boundary for a Source Built-in Tool call. It inherits the current tenant's process CPU, memory, and concurrency limits and has the standard sixty-second timeout; a source tool cannot raise those limits.
+_Avoid_: source-level resource escalation, unlimited shared tool, script-defined resource cap
+
+**Source Built-in Tool Async Execution**:
+The first-release execution mode for Source Built-in Tools. Newly added source tools run synchronously; only an Override of `execute_shell_command` inherits that Agent's existing asynchronous-execution choice.
+_Avoid_: general source-tool background mode, source-owned async toggle, lost shell async choice
+
+**Source Built-in Tool Credential Declaration**:
+The explicit list of runtime environment variable names a Source Built-in Tool needs. A call receives only the declared values from its current tenant; missing values produce a structured configuration failure, and source or backend credentials are never eligible.
+_Avoid_: whole tenant environment, source secret, backend secret, implicit credential access
+
+**Source Built-in Tool Dependency Boundary**:
+The first-release rule that a Source Built-in Tool is one Python source file of at most 1 MB, using only the standard library and Swe's fixed runtime interface. It cannot install, bundle, or select third-party dependencies or a custom runtime.
+_Avoid_: requirements file, package upload, runtime installation, custom virtual environment, oversized source file
+
+**Source Built-in Tool Safety Gate**:
+The mandatory upload scan for every Source Built-in Tool version. A safety finding or unavailable scan rejects publication; source management cannot bypass this gate.
+_Avoid_: warning-only publication, scan bypass, unscanned source tool
+
+**Source Built-in Tool Manual Test**:
+An explicitly confirmed real execution of an unpublished Source Built-in Tool version using the current Source Tool Administrator's selected Agent Profile, tenant workspace, declared credentials, and JSON input validated against the draft's Contract. Its displayed result uses the normal redaction and output limits; audit excludes test inputs, script content, and credentials. It neither publishes the version nor changes availability for other tenants.
+_Avoid_: dry-run, source-wide test, implicit publish, side-effect-free preview, unchecked test input, unrelated Agent context, unbounded test output
 
 **Source Built-in Tool Activation Boundary**:
-The start of an Agent run, when it snapshots its effective Source Built-in Tool catalog. Publication, replacement, and deactivation affect only later Agent runs; a running Agent retains its starting catalog.
-_Avoid_: mid-run tool mutation, retroactive catalogue change
+The start of an Agent run, when it snapshots its effective Source Built-in Tool catalog. Publication, replacement, and deactivation affect the next Agent run only; a running Agent retains its starting catalog.
+_Avoid_: mid-run tool mutation, next-call-only reload, retroactive catalog change
+
+**Source Built-in Tool Historical Record**:
+The retained scripts, version snapshots, content identities, and audit records for a Source Built-in Tool. The first release permits deactivation but no rollback or permanent deletion of this record.
+_Avoid_: destructive source-tool deletion, erased audit trail, rollback history
+
+**Source Built-in Tool Result Boundary**:
+The rule that a Source Built-in Tool returns only a JSON-serializable business result. The Source Built-in Tool Adapter turns it into the normal tool response and applies Swe's standard failure, redaction, output-limit, conversation-record, and observability behavior. A runtime failure never falls back to a code-defined built-in, even for an Override.
+_Avoid_: script-defined UI card, raw script output, custom error transport, fallback to built-in implementation
+
+**Source Built-in Tool Network Boundary**:
+The rule that a Source Built-in Tool may use only the platform's existing network egress policy. It cannot configure or bypass network destinations, and external authentication remains limited to its current tenant's declared credentials.
+_Avoid_: source-controlled egress allowlist, network bypass, shared integration credential
+
+**Source Built-in Tool Invocation Attribution**:
+The source-tool identity, tool name, and published version or content identity recorded with a standard tool invocation, alongside its tenant, source, Agent, and result. It excludes call arguments, script bodies, and credential values.
+_Avoid_: unattributed shared-tool call, logged tool secret, persisted script body
+
+**Source Built-in Tool Change Notification**:
+The cross-tenant notification of a Source Built-in Tool publication, replacement, or deactivation. The first release sends none; the change is observable through the next Agent run's effective catalog and source-level audit records.
+_Avoid_: tenant broadcast, source-tool change message, silent untraceable change
+
+**Source Built-in Tool Override**:
+The precedence rule under which a Source Built-in Tool with the same tool name replaces a Swe code-defined built-in tool for that source. An Override retains the built-in's complete tool JSON Schema while changing only implementation and description. It never overrides a Skill- or MCP-provided tool; such a name collision is invalid.
+_Avoid_: registration-order override, Schema-changing built-in override, Skill override, MCP override
+
+**Source Built-in Tool Replacement**:
+The explicitly confirmed publication of a staged same-name Source Built-in Tool draft. It is audited and affects later calls only; a call already executing retains the version with which it began.
+_Avoid_: retroactive replacement, execution interruption, silent overwrite, unconfirmed replacement
+
+**Source Built-in Tool Draft**:
+An unpublished Source Built-in Tool version that has passed static validation and the Source Built-in Tool Safety Gate. A Source Tool Administrator may manually test it or explicitly publish it; it does not change any Agent's effective catalog before publication.
+_Avoid_: implicit publication, unscanned test script, active source tool
+
+**Source Built-in Tool Draft Discard**:
+The explicit removal of an unpublished Source Built-in Tool Draft by a Source Tool Administrator. It does not remove published tool history; its creation, testing, and discard remain auditable as metadata.
+_Avoid_: published-version deletion, unaudited draft removal, source-tool rollback
+
+**Source Built-in Tool Draft Uniqueness**:
+The rule that each source and tool name has at most one unpublished Source Built-in Tool Draft. A later upload must explicitly replace or discard the existing draft before it can become the sole draft.
+_Avoid_: multiple pending versions, ambiguous publication target, parallel draft set
+**Source Built-in Tool Availability**:
+The source determines which Source Built-in Tools are available to an Agent, while the Agent's own enabled or disabled choice determines whether an available tool is callable for that Agent. An Override replaces implementation only and cannot bypass a disabled choice.
+_Avoid_: source-forced enablement, override bypass, tenant implementation ownership
+
+**Source Built-in Tool Default Enablement**:
+A newly published non-conflicting Source Built-in Tool is initially enabled for every Agent under its source through lazily resolved source defaults, without bulk-writing Agent configuration. Each Agent may later disable it through its own tool configuration.
+_Avoid_: opt-in-only source tool, permanently forced tool, bulk tenant configuration write
+
+**Source Built-in Tool Agent Choice Persistence**:
+An Agent's explicit enabled or disabled choice for a Source Built-in Tool survives that tool's source-level deactivation and later reactivation. Only an Agent that has never encountered the tool receives its default enablement.
+_Avoid_: reactivation reset, source-forced re-enable, forgotten Agent choice
+
+**Source Built-in Tool Catalog Exposure**:
+The complete registration of every source-enabled Source Built-in Tool that the Agent has not disabled when an Agent run begins. It is not filtered by user intent, keywords, or on-demand discovery.
+_Avoid_: lazy source tool, keyword-selected tool, partial source catalog
+
+**Source Tool Library**:
+The source-scoped management collection of Source Built-in Tools. It is presented within the Source System Configuration page but has independent storage and lifecycle from Source System Configuration. Its first release accepts complete-file upload and same-name replacement, not browser-based script editing, and does not cap the number of enabled Source Built-in Tools.
+_Avoid_: source configuration JSON, agent tool list, tenant script library, browser script editor, source tool-count quota
+
+**Source Tool Library Storage**:
+The Swe-controlled, source-isolated storage of Source Built-in Tool scripts and their version history. It is separate from Marketplace storage while retaining atomic publication, content identity, and audit history.
+_Avoid_: Marketplace item storage, tenant workspace storage, Source System Configuration storage, rollback store
+
+**Source Built-in Tool Script Read Access**:
+The read-only viewing or download of current and historical Source Built-in Tool scripts by a Source Tool Administrator. Ordinary tenants may see effective tool metadata but not script content.
+_Avoid_: tenant script download, browser editing, public source code
+
+**Source Built-in Tool Deactivation**:
+The source-level withdrawal of a Source Built-in Tool. It affects later calls only: a deactivated Override restores the code-defined built-in, while a deactivated unique source tool is unavailable; historical versions and audit records remain for tracing only.
+_Avoid_: destructive deletion, interrupted call, disabled Agent tool, rollback
+
+**Source Built-in Tool Failure Availability**:
+The rule that a runtime failure of a Source Built-in Tool affects only that invocation and does not deactivate the tool. Source-level availability changes only through an explicit Source Tool Administrator action.
+_Avoid_: automatic circuit-breaker deactivation, failure-driven source mutation, implicit source disablement
+
+**Source Tool Administrator**:
+The manager or administrator authorized for the current source and permitted to upload or replace a Source Built-in Tool. A tenant administrator may use such a tool but may not manage it.
+_Avoid_: tenant tool administrator, any tenant uploader
 
 **Source System Configuration Override**:
 A value explicitly saved in **Source System Configuration** that replaces the corresponding broader runtime setting for requests from that source. Missing values are inheritance, not implicit overrides.
@@ -1029,6 +1132,230 @@ Resolved as a **Runtime Instance**, meaning one running Swe service container. I
 **"Logging System"**:
 Resolved as the **Application Log Output Pipeline** when discussing asynchronous logging output. It does not mean changing **Hook Telemetry Log Message** schema, business operation logs, tracing storage, or **Tool Output Frames**.
 
+**Context Reference**:
+A user-selected runtime resource in a chat message. A Context Reference has one type—Skill, MCP Tool, or Workspace File—and is translated into that type's own trusted instruction context for the current turn.
+_Avoid_: plain @ text, forced tool invocation, file upload
+
+**Workspace File Context Reference**:
+A Context Reference for a file owned by the current workspace, scoped to either its `media` directory or its `static` directory. It identifies an existing runtime file; it is not a new uploaded attachment.
+_Avoid_: arbitrary local file, public file, chat upload
+
+**Chat File Manager**:
+The tenant-scoped browser for files in the current Agent workspace. It presents five controlled root directories and never exposes arbitrary host filesystem paths.
+_Avoid_: file preview drawer, host file browser, general file storage
+
+**Working Directory**:
+The root path of the current tenant's Agent workspace. It is the default root shown when the **Chat File Manager** opens.
+_Avoid_: global workspace, source checkout, host home directory
+
+**File Manager Hidden Managed Directories**:
+The two tenant-workspace directories omitted from the Working Directory view: `sessions`, which is reached through the read-only Conversation Directory, and `governance`, which is reached only through the controlled File Manager Recycle Bin. All other workspace files and directories remain visible in the Working Directory.
+_Avoid_: hidden workspace policy, governance root browser, sessions bypass
+
+**Upload Directory**:
+The `media` root within the current tenant's Agent workspace, containing files uploaded through chat.
+_Avoid_: attachment list, arbitrary upload location
+
+**Download Directory**:
+The `static` root within the current tenant's Agent workspace, containing files made available for download or generated for the user.
+_Avoid_: browser download history, client download folder
+
+**File Manager Recycle Bin**:
+The controlled file-manager view of the current tenant's governance archive. It presents archived files by their original file identity and permits only supported restore or permanent-delete operations; it is not a browser for the `governance` root or its control records.
+_Avoid_: governance directory browser, raw archive files, ordinary directory
+
+**File Manager Restore Conflict**:
+The outcome when a File Manager Recycle Bin item cannot return to its original path because a file already exists there. Restore does not overwrite the existing file and leaves the archive item available until the user resolves the conflict.
+_Avoid_: overwrite-on-restore, automatic rename, lost archive item
+
+**File Manager Permanent Deletion Confirmation**:
+The explicit, irreversible confirmation required before permanently deleting a File Manager Recycle Bin item. It displays the file's original path, uses a dangerous-action affordance, and provides no undo after confirmation.
+_Avoid_: one-click permanent delete, generic confirmation, undoable purge
+
+**File Manager Entry Date**:
+The weak secondary date shown for one file-manager row. Ordinary directories show the file's modification time, while the File Manager Recycle Bin shows the time the file entered the archive.
+_Avoid_: file size metadata, one date meaning for every root, recycle-bin modification time
+
+**File Manager Directory Incremental Loading**:
+The independent waterfall-style loading behavior for each directory column. It loads the first 100 stable-order entries and loads later pages as the user approaches that column's bottom; Current Directory Search uses the same server-side paging behavior.
+_Avoid_: one global scroll, capped flat workspace list, client-only large-directory filtering
+
+**File Manager Symbolic Link Boundary**:
+The safety rule for a symbolic link encountered in a visible workspace directory. The file manager displays it as restricted but never resolves, follows, previews, edits, downloads, deletes, or uses it as an upload destination.
+_Avoid_: workspace-escaping link traversal, hidden symlink, supported symlink file operation
+
+**File Manager HTML Preview Sandbox**:
+The isolated frame used to preview an HTML file. It permits scripts to execute but withholds same-origin access, top-level navigation, popups, and downloads from the embedded document.
+_Avoid_: trusted HTML preview, same-origin embedded file, unrestricted preview frame
+
+**File Manager Breadcrumb Root**:
+The first clickable segment of a file-manager breadcrumb: the active shortcut directory. It returns to that root and replaces the non-navigable `Home` label.
+_Avoid_: synthetic Home breadcrumb, host filesystem root, inactive shortcut root
+
+**File Manager Breadcrumb Reanchor**:
+The navigation behavior after a user selects any file-manager breadcrumb segment. Its directory becomes the left-column starting point, its default path repopulates the following columns, and the previously visible path and file preview are cleared.
+_Avoid_: partial breadcrumb rewind, preserved stale preview, in-place ancestor jump
+
+**File Manager Directory Capability**:
+The permitted user operations for a **Chat File Manager** root. Working, Upload, and Download Directories permit browsing, upload, editing, downloading, and recoverable deletion; the Conversation Directory permits browsing, previewing, and downloading only; the **File Manager Recycle Bin** permits restoring or permanently deleting archived files only.
+_Avoid_: uniform directory permissions, session-file editing, recycle-bin upload
+
+**File Manager Initial Column State**:
+The state after the **Chat File Manager** enters a root directory. The root's items occupy the left column, its default first folder becomes the middle directory, and that folder's default first child folder becomes the right directory; each column lists the direct contents of its directory.
+_Avoid_: synthetic Home column, selection-empty initial state, inaccessible parent layer
+
+**File Manager Default Directory Order**:
+The stable order used by the **Chat File Manager** to display directory entries and choose each default folder for the initial path. Folders precede files, and entries within each kind use case-insensitive natural name order.
+_Avoid_: modification-time default order, filesystem enumeration order, files-first default path
+
+**File Manager Default Path Termination**:
+The rule when initial automatic traversal reaches a directory without a child folder before all three columns are populated. Traversal stops, the remaining columns identify the absent child-folder level, and no file is selected or previewed automatically.
+_Avoid_: auto-previewed first file, fabricated directory level, file-based auto traversal
+
+**File Manager Current Directory Search**:
+The non-recursive, case-insensitive filename filter for the direct child entries of the directory represented by the middle column. It does not change the selected item or path; when no middle directory exists, it instead filters the current shortcut-root directory.
+_Avoid_: workspace-wide search, recursive search, search-driven navigation
+
+**File Manager Column Advance**:
+The selection rule for the three-column browser. Selecting a folder in a non-rightmost column displays its direct children in the next column without moving the window. Selecting either a folder or a file in the rightmost column moves the three-column window one level left.
+_Avoid_: double-click-to-enter, manual navigation confirmation, fixed parent-current-preview columns
+
+**File Manager File Advance Result**:
+The newly exposed rightmost column after a file triggers a **File Manager Column Advance**. It presents that file's preview or details in place, including its applicable editing action, rather than opening a separate preview overlay or leaving the column empty.
+_Avoid_: nested preview modal, empty trailing column, detached file inspector
+
+**File Manager Editable Text File**:
+A file whose content is safely classified as plain UTF-8 text, including text, Markdown, and HTML files. It supports in-place editing in the **Chat File Manager**; binary, Office, PDF, image, audio, and video files do not.
+_Avoid_: universal file editor, Office editing, binary-text coercion
+
+**File Manager Large Text Preview**:
+The bounded text-file reading rule. A text file of at most 1 MB is read in full and is eligible for editing; a larger text file previews only its first 1 MB, remains downloadable, and is not editable.
+_Avoid_: character-count truncation, unbounded text read, large-text editing
+
+**File Manager Save Conflict**:
+The outcome when a **File Manager Editable Text File** has changed after its editor loaded it but before the user saves. The save is rejected without overwriting the current file, and the user's unsaved draft remains available for comparison or resolution.
+_Avoid_: last-writer-wins save, silent overwrite, discarded draft
+
+**File Manager Unsaved-Edit Guard**:
+The confirmation required before closing the file manager or taking a navigation action that would replace an unsaved text-editor draft. The user may save, discard the draft, or cancel the pending action; the action proceeds after a successful save or an explicit discard only.
+_Avoid_: implicit draft discard, navigation-first save, silent editor reset
+
+**File Manager Recoverable Deletion**:
+The file-only deletion operation that moves one file from a mutable **Chat File Manager** directory into the **File Manager Recycle Bin**. Directories cannot be deleted through the first file-manager release.
+_Avoid_: recursive directory deletion, permanent ordinary-directory delete, file-system-wide trash
+
+**File Manager Upload Availability**:
+The Upload action is unavailable in the Conversation Directory and the File Manager Recycle Bin, with an explanation of that restriction. A successful upload refreshes its destination directory without selecting the new file automatically.
+_Avoid_: session upload, recycle-bin upload, upload-driven file selection
+
+**File Manager Upload Name Conflict**:
+The outcome when an upload's filename already exists in its destination directory. The upload is rejected without overwriting or automatically renaming either file; the user must rename the local file and retry.
+_Avoid_: overwrite upload, auto-suffixed upload, silent replacement
+
+**File Manager Mutation Audit Record**:
+The application-audit record for a file-manager upload, save, recoverable deletion, restore, or permanent deletion. It identifies the actor, time, operation, path, and result without retaining file contents; previews and downloads create no such record.
+_Avoid_: file-content audit, unlogged workspace mutation, preview analytics
+
+**File Manager File Download**:
+The detail-panel action that downloads one selected file from the Working, Upload, Download, or Conversation Directory. It is unavailable in the File Manager Recycle Bin and does not create archive downloads for folders.
+_Avoid_: directory ZIP download, recycle-bin download, list-row bulk download
+
+**Conversation Directory**:
+The `sessions` root within the current tenant's Agent workspace, containing conversation-scoped files.
+_Avoid_: chat transcript, current browser session, global sessions directory
+
+**On-Demand File Reference Instruction**:
+The trusted instruction context created from a Workspace File Context Reference after the backend re-resolves and validates it within the current workspace. It tells the Main Agent that the file is user-selected and may be read or analyzed on demand, without inlining its contents or binary data.
+_Avoid_: automatic file attachment, inline file content, unvalidated file path
+
+**Context Reference Search**:
+The non-empty query after `@` that searches the current Agent's Skills, Callable MCP Tools, and Workspace File Context References. Skills and MCP Tools retain their default presence when the query is empty; files are searched only after the user supplies a query.
+_Avoid_: eager workspace file enumeration, empty-query file listing
+
+**Context Reference Turn Scope**:
+The lifecycle shared by all Context References: their typed instruction contexts apply only to the next submitted user message and are cleared immediately after that request is created. They do not persist implicitly across later conversation turns.
+_Avoid_: persistent mention, conversation-scoped reference, sticky tool selection
+
+**Context Reference Selection Set**:
+The unique set of Context References chosen for one request. It deduplicates repeated choices by stable type-specific identity while allowing same-named resources of different types to coexist.
+_Avoid_: duplicate mention list, name-only deduplication, persistent selection
+
+**Context Reference Token**:
+The non-editable, type-icon-bearing inline representation of a selected Context Reference in the message editor. Skills display `@skill`, MCP Tools display `@server/tool`, and Workspace Files display `@filename` with the root-prefixed path available as supplementary text; token deletion changes the structured selection set.
+_Avoid_: editable reference text, text-parsed selection, untyped mention token
+
+**Context Reference Discovery Hint**:
+The footer message shown only while the user has typed `@` without a search term. It tells the user that further input searches tools and files; a non-empty query replaces it with results or an empty-result state.
+_Avoid_: persistent search footer, query-time instruction
+
+**Context Reference Result Group**:
+A typed category shown in the mention overlay only when it has one or more matching Context References. Empty categories are omitted rather than rendered as empty sections.
+_Avoid_: empty category section, category-level no-results row
+
+**Context Reference Result Group Order**:
+The fixed mention-overlay order for non-empty result groups: Skills, then MCP Tools, then Files.
+_Avoid_: relevance-shuffled groups, files-first grouping
+
+**Context Reference Empty Result State**:
+The single mention-overlay state displayed when a non-empty Context Reference Search finds no Skills, Callable MCP Tools, or Workspace File Context References. It replaces all result groups.
+_Avoid_: per-category empty states, blank search overlay
+
+**Workspace File Search Result**:
+A filename-matched Workspace File Context Reference from either the `media` or `static` directory. Both directories appear together in the single Files group, with no separate source grouping; each result category is limited to four items.
+_Avoid_: media group, static group, path-content search
+
+**Workspace File Result Path Label**:
+The secondary display text for a Workspace File Search Result. It uses the source-root-prefixed relative path, such as `media/image.png` or `static/reports/summary.pdf`, to distinguish same-named files while keeping them in one Files group.
+_Avoid_: filename-only file selection, separate source group
+
+**Callable MCP Tool**:
+An MCP Tool that is enabled for the current Agent and was successfully discovered for the current Context Reference lookup. A failed MCP service contributes no tool or error placeholder to the mention overlay.
+_Avoid_: configured MCP tool, unavailable MCP tool, failed-server row
+
+**MCP Tool Result Identity**:
+The stable identity and primary label for a Callable MCP Tool in the mention overlay: its MCP server identifier paired with its tool name. The UI presents it as `server / tool` and uses the tool description as secondary text.
+_Avoid_: tool-name-only identity, ambiguous MCP tool label
+
+**Preferred MCP Tool Instruction**:
+The typed instruction context for a selected Callable MCP Tool. It tells the Main Agent to prefer that tool when appropriate for the current request, but does not require a call or grant access beyond the tool's existing runtime availability.
+_Avoid_: forced MCP invocation, tool authorization grant, automatic tool call
+
+**Context Reference Directory Cache**:
+The process-local in-memory cache of Context Reference discovery snapshots and filename indexes. It is keyed by effective tenant and Agent identity, stores no file contents, and is never shared across processes or workspace scopes.
+_Avoid_: global reference cache, cross-tenant cache, file-content cache
+
+**Context Reference Cache Freshness**:
+The per-resource maximum age for a Context Reference Directory Cache snapshot, measured with a monotonic clock: five minutes for Skills and three minutes for Callable MCP Tools and the merged Workspace File filename index.
+_Avoid_: one shared TTL, wall-clock expiry, indefinite discovery cache
+
+**Context Reference Cache Hard Expiry**:
+The cache-failure policy that discards an expired discovery snapshot rather than serving it when refresh fails. The failed category contributes no results, and each selected reference is independently revalidated before instruction context is created.
+_Avoid_: stale-on-error reference list, unverified selected reference, stale MCP fallback
+
+**Context Reference Cache Invalidation**:
+The first-release cache invalidation policy: snapshots expire only through their configured TTLs. Configuration updates, uploads, and filesystem changes do not evict Context Reference Directory Cache entries early.
+_Avoid_: mutation-triggered cache eviction, filesystem watcher invalidation, instant discovery refresh
+
+**Context Reference Cache Admission and Capacity**:
+A Context Reference Directory Cache entry is created lazily only when a user opens the mention overlay with `@`. The cache holds at most 128 tenant-and-Agent-scoped entries, removes expired entries during cache access, and evicts the least recently used entry when full.
+_Avoid_: eager startup cache warming, unbounded reference cache, FIFO eviction
+
+**Context Reference Cache Single-Flight Refresh**:
+The refresh rule that permits one in-progress discovery refresh for each tenant-and-Agent scope and resource category. Concurrent cache misses wait for that refresh and consume its shared success result or shared empty failure result.
+_Avoid_: cache stampede, duplicate MCP discovery, parallel directory scans
+
+**Context Reference Cache TTL Configuration**:
+The first-release decision that Context Reference Cache Freshness values are fixed backend constants, not a source-system setting, environment override, or public API configuration surface.
+_Avoid_: runtime TTL tuning, cache settings UI, per-tenant cache TTL
+
+**Context Reference MCP Discovery Budget**:
+The bounded discovery window used when refreshing Callable MCP Tools: each MCP service has two seconds to respond, all services discover in parallel, and the overall overlay request waits at most three seconds. Only services that succeed within the budget contribute tools; timeout is silent.
+_Avoid_: unbounded MCP discovery, serial MCP lookup, timeout error row
+
+**Workspace File Index Capacity**:
+The maximum number of files retained in each source-root portion of a Workspace File filename index. `media` and `static` each retain at most 5,000 files, selecting the most recently modified files when their directory has more.
+_Avoid_: unbounded directory index, whole-directory search at request time, source-combined capacity limit
+
 ## Example Dialogue
 
 Developer: "When Plan Mode starts, should we create a SubAgent?"
@@ -1054,3 +1381,11 @@ Domain Expert: "`execute` accepts the persisted Proposed Plan and can move the c
 Developer: "Is the hook attached to a SubAgent Definition or to an Agent Profile?"
 
 Domain Expert: "It is an Agent Profile Hook. Its script belongs to that Agent Profile and is not a shared Skill asset."
+
+Developer: "Can a tenant administrator replace the source's `read_file` implementation?"
+
+Domain Expert: "No. Only a Source Tool Administrator may publish a Source Built-in Tool. An Override keeps `read_file`'s complete tool Schema, runs through the normal safety boundaries, and still respects each Agent's enabled or disabled choice."
+
+Developer: "Will a new source tool appear only when the model asks for it?"
+
+Domain Expert: "No. Every source-enabled tool that the Agent has not disabled is part of the Agent run's catalog from the start of that run."
