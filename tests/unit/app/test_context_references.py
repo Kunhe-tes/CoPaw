@@ -559,9 +559,4 @@ def test_context_references_endpoint_groups_and_limits_discovery_results(
     empty_query_response = client.get("/console/context-references")
     assert [
         item["name"] for item in empty_query_response.json()["skills"]
-    ] == [
-        "skill-0",
-        "skill-1",
-        "skill-2",
-        "skill-3",
-    ]
+    ] == [f"skill-{index}" for index in range(5)]
