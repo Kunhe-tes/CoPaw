@@ -18,6 +18,67 @@ function createOptions(
 }
 
 describe("loadSessionMessages session detail errors", () => {
+  it("finishes loading when the active session is cleared while a stale request drains", async () => {
+    let resolveRequest: (session: { messages: unknown[] }) => void = () => {};
+    const request = new Promise<{ messages: unknown[] }>((resolve) => {
+      resolveRequest = resolve;
+    });
+    const getSession = vi.fn().mockReturnValue(request);
+    const setMessages = vi.fn();
+    const setSessionLoading = vi.fn();
+    let currentSessionId: string | undefined = "17846028251220000";
+
+    const staleLoad = loadSessionMessages({
+      requestedSessionId: currentSessionId,
+      clearBeforeLoad: true,
+      options: createOptions(getSession),
+      setMessages,
+      getCurrentSessionId: () => currentSessionId,
+      setSessionLoading,
+      setSessionNotFound: vi.fn(),
+    });
+
+    currentSessionId = undefined;
+    const clearedLoad = await loadSessionMessages({
+      requestedSessionId: currentSessionId,
+      clearBeforeLoad: true,
+      finishLoadingWithoutSession: true,
+      options: createOptions(getSession),
+      setMessages,
+      getCurrentSessionId: () => currentSessionId,
+      setSessionLoading,
+      setSessionNotFound: vi.fn(),
+    });
+
+    expect(clearedLoad).toBe(false);
+    expect(setSessionLoading).toHaveBeenLastCalledWith(false);
+
+    resolveRequest({ messages: [] });
+    await expect(staleLoad).resolves.toBe(false);
+    expect(setSessionLoading).toHaveBeenCalledTimes(2);
+    expect(setSessionLoading).toHaveBeenNthCalledWith(1, true);
+    expect(setSessionLoading).toHaveBeenNthCalledWith(2, false);
+  });
+
+  it("preserves normal loading state when no session is active", async () => {
+    const setMessages = vi.fn();
+    const setSessionLoading = vi.fn();
+
+    const applied = await loadSessionMessages({
+      requestedSessionId: undefined,
+      clearBeforeLoad: true,
+      options: createOptions(vi.fn()),
+      setMessages,
+      getCurrentSessionId: () => undefined,
+      setSessionLoading,
+      setSessionNotFound: vi.fn(),
+    });
+
+    expect(applied).toBe(false);
+    expect(setMessages).toHaveBeenCalledWith([]);
+    expect(setSessionLoading).not.toHaveBeenCalled();
+  });
+
   it("records an active HTTP 404 and finishes loading", async () => {
     const error = createHttpError(404, "missing");
     const setSessionNotFound = vi.fn();

@@ -3,6 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import Chat from ".";
 
+const mocks = vi.hoisted(() => ({
+  useChatAnywhereSessionLoader: vi.fn(),
+}));
+
 vi.mock("@/components/agentscope-chat", () => ({
   useProviderContext: () => ({
     getPrefixCls: (name: string) => `copaw-${name}`,
@@ -21,7 +25,7 @@ vi.mock("../Context/ChatAnywhereMessagesContext", () => ({
 }));
 
 vi.mock("../Context/ChatAnywhereSessionsContext", () => ({
-  useChatAnywhereSessionLoader: vi.fn(),
+  useChatAnywhereSessionLoader: mocks.useChatAnywhereSessionLoader,
 }));
 
 vi.mock("./hooks/useChatController", () => ({
@@ -46,6 +50,7 @@ vi.mock("./styles", () => ({
 describe("Chat content-only composition", () => {
   afterEach(() => {
     cleanup();
+    mocks.useChatAnywhereSessionLoader.mockReset();
   });
 
   it("keeps the normal input mounted for interactive chat", () => {
@@ -53,6 +58,9 @@ describe("Chat content-only composition", () => {
 
     expect(screen.getByTestId("message-list")).toBeInTheDocument();
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
+    expect(mocks.useChatAnywhereSessionLoader).toHaveBeenCalledWith({
+      finishLoadingWithoutSession: false,
+    });
   });
 
   it("does not mount the input or its paste/upload listeners in content-only mode", () => {
@@ -64,5 +72,8 @@ describe("Chat content-only composition", () => {
 
     expect(screen.getByTestId("message-list")).toBeInTheDocument();
     expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
+    expect(mocks.useChatAnywhereSessionLoader).toHaveBeenCalledWith({
+      finishLoadingWithoutSession: true,
+    });
   });
 });

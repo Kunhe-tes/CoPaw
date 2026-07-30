@@ -12,7 +12,9 @@ export default function Chat() {
   const isContentOnly = useChatContentOnly();
   const prefixCls = useProviderContext().getPrefixCls("chat-anywhere-chat");
   const { handleSubmit, handleCancel } = useChatController();
-  useChatAnywhereSessionLoader();
+  useChatAnywhereSessionLoader({
+    finishLoadingWithoutSession: isContentOnly,
+  });
   // ==================== 首页改版 (Kun He) ====================
   // 当无消息时（欢迎态），隐藏底部输入框，因为欢迎页自带输入卡片
   const messages = useContextSelector(
