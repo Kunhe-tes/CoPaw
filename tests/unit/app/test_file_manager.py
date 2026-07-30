@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
+import shutil
 
 import pytest
 
@@ -30,6 +33,13 @@ def _service(workspace: Path) -> FileManagerService:
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_cursor_secret_cache() -> Generator[None, None, None]:
+    file_manager._load_or_create_cursor_secret.cache_clear()
+    yield
+    file_manager._load_or_create_cursor_secret.cache_clear()
+
+
 def test_service_factory_uses_configured_cursor_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -39,6 +49,36 @@ def test_service_factory_uses_configured_cursor_secret(
     service = file_manager.get_file_manager_service(tmp_path)
 
     assert service._cursor_secret == b"configured-secret"
+
+
+def test_service_factory_cursor_secret_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_dir = tmp_path / "secrets"
+    secret_dir.mkdir()
+    secret_path = secret_dir / "file-manager-cursor-secret"
+    secret_path.write_bytes(b"x" * 48)
+    secret_path.chmod(0o600)
+    monkeypatch.delenv("SWE_FILE_MANAGER_CURSOR_SECRET", raising=False)
+    monkeypatch.setattr(file_manager, "SECRET_DIR", secret_dir)
+    original_read_cursor_secret = file_manager._read_cursor_secret
+    read_paths: list[Path] = []
+
+    def track_read_cursor_secret(path: Path) -> bytes:
+        read_paths.append(path)
+        return original_read_cursor_secret(path)
+
+    monkeypatch.setattr(
+        file_manager,
+        "_read_cursor_secret",
+        track_read_cursor_secret,
+    )
+
+    file_manager.get_file_manager_service(tmp_path / "tenant-a")
+    file_manager.get_file_manager_service(tmp_path / "tenant-b")
+
+    assert read_paths == [secret_path]
 
 
 def test_service_factory_persists_a_private_fallback_secret(
@@ -146,6 +186,101 @@ def test_listing_uses_stable_100_item_cursor_pages(tmp_path: Path) -> None:
         "item101.txt",
     ]
     assert second_page.next_cursor is None
+
+
+def test_directory_cursor_reuses_snapshot_and_rejects_changed_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(FILE_MANAGER_PAGE_SIZE + 2):
+        (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+    service = _service(tmp_path)
+    original_candidates = service._directory_candidates
+    calls = 0
+
+    def track_candidates(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_candidates(*args, **kwargs)
+
+    monkeypatch.setattr(service, "_directory_candidates", track_candidates)
+
+    first = service.list_directory("working")
+    second = service.list_directory("working", cursor=first.next_cursor)
+
+    assert calls == 1
+    assert [item.name for item in second.items] == [
+        "item100.txt",
+        "item101.txt",
+    ]
+
+    (tmp_path / "changed.txt").write_text("changed", encoding="utf-8")
+    with pytest.raises(FileManagerConflictError, match="refresh and retry"):
+        service.list_directory("working", cursor=first.next_cursor)
+
+
+def test_directory_cursor_rejects_deleted_directory(
+    tmp_path: Path,
+) -> None:
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    for index in range(FILE_MANAGER_PAGE_SIZE + 1):
+        (media_dir / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+    service = _service(tmp_path)
+    first = service.list_directory("upload")
+
+    shutil.rmtree(media_dir)
+
+    with pytest.raises(FileManagerConflictError, match="refresh and retry"):
+        service.list_directory("upload", cursor=first.next_cursor)
+
+
+def test_snapshot_workspace_quota_preserves_other_workspace_page(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        file_manager,
+        "_DIRECTORY_SNAPSHOT_WORKSPACE_CAPACITY",
+        1,
+    )
+    file_manager._DIRECTORY_SNAPSHOTS.clear()
+    first_workspace = tmp_path / "first"
+    second_workspace = tmp_path / "second"
+    for workspace in (first_workspace, second_workspace):
+        workspace.mkdir()
+        for index in range(FILE_MANAGER_PAGE_SIZE + 1):
+            (workspace / f"item{index:03d}.txt").write_text(
+                "x",
+                encoding="utf-8",
+            )
+
+    first_service = _service(first_workspace)
+    second_service = _service(second_workspace)
+    first_page = first_service.list_directory("working")
+    second_page = second_service.list_directory("working")
+    first_service.list_directory("working", query="item")
+
+    assert (
+        second_service.list_directory(
+            "working",
+            cursor=second_page.next_cursor,
+        )
+        .items[0]
+        .name
+        == "item100.txt"
+    )
+    assert (
+        len(
+            [
+                key
+                for key in file_manager._DIRECTORY_SNAPSHOTS
+                if key[0] == str(first_workspace.resolve())
+            ],
+        )
+        == 1
+    )
+    assert first_page.next_cursor is not None
 
 
 def test_listing_allows_more_than_ten_thousand_items_with_cursor(
@@ -465,7 +600,7 @@ def test_large_utf8_with_codepoint_started_after_sample_is_still_text(
     assert preview.content == "a" * (1024 * 1024)
 
 
-def test_large_invalid_utf8_after_sample_boundary_is_rejected(
+def test_large_invalid_utf8_after_sample_boundary_stays_read_only_text(
     tmp_path: Path,
 ) -> None:
     prefix = b"a" * (1024 * 1024 + 3)
@@ -478,11 +613,11 @@ def test_large_invalid_utf8_after_sample_boundary_is_rejected(
         "invalid-boundary.txt",
     )
 
-    assert preview.is_text is False
-    assert preview.content is None
+    assert preview.is_text is True
+    assert preview.content == "a" * (1024 * 1024)
 
 
-def test_large_text_with_invalid_utf8_after_preview_is_rejected(
+def test_large_text_with_invalid_utf8_after_preview_stays_read_only_text(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "late-invalid.txt").write_bytes(
@@ -494,8 +629,8 @@ def test_large_text_with_invalid_utf8_after_preview_is_rejected(
         "late-invalid.txt",
     )
 
-    assert preview.is_text is False
-    assert preview.content is None
+    assert preview.is_text is True
+    assert preview.content == "a" * (1024 * 1024)
     assert preview.editable is False
 
 
@@ -598,6 +733,30 @@ def test_save_text_requires_matching_revision_and_replaces_safely(
     with pytest.raises(FileManagerConflictError):
         service.save_text("working", "document.md", "lost", revision)
     assert path.read_text(encoding="utf-8") == "after"
+
+
+def test_save_text_does_not_reread_after_successful_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "document.md"
+    path.write_text("before", encoding="utf-8")
+    service = _service(tmp_path)
+    revision = service.read_text_preview("working", "document.md").revision
+    original_read_text_preview = service.read_text_preview
+    preview_calls: list[tuple[object, ...]] = []
+
+    def track_read_text_preview(*args: object, **kwargs: object):
+        preview_calls.append(args)
+        return original_read_text_preview(*args, **kwargs)
+
+    monkeypatch.setattr(service, "read_text_preview", track_read_text_preview)
+
+    result = service.save_text("working", "document.md", "after", revision)
+
+    assert result.content == "after"
+    assert result.revision == hashlib.sha256(b"after").hexdigest()
+    assert preview_calls == []
 
 
 def test_content_revision_rejects_same_stat_content_replacement(
@@ -767,6 +926,39 @@ def test_upload_rejects_collisions_and_never_writes_through_links(
     assert uploaded.path == "fresh.txt"
     assert (tmp_path / "media" / "fresh.txt").read_bytes() == b"fresh"
     assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_upload_stream_reads_bounded_chunks_and_cleans_up_over_limit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "media").mkdir()
+    service = _service(tmp_path)
+
+    class RecordingSource(io.BytesIO):
+        def __init__(self, data: bytes) -> None:
+            super().__init__(data)
+            self.read_sizes: list[int] = []
+
+        def read(self, size: int | None = -1) -> bytes:
+            assert size is not None and size > 0
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    source = RecordingSource(b"x" * (file_manager._FILE_READ_CHUNK_BYTES + 1))
+    item = service.upload_stream("upload", "", "chunked.bin", source)
+
+    assert (tmp_path / "media" / item.name).read_bytes() == source.getvalue()
+    assert set(source.read_sizes) == {file_manager._FILE_READ_CHUNK_BYTES}
+
+    with pytest.raises(FileManagerPathError, match="File too large"):
+        service.upload_stream(
+            "upload",
+            "",
+            "too-large.bin",
+            io.BytesIO(b"x" * (10 * 1024 * 1024 + 1)),
+        )
+    assert not (tmp_path / "media" / "too-large.bin").exists()
+    assert not list((tmp_path / "media").glob(".too-large.bin.file-manager-*"))
 
 
 @pytest.mark.parametrize("root", ["conversation", "recycle"])

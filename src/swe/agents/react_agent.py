@@ -368,75 +368,124 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         if not self._source_tool_versions:
             return
         from ..config.config import _default_builtin_tools
-        from .source_tools import SourceToolRuntime, build_source_tool_function
 
         builtin_names = set(_default_builtin_tools())
-        runtime = SourceToolRuntime(
+        runtime = self._source_tool_runtime()
+        configured_tools = self._configured_builtin_tools()
+        enabled_tools = {
+            name: tool.enabled for name, tool in configured_tools.items()
+        }
+        for version in self._source_tool_versions:
+            self._register_source_tool_version(
+                toolkit,
+                version,
+                runtime,
+                builtin_names,
+                configured_tools,
+                enabled_tools,
+            )
+
+    def _source_tool_runtime(self):
+        """Build the execution context shared by source-tool versions."""
+        from .source_tools import SourceToolRuntime
+
+        return SourceToolRuntime(
             tenant_id=self._request_context.get("tenant_id") or None,
             source_id=self._request_context.get("source_id") or None,
             workspace_dir=Path(self._workspace_dir or WORKING_DIR),
             agent_id=self._request_context.get("agent_id") or None,
         )
-        configured_tools = getattr(
-            self._agent_config.tools,
-            "builtin_tools",
-            {},
+
+    def _configured_builtin_tools(self):
+        """Return the current agent's configured builtin tools."""
+        return getattr(self._agent_config.tools, "builtin_tools", {})
+
+    def _register_source_tool_version(
+        self,
+        toolkit: Toolkit,
+        version,
+        runtime,
+        builtin_names: set[str],
+        configured_tools,
+        enabled_tools: dict[str, bool],
+    ) -> None:
+        """Validate and register one source-tool version."""
+        if not enabled_tools.get(version.name, True):
+            logger.debug("Skipped disabled source tool: %s", version.name)
+            return
+
+        is_builtin_override = version.name in builtin_names
+        self._validate_source_tool_registration(
+            toolkit,
+            version,
+            is_builtin_override,
         )
-        enabled_tools = {
-            name: tool.enabled for name, tool in configured_tools.items()
-        }
-        for version in self._source_tool_versions:
-            if not enabled_tools.get(version.name, True):
-                logger.debug("Skipped disabled source tool: %s", version.name)
-                continue
-            is_builtin_override = version.name in builtin_names
-            if not is_builtin_override and version.name in toolkit.tools:
-                raise RuntimeError(
-                    "source tool collides with a skill or managed tool: "
-                    f"{version.name}",
-                )
-            source_schema = {
+        from .source_tools import build_source_tool_function
+
+        tool_func = build_source_tool_function(version, runtime)
+        toolkit.register_tool_function(
+            tool_func,
+            func_name=version.name,
+            func_description=version.description,
+            json_schema={
                 "type": "function",
                 "function": {
                     "name": version.name,
                     "description": version.description,
                     "parameters": version.json_schema,
                 },
-            }
-            if is_builtin_override:
-                registered = toolkit.tools.get(version.name)
-                registered_schema = getattr(registered, "json_schema", None)
-                registered_parameters = (
-                    registered_schema.get("function", {}).get("parameters")
-                    if isinstance(registered_schema, dict)
-                    else None
-                )
-                if registered_parameters != version.json_schema:
-                    raise RuntimeError(
-                        "source override schema must match the code-defined "
-                        f"builtin: {version.name}",
-                    )
-            tool_func = build_source_tool_function(version, runtime)
-            toolkit.register_tool_function(
-                tool_func,
-                func_name=version.name,
-                func_description=version.description,
-                json_schema=source_schema,
-                namesake_strategy=(
-                    "override" if is_builtin_override else "raise"
-                ),
-                async_execution=(
-                    version.name == "execute_shell_command"
-                    and enabled_tools.get(
-                        "execute_shell_command",
-                        False,
-                    )
-                    and configured_tools[
-                        "execute_shell_command"
-                    ].async_execution
-                ),
+            },
+            namesake_strategy="override" if is_builtin_override else "raise",
+            async_execution=self._source_tool_async_execution(
+                version.name,
+                configured_tools,
+                enabled_tools,
+            ),
+        )
+        self._normalize_registered_tool_functions(toolkit, [version.name])
+
+    @staticmethod
+    def _validate_source_tool_registration(
+        toolkit: Toolkit,
+        version,
+        is_builtin_override: bool,
+    ) -> None:
+        """Reject source tools that cannot safely replace a registered tool."""
+        if not is_builtin_override and version.name in toolkit.tools:
+            raise RuntimeError(
+                "source tool collides with a skill or managed tool: "
+                f"{version.name}",
             )
-            self._normalize_registered_tool_functions(toolkit, [version.name])
+        if not is_builtin_override:
+            return
+
+        registered = toolkit.tools.get(version.name)
+        registered_schema = getattr(registered, "json_schema", None)
+        registered_parameters = (
+            registered_schema.get("function", {}).get("parameters")
+            if isinstance(registered_schema, dict)
+            else None
+        )
+        if registered_parameters != version.json_schema:
+            raise RuntimeError(
+                "source override schema must match the code-defined builtin: "
+                f"{version.name}",
+            )
+
+    @staticmethod
+    def _source_tool_async_execution(
+        tool_name: str,
+        configured_tools,
+        enabled_tools: dict[str, bool],
+    ) -> bool:
+        """Return whether a source tool uses background execution."""
+        shell_tool = configured_tools.get("execute_shell_command")
+        return bool(
+            tool_name == "execute_shell_command"
+            and enabled_tools.get("execute_shell_command", False)
+            and shell_tool is not None
+            and shell_tool.async_execution,
+        )
 
     @staticmethod
     def _normalize_registered_tool_functions(
