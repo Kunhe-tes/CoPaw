@@ -268,7 +268,7 @@ export function PublishModal({ open, sourceId, userId, onClose, onSuccess, initi
         <Form.Item name="include_in_statistics" valuePropName="checked">
           <Checkbox>
             是否纳入统计
-            <Tooltip title="勾选后，该技能的使用数据将纳入统计分析">
+            <Tooltip title="勾选后，该技能的使用数据将纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。">
               <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
             </Tooltip>
           </Checkbox>

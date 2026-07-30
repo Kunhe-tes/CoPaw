@@ -563,8 +563,8 @@ export function SkillDetailDrawer(
           Modal.confirm({
             title: "确认操作",
             content: includeInStatistics
-              ? "取消后该技能将不再纳入统计分析"
-              : "纳入后该技能将纳入统计分析",
+              ? "取消后该技能将不再纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。"
+              : "纳入后该技能将纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。",
             okText: includeInStatistics ? "取消统计" : "纳入统计",
             cancelText: "取消",
             onOk: () => handleStatisticsConfigChange(!includeInStatistics),
