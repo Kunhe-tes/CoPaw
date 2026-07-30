@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -30,6 +31,13 @@ def _service(workspace: Path) -> FileManagerService:
     )
 
 
+@pytest.fixture(autouse=True)
+def _clear_cursor_secret_cache() -> Generator[None, None, None]:
+    file_manager._load_or_create_cursor_secret.cache_clear()
+    yield
+    file_manager._load_or_create_cursor_secret.cache_clear()
+
+
 def test_service_factory_uses_configured_cursor_secret(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -39,6 +47,36 @@ def test_service_factory_uses_configured_cursor_secret(
     service = file_manager.get_file_manager_service(tmp_path)
 
     assert service._cursor_secret == b"configured-secret"
+
+
+def test_service_factory_cursor_secret_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret_dir = tmp_path / "secrets"
+    secret_dir.mkdir()
+    secret_path = secret_dir / "file-manager-cursor-secret"
+    secret_path.write_bytes(b"x" * 48)
+    secret_path.chmod(0o600)
+    monkeypatch.delenv("SWE_FILE_MANAGER_CURSOR_SECRET", raising=False)
+    monkeypatch.setattr(file_manager, "SECRET_DIR", secret_dir)
+    original_read_cursor_secret = file_manager._read_cursor_secret
+    read_paths: list[Path] = []
+
+    def track_read_cursor_secret(path: Path) -> bytes:
+        read_paths.append(path)
+        return original_read_cursor_secret(path)
+
+    monkeypatch.setattr(
+        file_manager,
+        "_read_cursor_secret",
+        track_read_cursor_secret,
+    )
+
+    file_manager.get_file_manager_service(tmp_path / "tenant-a")
+    file_manager.get_file_manager_service(tmp_path / "tenant-b")
+
+    assert read_paths == [secret_path]
 
 
 def test_service_factory_persists_a_private_fallback_secret(
@@ -598,6 +636,30 @@ def test_save_text_requires_matching_revision_and_replaces_safely(
     with pytest.raises(FileManagerConflictError):
         service.save_text("working", "document.md", "lost", revision)
     assert path.read_text(encoding="utf-8") == "after"
+
+
+def test_save_text_does_not_reread_after_successful_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "document.md"
+    path.write_text("before", encoding="utf-8")
+    service = _service(tmp_path)
+    revision = service.read_text_preview("working", "document.md").revision
+    original_read_text_preview = service.read_text_preview
+    preview_calls: list[tuple[object, ...]] = []
+
+    def track_read_text_preview(*args: object, **kwargs: object):
+        preview_calls.append(args)
+        return original_read_text_preview(*args, **kwargs)
+
+    monkeypatch.setattr(service, "read_text_preview", track_read_text_preview)
+
+    result = service.save_text("working", "document.md", "after", revision)
+
+    assert result.content == "after"
+    assert result.revision == hashlib.sha256(b"after").hexdigest()
+    assert preview_calls == []
 
 
 def test_content_revision_rejects_same_stat_content_replacement(

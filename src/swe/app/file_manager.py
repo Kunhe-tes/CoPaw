@@ -23,7 +23,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
-from functools import wraps
+from functools import cache, wraps
 from pathlib import Path, PurePosixPath
 from typing import Mapping
 
@@ -173,7 +173,13 @@ def root_capabilities(root: FileManagerRoot | str) -> FileManagerCapabilities:
     )
 
 
+@cache
 def _load_or_create_cursor_secret() -> bytes:
+    """Return the process-cached cursor HMAC secret."""
+    return _load_or_create_cursor_secret_uncached()
+
+
+def _load_or_create_cursor_secret_uncached() -> bytes:
     """Return one process-independent cursor HMAC secret.
 
     The environment value supports managed deployments.  Local deployments
@@ -663,7 +669,14 @@ class FileManagerService:
                 pass
             finally:
                 os.close(parent_fd)
-        return self.read_text_preview(resolved_root, normalised_path)
+        return FileManagerTextPreview(
+            path=normalised_path,
+            size_bytes=len(encoded_content),
+            is_text=True,
+            content=content,
+            editable=True,
+            revision=hashlib.sha256(encoded_content).hexdigest(),
+        )
 
     def upload_bytes(
         self,
