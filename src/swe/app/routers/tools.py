@@ -54,31 +54,40 @@ async def list_tools(
     from ..agent_context import get_agent_and_config_for_request
 
     _, agent_config = await get_agent_and_config_for_request(request)
+    builtin_tools = _builtin_tools_for_agent(agent_config)
+    if builtin_tools is None:
+        return []
 
-    # Ensure tools config exists with defaults
-    if not agent_config.tools or not agent_config.tools.builtin_tools:
-        # Fallback to global config if agent config has no tools
-        config = load_config()
-        tools_config = config.tools if hasattr(config, "tools") else None
-        if not tools_config:
-            return []
-        builtin_tools = tools_config.builtin_tools
-    else:
-        builtin_tools = agent_config.tools.builtin_tools
+    source_tools = _active_source_tools(request)
+    return list(_effective_tool_info(builtin_tools, source_tools).values())
 
+
+def _builtin_tools_for_agent(agent_config):
+    """Return agent tool settings, falling back to global defaults."""
+    if agent_config.tools and agent_config.tools.builtin_tools:
+        return agent_config.tools.builtin_tools
+
+    config = load_config()
+    tools_config = config.tools if hasattr(config, "tools") else None
+    return tools_config.builtin_tools if tools_config else None
+
+
+def _active_source_tools(request: Request):
+    """Return active source-tool metadata for the request's source."""
     source_id = getattr(request.state, "source_id", None)
     source_tool_service = getattr(
         request.app.state,
         "source_tool_service",
         None,
     )
-    source_tools = (
-        source_tool_service.list_metadata(source_id)
-        if source_id and source_tool_service is not None
-        else ()
-    )
-    active_source_names = {tool.name for tool in source_tools}
+    if not source_id or source_tool_service is None:
+        return ()
+    return source_tool_service.list_metadata(source_id)
 
+
+def _effective_tool_info(builtin_tools, source_tools) -> dict[str, ToolInfo]:
+    """Merge configured builtins with active source-tool metadata."""
+    active_source_names = {tool.name for tool in source_tools}
     tools_list: dict[str, ToolInfo] = {}
     for tool_config in builtin_tools.values():
         if (
@@ -93,26 +102,23 @@ async def list_tools(
             async_execution=tool_config.async_execution,
         )
 
-    if source_id and source_tool_service is not None:
-        for source_tool in source_tools:
-            configured = builtin_tools.get(source_tool.name)
-            tools_list[source_tool.name] = ToolInfo(
-                name=source_tool.name,
-                enabled=(
-                    configured.enabled if configured is not None else True
-                ),
-                description=source_tool.description,
-                async_execution=(
-                    configured.async_execution
-                    if configured is not None
-                    and source_tool.name == "execute_shell_command"
-                    else False
-                ),
-                origin="source",
-                source_version=source_tool.version,
-            )
+    for source_tool in source_tools:
+        configured = builtin_tools.get(source_tool.name)
+        tools_list[source_tool.name] = ToolInfo(
+            name=source_tool.name,
+            enabled=configured.enabled if configured is not None else True,
+            description=source_tool.description,
+            async_execution=(
+                configured.async_execution
+                if configured is not None
+                and source_tool.name == "execute_shell_command"
+                else False
+            ),
+            origin="source",
+            source_version=source_tool.version,
+        )
 
-    return list(tools_list.values())
+    return tools_list
 
 
 @router.patch("/{tool_name}/toggle", response_model=ToolInfo)
