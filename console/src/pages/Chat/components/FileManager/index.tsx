@@ -136,15 +136,16 @@ export default function FileManager() {
 
   useLayoutEffect(() => {
     if (!open) return;
-    const chatArea = document.querySelector<HTMLElement>("[data-chat-messages-area]");
-    if (!chatArea) return;
+    const chatShell = document.querySelector<HTMLElement>("[data-chat-shell]")
+      ?? document.querySelector<HTMLElement>("[data-chat-messages-area]");
+    if (!chatShell) return;
     const updateFrame = () => {
-      const { left, width } = chatArea.getBoundingClientRect();
+      const { left, width } = chatShell.getBoundingClientRect();
       setChatAreaFrame({ left, width });
     };
     updateFrame();
     const observer = new ResizeObserver(updateFrame);
-    observer.observe(chatArea);
+    observer.observe(chatShell);
     window.addEventListener("resize", updateFrame);
     return () => {
       observer.disconnect();

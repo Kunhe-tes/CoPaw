@@ -1828,6 +1828,7 @@ export default function ChatPage() {
             onConsumed={() => setAutoPreviewTriggerKey(0)}
           >
             <div
+              data-chat-shell
               style={{
                 height: "100%",
                 width: "100%",

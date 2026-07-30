@@ -55,6 +55,7 @@ const rootPage = {
 describe("FileManager", () => {
   afterEach(() => {
     cleanup();
+    document.querySelector("[data-chat-shell]")?.remove();
     document.querySelector("[data-chat-messages-area]")?.remove();
     vi.unstubAllGlobals();
   });
@@ -81,7 +82,20 @@ describe("FileManager", () => {
     expect(screen.getByLabelText("文件列表第 3 栏")).toBeInTheDocument();
   });
 
-  it("uses the chat message area width instead of a full-width modal", async () => {
+  it("uses the full chat shell width instead of only the message area", async () => {
+    const chatShell = document.createElement("div");
+    chatShell.dataset.chatShell = "";
+    vi.spyOn(chatShell, "getBoundingClientRect").mockReturnValue({
+      left: 80,
+      top: 0,
+      right: 980,
+      bottom: 800,
+      width: 900,
+      height: 800,
+      x: 80,
+      y: 0,
+      toJSON: () => ({}),
+    });
     const chatArea = document.createElement("div");
     chatArea.dataset.chatMessagesArea = "";
     vi.spyOn(chatArea, "getBoundingClientRect").mockReturnValue({
@@ -95,14 +109,15 @@ describe("FileManager", () => {
       y: 0,
       toJSON: () => ({}),
     });
-    document.body.append(chatArea);
+    chatShell.append(chatArea);
+    document.body.append(chatShell);
 
     render(<FileManager />);
     fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
 
     expect(await screen.findByRole("dialog", { name: "文件管理器" })).toHaveStyle({
-      width: "640px",
-      left: "240px",
+      width: "900px",
+      left: "80px",
     });
   });
 
