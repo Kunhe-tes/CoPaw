@@ -1000,7 +1000,7 @@ export function SkillReadinessModal({
       }
       width={1040}
       onCancel={overviewLoading || starting ? undefined : onClose}
-      destroyOnClose
+      destroyOnHidden
       footer={[
         <Button
           key="refresh"
