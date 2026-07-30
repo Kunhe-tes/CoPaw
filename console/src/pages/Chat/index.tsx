@@ -71,6 +71,7 @@ import ConversationQuickNav from "@/components/ConversationQuickNav";
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
 import ChatSidebar from "./components/ChatSidebar";
 import { createWelcomeSkillMentions } from "./welcomeSkillMentions";
+import { selectContextReferences } from "./contextReferenceDefaults";
 // ==================== 首页改版结束 ====================
 // ==================== 自定义工具渲染器 (customToolRenderConfig) ====================
 import CopyFileToStatic from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic";
@@ -572,11 +573,12 @@ export default function ChatPage() {
       .discover(query)
       .then((response) => {
         if (requestId !== contextReferencesRequestIdRef.current) return;
-        setContextReferences([
-          ...response.skills,
-          ...response.mcp_tools,
-          ...response.files,
-        ]);
+        setContextReferences(
+          selectContextReferences(
+            [...response.skills, ...response.mcp_tools, ...response.files],
+            query,
+          ),
+        );
       })
       .catch(() => {
         if (requestId !== contextReferencesRequestIdRef.current) return;
