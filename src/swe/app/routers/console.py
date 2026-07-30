@@ -30,6 +30,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from ..agent_context import (
     get_agent_and_config_for_request,
     get_agent_for_request,
+    resolve_file_manager_workspace_dir,
 )
 from ..context_references import (
     ContextReferencesResponse,
@@ -43,6 +44,10 @@ from ..file_manager import (
     FileManagerPathError,
     FileManagerTextPreview,
     get_file_manager_service,
+)
+from ..file_manager_execution import (
+    run_file_manager_mutation,
+    run_file_manager_read,
 )
 from ...config.context import resolve_request_effective_tenant_id
 
@@ -1035,10 +1040,11 @@ async def get_file_manager_directory(
 ) -> FileManagerDirectoryListing:
     """List direct children for the workspace bound to this request only."""
 
-    workspace = await get_agent_for_request(request)
-    service = get_file_manager_service(Path(workspace.workspace_dir))
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
     try:
-        return service.list_directory(
+        return await run_file_manager_read(
+            service.list_directory,
             root,
             path,
             cursor=cursor,
@@ -1060,10 +1066,14 @@ async def get_file_manager_file_preview(
 ) -> FileManagerTextPreview:
     """Return at most one MiB of UTF-8 text without auditing reads."""
 
-    workspace = await get_agent_for_request(request)
-    service = get_file_manager_service(Path(workspace.workspace_dir))
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
     try:
-        return service.read_text_preview(root, path)
+        return await run_file_manager_read(
+            service.read_text_preview,
+            root,
+            path,
+        )
     except FileManagerPathError as exc:
         raise _file_manager_http_error(exc) from exc
 
@@ -1079,10 +1089,14 @@ async def get_file_manager_file_download(
 ) -> StreamingResponse:
     """Stream a single regular file from a no-follow descriptor, unaudited."""
 
-    workspace = await get_agent_for_request(request)
-    service = get_file_manager_service(Path(workspace.workspace_dir))
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
     try:
-        download = service.open_file_for_download(root, path)
+        download = await run_file_manager_read(
+            service.open_file_for_download,
+            root,
+            path,
+        )
     except FileManagerPathError as exc:
         raise _file_manager_http_error(exc) from exc
     stream = _FileManagerDownloadStream(
@@ -1095,6 +1109,7 @@ async def get_file_manager_file_download(
             "Content-Disposition": _file_manager_download_disposition(
                 download.filename,
             ),
+            "Content-Length": str(download.size_bytes),
         },
     )
 
@@ -1110,10 +1125,11 @@ async def put_file_manager_text_file(
 ) -> FileManagerTextPreview:
     """Save small UTF-8 text only, rejecting stale revisions instead of overwrite."""
 
-    workspace = await get_agent_for_request(request)
-    service = get_file_manager_service(Path(workspace.workspace_dir))
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
     try:
-        result = service.save_text(
+        result = await run_file_manager_mutation(
+            service.save_text,
             body.root,
             body.path,
             body.content,
@@ -1166,11 +1182,17 @@ async def post_file_manager_upload(
                 f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"
             ),
         )
-    workspace = await get_agent_for_request(request)
-    service = get_file_manager_service(Path(workspace.workspace_dir))
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
     filename = file.filename or ""
     try:
-        item = service.upload_bytes(root, path, filename, content)
+        item = await run_file_manager_mutation(
+            service.upload_bytes,
+            root,
+            path,
+            filename,
+            content,
+        )
     except FileManagerPathError as exc:
         _audit_file_manager_mutation(
             request,
@@ -1199,10 +1221,11 @@ async def delete_file_manager_file(
 ) -> dict[str, str]:
     """Move a file-manager file into the governance recycle-bin archive."""
 
-    workspace = await get_agent_for_request(request)
-    service = get_file_manager_service(Path(workspace.workspace_dir))
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
     try:
-        archived = service.archive_file(
+        archived = await run_file_manager_mutation(
+            service.archive_file,
             root,
             path,
             actor=_file_manager_actor(request),
@@ -1237,10 +1260,11 @@ async def post_file_manager_recycle_restore(
 ) -> dict[str, str]:
     """Restore one archive item; a collision leaves the archive untouched."""
 
-    workspace = await get_agent_for_request(request)
-    service = get_file_manager_service(Path(workspace.workspace_dir))
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
     try:
-        restored = service.restore_recycle_item(
+        restored = await run_file_manager_mutation(
+            service.restore_recycle_item,
             archive_item_id,
             actor=_file_manager_actor(request),
         )
@@ -1274,10 +1298,11 @@ async def delete_file_manager_recycle_item(
 ) -> dict[str, str]:
     """Remove archived bytes and index entry after the UI confirmation."""
 
-    workspace = await get_agent_for_request(request)
-    service = get_file_manager_service(Path(workspace.workspace_dir))
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
     try:
-        purged = service.purge_recycle_item(
+        purged = await run_file_manager_mutation(
+            service.purge_recycle_item,
             archive_item_id,
             actor=_file_manager_actor(request),
         )
