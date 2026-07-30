@@ -26,8 +26,14 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
-from ...marketplace.fs import get_skill_dir, _atomic_write_json
+from ...marketplace.fs import (
+    _atomic_write_json,
+    default_workspace_skill_manifest,
+    get_skill_dir,
+    get_workspace_skill_manifest_path,
+)
 from ...marketplace.schemas import (
+    AsyncTaskSubmitResponse,
     DistributeRequest,
     DistributeResponse,
     DistributionPreviewRequest,
@@ -45,6 +51,7 @@ from ...marketplace.service import (
     save_index,
 )
 from ...marketplace.version_service import SkillVersionService
+from ..async_tasks import AsyncTaskStore
 from ..deps import decode_user_name, require_source_id
 from .skills_browse import (
     _decode_zip_filename,
@@ -222,6 +229,150 @@ async def _log_publish_operation(
         )
     except Exception as e:
         logger.warning("Failed to log publish operation: %s", e)
+
+
+def _new_async_task_id() -> str:
+    """生成异步任务 ID。"""
+    return str(uuid.uuid4())
+
+
+def _get_async_task_store(request: Request) -> AsyncTaskStore:
+    """创建 Market 异步任务写入器。"""
+    db = request.app.state.marketplace.db
+    if db is None or not getattr(db, "is_connected", False):
+        raise HTTPException(
+            status_code=503,
+            detail="Async task database connection is not available",
+        )
+    return AsyncTaskStore(db)
+
+
+def _distribution_summary(kind: str, name: str, target_count: int) -> str:
+    """构造包含分发对象的任务摘要。"""
+    object_name = str(name or "").strip() or "-"
+    return f"分发{kind}「{object_name}」，目标 {target_count} 个用户"
+
+
+def _find_market_skill_item(
+    svc,
+    source_id: str,
+    item_ref: str,
+) -> MarketItem | None:
+    """按 item_id、skill_id 或名称解析市场技能条目。"""
+    items = load_index(svc.marketplace_root, source_id)
+    return next(
+        (
+            candidate
+            for candidate in items
+            if candidate.item_type == "skill"
+            and item_ref
+            in {
+                candidate.item_id,
+                candidate.skill_id,
+                candidate.name,
+            }
+        ),
+        None,
+    )
+
+
+def _skill_task_result_payload(
+    result: DistributeResponse,
+) -> dict[str, object]:
+    """构造技能分发的任务结果摘要。"""
+    return result.model_dump()
+
+
+async def _run_skill_distribution_task(
+    *,
+    task_id: str,
+    store: AsyncTaskStore,
+    svc,
+    source_id: str,
+    item_id: str,
+    operator_id: str,
+    operator_name: str,
+    req: DistributeRequest,
+    target_user_ids: list[str],
+) -> None:
+    """后台执行技能分发并写回任务表。"""
+    try:
+        await store.mark_running(task_id)
+        result = await svc.distribute_skill(
+            source_id,
+            item_id,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            req=req,
+        )
+        conflict_map = {item.user_id: item.reason for item in result.conflicts}
+        for user_id in target_user_ids:
+            if user_id in conflict_map:
+                await store.record_item_result(
+                    task_id=task_id,
+                    target_id=user_id,
+                    success=False,
+                    error_message=conflict_map[user_id],
+                    result={
+                        "item_id": item_id,
+                        "status": "conflict",
+                    },
+                )
+            else:
+                await store.record_item_result(
+                    task_id=task_id,
+                    target_id=user_id,
+                    success=True,
+                    result=_skill_task_result_payload(result),
+                )
+        await store.finish_task(
+            task_id=task_id,
+            status=(
+                "succeeded"
+                if result.conflict_count == 0
+                else (
+                    "failed"
+                    if result.distributed_count == 0
+                    else "partial_failed"
+                )
+            ),
+            done_count=result.distributed_count,
+            failed_count=result.conflict_count,
+            error_message=(
+                None if result.conflict_count == 0 else "部分目标分发失败"
+            ),
+            result=result.model_dump(),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        for user_id in target_user_ids:
+            try:
+                await store.record_item_result(
+                    task_id=task_id,
+                    target_id=user_id,
+                    success=False,
+                    error_message=str(exc),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record skill distribution item failure: task_id=%s user_id=%s",
+                    task_id,
+                    user_id,
+                    exc_info=True,
+                )
+        try:
+            await store.finish_task(
+                task_id=task_id,
+                status="failed",
+                done_count=0,
+                failed_count=len(target_user_ids),
+                error_message=str(exc),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to finish skill distribution task: task_id=%s",
+                task_id,
+                exc_info=True,
+            )
 
 
 def _create_market_item(
@@ -814,7 +965,7 @@ async def delete_skill_permanently(
 
 @router.post(
     "/market/skills/{item_id}/distribute",
-    response_model=DistributeResponse,
+    response_model=AsyncTaskSubmitResponse,
 )
 async def distribute_skill(
     item_id: str,
@@ -824,22 +975,64 @@ async def distribute_skill(
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
-):
-    """分发技能（管理员）."""
+) -> AsyncTaskSubmitResponse:
+    """分发技能（管理员）。"""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
-    try:
-        result = await svc.distribute_skill(
-            source_id,
-            item_id,
+    if not getattr(svc.db, "is_connected", False):
+        raise HTTPException(
+            status_code=503,
+            detail="Async task database connection is not available",
+        )
+    task_id = _new_async_task_id()
+    target_users = await svc._resolve_target_users(
+        source_id,
+        req,
+    )  # noqa: SLF001
+    target_user_ids = [user["tenant_id"] for user in target_users]
+    target_user_names = {
+        user["tenant_id"]: (
+            user.get("tenant_name")
+            or user.get("user_name")
+            or user.get("name")
+        )
+        for user in target_users
+    }
+    skill_item = _find_market_skill_item(svc, source_id, item_id)
+    if skill_item is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    store = _get_async_task_store(request)
+    await store.start_task(
+        task_id=task_id,
+        service="market",
+        task_type="market.skill.distribute",
+        source_id=source_id,
+        actor_user_id=x_user_id or "",
+        actor_user_name=decode_user_name(x_user_name) or "",
+        target_ids=target_user_ids,
+        target_names=target_user_names,
+        summary=_distribution_summary(
+            "技能",
+            skill_item.name,
+            len(target_user_ids),
+        ),
+    )
+    asyncio.create_task(
+        _run_skill_distribution_task(
+            task_id=task_id,
+            store=store,
+            svc=svc,
+            source_id=source_id,
+            item_id=skill_item.item_id,
             operator_id=x_user_id or "",
             operator_name=decode_user_name(x_user_name) or "",
             req=req,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return result
+            target_user_ids=target_user_ids,
+        ),
+    )
+    return AsyncTaskSubmitResponse(task_id=task_id)
 
 
 def _process_user_skill(
@@ -1160,7 +1353,7 @@ def _find_tenant_dirs_for_source_id(
 def _read_workspace_manifest(manifest_path: Path) -> tuple[dict, str | None]:
     """读取 workspace manifest，返回 (manifest, error)."""
     if not manifest_path.exists():
-        return {"skills": {}}, None
+        return default_workspace_skill_manifest(), None
     try:
         return json.loads(manifest_path.read_text(encoding="utf-8")), None
     except json.JSONDecodeError as e:
@@ -1179,7 +1372,7 @@ def _extract_skill_fields(
 
     Args:
         skill_dir: 技能目录
-        entry: skill.json 中的 entry 数据
+        entry: Workspace manifest entry dict
         skill_name: 技能名
         user_id: 用户ID（数据库 tenant_id）
         source_id: 租户 source_id
@@ -1418,7 +1611,7 @@ async def _process_workspace_skills_async(
 ) -> None:
     """处理单个 workspace 下的所有技能."""
     skills_dir = workspace_dir / "skills"
-    manifest_path = workspace_dir / "skill.json"
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     agent_id = workspace_dir.name
 
     if not skills_dir.exists():
@@ -1436,7 +1629,7 @@ async def _process_workspace_skills_async(
         results["errors"].append(
             {
                 "tenant_id": user_id,
-                "error": f"skill.json 解析失败: {error}",
+                "error": f"workspace manifest 解析失败: {error}",
             },
         )
         return
@@ -1460,6 +1653,7 @@ async def _process_workspace_skills_async(
     # 保存 manifest
     if not dry_run and skills_dict:
         manifest["skills"] = skills_dict
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(
             json.dumps(manifest, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -1482,7 +1676,7 @@ async def _process_single_skill(
         skill_dir: 技能目录
         user_id: 用户ID（数据库 tenant_id）
         source_id: 租户 source_id
-        skills_dict: skill.json 中的 skills dict
+        skills_dict: Workspace manifest skills dict
         registry: SkillRegistry
         force: 是否强制重新生成
         dry_run: 试运行模式

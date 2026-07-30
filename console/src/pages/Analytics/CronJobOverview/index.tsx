@@ -71,6 +71,9 @@ const DRILL_DOWN_TABLE_SCROLL = {
   y: 300,
 } as const;
 
+const formatRatioPercent = (value?: number | null) =>
+  `${((value ?? 0) * 100).toFixed(2)}%`;
+
 const SKILL_NAME_MAP: Record<string, string> = {
   insurance_mkt: "保险营销客户分析技能",
   deposit_scale_growth_skill: "存款规模增长与产品配置技能",
@@ -83,6 +86,12 @@ const SKILL_NAME_MAP: Record<string, string> = {
   智能推荐保险计划书: "智能推荐保险计划书",
   黄金持仓客户陪伴技能: "黄金持仓客户陪伴技能",
   "query-fund-plus-cust": "固收+基金营销技能",
+  "query-insu-expand-cust":"分行保险潜客技能",
+  "market-movement": "市场异动",
+  "ncfh-report-review": "如影随影-市场复盘",
+  "query-high-value-transactions": "高价值动账商机盘户",
+  "query-sorted-cust": "Claw精选名单",
+  "global-market-review": "全球市场复盘报告-V2"
 };
 
 const ALLOWED_SKILLS = new Set([
@@ -454,6 +463,8 @@ function RankingTable({
             <col style={{ width: 80 }} />
             <col style={{ width: 55 }} />
             <col style={{ width: 55 }} />
+            <col style={{ width: 70 }} />
+            <col style={{ width: 80 }} />
           </colgroup>
           <thead>
             <tr>
@@ -472,6 +483,8 @@ function RankingTable({
               <th>被客户经理查看的客户数</th>
               <th>去洞察客户数</th>
               <th>去电访客户数</th>
+              <th>接触客户数</th>
+              <th>客户接触率</th>
             </tr>
           </thead>
           <tbody>
@@ -515,6 +528,8 @@ function RankingTable({
                   <td>{row.viewedCustomers}</td>
                   <td>{row.insightCustomers}</td>
                   <td>{row.phoneCustomers}</td>
+                  <td>{row.contactedCustomers}</td>
+                  <td>{row.contactRate}</td>
                 </tr>
               );
             })}
@@ -1485,7 +1500,7 @@ export default function CronJobOverviewPage() {
               className={styles.refreshButton}
               onClick={handleRefresh}
             >
-              <RefreshCw size={16} />
+              <RefreshCw size={14} />
               刷新
             </button>
           </div>
@@ -2053,6 +2068,22 @@ export default function CronJobOverviewPage() {
                   key: "phone_customers",
                   width: 80,
                   align: "center",
+                },
+                {
+                  title: "接触客户数",
+                  dataIndex: "contacted_customers",
+                  key: "contacted_customers",
+                  width: 80,
+                  align: "center",
+                },
+                {
+                  title: "客户接触率",
+                  dataIndex: "contact_rate",
+                  key: "contact_rate",
+                  width: 90,
+                  align: "center",
+                  render: (v: number | null | undefined) =>
+                    formatRatioPercent(v),
                 },
               ]}
             />

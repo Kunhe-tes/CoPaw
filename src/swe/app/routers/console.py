@@ -25,7 +25,14 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
-from ..agent_context import get_agent_for_request
+from ..agent_context import (
+    get_agent_and_config_for_request,
+    get_agent_for_request,
+)
+from ..context_references import (
+    ContextReferencesResponse,
+    context_reference_directory,
+)
 from ...config.context import resolve_request_effective_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -403,9 +410,16 @@ def _extract_content_parts_from_mapping(request_data: dict) -> list[Any]:
 
 def _extract_payload_fields_from_request(
     request_data: AgentRequest,
-) -> tuple[str, str, str, Any, Any, Any, Any, list[Any]]:
+) -> tuple[str, str, str, Any, Any, Any, Any, Any, list[Any]]:
     """提取 AgentRequest 形态请求的核心字段。"""
     channel_meta = getattr(request_data, "channel_meta", None) or {}
+    selected_skill_names = getattr(
+        request_data,
+        "selected_skill_names",
+        None,
+    )
+    if selected_skill_names is None:
+        selected_skill_names = channel_meta.get("selected_skill_names")
     return (
         getattr(request_data, "channel", None) or "console",
         request_data.user_id or "default",
@@ -415,13 +429,14 @@ def _extract_payload_fields_from_request(
         getattr(request_data, "bbk_id", None) or channel_meta.get("bbk_id"),
         getattr(request_data, "system_prompt_injections", None),
         getattr(request_data, "file_url_network", None),
+        selected_skill_names,
         list(request_data.input[0].content) if request_data.input else [],
     )
 
 
 def _extract_payload_fields_from_mapping(
     request_data: dict,
-) -> tuple[str, str, str, Any, Any, Any, Any, list[Any]]:
+) -> tuple[str, str, str, Any, Any, Any, Any, Any, list[Any]]:
     """提取 dict 形态请求的核心字段。"""
     return (
         request_data.get("channel", "console"),
@@ -431,8 +446,22 @@ def _extract_payload_fields_from_mapping(
         request_data.get("bbk_id"),
         request_data.get("system_prompt_injections"),
         request_data.get("file_url_network"),
+        request_data.get("selected_skill_names"),
         _extract_content_parts_from_mapping(request_data),
     )
+
+
+def _extract_context_references(
+    request_data: Union[AgentRequest, dict],
+) -> Any:
+    """Keep structured one-turn context references intact for the runner."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "context_references", None)
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("context_references")
+        return value
+    return request_data.get("context_references")
 
 
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
@@ -445,29 +474,33 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """
     if isinstance(request_data, AgentRequest):
         (
-            channel_id,
+            _channel_id,
             sender_id,
             session_id,
             user_name,
             bbk_id,
             system_prompt_injections,
             file_url_network,
+            selected_skill_names,
             content_parts,
         ) = _extract_payload_fields_from_request(request_data)
     else:
         (
-            channel_id,
+            _channel_id,
             sender_id,
             session_id,
             user_name,
             bbk_id,
             system_prompt_injections,
             file_url_network,
+            selected_skill_names,
             content_parts,
         ) = _extract_payload_fields_from_mapping(request_data)
 
     native_payload: dict[str, Any] = {
-        "channel_id": channel_id,
+        # /console/chat always executes through the Console runtime.  Do not
+        # trust the client-provided channel when resolving effective skills.
+        "channel_id": _channel_id,
         "sender_id": sender_id,
         "content_parts": content_parts,
         "meta": {
@@ -481,6 +514,11 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         ] = system_prompt_injections
     if file_url_network is not None:
         native_payload["meta"]["file_url_network"] = file_url_network
+    if selected_skill_names is not None:
+        native_payload["meta"]["selected_skill_names"] = selected_skill_names
+    context_references = _extract_context_references(request_data)
+    if context_references is not None:
+        native_payload["meta"]["context_references"] = context_references
     if user_name:
         native_payload["meta"]["user_name"] = user_name
     if bbk_id:
@@ -557,6 +595,41 @@ def _console_chat_stream_headers(
         headers["X-Swe-Msgid"] = msgid
         headers["X-Swe-Sessionid"] = session_id
     return headers
+
+
+async def _start_new_chat(
+    workspace,
+    tracker,
+    console_channel,
+    session_id,
+    native_payload,
+):
+    """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
+    msgid = str(uuid.uuid4())
+    native_payload["meta"]["msgid"] = msgid
+    chat = await workspace.chat_manager.get_or_create_chat(
+        session_id,
+        native_payload["sender_id"],
+        native_payload["channel_id"],
+        name=_derive_chat_name(native_payload),
+        meta=(
+            {
+                "agent_id": workspace.agent_id,
+            }
+            if getattr(workspace, "agent_id", None)
+            else None
+        ),
+    )
+    # Inject session_channel from chat record so downstream (e.g. session-end
+    # push) can identify the session's original channel (e.g. zhaohu).
+    if chat.channel and chat.channel != "console":
+        native_payload["meta"]["session_channel"] = chat.channel
+    queue, _ = await tracker.attach_or_start(
+        chat.id,
+        native_payload,
+        console_channel.stream_one,
+    )
+    return queue, chat.id, msgid
 
 
 @router.post(
@@ -647,27 +720,13 @@ async def post_console_chat(
                 detail="No running chat for this session",
             )
     else:
-        msgid = str(uuid.uuid4())
-        native_payload["meta"]["msgid"] = msgid
-        chat = await workspace.chat_manager.get_or_create_chat(
+        queue, run_key, msgid = await _start_new_chat(
+            workspace,
+            tracker,
+            console_channel,
             session_id,
-            native_payload["sender_id"],
-            native_payload["channel_id"],
-            name=_derive_chat_name(native_payload),
-            meta=(
-                {
-                    "agent_id": workspace.agent_id,
-                }
-                if getattr(workspace, "agent_id", None)
-                else None
-            ),
-        )
-        queue, _ = await tracker.attach_or_start(
-            chat.id,
             native_payload,
-            console_channel.stream_one,
         )
-        run_key = chat.id
 
     async def event_generator() -> AsyncGenerator[str, None]:
         # Hold iterator so finally can aclose(); guarantees stream_from_queue's
@@ -795,6 +854,26 @@ async def get_console_generated_files(
     items.sort(key=lambda item: item.modified_at, reverse=reverse)
     return GeneratedFilesResponse(
         files=items[:_CHAT_FILE_LIST_LIMIT],
+    )
+
+
+@router.get(
+    "/context-references",
+    response_model=ContextReferencesResponse,
+    summary="Discover context references for the Console composer",
+)
+async def get_context_references(
+    request: Request,
+    q: str = Query("", max_length=512),
+) -> ContextReferencesResponse:
+    """Return cached, scope-bound Skills, MCP tools, and matching files."""
+    workspace, agent_config = await get_agent_and_config_for_request(request)
+    workspace_dir = Path(workspace.workspace_dir)
+    return await context_reference_directory.discover(
+        workspace=workspace,
+        agent_config=agent_config,
+        query=q,
+        media_dir=await _resolve_console_media_dir(workspace, workspace_dir),
     )
 
 

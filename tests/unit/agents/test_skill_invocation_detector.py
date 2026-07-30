@@ -11,6 +11,7 @@ This test module covers:
 # pylint: disable=protected-access,redefined-outer-name
 
 import asyncio
+import json
 from datetime import datetime
 import pytest
 from unittest.mock import AsyncMock
@@ -39,6 +40,7 @@ from swe.agents.skill_invocation_detector import (
     reset_skill_invocation_detector,
 )
 from swe.agents.skill_runtime_profile import SkillRuntimeProfile
+from swe.agents.skills_manager import get_workspace_skill_manifest_path
 
 
 @pytest.fixture(autouse=True)
@@ -600,6 +602,41 @@ class TestSkillInvocationDetector:
 
         assert "xlsx" in detector._enabled_skills
         assert "pdf" in detector._enabled_skills
+
+    def test_set_enabled_skills_reads_metadata_from_v2_manifest(
+        self,
+        tmp_path,
+    ):
+        workspace_dir = tmp_path / "workspace"
+        manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "workspace-skill-manifest.v1",
+                    "layout_version": 2,
+                    "version": 0,
+                    "skills": {
+                        "demo": {
+                            "enabled": True,
+                            "metadata": {
+                                "description": "v2 description",
+                                "skill_id": "skill-1",
+                                "cn_name": "演示技能",
+                            },
+                        },
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+        detector = SkillInvocationDetector(workspace_dir=workspace_dir)
+
+        detector.set_enabled_skills(["demo"])
+
+        assert detector._skill_descriptions["demo"] == "v2 description"
+        assert detector._skill_ids["demo"] == "skill-1"
+        assert detector._skill_cn_names["demo"] == "演示技能"
 
     @pytest.mark.asyncio
     async def test_declared_skill_attribution(self):

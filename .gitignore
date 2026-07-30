@@ -148,3 +148,5 @@ openspec/changes/cron-job-overview-failed-detail-modal/specs/cron-job-overview-f
 # personal debug scripts (not meant to be tracked)
 /diff_dir.py
 /diff_dir_*/
+guide.md
+bbk_map.md

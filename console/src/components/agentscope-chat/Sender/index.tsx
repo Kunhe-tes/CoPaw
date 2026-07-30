@@ -1,4 +1,4 @@
-import { Button, Flex, Input } from "antd";
+import { Flex, Input } from "antd";
 import { Suggestion } from "@ant-design/x";
 import classnames from "classnames";
 import { useMergedState } from "rc-util";
@@ -24,6 +24,8 @@ import type {
   GetProps,
 } from "antd";
 import BeforeUIContainer from "./BeforeUIContainer";
+import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
+import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 
 export type SubmitType = "enter" | "shiftEnter" | false;
 
@@ -56,6 +58,7 @@ export interface SenderProps
    * ]
    */
   suggestions?: { label?: string | React.ReactNode; value: string }[];
+  skillMentions?: SkillMentionsData;
 
   /**
    * @description 输入框的默认初始值，仅在非受控模式下生效
@@ -279,6 +282,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     defaultValue,
     value,
     readOnly,
+    placeholder,
     enableFocusExpand = false,
     sendDisabled = false,
     allowEmptySubmit = false,
@@ -294,6 +298,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     onKeyPress,
     onKeyDown,
     suggestions,
+    skillMentions,
     disabled,
     header,
     // @ts-ignore
@@ -315,11 +320,24 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
 
   const containerRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<AntdInputRef>(null);
+  const tokenEditorRef = React.useRef<HTMLDivElement>(null);
 
   useProxyImperativeHandle(ref, () => ({
     nativeElement: containerRef.current!,
-    focus: inputRef.current?.focus!,
-    blur: inputRef.current?.blur!,
+    focus: () => {
+      if (tokenEditorRef.current) {
+        tokenEditorRef.current.focus();
+      } else {
+        inputRef.current?.focus();
+      }
+    },
+    blur: () => {
+      if (tokenEditorRef.current) {
+        tokenEditorRef.current.blur();
+      } else {
+        inputRef.current?.blur();
+      }
+    },
   }));
 
   useFocusWithin(containerRef, {
@@ -356,6 +374,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     [`${prefixCls}-disabled`]: disabled,
     [`${prefixCls}-focus`]: focus && enableFocusExpand,
     [`${prefixCls}-blur`]: !focus && enableFocusExpand,
+    [`${prefixCls}-with-skill-editor`]: Boolean(skillMentions),
   });
 
   const actionBtnCls = `${prefixCls}-actions-btn`;
@@ -379,7 +398,8 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     },
     allowSpeech,
   );
-  const hasSuggestions = Array.isArray(suggestions) && suggestions.length > 0;
+  const hasSuggestions =
+    !skillMentions && Array.isArray(suggestions) && suggestions.length > 0;
   const slashCommandKeyword = React.useMemo(
     () => getSlashCommandKeyword(innerValue),
     [innerValue],
@@ -449,12 +469,14 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     isCompositionRef.current = true;
   };
 
-  const onInternalCompositionEnd = (
-    e: React.CompositionEvent<HTMLTextAreaElement>,
-  ) => {
+  const onInternalCompositionEnd = (e: React.CompositionEvent<HTMLElement>) => {
     isCompositionRef.current = false;
     if (props.maxLength) {
-      const currentValue = (e.target as HTMLTextAreaElement).value;
+      const target = e.target as HTMLElement;
+      const currentValue =
+        target instanceof HTMLTextAreaElement
+          ? target.value
+          : target.textContent || "";
       if (currentValue.length > props.maxLength) {
         triggerValueChange(currentValue.slice(0, props.maxLength));
       }
@@ -557,6 +579,53 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     open?: boolean;
   }) => {
     suggestionOpenRef.current = !!suggestionProps?.open;
+
+    if (skillMentions) {
+      return (
+        <SkillTokenEditor
+          {...domProps}
+          ref={tokenEditorRef}
+          aria-label={props.placeholder || "消息"}
+          className={classnames(
+            inputCls,
+            `${prefixCls}-skill-editor`,
+            classNames.input,
+          )}
+          disabled={!!disabled}
+          readOnly={readOnly}
+          onKeyDown={(event) => {
+            const shouldSubmit =
+              event.key === "Enter" &&
+              !event.nativeEvent.isComposing &&
+              ((submitType === "enter" && !event.shiftKey) ||
+                (submitType === "shiftEnter" && event.shiftKey));
+            if (shouldSubmit) {
+              event.preventDefault();
+              triggerSend();
+              return;
+            }
+            onKeyDown?.(event);
+          }}
+          onCompositionStart={onInternalCompositionStart}
+          onCompositionEnd={onInternalCompositionEnd}
+          onPaste={onInternalPaste}
+          onValueChange={(nextValue) =>
+            triggerValueChange(
+              props.maxLength && !isCompositionRef.current
+                ? nextValue.slice(0, props.maxLength)
+                : nextValue,
+            )
+          }
+          placeholder={placeholder}
+          skillMentions={skillMentions}
+          style={styles.input}
+          value={innerValue.slice(
+            0,
+            props.maxLength || Number.MAX_SAFE_INTEGER,
+          )}
+        />
+      );
+    }
 
     return (
       <InputTextArea

@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
     getCurrentCronBroadcastTask: vi.fn(),
     getCronBroadcastTask: vi.fn(),
     getCronJob: vi.fn(),
+    listSweSkills: vi.fn(),
     broadcastCronJob: vi.fn(),
     enableCronBatchDispatch: vi.fn(),
     disableCronBatchDispatch: vi.fn(),
@@ -54,6 +55,7 @@ vi.mock("../../../api", () => ({
     getCurrentCronBroadcastTask: mocks.getCurrentCronBroadcastTask,
     getCronBroadcastTask: mocks.getCronBroadcastTask,
     getCronJob: mocks.getCronJob,
+    listSweSkills: mocks.listSweSkills,
     broadcastCronJob: mocks.broadcastCronJob,
     enableCronBatchDispatch: mocks.enableCronBatchDispatch,
     disableCronBatchDispatch: mocks.disableCronBatchDispatch,
@@ -156,6 +158,11 @@ describe("CronJobsPage broadcast task refresh", () => {
     vi.clearAllMocks();
     mocks.getUserTimezone.mockResolvedValue({ timezone: "UTC" });
     mocks.getCronJob.mockResolvedValue({ spec: mocks.job });
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "default",
+      count: 0,
+      skills: [],
+    });
     mocks.job.meta = {};
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({
       task: {
@@ -275,6 +282,38 @@ describe("CronJobsPage broadcast task refresh", () => {
     fireEvent.click(disabledConfirmButton);
 
     expect(mocks.broadcastCronJob).toHaveBeenCalledTimes(1);
+  }, 30000);
+
+  it("shows cron broadcast task id after submitting async distribution", async () => {
+    mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
+    mocks.broadcastCronJob.mockResolvedValue({
+      task_id: "task-running",
+      status: "running",
+      tenant_count: 1,
+      completed_count: 0,
+      failed_count: 0,
+      results: [],
+      reused: false,
+    });
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "广播到租户" }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Select tenant" }),
+    );
+
+    const confirmButton = screen.getByRole("button", { name: /OK/ });
+    await waitFor(() => {
+      expect(confirmButton).not.toBeDisabled();
+    });
+    fireEvent.click(confirmButton);
+
+    await waitFor(() => {
+      expect(mocks.message.info).toHaveBeenCalledWith(
+        "定时任务分发任务已提交：task-running",
+      );
+    });
   }, 30000);
 
   it("requests batch dispatch after broadcasting with the shared offset window", async () => {

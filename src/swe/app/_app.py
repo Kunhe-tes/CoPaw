@@ -772,6 +772,7 @@ async def lifespan(
 
     # --- Initialize database connection (required for tracing and instance modules) ---
     db_connection = await _initialize_database_connection()
+    app.state.db_connection = db_connection
 
     await _initialize_tracing_manager(db_connection)
     logger.info("Instance module initialized")

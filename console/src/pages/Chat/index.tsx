@@ -31,6 +31,8 @@ import defaultConfig, { getDefaultConfig } from "./OptionsPanel/defaultConfig";
 import { chatApi } from "../../api/modules/chat";
 import { cronJobApi } from "../../api/modules/cronjob";
 import { feedbackApi } from "../../api/modules/feedback";
+import { contextReferencesApi } from "../../api/modules/contextReferences";
+import type { SkillMentionItem } from "../../components/agentscope-chat/SkillMentions/useSkillMentions";
 import { getApiUrl } from "../../api/config";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import type {
@@ -68,6 +70,7 @@ import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
 import ChatSidebar from "./components/ChatSidebar";
+import { createWelcomeSkillMentions } from "./welcomeSkillMentions";
 // ==================== 首页改版结束 ====================
 // ==================== 自定义工具渲染器 (customToolRenderConfig) ====================
 import CopyFileToStatic from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic";
@@ -340,7 +343,11 @@ function useIMEComposition(isChatActive: () => boolean) {
     const suppressImeEnter = (e: KeyboardEvent) => {
       if (!isChatActive()) return;
       const target = e.target as HTMLElement;
-      if (target?.tagName === "TEXTAREA" && e.key === "Enter" && !e.shiftKey) {
+      if (
+        (target?.tagName === "TEXTAREA" || target?.isContentEditable) &&
+        e.key === "Enter" &&
+        !e.shiftKey
+      ) {
         // e.isComposing is the standard flag; isComposingRef covers the
         // post-compositionend grace period needed by Safari.
         if (isComposingRef.current || e.isComposing) {
@@ -520,6 +527,17 @@ export default function ChatPage() {
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [selectedContextReferences, setSelectedContextReferences] = useState<
+    SkillMentionItem[]
+  >([]);
+  const [contextReferences, setContextReferences] = useState<
+    SkillMentionItem[]
+  >([]);
+  const [contextReferencesLoading, setContextReferencesLoading] =
+    useState(false);
+  const [contextReferencesError, setContextReferencesError] = useState(false);
+  const pendingContextReferencesRef = useRef<SkillMentionItem[]>([]);
+  const contextReferencesRequestIdRef = useRef(0);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
@@ -533,6 +551,11 @@ export default function ChatPage() {
     setSessionLoading,
     currentSessionId: activeSessionId,
   } = useChatAnywhereSessionsState();
+
+  useEffect(() => {
+    setSelectedContextReferences([]);
+    pendingContextReferencesRef.current = [];
+  }, [activeSessionId, chatId]);
   const sourceSystemConfig = useSourceSystemConfigStore(
     (state) => state.config,
   );
@@ -540,6 +563,31 @@ export default function ChatPage() {
     (state) => state.loadActiveModelData,
   );
   const taskProgressEnabled = isChatTaskProgressEnabled(sourceSystemConfig);
+
+  const loadContextReferences = useCallback((query: string) => {
+    const requestId = ++contextReferencesRequestIdRef.current;
+    setContextReferencesLoading(true);
+    setContextReferencesError(false);
+    void contextReferencesApi
+      .discover(query)
+      .then((response) => {
+        if (requestId !== contextReferencesRequestIdRef.current) return;
+        setContextReferences([
+          ...response.skills,
+          ...response.mcp_tools,
+          ...response.files,
+        ]);
+      })
+      .catch(() => {
+        if (requestId !== contextReferencesRequestIdRef.current) return;
+        setContextReferences([]);
+        setContextReferencesError(true);
+      })
+      .finally(() => {
+        if (requestId === contextReferencesRequestIdRef.current)
+          setContextReferencesLoading(false);
+      });
+  }, []);
 
   // useTransition for non-urgent state updates (badge clearing)
   const [, startTransition] = useTransition();
@@ -1346,6 +1394,11 @@ export default function ChatPage() {
               },
             ]
           : lastInput;
+      const userText = rewrittenInput
+        .filter((m: InputMessage) => m.role === "user")
+        .map(extractUserMessageText)
+        .join("\n")
+        .trim();
 
       const resolvedLogicalSessionId = resolveLogicalRequestSessionId(
         {
@@ -1366,8 +1419,14 @@ export default function ChatPage() {
         // ==================== userId 统一整改结束 ====================
         stream: true,
         ...biz_params,
+        context_references:
+          userText.startsWith("/") &&
+          pendingContextReferencesRef.current.length === 0
+            ? []
+            : pendingContextReferencesRef.current,
         file_url_network: resolveCurrentFileUrlNetwork(),
       };
+      pendingContextReferencesRef.current = [];
 
       const backendChatId = resolveRequestChatId(
         {
@@ -1378,11 +1437,6 @@ export default function ChatPage() {
         requestBody.session_id,
       );
       if (backendChatId) {
-        const userText = rewrittenInput
-          .filter((m: InputMessage) => m.role === "user")
-          .map(extractUserMessageText)
-          .join("\n")
-          .trim();
         if (userText) {
           sessionApi.setLastUserMessage(backendChatId, userText);
         }
@@ -1548,10 +1602,17 @@ export default function ChatPage() {
       | IAgentScopeRuntimeWebUISenderOptions
       | undefined;
 
-    const handleBeforeSubmit = async () => {
-      if (isComposingRef.current) return false;
-      return true;
-    };
+    const { beforeSubmit: handleBeforeSubmit, skillMentions } =
+      createWelcomeSkillMentions({
+        contextReferences,
+        contextReferencesError,
+        contextReferencesLoading,
+        isComposingRef,
+        loadContextReferences,
+        pendingContextReferencesRef,
+        selectedContextReferences,
+        setSelectedContextReferences,
+      });
 
     return {
       ...i18nConfig,
@@ -1590,6 +1651,8 @@ export default function ChatPage() {
               typeof greeting === "string" ? greeting : "你好，有什么可以帮您？"
             }
             onSubmit={(data) => onSubmit(data)}
+            skillMentions={skillMentions}
+            beforeSubmit={handleBeforeSubmit}
           />
         ),
         // ==================== 首页改版结束 ====================
@@ -1626,6 +1689,7 @@ export default function ChatPage() {
           label: renderSuggestionLabel(item.command, item.description),
           value: item.value,
         })),
+        skillMentions,
       },
       session: {
         multiple: true,
@@ -1725,6 +1789,11 @@ export default function ChatPage() {
     multimodalCaps,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
+    selectedContextReferences,
+    contextReferences,
+    contextReferencesError,
+    contextReferencesLoading,
+    loadContextReferences,
     taskProgress,
     t,
   ]);

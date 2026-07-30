@@ -379,38 +379,23 @@ class TenantInitializer:
         Returns:
             True if default workspace has skill manifest with skills, False otherwise.
         """
-        from ...agents.skills_manager import (
-            get_workspace_skills_dir,
-            get_workspace_skill_manifest_path,
-        )
+        from ...agents.skills_manager import get_workspace_skill_manifest_path
 
         default_workspace = self.tenant_dir / "workspaces" / "default"
-        skills_dir = get_workspace_skills_dir(default_workspace)
         manifest_path = get_workspace_skill_manifest_path(default_workspace)
 
-        # Primary check: manifest exists and has skills
-        # If manifest doesn't exist, we need seeding (even if directories exist)
-        if manifest_path.exists():
-            try:
-                manifest = json.loads(
-                    manifest_path.read_text(encoding="utf-8"),
-                )
-                if manifest.get("skills"):
-                    return True
-                # Manifest exists but is empty - check if skills were partially copied
-            except (json.JSONDecodeError, OSError):
-                pass
-
-            # Manifest exists (even if empty/corrupt), check for partial state
-            if skills_dir.exists():
-                for item in skills_dir.iterdir():
-                    if item.is_dir() and (item / "SKILL.md").exists():
-                        return True
-        else:
-            # No manifest - need seeding regardless of directory state
-            pass
-
-        return False
+        if not manifest_path.exists():
+            return False
+        manifest = json.loads(
+            manifest_path.read_text(encoding="utf-8"),
+        )
+        return (
+            bool(manifest.get("skills"))
+            and manifest.get(
+                "layout_version",
+            )
+            == 2
+        )
 
     def _copy_skill_directories(
         self,
@@ -1041,49 +1026,128 @@ class TenantInitializer:
         Returns:
             Dict with skill states (enabled, channels, config, source).
         """
-        from ...agents.skills_manager import (
-            get_workspace_skills_dir,
-            get_workspace_skill_manifest_path,
-            reconcile_workspace_manifest,
-            _read_json_unlocked,
-            _default_workspace_manifest,
-        )
-
-        source_skills_state: dict[str, Any] = {}
-        default_skills_dir = get_workspace_skills_dir(default_workspace)
-        default_manifest_path = get_workspace_skill_manifest_path(
-            default_workspace,
-        )
-
-        if not default_skills_dir.exists():
-            return source_skills_state
+        from ...agents.skills_manager import reconcile_workspace_manifest
 
         try:
-            if default_manifest_path.exists():
-                source_manifest = _read_json_unlocked(
-                    default_manifest_path,
-                    _default_workspace_manifest(),
-                )
+            source_manifest = reconcile_workspace_manifest(default_workspace)
+            return {
+                skill_name: dict(skill_entry)
                 for skill_name, skill_entry in source_manifest.get(
                     "skills",
                     {},
-                ).items():
-                    source_skills_state[skill_name] = {
-                        field: skill_entry[field]
-                        for field in (
-                            "enabled",
-                            "channels",
-                            "config",
-                            "source",
-                        )
-                        if field in skill_entry
-                    }
-            reconcile_workspace_manifest(default_workspace)
+                ).items()
+            }
         except Exception as e:
             logger.warning(
                 f"Failed to reconcile source workspace for tenant {self.tenant_id}: {e}",
             )
-        return source_skills_state
+            return {}
+
+    def _seed_prepared_workspace_skills(
+        self,
+        template_workspace: Path,
+        source_skills_state: dict[str, Any],
+        existing_target_manifest: dict[str, Any],
+        original_target_manifest: bytes | None,
+    ) -> dict[str, Any]:
+        """Copy prepared registered packages and publish target state."""
+        from ...agents.skills_manager import (
+            _default_workspace_manifest,
+            _write_json_atomic,
+            get_workspace_skill_manifest_path,
+            reconcile_workspace_manifest,
+            resolve_workspace_managed_skill_dir,
+        )
+
+        result: dict[str, Any] = {"seeded": False, "skills": []}
+        target_workspace = self.tenant_dir / "workspaces" / "default"
+        target_manifest_path = get_workspace_skill_manifest_path(
+            target_workspace,
+        )
+        attempted_target_dirs: list[Path] = []
+        try:
+            copied: list[str] = []
+            for skill_name, skill_entry in sorted(
+                source_skills_state.items(),
+            ):
+                enabled = bool(skill_entry.get("enabled", False))
+                source_dir = resolve_workspace_managed_skill_dir(
+                    template_workspace,
+                    skill_name,
+                    enabled=enabled,
+                )
+                if not source_dir.exists():
+                    continue
+                target_dir = resolve_workspace_managed_skill_dir(
+                    target_workspace,
+                    skill_name,
+                    enabled=enabled,
+                )
+                opposite_target_dir = resolve_workspace_managed_skill_dir(
+                    target_workspace,
+                    skill_name,
+                    enabled=not enabled,
+                )
+                if skill_name not in existing_target_manifest.get(
+                    "skills",
+                    {},
+                ) and (target_dir.exists() or opposite_target_dir.exists()):
+                    continue
+                attempted_target_dirs.append(target_dir)
+                target_dir.parent.mkdir(parents=True, exist_ok=True)
+                if target_dir.exists():
+                    shutil.rmtree(target_dir)
+                shutil.copytree(source_dir, target_dir)
+                copied.append(skill_name)
+
+            if not copied:
+                return result
+
+            target_manifest = _default_workspace_manifest()
+            target_manifest["version"] = 1
+            target_manifest["skills"] = {
+                skill_name: dict(source_skills_state[skill_name])
+                for skill_name in copied
+            }
+            _write_json_atomic(target_manifest_path, target_manifest)
+            reconciled = reconcile_workspace_manifest(target_workspace)
+            reconciled["version"] = 1
+            for skill_name in copied:
+                source_entry = source_skills_state[skill_name]
+                target_entry = reconciled["skills"][skill_name]
+                for field in (
+                    "enabled",
+                    "channels",
+                    "config",
+                    "source",
+                    "created_at",
+                    "updated_at",
+                ):
+                    if field in source_entry:
+                        target_entry[field] = source_entry[field]
+            _write_json_atomic(target_manifest_path, reconciled)
+
+            result["seeded"] = True
+            result["skills"] = sorted(copied)
+            return result
+        except Exception as e:
+            for attempted_dir in attempted_target_dirs:
+                if attempted_dir.exists():
+                    shutil.rmtree(attempted_dir, ignore_errors=True)
+            if original_target_manifest is None:
+                target_manifest_path.unlink(missing_ok=True)
+            else:
+                target_manifest_path.parent.mkdir(
+                    parents=True,
+                    exist_ok=True,
+                )
+                target_manifest_path.write_bytes(original_target_manifest)
+            logger.error(
+                f"Failed to seed workspace skills for tenant {self.tenant_id}: {e}",
+            )
+            raise RuntimeError(
+                f"Default workspace skill seeding failed for tenant {self.tenant_id}: {e}",
+            ) from e
 
     def seed_default_workspace_skills_from_default(self) -> dict[str, Any]:
         """Seed default workspace skills from default tenant (idempotent).
@@ -1101,15 +1165,32 @@ class TenantInitializer:
             - "skills": list of skill names copied (if any)
         """
         from ...agents.skills_manager import (
-            get_workspace_skills_dir,
-            reconcile_workspace_manifest,
+            _default_workspace_manifest,
+            get_workspace_skill_manifest_path,
         )
 
         result: dict[str, Any] = {"seeded": False, "skills": []}
 
+        target_workspace = self.tenant_dir / "workspaces" / "default"
+        target_manifest_path = get_workspace_skill_manifest_path(
+            target_workspace,
+        )
+        target_manifest_existed = target_manifest_path.exists()
+        original_target_manifest = (
+            target_manifest_path.read_bytes()
+            if target_manifest_existed
+            else None
+        )
+
         # Skip if default workspace already has skills
         if self._has_default_workspace_skills():
             return result
+
+        existing_target_manifest = (
+            json.loads(original_target_manifest.decode("utf-8"))
+            if original_target_manifest is not None
+            else _default_workspace_manifest()
+        )
 
         template_workspace = (
             self.base_working_dir
@@ -1117,61 +1198,18 @@ class TenantInitializer:
             / "workspaces"
             / "default"
         )
-        template_skills_dir = get_workspace_skills_dir(template_workspace)
-
-        # Prepare source state and reconcile
         source_skills_state = self._prepare_source_workspace_state(
             template_workspace,
         )
-
-        # Check if source has usable skills after reconciliation
-        source_skill_names = self._list_skill_directories(template_skills_dir)
-
-        if not source_skill_names:
-            # Source has no skills, check if target has existing skills
-            target_workspace = self.tenant_dir / "workspaces" / "default"
-            target_skills_dir = get_workspace_skills_dir(target_workspace)
-            existing_skills = self._list_skill_directories(target_skills_dir)
-            if existing_skills:
-                return self._reconcile_existing_workspace_skills(
-                    target_workspace,
-                    existing_skills,
-                )
+        if not source_skills_state:
             return result
 
-        try:
-            # Copy skill directories
-            target_workspace = self.tenant_dir / "workspaces" / "default"
-            target_skills_dir = get_workspace_skills_dir(target_workspace)
-            copied = self._copy_skill_directories(
-                template_skills_dir,
-                target_skills_dir,
-            )
-
-            if not copied:
-                return result
-
-            # Reconcile target to build proper manifest
-            reconcile_workspace_manifest(target_workspace)
-
-            # Preserve durable state from source manifest
-            if source_skills_state:
-                self._merge_workspace_manifest_state(
-                    target_workspace,
-                    source_skills_state,
-                )
-
-            result["seeded"] = True
-            result["skills"] = copied
-            return result
-
-        except Exception as e:
-            logger.error(
-                f"Failed to seed workspace skills for tenant {self.tenant_id}: {e}",
-            )
-            raise RuntimeError(
-                f"Default workspace skill seeding failed for tenant {self.tenant_id}: {e}",
-            ) from e
+        return self._seed_prepared_workspace_skills(
+            template_workspace,
+            source_skills_state,
+            existing_target_manifest,
+            original_target_manifest,
+        )
 
     def _merge_workspace_manifest_state(
         self,

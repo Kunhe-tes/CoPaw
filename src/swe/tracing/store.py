@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from .config import TracingConfig
 from ..database import DatabaseConnection
+from ..utils.bbk import normalize_bbk_id_to_primary
 from .models import (
     EventType,
     MCPToolUsage,
@@ -123,14 +124,15 @@ class TraceStore:
 
         query = """
             INSERT INTO swe_tracing_traces (
-                trace_id, source_id, user_id, session_id, session_name, channel, start_time,
+                trace_id, b3_trace_id, source_id, user_id, session_id, session_name, channel, start_time,
                 end_time, duration_ms, model_name, total_input_tokens,
                 total_output_tokens, total_tokens, tools_used, skills_used,
                 status, error, user_message, user_name, bbk_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             trace.trace_id,
+            trace.b3_trace_id,
             trace.source_id,
             trace.user_id,
             trace.session_id,
@@ -153,7 +155,7 @@ class TraceStore:
             trace.error,
             trace.user_message,
             trace.user_name,
-            trace.bbk_id,
+            normalize_bbk_id_to_primary(trace.bbk_id),
         )
         await self.db.execute(query, params)
 
@@ -390,7 +392,7 @@ class TraceStore:
             span.tool_output,
             span.error,
             span.user_name,
-            span.bbk_id,
+            normalize_bbk_id_to_primary(span.bbk_id),
         )
         await self.db.execute(query, params)
 
@@ -504,7 +506,7 @@ class TraceStore:
                     span.tool_output,
                     span.error,
                     span.user_name,
-                    span.bbk_id,
+                    normalize_bbk_id_to_primary(span.bbk_id),
                 ),
             )
         rowcount = await self.db.execute_many(query, params_list)
@@ -2901,6 +2903,7 @@ class TraceStore:
         """Convert database row to Trace model."""
         return Trace(
             trace_id=row["trace_id"],
+            b3_trace_id=row.get("b3_trace_id"),
             source_id=row["source_id"],
             user_id=row["user_id"],
             session_id=row["session_id"],

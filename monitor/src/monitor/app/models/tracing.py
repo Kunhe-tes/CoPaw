@@ -111,6 +111,10 @@ class Trace(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     trace_id: str = Field(description="Unique trace identifier")
+    b3_trace_id: Optional[str] = Field(
+        default=None,
+        description="External B3 trace identifier for distributed correlation",
+    )
     source_id: str = Field(description="Source identifier for data isolation")
     user_id: str = Field(description="User identifier")
     user_name: Optional[str] = Field(default=None, description="User name")
@@ -321,12 +325,23 @@ class TaskStatusSummary(BaseModel):
     read_count: int = 0  # 已读次数
 
 
+class ModelErrorCodeCount(BaseModel):
+    """模型报错错误码计数."""
+
+    code: str = Field(description="错误码")
+    count: int = Field(description="数量")
+
+
 class ErrorSummary(BaseModel):
     """报错分析汇总统计."""
 
     total_errors: int = 0  # 报错总数
     model_errors: int = 0  # 模型报错（llm_input）
     tool_errors: int = 0  # 工具报错（tool_call_end）
+    model_error_codes: list[ModelErrorCodeCount] = Field(
+        default_factory=list,
+        description="模型报错错误码 Top 10",
+    )
 
 
 class ErrorItem(BaseModel):

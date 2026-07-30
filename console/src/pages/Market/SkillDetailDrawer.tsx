@@ -19,6 +19,7 @@ import { VersionHistoryModal } from "./Skills/VersionHistoryModal";
 import styles from "./SkillDetailDrawer.module.less";
 
 const { Text, Title } = Typography;
+const DEFAULT_USAGE_PAGE_SIZE = 5;
 
 interface SkillDetailDrawerProps {
   open: boolean;
@@ -338,6 +339,8 @@ export function SkillDetailDrawer(
   const [distributions, setDistributions] = useState<DistributionRecord[]>([]);
   const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
   const [syncToUsers, setSyncToUsers] = useState(true);
+  const [usagePage, setUsagePage] = useState(1);
+  const [usagePageSize, setUsagePageSize] = useState(DEFAULT_USAGE_PAGE_SIZE);
 
   // 统计配置相关状态
   const [includeInStatistics, setIncludeInStatistics] = useState<boolean>(false);
@@ -603,6 +606,11 @@ export function SkillDetailDrawer(
       cancelled = true;
     };
   }, [open, skill, sourceId]);
+
+  useEffect(() => {
+    setUsagePage(1);
+    setUsagePageSize(DEFAULT_USAGE_PAGE_SIZE);
+  }, [open, skill?.item_id]);
 
   const userStatsColumns = useMemo(
     () => [
@@ -930,7 +938,18 @@ export function SkillDetailDrawer(
                   dataSource={skill.user_stats}
                   columns={userStatsColumns}
                   rowKey="user_id"
-                  pagination={{ pageSize: 5, hideOnSinglePage: true, size: "small" }}
+                  pagination={{
+                    current: usagePage,
+                    pageSize: usagePageSize,
+                    hideOnSinglePage: true,
+                    showSizeChanger: true,
+                    pageSizeOptions: ["5", "10", "20", "50"],
+                    size: "small",
+                    onChange: (nextPage, nextPageSize) => {
+                      setUsagePage(nextPageSize !== usagePageSize ? 1 : nextPage);
+                      setUsagePageSize(nextPageSize);
+                    },
+                  }}
                   size="small"
                   scroll={{ y: 380 }}
                 />

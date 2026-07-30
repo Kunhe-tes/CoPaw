@@ -5,6 +5,8 @@ import pytest
 from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
+from market.app.routers import skills_market as skills_router
+
 
 def _make_app(tmp_path):
     from fastapi import FastAPI
@@ -27,6 +29,65 @@ def _make_app(tmp_path):
     app.state.marketplace = svc
     app.include_router(router, prefix="/api")
     return app
+
+
+@pytest.mark.asyncio
+async def test_process_workspace_skills_writes_workspace_manifest_path(
+    tmp_path,
+    monkeypatch,
+):
+    from market.app.routers import skills_market
+    from market.marketplace.fs import get_workspace_skill_manifest_path
+
+    workspace_dir = tmp_path / "workspace"
+    (workspace_dir / "skills" / "demo").mkdir(parents=True)
+
+    async def _record_skill(
+        skill_dir,
+        user_id,
+        source_id,
+        skills_dict,
+        registry,
+        force,
+        dry_run,
+        results,
+    ):
+        del (
+            skill_dir,
+            user_id,
+            source_id,
+            registry,
+            force,
+            dry_run,
+            results,
+        )
+        skills_dict["demo"] = {"enabled": True}
+
+    monkeypatch.setattr(
+        skills_market,
+        "_process_single_skill",
+        _record_skill,
+    )
+
+    await skills_market._process_workspace_skills_async(
+        workspace_dir,
+        "user1",
+        "source_a",
+        object(),
+        False,
+        False,
+        {"errors": []},
+    )
+
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": 2,
+        "version": 0,
+        "skills": {"demo": {"enabled": True}},
+    }
+    assert manifest_path == workspace_dir / "skill.json"
+    assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
 def test_publish_skill_returns_201(tmp_path):
@@ -112,7 +173,7 @@ def test_unpublish_skill_not_found_returns_404(tmp_path):
     assert resp.status_code == 404
 
 
-def test_distribute_skill_returns_200(tmp_path):
+def test_distribute_skill_returns_200(tmp_path, monkeypatch):
     from market.marketplace.schemas import PublishSkillRequest
 
     app = _make_app(tmp_path)
@@ -131,6 +192,12 @@ def test_distribute_skill_returns_200(tmp_path):
             {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
         ],
     )
+
+    monkeypatch.setattr(
+        skills_router.asyncio,
+        "create_task",
+        lambda coro: coro.close() or object(),
+    )
     client = TestClient(app)
     resp = client.post(
         f"/api/market/skills/{item.item_id}/distribute",
@@ -144,8 +211,64 @@ def test_distribute_skill_returns_200(tmp_path):
     )
     assert resp.status_code == 200
     data = resp.json()
-    assert data["distributed_count"] == 1
-    assert data["conflict_count"] == 0
+    assert data["status"] == "queued"
+    assert data["task_id"]
+
+
+def test_distribute_skill_writes_workspace_manifest(tmp_path):
+    from market.marketplace.fs import get_user_skills_dir
+    from market.marketplace.schemas import (
+        DistributeRequest,
+        PublishSkillRequest,
+    )
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    item, _ = asyncio.run(
+        svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="skill_z",
+                description="",
+                creator_id="u1",
+                creator_name="",
+                skill_json={},
+                skill_md="",
+            ),
+        ),
+    )
+    svc.db.fetch_all = AsyncMock(
+        return_value=[
+            {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
+        ],
+    )
+    result = asyncio.run(
+        svc.distribute_skill(
+            "src_a",
+            item.item_id,
+            operator_id="u1",
+            operator_name="User",
+            req=DistributeRequest(target_type="all"),
+        ),
+    )
+    assert result.distributed_count == 1
+    assert result.conflict_count == 0
+
+    workspace_dir = get_user_skills_dir(
+        tmp_path / "swe",
+        "user1",
+        "default",
+        "src_a",
+    ).parent
+    manifest_path = workspace_dir / "skill.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["skills"]["skill_z"]["source"] == (
+        f"marketplace:{item.item_id}"
+    )
+    assert manifest["skills"]["skill_z"]["metadata"]["distributed_by"] == (
+        "u1"
+    )
+    assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
 def test_publish_skill_missing_source_id_returns_400(tmp_path):

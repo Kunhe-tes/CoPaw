@@ -21,6 +21,7 @@ from swe.agents.hook_runtime.models import (
     AdditionalContext,
     MergedHookResult,
 )
+from swe.agents.tool_guard_mixin import PreToolUseTerminalStop
 from swe.app.runner.runner import (
     AgentRunner,
     _build_and_connect_mcp_clients,
@@ -150,6 +151,28 @@ def _patch_normal_agent_path(monkeypatch):
         "swe.app.runner.runner.build_env_context",
         lambda **kwargs: "base context",
     )
+
+
+def test_query_runtime_inputs_keep_request_scoped_values() -> None:
+    from swe.app.runner.runner import _QueryRuntimeInputs
+
+    inputs = _QueryRuntimeInputs(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        agent_config=SimpleNamespace(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        env_context="base context",
+        selected_context_directives=["<SKILL-USE>"],
+        auth_token="token",
+        passthrough_headers={"cookie": "session=abc"},
+    )
+
+    assert inputs.session_id == "session-1"
+    assert inputs.selected_context_directives == ["<SKILL-USE>"]
+    assert inputs.passthrough_headers == {"cookie": "session=abc"}
 
 
 def test_hook_config_enabled_accepts_loaded_skill_sources() -> None:
@@ -1126,6 +1149,62 @@ async def test_prepare_query_runtime_logs_agent_build_duration(
 
 
 @pytest.mark.asyncio
+async def test_prepare_query_runtime_returns_blocked_start_result(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    chat = SimpleNamespace(id="chat-1")
+    setattr(
+        runner,
+        "_chat_manager",
+        SimpleNamespace(get_or_create_chat=AsyncMock(return_value=chat)),
+    )
+    _patch_normal_agent_path(monkeypatch)
+    enabled_hooks = HookConfig(enabled=True)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(enabled_hooks),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: enabled_hooks,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._resolve_active_model_label",
+        lambda *args, **kwargs: "openai/gpt-test",
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        AsyncMock(
+            return_value=MergedHookResult(
+                decision=HookDecision.BLOCK,
+                reason="blocked",
+            ),
+        ),
+    )
+
+    result = await runner._prepare_query_runtime(
+        request=SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            channel_meta={},
+        ),
+        msgs=[Msg(name="user", role="user", content="hello")],
+        query="hello",
+        preflight=_QueryPreflight(),
+    )
+
+    assert result.runtime is None
+    assert result.block_response is not None
+    assert result.blocked_chat is chat
+    assert result.blocked_mcp_clients == []
+    assert result.blocked_session_id == "session-1"
+
+
+@pytest.mark.asyncio
 async def test_prepare_query_runtime_restores_confirmed_skill_from_session_snapshot(
     monkeypatch,
     tmp_path,
@@ -1177,7 +1256,7 @@ async def test_prepare_query_runtime_restores_confirmed_skill_from_session_snaps
             "fill-metadata": {
                 "skill_name": "fill-metadata",
                 "resolved_skill_dir": str(
-                    tmp_path / "skills" / "fill-metadata"
+                    tmp_path / "skills" / "fill-metadata",
                 ),
                 "freshness_token": "v1",
                 "confirmed_at": 2.0,
@@ -2134,6 +2213,164 @@ async def test_query_handler_stop_hook_blocks_completion(
     stop_call = emit_hook.await_args_list[-1]
     assert stop_call.args[0] == HookEventName.STOP
     assert stop_call.kwargs["assistant_response"] == "agent reply"
+
+
+def _make_terminal_stop_runner(
+    monkeypatch,
+    tmp_path,
+    stop_reason,
+) -> tuple[AgentRunner, type[_FakeAgent], SimpleNamespace, AsyncMock]:
+    class TerminalStopAgent(_FakeAgent):
+        calls = 0
+        consume_calls = 0
+        pre_tool_output_suppressed = False
+        reset_calls = 0
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._pre_tool_terminal_stop_reason = None
+
+        def consume_pre_tool_terminal_stop(self):
+            type(self).consume_calls += 1
+            reason = self._pre_tool_terminal_stop_reason
+            self._pre_tool_terminal_stop_reason = None
+            return reason
+
+        def reset_pre_tool_terminal_stop(self):
+            type(self).reset_calls += 1
+            self.consume_pre_tool_terminal_stop()
+
+        async def __call__(self, turn_msgs):
+            type(self).calls += 1
+            for msg in turn_msgs:
+                self.memory.content.append((msg, []))
+            if type(self).calls == 1:
+                self._pre_tool_terminal_stop_reason = stop_reason
+                self.pre_tool_hook_result = MergedHookResult(
+                    decision=HookDecision.STOP,
+                    reason=stop_reason or "",
+                    suppress_output=True,
+                )
+                type(self).pre_tool_output_suppressed = (
+                    self.pre_tool_hook_result.suppress_output
+                )
+                await self.memory.add(
+                    Msg(
+                        name="system",
+                        role="system",
+                        content="hook_stopped",
+                    ),
+                )
+                raise PreToolUseTerminalStop(stop_reason)
+            reply = Msg(
+                name="Friday",
+                role="assistant",
+                content="normal second-turn reply",
+            )
+            await self.memory.add(reply)
+            return [reply]
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    setattr(runner, "_chat_manager", None)
+    _patch_normal_agent_path(monkeypatch)
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", TerminalStopAgent)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(HookConfig(enabled=True)),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(enabled=True),
+    )
+    emit_hook = AsyncMock(return_value=MergedHookResult())
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        emit_hook,
+    )
+    runner._generate_backend_suggestions_if_needed = AsyncMock()
+    runner._index_model_output_if_needed = AsyncMock()
+    runner._end_trace_if_needed = AsyncMock()
+
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    return runner, TerminalStopAgent, request, emit_hook
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_reason"),
+    [
+        ("policy stopped tool", "policy stopped tool"),
+        (None, "Hook requested stop"),
+    ],
+)
+async def test_query_handler_pre_tool_terminal_stop_is_final_and_allows_next_turn(
+    monkeypatch,
+    tmp_path,
+    stop_reason,
+    expected_reason,
+) -> None:
+    runner, terminal_stop_agent, request, emit_hook = (
+        _make_terminal_stop_runner(
+            monkeypatch,
+            tmp_path,
+            stop_reason,
+        )
+    )
+    first_outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="run a tool")],
+            request=request,
+        )
+    ]
+    saved_state = await runner.session.get_session_state_dict(
+        session_id="session-1",
+        user_id="user-1",
+    )
+
+    assert [item[0].get_text_content() for item in first_outputs] == [
+        expected_reason,
+    ]
+    assert first_outputs[-1][1] is True
+    persisted_content = saved_state["agent"]["memory"]["content"]
+    assert [entry[0]["content"] for entry in persisted_content[-2:]] == [
+        "hook_stopped",
+        expected_reason,
+    ]
+    assert terminal_stop_agent.pre_tool_output_suppressed is True
+    assert [call.args[0] for call in emit_hook.await_args_list] == [
+        HookEventName.USER_PROMPT_SUBMIT,
+        HookEventName.SESSION_START,
+    ]
+    runner._generate_backend_suggestions_if_needed.assert_not_awaited()
+    runner._index_model_output_if_needed.assert_not_awaited()
+    runner._end_trace_if_needed.assert_awaited_once_with(
+        None,
+        "completed",
+    )
+    assert terminal_stop_agent.calls == 1
+    assert terminal_stop_agent.consume_calls == 2
+    assert terminal_stop_agent.reset_calls == 1
+
+    second_outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="try again")],
+            request=request,
+        )
+    ]
+
+    assert [item[0].get_text_content() for item in second_outputs] == [
+        "normal second-turn reply",
+    ]
+    assert terminal_stop_agent.calls == 2
+    assert terminal_stop_agent.reset_calls == 2
 
 
 @pytest.mark.asyncio

@@ -4,14 +4,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
 from typing import Any, Literal, cast
 
+from ..async_tasks.store import AsyncTaskStore
+
 BroadcastTaskStatus = Literal["running", "completed", "failed"]
 BroadcastTargetStatus = Literal["pending", "running", "succeeded", "failed"]
+
+logger = logging.getLogger(__name__)
 
 _TASK_TABLE = "swe_cron_broadcast_tasks"
 _ITEM_TABLE = "swe_cron_broadcast_task_items"
@@ -48,21 +53,31 @@ class CronBroadcastTaskStoreUnavailable(RuntimeError):
     """定时任务广播分发进度存储不可用。"""
 
 
+def _cron_broadcast_async_summary(
+    job_name: str | None,
+    target_count: int,
+) -> str:
+    """生成定时任务广播对应的统一异步任务摘要。"""
+    name = str(job_name or "").strip()
+    if not name:
+        return f"向 {target_count} 个用户分发定时任务"
+    return f"分发定时任务「{name}」，目标 {target_count} 个用户"
+
+
 class CronBroadcastTaskStore:
     """读写定时任务广播分发进度。"""
 
     def __init__(self, db: Any | None = None):
         """初始化存储；无数据库时退化为进程内存储。"""
         self.db = db
+        self._async_task_store = AsyncTaskStore(db) if db is not None else None
         self._tasks: dict[str, CronBroadcastTaskSnapshot] = {}
         self._items: dict[str, dict[str, _TargetItem]] = {}
 
     @property
     def is_available(self) -> bool:
-        """返回当前数据库连接是否可用。"""
-        return self.db is not None and bool(
-            getattr(self.db, "is_connected", False),
-        )
+        """返回当前是否配置了数据库存储对象。"""
+        return self.db is not None
 
     async def initialize(self) -> None:
         """幂等初始化广播任务进度表。"""
@@ -86,7 +101,11 @@ class CronBroadcastTaskStore:
         source_id: str,
         tenant_id: str,
         job_id: str,
+        job_name: str | None = None,
         target_tenant_ids: list[str],
+        target_names: dict[str, str | None] | None = None,
+        actor_user_id: str | None = None,
+        actor_user_name: str | None = None,
     ) -> tuple[CronBroadcastTaskSnapshot, bool]:
         """创建或复用同一源任务和目标集合下仍在运行的广播任务。"""
         targets = _normalize_targets(target_tenant_ids)
@@ -105,8 +124,12 @@ class CronBroadcastTaskStore:
             source_id=source_id,
             tenant_id=tenant_id,
             job_id=job_id,
+            job_name=job_name,
             target_key=target_key,
             targets=targets,
+            target_names=target_names,
+            actor_user_id=actor_user_id,
+            actor_user_name=actor_user_name,
         )
 
     async def get_task(
@@ -118,6 +141,27 @@ class CronBroadcastTaskStore:
             task = self._tasks.get(task_id)
             return self._build_memory_snapshot(task) if task else None
         return await self._get_db_task(task_id)
+
+    async def mark_running(self, task_id: str) -> None:
+        """将广播任务标记为运行中。"""
+        if not self.is_available:
+            task = self._tasks.get(task_id)
+            if task is not None:
+                task.status = "running"
+                task.updated_at = datetime.now()
+            return
+        await self._call_db(
+            "mark task running",
+            self.db.execute,
+            f"""
+                UPDATE {_TASK_TABLE}
+                SET status = 'running',
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE task_id = %s
+            """,
+            (task_id,),
+        )
+        await self._mirror_async_task_running(task_id)
 
     async def mark_target_running(
         self,
@@ -148,6 +192,7 @@ class CronBroadcastTaskStore:
             """,
             (task_id, tenant_id),
         )
+        await self._mirror_async_task_item_running(task_id, tenant_id)
 
     async def record_target_result(
         self,
@@ -193,6 +238,7 @@ class CronBroadcastTaskStore:
                 json.dumps(result, ensure_ascii=False),
             ),
         )
+        await self._mirror_async_task_item_result(task_id, result)
 
     async def finish_task(self, task_id: str) -> None:
         """根据目标结果汇总并结束广播任务。"""
@@ -230,6 +276,13 @@ class CronBroadcastTaskStore:
                 task_id,
             ),
         )
+        await self._mirror_async_task_finished(
+            task_id=task_id,
+            done_count=snapshot.completed_count,
+            failed_count=snapshot.failed_count,
+            results=snapshot.results,
+            failure_summary=snapshot.failure_summary,
+        )
 
     async def record_task_failed(
         self,
@@ -258,6 +311,7 @@ class CronBroadcastTaskStore:
             """,
             (failure_summary, task_id),
         )
+        await self._mirror_async_task_failed(task_id, failure_summary)
 
     def _start_memory_task(
         self,
@@ -268,6 +322,8 @@ class CronBroadcastTaskStore:
         job_id: str,
         target_key: str,
         targets: list[str],
+        actor_user_id: str | None = None,
+        actor_user_name: str | None = None,
     ) -> tuple[CronBroadcastTaskSnapshot, bool]:
         for task in self._tasks.values():
             if (
@@ -305,8 +361,12 @@ class CronBroadcastTaskStore:
         source_id: str,
         tenant_id: str,
         job_id: str,
+        job_name: str | None,
         target_key: str,
         targets: list[str],
+        target_names: dict[str, str | None] | None,
+        actor_user_id: str | None,
+        actor_user_name: str | None,
     ) -> tuple[CronBroadcastTaskSnapshot, bool]:
         claim_key = _claim_key(
             agent_id,
@@ -331,6 +391,17 @@ class CronBroadcastTaskStore:
                 tenant_count=len(targets),
             )
             if inserted:
+                await self._mirror_async_task_started(
+                    task_id=task_id,
+                    source_id=source_id,
+                    tenant_id=tenant_id,
+                    job_id=job_id,
+                    job_name=job_name,
+                    target_ids=targets,
+                    target_names=target_names,
+                    actor_user_id=actor_user_id,
+                    actor_user_name=actor_user_name,
+                )
                 return (
                     CronBroadcastTaskSnapshot(
                         task_id=task_id,
@@ -517,6 +588,156 @@ class CronBroadcastTaskStore:
                 f"{_UNAVAILABLE_PREFIX}: {operation} failed: {exc}",
             ) from exc
 
+    async def _mirror_async_task_started(
+        self,
+        *,
+        task_id: str,
+        source_id: str,
+        tenant_id: str,
+        job_id: str,
+        job_name: str | None,
+        target_ids: list[str],
+        target_names: dict[str, str | None] | None = None,
+        actor_user_id: str | None = None,
+        actor_user_name: str | None = None,
+    ) -> None:
+        """同步统一异步任务主记录。"""
+        if self._async_task_store is None:
+            return
+        try:
+            await self._async_task_store.start_task(
+                task_id=task_id,
+                service="swe",
+                task_type="cron.broadcast.distribute",
+                source_id=source_id,
+                actor_user_id=actor_user_id,
+                actor_user_name=actor_user_name,
+                target_ids=target_ids,
+                target_names=target_names,
+                summary=_cron_broadcast_async_summary(
+                    job_name,
+                    len(target_ids),
+                ),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to mirror cron broadcast task %s into async_tasks",
+                task_id,
+                exc_info=True,
+            )
+
+    async def _mirror_async_task_item_running(
+        self,
+        task_id: str,
+        tenant_id: str,
+    ) -> None:
+        """同步统一异步任务明细的运行状态。"""
+        if self._async_task_store is None:
+            return
+        try:
+            await self._async_task_store.mark_item_running(
+                task_id=task_id,
+                target_id=tenant_id,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to mirror cron broadcast item running: task_id=%s tenant_id=%s",
+                task_id,
+                tenant_id,
+                exc_info=True,
+            )
+
+    async def _mirror_async_task_running(self, task_id: str) -> None:
+        """同步统一异步任务运行状态。"""
+        if self._async_task_store is None:
+            return
+        try:
+            await self._async_task_store.mark_running(task_id)
+        except Exception:
+            logger.warning(
+                "Failed to mirror cron broadcast task running: task_id=%s",
+                task_id,
+                exc_info=True,
+            )
+
+    async def _mirror_async_task_item_result(
+        self,
+        task_id: str,
+        result: dict[str, Any],
+    ) -> None:
+        """同步统一异步任务明细结果。"""
+        if self._async_task_store is None:
+            return
+        tenant_id = str(result.get("tenant_id") or "")
+        if not tenant_id:
+            return
+        try:
+            await self._async_task_store.record_item_result(
+                task_id=task_id,
+                target_id=tenant_id,
+                success=bool(result.get("success")),
+                result=result,
+                error_message=str(result.get("error") or "") or None,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to mirror cron broadcast item result: task_id=%s tenant_id=%s",
+                task_id,
+                tenant_id,
+                exc_info=True,
+            )
+
+    async def _mirror_async_task_finished(
+        self,
+        *,
+        task_id: str,
+        done_count: int,
+        failed_count: int,
+        results: list[dict[str, Any]],
+        failure_summary: str | None,
+    ) -> None:
+        """同步统一异步任务完成状态。"""
+        if self._async_task_store is None:
+            return
+        async_task_status = "succeeded"
+        succeeded_count = max(done_count - failed_count, 0)
+        if failed_count > 0 and succeeded_count > 0:
+            async_task_status = "partial_failed"
+        elif failed_count > 0:
+            async_task_status = "failed"
+        try:
+            await self._async_task_store.finish_task(
+                task_id=task_id,
+                status=async_task_status,
+                done_count=done_count,
+                failed_count=failed_count,
+                error_message=failure_summary,
+                result=results,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to mirror cron broadcast task finished: task_id=%s",
+                task_id,
+                exc_info=True,
+            )
+
+    async def _mirror_async_task_failed(
+        self,
+        task_id: str,
+        failure_summary: str,
+    ) -> None:
+        """同步统一异步任务失败状态。"""
+        if self._async_task_store is None:
+            return
+        try:
+            await self._async_task_store.fail_task(task_id, failure_summary)
+        except Exception:
+            logger.warning(
+                "Failed to mirror cron broadcast task failed: task_id=%s",
+                task_id,
+                exc_info=True,
+            )
+
 
 def _normalize_targets(target_tenant_ids: list[str]) -> list[str]:
     seen: set[str] = set()
@@ -531,7 +752,11 @@ def _normalize_targets(target_tenant_ids: list[str]) -> list[str]:
 
 
 def _target_key(targets: list[str]) -> str:
-    return json.dumps(sorted(targets), ensure_ascii=False, separators=(",", ":"))
+    return json.dumps(
+        sorted(targets),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _claim_key(

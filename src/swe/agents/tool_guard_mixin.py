@@ -19,7 +19,7 @@ import os
 from pathlib import Path
 import time
 import uuid as _uuid
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from agentscope.message import Msg, ToolResultBlock
 
@@ -86,6 +86,14 @@ _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
 _PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
 
 
+class PreToolUseTerminalStop(Exception):
+    """Signal that a PreToolUse hook terminated the current agent turn."""
+
+    def __init__(self, reason: str | None = None) -> None:
+        self.reason = reason or "Hook requested stop"
+        super().__init__(self.reason)
+
+
 class _GuardAction:
     """Lightweight container for a guard decision made under lock."""
 
@@ -126,10 +134,42 @@ class ToolGuardMixin:
         self._tool_guard_approval_service = get_approval_service()
         self._tool_guard_pending_info: dict | None = None
         self._tool_guard_lock = asyncio.Lock()
+        self._pre_tool_terminal_stop_reason: str | None = None
+        self._active_tool_guard_acting_tasks: set[asyncio.Task[Any]] = set()
 
     def _ensure_tool_guard(self) -> None:
         if not hasattr(self, "_tool_guard_engine"):
             self._init_tool_guard()
+
+    def _ensure_pre_tool_terminal_stop_tracking(self) -> None:
+        if not hasattr(self, "_pre_tool_terminal_stop_reason"):
+            self._pre_tool_terminal_stop_reason = None
+        if not hasattr(self, "_active_tool_guard_acting_tasks"):
+            self._active_tool_guard_acting_tasks = set()
+
+    def consume_pre_tool_terminal_stop(self) -> str | None:
+        """Return and clear the terminal stop state for the completed turn."""
+        self._ensure_pre_tool_terminal_stop_tracking()
+        reason = self._pre_tool_terminal_stop_reason
+        self._pre_tool_terminal_stop_reason = None
+        return reason
+
+    def reset_pre_tool_terminal_stop(self) -> None:
+        """Clear terminal stop state before beginning a new agent turn."""
+        self.consume_pre_tool_terminal_stop()
+
+    def _raise_if_pre_tool_terminal_stop_requested(self) -> None:
+        self._ensure_pre_tool_terminal_stop_tracking()
+        if self._pre_tool_terminal_stop_reason is not None:
+            raise PreToolUseTerminalStop(self._pre_tool_terminal_stop_reason)
+
+    def _request_pre_tool_terminal_stop(self, reason: str) -> None:
+        self._ensure_pre_tool_terminal_stop_tracking()
+        self._pre_tool_terminal_stop_reason = reason
+        stopping_task = asyncio.current_task()
+        for task in tuple(self._active_tool_guard_acting_tasks):
+            if task is not stopping_task and not task.done():
+                task.cancel()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1048,6 +1088,76 @@ class ToolGuardMixin:
         await self.memory.add(tool_res_msg)
         return None
 
+    async def _acting_hook_stopped(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        reason: str,
+    ) -> None:
+        stopped_text = (
+            f"Tool `{tool_name}` stopped by hook runtime.\n" f"{reason}"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    **build_failed_tool_result_block(
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_name,
+                        error_type="hook_stopped",
+                        detail=stopped_text,
+                    ),
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+
+    async def _stop_pre_tool_hook(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        reason: str,
+    ) -> NoReturn:
+        """Record a terminal pre-tool stop and cancel peer tool calls."""
+        await self._acting_hook_stopped(tool_call, tool_name, reason)
+        self._request_pre_tool_terminal_stop(reason)
+        raise PreToolUseTerminalStop(reason)
+
+    async def _stop_post_tool_hook(self, reason: str) -> NoReturn:
+        """End the turn after a post-tool hook without altering its result."""
+        reason = reason or "Hook requested stop"
+        self._discard_forced_tool_replay()
+        self._request_pre_tool_terminal_stop(reason)
+        raise PreToolUseTerminalStop(reason)
+
+    async def _handle_post_tool_use(
+        self,
+        *,
+        span_id: str,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+        tool_response: dict | str | None,
+        trace_tool_output: dict | str | None,
+    ) -> None:
+        """Record the post-tool hook, trace its outcome, then stop if asked."""
+        post_hook_result = await self._emit_tool_hook(
+            HookEventName.POST_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=tool_use_id,
+            tool_response=tool_response,
+        )
+        await self._record_tool_hook_result(
+            post_hook_result,
+            event_name=HookEventName.POST_TOOL_USE,
+        )
+        await self._emit_tool_trace_end(span_id, trace_tool_output)
+        if post_hook_result.decision == HookDecision.STOP:
+            await self._stop_post_tool_hook(post_hook_result.reason)
+
     async def _record_tool_hook_result(
         self,
         result: MergedHookResult,
@@ -1099,7 +1209,83 @@ class ToolGuardMixin:
             guardians_used=["unified_hook_runtime"],
         )
 
-    async def _acting(self, tool_call) -> dict | None:  # noqa: C901
+    async def _acting(self, tool_call) -> dict | None:
+        """Track an active tool call and stop peers after a terminal hook."""
+        self._ensure_pre_tool_terminal_stop_tracking()
+        self._raise_if_pre_tool_terminal_stop_requested()
+        task = asyncio.current_task()
+        if task is None:
+            return await self._acting_impl(tool_call)
+        self._active_tool_guard_acting_tasks.add(task)
+        try:
+            return await self._acting_impl(tool_call)
+        finally:
+            self._active_tool_guard_acting_tasks.discard(task)
+
+    async def _apply_pre_tool_hook(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], bool, dict | None]:
+        """Run the pre-tool hook and return an early response if it decides."""
+        pre_hook_result = await self._emit_tool_hook(
+            HookEventName.PRE_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=str(tool_call.get("id") or ""),
+        )
+        if pre_hook_result.updated_input is not None:
+            tool_call = dict(tool_call)
+            tool_call["input"] = pre_hook_result.updated_input
+            tool_input = pre_hook_result.updated_input
+        if pre_hook_result.decision == HookDecision.STOP:
+            await self._stop_pre_tool_hook(
+                tool_call,
+                tool_name,
+                pre_hook_result.reason or "Hook requested stop",
+            )
+        if pre_hook_result.decision in {
+            HookDecision.BLOCK,
+            HookDecision.DENY,
+        }:
+            result = await self._acting_hook_denied(
+                tool_call,
+                tool_name,
+                pre_hook_result.reason,
+            )
+            return tool_call, tool_input, True, result
+        if (
+            pre_hook_result.decision == HookDecision.ASK
+            and not self._approved_hook_ask_replay_matches(
+                tool_call,
+                tool_name,
+                tool_input,
+                pre_hook_result,
+            )
+        ):
+            result = await self._acting_with_approval(
+                tool_call,
+                tool_name,
+                self._hook_guard_result(
+                    tool_name,
+                    tool_input,
+                    pre_hook_result.reason,
+                ),
+                approval_kind=_APPROVAL_KIND_HOOK_PRE_TOOL_USE,
+                hook_ask_handler_ids=self._hook_ask_handler_ids(
+                    pre_hook_result,
+                ),
+            )
+            return tool_call, tool_input, True, result
+        if pre_hook_result.decision == HookDecision.ASK:
+            await self._record_tool_hook_result(
+                pre_hook_result,
+                event_name=HookEventName.PRE_TOOL_USE,
+            )
+        return tool_call, tool_input, False, None
+
+    async def _acting_impl(self, tool_call) -> dict | None:
         """Intercept sensitive tool calls before execution.
 
         1. If tool is in *denied_tools*, auto-deny unconditionally.
@@ -1125,51 +1311,14 @@ class ToolGuardMixin:
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
 
-        pre_hook_result = await self._emit_tool_hook(
-            HookEventName.PRE_TOOL_USE,
-            tool_name=tool_name,
-            tool_input=tool_input,
-            tool_use_id=str(tool_call.get("id") or ""),
-        )
-        if pre_hook_result.updated_input is not None:
-            tool_call = dict(tool_call)
-            tool_call["input"] = pre_hook_result.updated_input
-            tool_input = pre_hook_result.updated_input
-        if pre_hook_result.decision in {
-            HookDecision.BLOCK,
-            HookDecision.DENY,
-            HookDecision.STOP,
-        }:
-            return await self._acting_hook_denied(
-                tool_call,
-                tool_name,
-                pre_hook_result.reason,
-            )
-        if pre_hook_result.decision == HookDecision.ASK:
-            if self._approved_hook_ask_replay_matches(
-                tool_call,
-                tool_name,
-                tool_input,
-                pre_hook_result,
-            ):
-                await self._record_tool_hook_result(
-                    pre_hook_result,
-                    event_name=HookEventName.PRE_TOOL_USE,
-                )
-            else:
-                return await self._acting_with_approval(
-                    tool_call,
-                    tool_name,
-                    self._hook_guard_result(
-                        tool_name,
-                        tool_input,
-                        pre_hook_result.reason,
-                    ),
-                    approval_kind=_APPROVAL_KIND_HOOK_PRE_TOOL_USE,
-                    hook_ask_handler_ids=self._hook_ask_handler_ids(
-                        pre_hook_result,
-                    ),
-                )
+        (
+            tool_call,
+            tool_input,
+            hook_handled,
+            hook_result,
+        ) = await self._apply_pre_tool_hook(tool_call, tool_name, tool_input)
+        if hook_handled:
+            return hook_result
 
         await self._notify_skill_detector_tool_call(
             tool_name,
@@ -1202,53 +1351,62 @@ class ToolGuardMixin:
                         exc_info=True,
                     )
 
-        if action is not None:
+        if action is not None and action.kind != "preapproved":
             result = await self._execute_guard_action(action, tool_call)
             await self._emit_tool_trace_end(span_id, result)
             return result
 
+        return await self._run_guarded_tool_call(
+            action,
+            tool_call,
+            tool_name,
+            tool_input,
+            span_id,
+        )
+
+    async def _run_guarded_tool_call(
+        self,
+        action: "_GuardAction | None",
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        span_id: str,
+    ) -> dict | None:
+        """Execute a permitted tool call and emit its terminal hook events."""
         try:
-            result = await self._run_tool_call_with_hard_timeout(
+            self._raise_if_pre_tool_terminal_stop_requested()
+            result = await self._execute_guard_action_or_tool_call(
+                action,
                 tool_call,
                 tool_name,
                 tool_input,
             )
             tool_use_id = str(tool_call.get("id") or "")
             tool_response = self._extract_current_tool_response(tool_use_id)
-            trace_tool_output = result
-            if trace_tool_output is None:
-                # post hook 不应把结构化失败当作正常结果继续消费，
-                # 但 tracing 仍需要读取原始失败 payload 来提取 error。
-                trace_tool_output = self._extract_current_tool_response(
+            # post hook 不应把结构化失败当作正常结果继续消费，
+            # 但 tracing 仍需要读取原始失败 payload 来提取 error。
+            trace_tool_output = (
+                result
+                if result is not None
+                else self._extract_current_tool_response(
                     tool_use_id,
                     include_structured_failure=True,
                 )
-            post_hook_result = await self._emit_tool_hook(
-                HookEventName.POST_TOOL_USE,
+            )
+            await self._handle_post_tool_use(
+                span_id=span_id,
                 tool_name=tool_name,
                 tool_input=tool_input,
                 tool_use_id=tool_use_id,
                 tool_response=tool_response,
+                trace_tool_output=trace_tool_output,
             )
-            await self._record_tool_hook_result(
-                post_hook_result,
-                event_name=HookEventName.POST_TOOL_USE,
-            )
-            await self._emit_tool_trace_end(span_id, trace_tool_output)
 
-            if getattr(self, "_tool_guard_forced_replay_active", False):
-                self._tool_guard_forced_replay_active = False
-                self._tool_guard_replay_done = {
-                    "tool_name": tool_name,
-                    "tool_input": tool_input,
-                    "remaining_queue": getattr(
-                        self,
-                        "_tool_guard_replay_queue",
-                        [],
-                    ),
-                }
+            self._complete_forced_tool_replay(tool_name, tool_input)
             return result
 
+        except PreToolUseTerminalStop:
+            raise
         except Exception as e:
             failure_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE_FAILURE,
@@ -1262,6 +1420,8 @@ class ToolGuardMixin:
                 event_name=HookEventName.POST_TOOL_USE_FAILURE,
             )
             await self._emit_tool_trace_end(span_id, None, error=str(e))
+            if failure_hook_result.decision == HookDecision.STOP:
+                await self._stop_post_tool_hook(failure_hook_result.reason)
             raise
 
     async def _decide_guard_action(
@@ -1353,6 +1513,22 @@ class ToolGuardMixin:
             )
         return None
 
+    async def _execute_guard_action_or_tool_call(
+        self,
+        action: "_GuardAction | None",
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
+        """Execute a preapproved action or the ordinary tool-call path."""
+        if action is not None:
+            return await self._execute_guard_action(action, tool_call)
+        return await self._run_tool_call_with_hard_timeout(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
+
     async def _consume_preapproval(
         self,
         tool_name: str,
@@ -1384,24 +1560,33 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> dict | None:
-        """Execute approved call and persist replay state."""
-        result = await self._run_tool_call_with_hard_timeout(
+        """Execute an approved call without advancing a replay queue."""
+        return await self._run_tool_call_with_hard_timeout(
             tool_call,
             tool_name,
             tool_input,
         )
-        if getattr(self, "_tool_guard_forced_replay_active", False):
-            self._tool_guard_forced_replay_active = False
-            self._tool_guard_replay_done = {
-                "tool_name": tool_name,
-                "tool_input": tool_input,
-                "remaining_queue": getattr(
-                    self,
-                    "_tool_guard_replay_queue",
-                    [],
-                ),
-            }
-        return result
+
+    def _complete_forced_tool_replay(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> None:
+        """Record a replay result only after its post-tool hooks finish."""
+        if not getattr(self, "_tool_guard_forced_replay_active", False):
+            return
+        self._tool_guard_forced_replay_active = False
+        self._tool_guard_replay_done = {
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "remaining_queue": getattr(self, "_tool_guard_replay_queue", []),
+        }
+
+    def _discard_forced_tool_replay(self) -> None:
+        """Prevent a terminal hook decision from resuming queued replays."""
+        self._tool_guard_forced_replay_active = False
+        self._tool_guard_replay_done = None
+        self._tool_guard_replay_queue = []
 
     # ------------------------------------------------------------------
     # Denied / Approval responses

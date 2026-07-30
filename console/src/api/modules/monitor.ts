@@ -141,6 +141,78 @@ export interface CronOverviewResponse {
   branch_read: CronOverviewBranchReadItem[];
 }
 
+export type CronScheduleBucketMinutes = 5 | 10 | 15 | 30 | 60;
+export type CronScheduleTaskType = "text" | "agent";
+
+export interface CronScheduleDistributionDiagnostics {
+  invalid_cron_jobs: number;
+  invalid_timezone_jobs: number;
+  unsupported_task_type_jobs: number;
+  invalid_metadata_jobs: number;
+  managed_child_jobs: number;
+}
+
+export interface CronScheduleDistributionBucket {
+  start_time: string;
+  end_time: string;
+  text_count: number;
+  agent_count: number;
+  total_count: number;
+}
+
+export interface CronScheduleDistributionResponse {
+  start_time: string;
+  end_time: string;
+  bucket_minutes: CronScheduleBucketMinutes;
+  calculated_at: string;
+  definition_revision: string;
+  eligible_job_count: number;
+  text_count: number;
+  agent_count: number;
+  total_count: number;
+  buckets: CronScheduleDistributionBucket[];
+  diagnostics: CronScheduleDistributionDiagnostics;
+}
+
+export interface CronScheduleOccurrenceItem {
+  scheduled_at: string;
+  job_id: string;
+  job_name: string;
+  user_name: string;
+  user_id: string;
+  task_type: CronScheduleTaskType;
+  cron_expr: string;
+  timezone: string;
+}
+
+export interface CronScheduleDistributionDetailsResponse {
+  start_time: string;
+  end_time: string;
+  task_type: CronScheduleTaskType | null;
+  calculated_at: string;
+  definition_revision: string;
+  items: CronScheduleOccurrenceItem[];
+  total: number;
+  page: number;
+  page_size: number;
+  diagnostics: CronScheduleDistributionDiagnostics;
+}
+
+export interface CronScheduleDistributionParams {
+  start_time: string;
+  end_time: string;
+  bucket_minutes: CronScheduleBucketMinutes;
+}
+
+export interface CronScheduleDistributionDetailsParams {
+  start_time: string;
+  end_time: string;
+  task_type?: CronScheduleTaskType;
+  page?: number;
+  page_size?: number;
+  definition_revision?: string;
+}
+
 export interface CronDispatchBatchStats {
   total_batches: number;
   running_batches: number;
@@ -155,6 +227,7 @@ export interface CronDispatchBatchStats {
 export interface CronDispatchBatchItem {
   batch_id: string;
   parent_job_id: string;
+  parent_job_name: string;
   parent_external_job_id: string;
   tenant_id: string;
   source_id: string;
@@ -276,10 +349,62 @@ export interface CronDispatchWorkersResponse {
   capacity_events: CronDispatchCapacityItem[];
 }
 
+export interface AsyncTaskItemRecord {
+  task_id: string;
+  target_id: string;
+  target_name?: string | null;
+  status: string;
+  error_message?: string | null;
+  result_json?: unknown;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface AsyncTaskRecord {
+  task_id: string;
+  service: string;
+  task_type: string;
+  status: string;
+  title: string;
+  summary?: string | null;
+  source_id?: string | null;
+  actor_user_id?: string | null;
+  actor_user_name?: string | null;
+  target_count: number;
+  done_count: number;
+  failed_count: number;
+  error_message?: string | null;
+  result_json?: unknown;
+  created_at?: string | null;
+  updated_at?: string | null;
+  finished_at?: string | null;
+}
+
+export interface AsyncTaskDetailRecord extends AsyncTaskRecord {
+  items: AsyncTaskItemRecord[];
+}
+
+export interface AsyncTaskListResponse<T> {
+  items: T[];
+  total: number;
+  page: number;
+  page_size: number;
+}
+
+export interface AsyncTaskQueryFilters {
+  source_id?: string;
+  task_type?: string;
+  status?: string;
+  keyword?: string;
+  page?: number;
+  page_size?: number;
+}
+
 export interface CronDispatchDateFilters {
   start_time?: string;
   end_time?: string;
   status?: string;
+  query?: string;
 }
 
 export interface CronJobOverviewSummaryMetric {
@@ -304,6 +429,8 @@ export interface CronJobOverviewBranchRankingRow {
   phoneManagers: string;
   recommendedCustomers: string;
   viewedCustomers: string;
+  contactedCustomers: string;
+  contactRate: string;
   insightCustomers: string;
   phoneCustomers: string;
 }
@@ -403,6 +530,8 @@ export interface CronBranchRankingItem {
   phone_managers: number;
   recommended_customers: number;
   viewed_customers: number;
+  contacted_customers: number;
+  contact_rate: number;
   insight_customers: number;
   phone_customers: number;
 }
@@ -463,6 +592,8 @@ export interface BranchManagerSummaryItem {
   read_tasks: number;
   recommended_customers: number;
   viewed_customers: number;
+  contacted_customers: number;
+  contact_rate: number;
   insight_customers: number;
   phone_customers: number;
 }
@@ -570,12 +701,15 @@ export interface SubscriptionDetailItem {
   execution_time: string | null;
 }
 
-const CRON_FAILURE_REASON_COLORS = ["#1d6ff2", "#38a8f5", "#7a8cf0", "#ff821c", "#67cdb9"];
+const CRON_FAILURE_REASON_COLORS = [
+  "#1d6ff2",
+  "#38a8f5",
+  "#7a8cf0",
+  "#ff821c",
+  "#67cdb9",
+];
 
-function appendDefinedParams(
-  params: URLSearchParams,
-  filters?: object,
-) {
+function appendDefinedParams(params: URLSearchParams, filters?: object) {
   if (!filters) {
     return;
   }
@@ -605,6 +739,10 @@ function formatPercentText(value: number | null | undefined) {
   return `${formatPercentValue(value)}%`;
 }
 
+function formatRatioPercentText(value: number | null | undefined) {
+  return `${(Number(value ?? 0) * 100).toFixed(2)}%`;
+}
+
 export function mapCronJobOverviewPageData(
   stats: CronOverviewStatsResponse,
   behavior: CronBranchRankingResponse,
@@ -623,7 +761,9 @@ export function mapCronJobOverviewPageData(
       {
         key: "success",
         value: formatPercentValue(stats.success_rate),
-        footerValue: `${formatInteger(stats.success_count)}/${formatInteger(stats.error_count)}`,
+        footerValue: `${formatInteger(stats.success_count)}/${formatInteger(
+          stats.error_count,
+        )}`,
       },
       {
         key: "read",
@@ -653,6 +793,8 @@ export function mapCronJobOverviewPageData(
       phoneManagers: formatInteger(item.phone_managers),
       recommendedCustomers: formatInteger(item.recommended_customers),
       viewedCustomers: formatInteger(item.viewed_customers),
+      contactedCustomers: formatInteger(item.contacted_customers ?? 0),
+      contactRate: formatRatioPercentText(item.contact_rate ?? 0),
       insightCustomers: formatInteger(item.insight_customers),
       phoneCustomers: formatInteger(item.phone_customers),
     })),
@@ -660,7 +802,8 @@ export function mapCronJobOverviewPageData(
       name: item.reason || "其他",
       count: Number(item.count || 0),
       percent: Number(item.percent || 0),
-      color: CRON_FAILURE_REASON_COLORS[index % CRON_FAILURE_REASON_COLORS.length],
+      color:
+        CRON_FAILURE_REASON_COLORS[index % CRON_FAILURE_REASON_COLORS.length],
     })),
     anomalySummary: {
       affectedBranches: formatInteger(branchError.affected_branch_count),
@@ -705,6 +848,35 @@ export const monitorApi = {
     return request(`/monitor/cron/overview${query ? `?${query}` : ""}`);
   },
 
+  getScheduleDistribution: async (
+    params: CronScheduleDistributionParams,
+  ): Promise<CronScheduleDistributionResponse> => {
+    const query = new URLSearchParams();
+    query.set("start_time", params.start_time);
+    query.set("end_time", params.end_time);
+    query.set("bucket_minutes", String(params.bucket_minutes));
+    return request(`/monitor/cron/schedule-distribution?${query.toString()}`);
+  },
+
+  getScheduleDistributionDetails: async (
+    params: CronScheduleDistributionDetailsParams,
+  ): Promise<CronScheduleDistributionDetailsResponse> => {
+    const query = new URLSearchParams();
+    query.set("start_time", params.start_time);
+    query.set("end_time", params.end_time);
+    query.set("page", String(params.page ?? 1));
+    query.set("page_size", String(params.page_size ?? 20));
+    if (params.task_type) {
+      query.set("task_type", params.task_type);
+    }
+    if (params.definition_revision) {
+      query.set("expected_revision", params.definition_revision);
+    }
+    return request(
+      `/monitor/cron/schedule-distribution/details?${query.toString()}`,
+    );
+  },
+
   getCronDispatchBatches: async (
     page = 1,
     pageSize = 20,
@@ -726,7 +898,9 @@ export const monitorApi = {
     },
   ): Promise<CronDispatchBatchDetailResponse> => {
     return request(
-      `/monitor/cron/dispatch/batches/${encodeURIComponent(batchId)}${buildQuery(filters)}`,
+      `/monitor/cron/dispatch/batches/${encodeURIComponent(
+        batchId,
+      )}${buildQuery(filters)}`,
     );
   },
 
@@ -845,7 +1019,12 @@ export const monitorApi = {
     params.append("page_size", pageSize.toString());
     if (filters) {
       Object.entries(filters).forEach(([key, value]) => {
-        if (value !== undefined && value !== null && value !== "" && value !== "all") {
+        if (
+          value !== undefined &&
+          value !== null &&
+          value !== "" &&
+          value !== "all"
+        ) {
           params.append(key, value.toString());
         }
       });
@@ -946,18 +1125,17 @@ export const monitorApi = {
   },
 
   // Export jobs to Excel
-  exportJobs: async (
-    filters?: {
-      tenant_id?: string;
-      bbk_id?: string;
-      enabled?: boolean;
-    },
-  ): Promise<Blob> => {
+  exportJobs: async (filters?: {
+    tenant_id?: string;
+    bbk_id?: string;
+    enabled?: boolean;
+  }): Promise<Blob> => {
     const params = new URLSearchParams();
     params.append("export_type", "jobs");
     if (filters) {
       Object.entries(filters).forEach(([key, value]) => {
-        if (value !== undefined && value !== null) params.append(key, value.toString());
+        if (value !== undefined && value !== null)
+          params.append(key, value.toString());
       });
     }
     const url = getApiUrl(`/monitor/cron/export?${params.toString()}`);
@@ -979,15 +1157,13 @@ export const monitorApi = {
   },
 
   // Export executions to Excel
-  exportExecutions: async (
-    filters?: {
-      job_id?: string;
-      tenant_id?: string;
-      status?: string;
-      start_time?: string;
-      end_time?: string;
-    },
-  ): Promise<Blob> => {
+  exportExecutions: async (filters?: {
+    job_id?: string;
+    tenant_id?: string;
+    status?: string;
+    start_time?: string;
+    end_time?: string;
+  }): Promise<Blob> => {
     const params = new URLSearchParams();
     params.append("export_type", "executions");
     if (filters) {
@@ -1025,5 +1201,42 @@ export const monitorApi = {
       params.append("tenant_id", tenantId);
     }
     return request(`/monitor/cron/unread-count?${params.toString()}`);
+  },
+
+  getAsyncTasks: async (
+    filters?: AsyncTaskQueryFilters,
+  ): Promise<AsyncTaskListResponse<AsyncTaskRecord>> => {
+    const params = new URLSearchParams();
+    const page = filters?.page ?? 1;
+    const pageSize = filters?.page_size ?? 20;
+    params.append("page", page.toString());
+    params.append("page_size", pageSize.toString());
+    if (filters) {
+      Object.entries(filters).forEach(([key, value]) => {
+        if (
+          key === "page" ||
+          key === "page_size" ||
+          value === undefined ||
+          value === null ||
+          value === ""
+        ) {
+          return;
+        }
+        params.append(key, String(value));
+      });
+    }
+    return request(`/monitor/tasks?${params.toString()}`);
+  },
+
+  getAsyncTaskDetail: async (
+    taskId: string,
+    sourceId?: string,
+  ): Promise<AsyncTaskDetailRecord> => {
+    const params = new URLSearchParams();
+    if (sourceId) {
+      params.append("source_id", sourceId);
+    }
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return request(`/monitor/tasks/${encodeURIComponent(taskId)}${query}`);
   },
 };

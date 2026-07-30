@@ -340,6 +340,7 @@ async def test_start_query_trace_uses_b3_trace_id_for_new_trace(tmp_path):
     start_trace.assert_awaited_once()
     kwargs = start_trace.await_args.kwargs
     assert kwargs["trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert kwargs["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
     assert kwargs["attach_existing"] is False
 
 
@@ -350,6 +351,7 @@ async def test_start_query_trace_allows_explicit_attach_existing_trace(
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     request = SimpleNamespace(
         trace_id="trace-existing",
+        b3_trace_id="8267fd70bacf497704fec30eaa353979",
         user_id="user-1",
         session_id="session-1",
         channel="console",
@@ -381,6 +383,7 @@ async def test_start_query_trace_allows_explicit_attach_existing_trace(
     start_trace.assert_awaited_once()
     kwargs = start_trace.await_args.kwargs
     assert kwargs["trace_id"] == "trace-existing"
+    assert kwargs["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
     assert kwargs["attach_existing"] is True
 
 

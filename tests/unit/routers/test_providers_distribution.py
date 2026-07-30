@@ -10,6 +10,8 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 
 from swe.app.routers import providers as providers_router
 
@@ -18,13 +20,52 @@ def _request(
     tenant_id: str = "tenant-source",
     source_id: str | None = None,
     scope_id: str | None = None,
+    headers: dict[str, str] | None = None,
+    app: Any | None = None,
 ) -> SimpleNamespace:
-    return SimpleNamespace(
+    request = SimpleNamespace(
+        headers=headers or {},
         state=SimpleNamespace(
             tenant_id=tenant_id,
             source_id=source_id,
             scope_id=scope_id,
         ),
+    )
+    if app is not None:
+        request.app = app
+    return request
+
+
+class FakeAsyncTaskDb:
+    """提供异步任务写入器所需的数据库连接状态。"""
+
+    is_connected = True
+
+
+class DisconnectedAsyncTaskDb(FakeAsyncTaskDb):
+    """模拟连接状态标记为断开但仍可执行写入的任务库。"""
+
+    is_connected = False
+
+
+def _patch_resolve_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    names: dict[str, str] | None = None,
+) -> None:
+    """替换分发目标身份解析，避免单测触发远端查询。"""
+    name_map = names or {"tenant-a": "用户A"}
+
+    async def fake_resolve_user_identity(**kwargs):  # noqa: ANN003
+        tenant_id = kwargs["tenant_id"]
+        return SimpleNamespace(
+            user_name=name_map.get(tenant_id),
+            bbk_id=None,
+        )
+
+    monkeypatch.setattr(
+        providers_router,
+        "resolve_user_identity",
+        fake_resolve_user_identity,
     )
 
 
@@ -116,15 +157,35 @@ def test_distribute_providers_success(
     assert result.source_tenant_id == "tenant-source"
     assert len(result.results) == 1
     assert result.results[0].tenant_id == "tenant-target"
-    assert result.results[0].success is True
-    assert result.results[0].bootstrapped is False
 
-    # Verify target directory was created
-    target_providers_dir = secret_dir / "tenant-target" / "providers"
-    assert target_providers_dir.exists()
-    assert (target_providers_dir / "builtin" / "openai.json").exists()
-    assert (target_providers_dir / "custom" / "custom-llm.json").exists()
-    assert (target_providers_dir / "active_model.json").exists()
+
+def test_distribute_providers_requires_async_task_db(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """供应商分发必须提交异步任务，缺少任务库时返回明确错误。"""
+    secret_dir = tmp_path / "secret"
+    _setup_source_providers(secret_dir, "tenant-source")
+
+    monkeypatch.setattr(providers_router, "SECRET_DIR", secret_dir)
+    app = SimpleNamespace(state=SimpleNamespace())
+
+    with pytest.raises(providers_router.HTTPException) as exc_info:
+        asyncio.run(
+            providers_router.distribute_providers(
+                _request(app=app),
+                providers_router.ProvidersDistributionRequest(
+                    target_tenant_ids=["tenant-target"],
+                    overwrite=True,
+                ),
+            ),
+        )
+
+    assert exc_info.value.status_code == 503
+    assert (
+        exc_info.value.detail
+        == "Async task database connection is not available"
+    )
 
 
 def test_distribute_providers_uses_request_scope_for_source_dir(
@@ -458,3 +519,155 @@ def test_distribute_providers_bootstraps_tenant(
 
     assert bootstrap_calls == ["tenant-new"]
     assert result.results[0].bootstrapped is True
+
+
+def test_distribute_providers_returns_async_task_submission(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """提交 providers 分发后应返回受理中的任务信息。"""
+    secret_dir = tmp_path / "secret"
+    _setup_source_providers(secret_dir, "tenant-source")
+    submitted: dict[str, Any] = {}
+    task_ids: list[str] = []
+    _patch_resolve_identity(monkeypatch)
+
+    monkeypatch.setattr(providers_router, "SECRET_DIR", secret_dir)
+    monkeypatch.setattr(
+        providers_router,
+        "get_tenant_working_dir_strict",
+        lambda tenant_id: tmp_path / str(tenant_id),
+    )
+
+    class FakeStore:
+        def __init__(self, db) -> None:  # noqa: ANN001
+            submitted["db"] = db
+
+        async def start_task(self, **kwargs) -> None:  # noqa: ANN003
+            submitted["start_task"] = kwargs
+
+    async def fake_task_runner(*args, **kwargs):  # noqa: ANN001, ANN003
+        submitted["runner"] = (args, kwargs)
+
+    def fake_create_task(coro):  # noqa: ANN001
+        task_ids.append("scheduled")
+        submitted["coroutine"] = coro
+        coro.close()
+        return object()
+
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router.asyncio,
+        "create_task",
+        fake_create_task,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_providers_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    result = asyncio.run(
+        providers_router.distribute_providers(
+            _request(
+                headers={
+                    "X-User-Id": "operator-1",
+                    "X-User-Name": "%E5%BC%A0%E4%B8%89",
+                },
+                app=SimpleNamespace(
+                    state=SimpleNamespace(
+                        db_connection=DisconnectedAsyncTaskDb(),
+                    ),
+                ),
+            ),
+            providers_router.ProvidersDistributionRequest(
+                target_tenant_ids=["tenant-a"],
+                overwrite=True,
+            ),
+        ),
+    )
+
+    assert result.status == "queued"
+    assert result.reused is False
+    assert result.task_id
+    assert task_ids == ["scheduled"]
+    assert isinstance(submitted["db"], DisconnectedAsyncTaskDb)
+    assert (
+        submitted["start_task"]["task_type"] == "provider.providers.distribute"
+    )
+    assert (
+        submitted["start_task"]["summary"]
+        == "分发供应商配置「openai, custom-llm」，目标 1 个用户"
+    )
+    assert submitted["start_task"]["actor_user_id"] == "operator-1"
+    assert submitted["start_task"]["actor_user_name"] == "张三"
+    assert submitted["start_task"]["target_names"] == {
+        "tenant-a": "用户A",
+    }
+
+
+def test_distribute_providers_http_response_includes_task_id(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """供应商分发的 HTTP 响应必须显式返回任务 ID。"""
+    secret_dir = tmp_path / "secret"
+    _setup_source_providers(secret_dir, "tenant-source")
+    _patch_resolve_identity(monkeypatch)
+
+    monkeypatch.setattr(providers_router, "SECRET_DIR", secret_dir)
+    monkeypatch.setattr(
+        providers_router,
+        "get_tenant_working_dir_strict",
+        lambda tenant_id: tmp_path / str(tenant_id),
+    )
+
+    class FakeStore:
+        def __init__(self, _db) -> None:  # noqa: ANN001
+            pass
+
+        async def start_task(self, **_kwargs) -> None:  # noqa: ANN003
+            return None
+
+    async def fake_task_runner(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        return None
+
+    app = FastAPI()
+    app.state.db_connection = DisconnectedAsyncTaskDb()
+
+    @app.middleware("http")
+    async def add_tenant_state(request, call_next):  # noqa: ANN001
+        request.state.tenant_id = "tenant-source"
+        request.state.source_id = None
+        request.state.scope_id = None
+        return await call_next(request)
+
+    app.include_router(providers_router.router)
+    monkeypatch.setattr(
+        providers_router,
+        "AsyncTaskStore",
+        FakeStore,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        providers_router,
+        "_run_providers_distribution_task",
+        fake_task_runner,
+        raising=False,
+    )
+
+    response = TestClient(app).post(
+        "/models/distribution/providers",
+        json={"target_tenant_ids": ["tenant-a"], "overwrite": True},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["task_id"]
+    assert payload["taskId"] == payload["task_id"]

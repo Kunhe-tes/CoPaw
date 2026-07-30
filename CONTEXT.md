@@ -20,6 +20,86 @@ _Avoid_: subagent creation
 The user-facing agent that owns global task understanding, user interaction, mode decisions, and final responses.
 _Avoid_: parent bot, orchestrator bot
 
+**Agent Profile**:
+A tenant-owned runtime configuration and workspace identity for one runnable Agent. An **Agent Profile** is distinct from a **SubAgent Definition**, which is a versioned delegation worker description.
+_Avoid_: agent-level config, subagent profile, worker profile
+
+**Default Agent Profile**:
+The tenant's built-in **Agent Profile** with the stable identifier `default`. It is the sole scope of the first Agent Profile Hook console release and remains available rather than being disabled or removed.
+_Avoid_: selected agent, active-agent selector
+
+**Default Agent Profile Hook Access**:
+The ordinary tenant-scoped access boundary for changing Default Agent Profile Hooks and their scripts. The first release adds no separate manager or administrator role requirement.
+_Avoid_: manager-only hook access, global hook administrator
+
+**Default Agent Profile Hook Audit Record**:
+A best-effort structured application-log event for a Default Agent Profile Hook or Hook Script change. It identifies the actor, time, action, affected script and digest when applicable, and a configuration-delta summary without retaining script content or runtime hook payloads; a logging failure does not prevent the action.
+_Avoid_: audit database table, hook execution log, full script archive, hook payload audit
+
+**Agent Profile Hook**:
+A lifecycle-hook configuration owned by exactly one **Agent Profile**. It applies only while that Agent Profile runs, rather than across a tenant or through a reusable Skill.
+_Avoid_: agent-level hook, tenant hook, skill hook
+
+**Agent Profile Hook Handler**:
+One configured action within an **Agent Profile Hook**. It is either a command handler, an HTTP handler, or a prompt handler; only a command handler may reference one or more **Agent Profile Hook Scripts**.
+_Avoid_: shell hook, script hook configuration
+
+**Agent Profile Hook Script**:
+A Python or shell executable asset owned by one **Agent Profile** and referenced through a command handler's ordered arguments. One command handler may reference multiple Agent Profile Hook Scripts; scripts cannot be deleted, but a same-name upload replaces the stored content after an explicit warning.
+_Avoid_: shared hook script, skill hook script, arbitrary binary, disposable script
+
+**Agent Profile Hook Script Replacement**:
+The explicit same-name upload that replaces an Agent Profile Hook Script's content for later Hook events. It records both the prior and replacement script digests and does not interrupt an executing Hook.
+_Avoid_: silent overwrite, script deletion
+
+**Agent Profile Hook Script Path Boundary**:
+The rule that a command handler may reference executable programs and ordinary arguments freely, but every argument used as a script must resolve to an Agent Profile Hook Script owned by the Default Agent Profile. Paths outside that controlled script set are not script references.
+_Avoid_: workspace script reference, absolute script path, path escape
+
+**Agent Profile Hook Script Type Boundary**:
+The first-release upload policy accepts only Python and shell source files with `.py`, `.sh`, `.bash`, or `.zsh` names. It excludes extensionless files and binary assets.
+_Avoid_: extensionless script, binary hook asset
+
+**Agent Profile Hook Script Safety Scan**:
+The application security scan applied to every Agent Profile Hook Script upload or replacement. It follows the active scan policy: disabled, warning-only, or blocking for unsafe findings.
+_Avoid_: unconditional script rejection, unscanned replacement
+
+**Agent Profile Hook Script Upload Batch**:
+One or more Hook Script files submitted together to the script library. Each file is validated and scanned independently, so successful files are retained while failed files report their own reasons.
+_Avoid_: all-or-nothing script upload, silent partial upload
+
+**Agent Profile Hook Script Upload Limit**:
+The first-release storage boundary of at most 1 MB per Hook Script and at most 20 files per Upload Batch.
+_Avoid_: unrestricted script upload, general file storage
+
+**Agent Profile Hook Activation Boundary**:
+The point after a saved Agent Profile Hook configuration has reloaded, from which later Hook events use it. A Hook already executing continues with its prior configuration and scripts.
+_Avoid_: immediate interruption, retroactive Hook update
+
+**Agent Profile Hook Configuration Removal**:
+The saved removal of a Handler or Matcher Group from the Default Agent Profile Hook configuration. It stops later Hook events from resolving that configuration while leaving its Hook Scripts retained in the script library.
+_Avoid_: script deletion, immediate Hook interruption
+
+**Agent Profile Hook Configuration Revision**:
+The version token for the complete Default Agent Profile Hook configuration. A save must name the revision it was based on; a mismatched current revision is a conflict rather than a silent overwrite.
+_Avoid_: last-writer-wins configuration save, invisible concurrent overwrite
+
+**Agent Profile Hook Manual Test**:
+An explicitly confirmed execution of one draft Agent Profile Hook Handler with an editable sample context. It does not save configuration, activate a reload, or consume once-only state; it performs the handler's real external effects, and its result is audited and presented in a redacted, bounded form.
+_Avoid_: full Hook replay, production event replay, unsandboxed preview
+
+**Agent Profile Hook Console**:
+The Default Agent Profile's user interface for maintaining its Hooks, Handlers, Scripts, and manual tests. It is a dedicated Run Center page with configuration and script-library areas; its changes emit audit logs, which are viewed through the application log system rather than the console.
+_Avoid_: raw configuration editor, partial Hook form
+
+**Agent Profile Hook Handler Identifier**:
+The stable identifier of one Agent Profile Hook Handler. It is generated by the console by default, may be edited, and must be unique across the Default Agent Profile Hook configuration.
+_Avoid_: duplicate handler ID, display-only handler name
+
+**Agent Profile Hook Matcher Group Identifier**:
+The stable identifier of one Agent Profile Hook Matcher Group. It is generated by the console by default, may be edited, and must be unique across the Default Agent Profile Hook configuration.
+_Avoid_: duplicate group ID, event-local-only group ID
+
 **Plan Mode**:
 A user-visible planning state where the Main Agent itself runs under reduced planning permissions and interacts with the user through planning cards before execution continues.
 _Avoid_: dry run, planning prompt
@@ -56,6 +136,50 @@ _Avoid_: generic question tool, subagent prompt
 The Plan Interaction Tool used by the Main Agent to present a Proposed Plan for `revise`, `execute`, or `exit_plan` review.
 _Avoid_: final answer tool, permission approval tool
 
+**Structured Interaction Envelope**:
+A runtime transport contract that carries validated interactive state and user responses between an agent workflow and a specialized CoPaw interface. Its first product consumer is the W+ SOP Workspace; it does not by itself create a generic interactive-skill product surface. For W+ SOP clarification, a question batch contains one to three typed questions; supported response controls are single-select, multi-select, and free text, including evidence-backed options with an Other text path. A batch is submitted atomically after all required responses are complete. Each submitted batch becomes one auditable owning-Chat response summary carrying the clarification session ID, round number, and revision number, and it triggers exactly one subsequent Miner turn. During generation the UI may stream lifecycle progress, but answer controls appear only after the complete question batch passes envelope validation and then become available atomically.
+_Avoid_: Plan Interaction Card, markdown JSON card, generic skill workspace
+
+**W+ SOP Answer Revision**:
+An append-only correction to an earlier answer in the current clarification history. Submitting it increments the revision, invalidates every downstream question, answer, and derived result, and regenerates from the corrected point. The owning Chat retains the original messages, appends a revision record containing the old value, new value, revision number, and affected rounds, and visually marks invalidated records; the Miner consumes only the current valid revision. Editing is allowed only while the session is active; a paused session must be resumed first, and completed or terminated sessions are permanently read-only.
+_Avoid_: edited Chat message, deleted audit history, branching valid answers
+
+**W+ SOP Workspace**:
+The W+-specific CoPaw interface for conducting and reviewing one W+ SOP Clarification Session. It is a specialized view of the owning Chat, not a separate conversation or a generic interface for all skills. It is the sole answer-submission surface while the session is active. The owning Chat renders each current question batch as a read-only audit card with session status and a Return to SOP Workspace action; it must not duplicate active answer controls. Navigating away from the workspace does not pause or otherwise mutate the session: the owning Chat remains locked until the user explicitly saves and exits, completes, or terminates the session.
+_Avoid_: Plan Mode, standalone chat, generic skill workspace
+
+**W+ SOP Session Control Card**:
+The single mutable Chat card representing one W+ SOP Clarification Session and serving as its stable navigation or recovery entry. Its state changes in place across Active, Pending Exit, Paused, Completed, and Terminated, while question, answer, and revision audit cards remain append-only and immutable. While the session is Active or Paused, the owning Chat also derives a non-message sticky bar above the input area: Return to SOP Workspace when active and Resume SOP when paused. The sticky bar disappears after completion or termination.
+_Avoid_: one resume card per transition, latest question as resume state, multiple active controls
+
+**W+ SOP Clarification Session**:
+A revisioned clarification process produced by `wplus-sop-miner`, bound to one owning Chat and containing the currently valid questions, answers, confirmed facts, and SOP result state. An owning Chat may have at most one active or paused session at a time. After that session is terminated, a new session may be created in the same Chat while the earlier session and its cards remain available as history. Producing and validating the final SOP does not by itself complete the session: the workspace must then present the Miner's evidence-backed memory candidates for explicit per-candidate consent, with a Skip All action. The session completes normally only after those choices are resolved. Normal completion restores the owning Chat input immediately but leaves the user on the final workspace result view; the Chat card becomes a read-only Completed entry that can reopen the result and history. Pausing restores normal Chat input, but later ordinary Chat turns remain outside the saved SOP state; resuming uses only the session's current valid revision unless the user explicitly adds information from inside the workspace.
+_Avoid_: Chat session, skill invocation, Plan Mode session
+
+**Pending W+ SOP Exit**:
+A transitional session state created when the user requests Save and Exit or Terminate while the Miner is generating. The workspace stops accepting new answers, allows the in-flight response to finish and persist, and only then applies the requested exit action so frontend and agent state remain consistent.
+_Avoid_: immediate stream disconnect, discarded response, disabled exit control
+
+**W+ SOP Recoverable Failure**:
+A terminal generation failure recorded against the last stable session revision after reconnecting to the same in-flight Chat run is no longer possible. The workspace preserves that stable state and offers an idempotent Retry Current Turn, Save and Exit, and Terminate; retrying must not append a duplicate answer audit record.
+_Avoid_: duplicate turn, automatic new generation, forced pause
+
+**W+ SOP Termination Summary**:
+The read-only artifact retained when a user permanently terminates an incomplete clarification session. It lists confirmed facts, explicit unknowns, unresolved questions, completed and incomplete stages, and the termination point, and must state that it is not a valid SOP. It cannot be passed to `wplus-skill-builder`.
+_Avoid_: partial SOP, assumed completion, builder-ready result
+
+**W+ SOP Result Bundle**:
+The validated final output of a normally completed clarification session: the readable SOP, `sop_spec.json`, and escaped HTML visualization. The first workspace release supports viewing and downloading these artifacts and states that they are ready for a later explicit `wplus-skill-builder` invocation; it neither invokes nor embeds the Builder.
+_Avoid_: automatic Builder invocation, incomplete SOP bundle, implicit handoff
+
+**W+ SOP Workspace V1 Privacy Scope**:
+The first workspace release adds no dedicated client or server feature for detecting, blocking, or automatically redacting sensitive text in clarification answers. Existing CoPaw controls and the Miner's privacy rules remain applicable, but new workspace-specific sensitive-input enforcement is outside this feature scope.
+_Avoid_: claimed PII protection, implicit redaction, weakening Miner policy
+
+**W+ SOP Workspace Entry**:
+The explicit transition from an owning Chat into a W+ SOP Workspace. A direct user invocation of `wplus-sop-miner` may enter immediately; an implicitly detected invocation must first render a clickable Chat confirmation card with Confirm and Reject actions. Confirm creates the W+ SOP Clarification Session, uses the already-submitted original request as the Miner's initial input, navigates to the new workspace, and begins producing the first clarification question without requiring resubmission. Reject cancels the Miner invocation, keeps the user in normal Chat, and returns the original request to the normal Chat agent for processing. The rejected turn must suppress `wplus-sop-miner` re-detection so the confirmation card cannot loop, and it does not create or activate a W+ SOP Clarification Session.
+_Avoid_: silent route switch, automatic implicit entry, Plan Mode entry
+
 **Plan Delegation**:
 An optional Main Agent action in Plan Mode that creates a SubAgent Run through the normal delegation mechanism. Plan Delegation is allowed but is never automatic or required by Plan Mode.
 _Avoid_: default plan subagent, automatic plan researcher
@@ -75,6 +199,10 @@ _Avoid_: one-shot plan flag, global plan switch
 **Scheduled Job**:
 A recurring task definition owned by a tenant and executed by the runtime at configured times. One **Scheduled Job** can have many **Scheduled Runs**.
 _Avoid_: cron config, timer task
+
+**Scheduled Firing Count**:
+The number of planned firing occurrences produced by enabled, active **Scheduled Job** definitions within a selected time range. One Scheduled Job contributes once for every matching cron occurrence. A **Scheduled Firing Count** describes planned schedule density only; it does not prove that runs are queued, delayed, executing, or backlogged.
+_Avoid_: backlog count, running task count, execution count
 
 **Scheduled Run**:
 A single execution of a **Scheduled Job**, whether triggered by schedule or manually.
@@ -188,9 +316,109 @@ _Avoid_: chat bootstrap, BOOTSTRAP.md flow, onboarding chat
 The first-run conversational onboarding in which an Agent learns and records identity, style, and user preferences. A **Bootstrap Chat Flow** is separate from **Tenant Scaffold Bootstrap** and may be skipped for a tenant that still has a valid scaffold.
 _Avoid_: tenant bootstrap, scaffold bootstrap, workspace initialization
 
+**Disabled Skill**:
+A managed skill package retained by the control plane but excluded from the **Skill Runtime View** and ordinary Agent skill discovery for later runs. Disabled status alone is not a filesystem security boundary.
+_Avoid_: hidden skill, unregistered skill, inactive skill
+
+**Disabled Skill Store**:
+A Workspace-scoped retention area for **Disabled Skill** packages outside the conventional runtime skill path. It is managed through skill-management surfaces but remains ordinary filesystem content that generic file or shell searches may discover.
+_Avoid_: skill sandbox, secure skill store, deleted skills
+
+**Skill Management State**:
+The authoritative backend-managed record of installed skills, enablement, channel availability, and configuration for one Workspace. It is accessed through skill-management surfaces rather than ordinary Workspace browsing, search, or editing.
+_Avoid_: workspace skill file, user-editable skill manifest, runtime skill list
+
+**Skill Management Surface**:
+A user-visible service or API that performs a managed skill lifecycle operation, including enablement, disablement, deletion, re-import, distribution, or editing. It resolves a registered package from **Skill Management State** to either the **Skill Runtime View** or **Disabled Skill Store**; a surface may write enablement state and rely on later reconciliation for package placement when that is its established service boundary. Market may also perform an **Explicit Skill Claim**.
+_Avoid_: skill-directory browser, active-directory-only management surface
+
+**Managed Skill Package Resolution**:
+The management-surface rule for locating a registered package from its **Skill Management State**. It prefers the root selected by enablement and falls back to the other managed root during a **Skill State Conflict**. An **Active Collision Promotion** takes precedence when both copies exist. A Market mutation receives both the resolved package and an explicit promotion result: it is true only when the collision changes a registered skill from disabled to enabled, so only that case requires the one Agent reload. It does not resolve **Unmanaged Skill Content** that has no registered-name collision.
+_Avoid_: enumerate every skill-looking directory, manifest-only package lookup
+
+**Active Collision Promotion**:
+The default resolution of a same-name active and disabled package: the `skills/` package is retained as the **Canonical Skill Package**, the `.disabled_skills/` package is deleted, and the registered skill becomes enabled. SWE reconciliation and Market explicit management both apply this rule.
+_Avoid_: preserve disabled state on active collision, ambiguous duplicate skill
+
+**State-Preserving Distribution**:
+Market distribution that installs an unregistered skill as enabled, but updates an already registered package at its managed location without changing its enablement. In particular, updating a **Disabled Skill** does not make it part of the **Skill Runtime View**.
+_Avoid_: update means enable, replace-active-directory-only
+
+**Disabled Skill Maintenance**:
+Management-surface viewing, downloading, editing, and publishing of a **Disabled Skill** at its resolved package location. Maintenance changes package content or related metadata but does not change enablement.
+_Avoid_: disabled means immutable, maintenance means enable
+
+**Canonical Skill Package**:
+The authoritative package content when the same skill exists in both the **Skill Runtime View** and **Disabled Skill Store**. The runtime-view copy wins for content; **Active Collision Promotion** is the exception to ordinary **Skill Management State**-driven placement and changes the registered skill to enabled.
+_Avoid_: newest skill copy, enabled skill state, manifest-selected content
+
+**Skill State Conflict**:
+A disagreement between **Skill Management State** and the retained location of a skill package. A skill in conflict is unavailable to Agent Runs until the disagreement is reconciled.
+_Avoid_: partially enabled skill, best-effort skill state, usable mismatch
+
+**Unmanaged Skill Content**:
+Workspace content that resembles a skill package but has no entry in **Skill Management State**. It is neither registered nor governed by disabled-skill discovery guarantees, even when it remains visible to model-initiated file or shell tools. Market may retain its legacy list, viewing, download, editing, publishing, and direct-delete behavior for this ordinary content; only an **Explicit Skill Claim** creates managed state, except that a same-name registered disabled package triggers **Active Collision Promotion**.
+_Avoid_: disabled skill, automatically installed skill, runtime skill
+
+**Explicit Skill Claim**:
+A user-initiated Market enablement of **Unmanaged Skill Content** in the ordinary skill directory. After the established security scan, it creates the corresponding **Skill Management State** entry as enabled. Except for **Active Collision Promotion**, SWE never claims unmanaged content automatically, and the **Disabled Skill Store** contains only registered packages.
+_Avoid_: automatic skill discovery, reconciliation registration, disabled-skill import
+
+**Skill Runtime View**:
+The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**, changes immediately when skill enablement changes, and gives existing Agent Runs no guarantee that earlier skill files remain available.
+_Avoid_: skill snapshot, immutable skill view, complete skill directory
+
+**Console Skill Selection Panel**:
+The command-style panel opened by `@` in Console chat for selecting ordered **User-Selected Skills**, including duplicates, from the current **Skill Runtime View**. A selection is represented both by an **Inline Skill Tag** in the message and by trusted structured selection context; the panel does not list built-in tools, MCP tools, or other callable runtime capabilities.
+_Avoid_: tool panel, MCP menu, all-capabilities menu
+
+**Inline Skill Tag**:
+The visible, atomic `@` label for one **User-Selected Skill** occurrence inside a Console chat message, created only by confirmation in the **Console Skill Selection Panel**. It is user-message content for readability, but does not replace the trusted structured selection context that resolves the selected skill; deleting the tag removes its corresponding selection occurrence as well.
+_Avoid_: trusted skill directive, tool call, execution proof
+
+**User-Selected Skill**:
+A **Skill Runtime View** member that a user explicitly selects for a single chat turn and remains available when that turn starts. A turn may contain repeated **User-Selected Skills**; their **Skill Use Directives** are injected in selection order after duplicate runtime identifiers are removed. Each selection records user intent as structured turn context with a readable message marker, but is not evidence that the skill actually executed.
+_Avoid_: skill mention, forced tool call, permanently active skill, single selected skill
+
+**Skill Runtime Identifier**:
+The stable `name` of a skill package in one Workspace: its managed skill-directory name and **Skill Management State** key. It is the identity used for runtime selection, channel availability, and injection de-duplication; a frontmatter or market `skill_id` is not a substitute.
+_Avoid_: display name, frontmatter name, market skill id
+
+**Skill Use Directive**:
+A trusted instruction block for one **User-Selected Skill** whose server-resolved `SKILL.md` exists and is readable. It names the skill, describes it, and supplies that path; it requires the Agent to read the document before acting, but does not include the document's full content. With multiple directives, every document is read in directive order before task execution begins.
+_Avoid_: skill prompt copy, user-supplied file path, complete skill document
+
+**Skill-Use Enforcement**:
+The runtime policy that verifies an Agent followed a **Skill Use Directive** before it acts. The first rollout has no Skill-Use Enforcement; the directive is a trusted model instruction rather than a runtime gate.
+_Avoid_: prompt injection, tool attribution, guaranteed skill execution
+
+**Actual Skill Use**:
+The runtime-detected participation of a skill in a turn, established by tool or asset evidence. It is distinct from **User-Selected Skill** and is the only basis for tool-call skill attribution.
+_Avoid_: selected skill, requested skill, assumed skill invocation
+
+**Unavailable Skill Selection**:
+A user-requested skill choice that is no longer in the **Skill Runtime View** when its chat turn starts. The choice is discarded without skill guidance or selection-based attribution, while other **User-Selected Skills** in the same turn may still apply; the turn is ordinary chat only when none remain.
+_Avoid_: failed chat turn, disabled skill invocation, deferred selection, auditable selection
+
+**Skill Isolation Guarantee**:
+The stronger platform-independent boundary under which disabled skill content is inaccessible to model-initiated tools on every supported operating system. **Skill Isolation Guarantee** is distinct from **Skill Discovery Suppression**.
+_Avoid_: best-effort skill hiding, platform-specific skill safety, shell path filter
+
+**Skill Discovery Suppression**:
+The default disabled-skill behavior that removes a package from Agent registration, prompting, and conventional skill-directory discovery. It reduces accidental reuse but does not deny generic file searches or deliberately crafted shell access.
+_Avoid_: skill isolation, filesystem sandbox, disabled-skill authorization
+
 **Runtime Invocation Claims**:
 Session, trace, tenant, and source claims that Swe passes across a runtime invocation boundary for a receiving tool or integration to interpret inside an already trusted channel. **Runtime Invocation Claims** are distinct from **Runtime Request Identity**, which is internal request context, and are not independently verifiable credentials.
 _Avoid_: runtime metadata, env/header info, credential, signed token
+
+**Execution Trace ID**:
+The unique identifier for one Swe execution. Spans, Subtasks, execution records, feedback, and Runtime Invocation Claims correlate through this identifier even when several executions share one external distributed trace.
+_Avoid_: B3 trace ID, batch ID, request header trace ID
+
+**B3 Trace ID**:
+The external distributed-tracing identifier received through B3 transport metadata. It may be shared by multiple executions in one Dispatch Batch and therefore is not an execution identity.
+_Avoid_: execution trace ID, Subtask trace ID, unique run ID
 
 **Canonical Runtime Claim Name**:
 The preferred external name for one **Runtime Invocation Claim** at a specific transport boundary. Canonical names are stable and transport-appropriate; compatibility aliases may exist only for boundaries that already require them.
@@ -339,6 +567,14 @@ _Avoid_: raw prompt, raw tool input, raw tool output, full updated input
 **Current Tool Response**:
 The successful output produced by the current tool invocation for the active `PostToolUse` boundary. A **Current Tool Response** is the tool's business output, not the full persisted `tool_result` block and not a **Hook Conversation Snapshot**.
 _Avoid_: full tool result block, conversation snapshot, AgentScope acting return value
+
+**PreToolUse Terminal Stop**:
+A `PreToolUse` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}` and available to every handler type, that rejects the pending tool invocation and ends the current Main Agent turn without another model call. The first `stop` in handler order is authoritative and cannot be replaced by another decision or input update; handler failures and `failPolicy:block` never imply it. Its reason, or the stable fallback `Hook requested stop`, is always emitted and persisted as the turn's final assistant message while the failed tool result remains available for tool presentation and audit as `hook_stopped`. It blocks unstarted peer calls and requests best-effort cancellation of already-started peer calls; it does not promise rollback of external side effects. It bypasses later `BeforeStop` and `Stop` hooks. It is distinct from `deny` and `block`, which reject the invocation but allow the Main Agent to choose a different next action.
+_Avoid_: terminal deny, blocked tool, cancelled session
+
+**PostTool Terminal Stop**:
+A `PostToolUse` or `PostToolUseFailure` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}`, that ends the current Main Agent turn after the tool outcome is known. It requests best-effort cancellation of unfinished peer calls while retaining completed outcomes and without promising external rollback. It records the completed tool outcome and post-hook context before the final assistant reason, then bypasses `BeforeStop` and `Stop` hooks. It does not rewrite the completed tool outcome; for a failed tool, it replaces propagation of the original tool exception while retaining that failure for presentation and audit. Hook failure, `failPolicy:block`, `deny`, and `block` never imply it. It is distinct from `deny` and `block`, which remain non-terminal for post-tool events.
+_Avoid_: post-tool denial, tool rollback, completed session
 
 **Hook Conversation Snapshot**:
 A bounded hook-facing snapshot of the current session's message list at one Hook Runtime boundary, including normal user, assistant, tool-call, and tool-result messages while excluding reasoning content. A **Hook Conversation Snapshot** is not the saved transcript file and is not the full Agent state.
@@ -495,6 +731,14 @@ _Avoid_: final answer text, assistant-only bubble, latest response, answer-only 
 **Logical Chat Session**:
 The stable conversation identity used to continue chat context across turns. A **Logical Chat Session** is distinct from the persisted chat record used to load or display the conversation.
 _Avoid_: chat UUID, UI session row, temporary frontend id
+
+**Chat Record**:
+The persisted, displayable record for one conversation, identified by a chat UUID and returned by chat-list APIs. A **Chat Record** is distinct from the **Logical Chat Session** that carries conversational continuity.
+_Avoid_: logical chat session, UI session, conversation identity
+
+**Chat Record Last Updated Time**:
+The timestamp of the most recent persisted change to a **Chat Record**. It establishes recency when Chat Records are listed.
+_Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
 
 ## Flagged Ambiguities
 
@@ -786,3 +1030,7 @@ Domain Expert: "Yes. In Plan Mode, the Main Agent itself is permission-limited u
 Developer: "Does executing a plan unlock write tools?"
 
 Domain Expert: "`execute` accepts the persisted Proposed Plan and can move the chat back to normal execution, where the Main Agent regains its normal permissions."
+
+Developer: "Is the hook attached to a SubAgent Definition or to an Agent Profile?"
+
+Domain Expert: "It is an Agent Profile Hook. Its script belongs to that Agent Profile and is not a shared Skill asset."

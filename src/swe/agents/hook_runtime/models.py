@@ -25,6 +25,8 @@ PROMPT_HANDLER_BLOCKABLE_EVENTS = {
     HookEventName.SESSION_START,
     HookEventName.USER_PROMPT_SUBMIT,
     HookEventName.PRE_TOOL_USE,
+    HookEventName.POST_TOOL_USE,
+    HookEventName.POST_TOOL_USE_FAILURE,
     HookEventName.BEFORE_STOP,
     HookEventName.STOP,
 }

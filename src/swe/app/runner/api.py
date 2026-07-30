@@ -17,6 +17,7 @@ from .models import (
     ChatMessage,
 )
 from .model_call_error_detail import MODEL_CALL_FAILED_MESSAGES_STATE_KEY
+from .hidden_context_injection import HIDDEN_CONTEXT_METADATA_KEY
 from .utils import agentscope_msg_to_message
 from ..approvals import get_approval_service
 
@@ -57,6 +58,48 @@ async def _annotate_approval_action_statuses(
         approval_action["status"] = request.status
 
     return messages
+
+
+def _redact_hidden_context_messages(
+    messages: list[ChatMessage],
+) -> list[ChatMessage]:
+    """Build display-safe chat-history messages without mutating memory."""
+    redacted: list[ChatMessage] = []
+    for message in messages:
+        if message.role != "user" or not isinstance(message.metadata, dict):
+            redacted.append(message)
+            continue
+
+        nested_metadata = message.metadata.get("metadata")
+        marker = message.metadata.get(HIDDEN_CONTEXT_METADATA_KEY)
+        if marker is None and isinstance(nested_metadata, dict):
+            marker = nested_metadata.get(HIDDEN_CONTEXT_METADATA_KEY)
+        if not isinstance(marker, dict):
+            redacted.append(message)
+            continue
+
+        visible_text = marker.get("visible_text")
+        suffix = marker.get("suffix")
+        if not isinstance(visible_text, str) or not isinstance(suffix, str):
+            redacted.append(message)
+            continue
+
+        payload = message.model_dump(mode="json")
+        metadata = {
+            key: value
+            for key, value in message.metadata.items()
+            if key != HIDDEN_CONTEXT_METADATA_KEY
+        }
+        if isinstance(nested_metadata, dict):
+            metadata["metadata"] = {
+                key: value
+                for key, value in nested_metadata.items()
+                if key != HIDDEN_CONTEXT_METADATA_KEY
+            }
+        payload["metadata"] = metadata
+        payload["content"] = [{"type": "text", "text": visible_text}]
+        redacted.append(ChatMessage.model_validate(payload))
+    return redacted
 
 
 def _task_session_messages_from_state(state: dict) -> list[ChatMessage]:
@@ -435,6 +478,7 @@ async def _build_chat_history(
     messages.extend(model_call_failed_messages)
     messages.sort(key=_message_sort_key)
     messages = await _annotate_approval_action_statuses(messages)
+    messages = _redact_hidden_context_messages(messages)
     return ChatHistory(chat=chat_spec, messages=messages, status=status)
 
 
@@ -485,7 +529,7 @@ async def list_chats(
     ),
     cursor: Optional[str] = Query(
         None,
-        description="Opaque cursor for stable chat pagination",
+        description="Opaque cursor for live best-effort chat pagination",
     ),
     mgr: ChatManager = Depends(get_chat_manager),
     workspace=Depends(get_workspace),
@@ -494,6 +538,8 @@ async def list_chats(
 
     Omitting both pagination parameters preserves the legacy array response.
     Providing both returns a ``ChatPage`` ordered by latest update first.
+    Cursor pages are live and best-effort: updates between requests can move
+    records across the cursor boundary.
 
     Args:
         user_id: Optional user ID to filter chats

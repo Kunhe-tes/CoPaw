@@ -29,7 +29,7 @@ def test_build_structured_failure_output_uses_canonical_shape() -> None:
     }
 
 
-def test_react_toolkit_skips_background_process_tools_by_default() -> None:
+def test_react_toolkit_excludes_background_process_tools() -> None:
     agent = object.__new__(SWEAgent)
     agent._agent_config = SimpleNamespace()
 
@@ -127,9 +127,12 @@ async def test_react_toolkit_normalizes_builtin_tool_execution_errors(
 
 
 @pytest.mark.asyncio
-async def test_copy_file_to_static_raises_tool_execution_error_for_missing_file():
-    with pytest.raises(ToolExecutionError) as exc_info:
-        await copy_file_to_static("missing-file.txt")
+async def test_copy_file_to_static_raises_tool_execution_error_for_missing_file(
+    tmp_path,
+):
+    with tenant_context(tenant_id="tenant_a", workspace_dir=tmp_path):
+        with pytest.raises(ToolExecutionError) as exc_info:
+            await copy_file_to_static("missing-file.txt")
 
     assert exc_info.value.error_type == "not_found"
     assert "File not found" in exc_info.value.detail

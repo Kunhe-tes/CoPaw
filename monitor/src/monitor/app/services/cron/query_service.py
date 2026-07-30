@@ -6,11 +6,16 @@ for the frontend overview page.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
-from datetime import datetime, timedelta
-from typing import List, Optional, Tuple, Any, Dict
-from zoneinfo import ZoneInfo
+import os
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone, tzinfo
+from typing import Any, Dict, Iterator, List, Optional, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from croniter import CroniterBadCronError, CroniterBadDateError, croniter
 
 from ...database import DatabaseConnection, get_db_connection
 from ...models.cron import (
@@ -50,12 +55,18 @@ from ...models.cron import (
     CronBranchTaskRankingResponse,
     CronJobModel,
     CronJobQueryParams,
+    CronScheduleDistributionBucket,
+    CronScheduleDistributionDetailsResponse,
+    CronScheduleDistributionDiagnostics,
+    CronScheduleDistributionResponse,
+    CronScheduleOccurrenceItem,
     ExecutionModel,
     ExecutionQueryParams,
     LatestExecutionSubtaskCountResponse,
     PaginatedResponse,
     SubscriptionDetailItem,
     SubscriptionOverviewItem,
+    TaskType,
     UnreadCountResponse,
 )
 from ....utils.bbk import get_bbk_name_by_id
@@ -106,6 +117,85 @@ DISPATCH_EVENT_TIME_FIELDS = ["created_at"]
 DISPATCH_CAPACITY_TIME_FIELDS = ["created_at"]
 DISPATCH_POLICY_TIME_FIELDS = ["created_at", "updated_at"]
 DISPATCH_CAPACITY_EVENT_LIMIT = 100
+SCHEDULE_BUCKET_MINUTES = frozenset({5, 10, 15, 30, 60})
+SCHEDULE_RANGE_LIMIT = timedelta(days=7)
+SCHEDULE_OCCURRENCE_LIMIT = 100_000
+SCHEDULE_DISPATCH_INTENTS_ENABLED_ENV = "SWE_CRON_DISPATCH_INTENTS_ENABLED"
+SCHEDULE_BROADCAST_SOURCE_JOB_ID_META_KEY = "broadcast_source_job_id"
+SCHEDULE_BROADCAST_INTENTS_ENABLED_META_KEY = (
+    "broadcast_dispatch_intents_enabled"
+)
+_TRUE_ENV_VALUES = frozenset({"1", "true", "yes", "on"})
+
+
+class ScheduleDistributionError(ValueError):
+    """Base class for typed planned schedule calculation errors."""
+
+    code = "schedule_distribution_error"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+class ScheduleDistributionValidationError(ScheduleDistributionError):
+    """The requested range, bucket, filter, or pagination is invalid."""
+
+    code = "schedule_distribution_validation_error"
+
+
+class ScheduleCalculationLimitExceededError(ScheduleDistributionError):
+    """The calculation exceeded its bounded occurrence budget."""
+
+    code = "schedule_calculation_limit_exceeded"
+
+
+class ScheduleDefinitionRevisionConflictError(ScheduleDistributionError):
+    """The job definitions changed between paginated detail requests."""
+
+    code = "schedule_definition_revision_conflict"
+
+    def __init__(self, actual_revision: str) -> None:
+        super().__init__(
+            "Scheduled job definitions changed; restart detail pagination "
+            "from page one.",
+        )
+        self.actual_revision = actual_revision
+
+
+@dataclass(frozen=True)
+class _ScheduleOccurrence:
+    scheduled_at: datetime
+    job_id: str
+    job_name: str
+    user_name: str
+    user_id: str
+    task_type: TaskType
+    cron_expr: str
+    timezone: str
+
+
+@dataclass(frozen=True)
+class _PreparedScheduleDefinition:
+    job_id: str
+    job_name: str
+    user_name: str
+    user_id: str
+    task_type: TaskType
+    cron_expr: str
+    timezone_name: str
+    job_timezone: tzinfo
+
+
+@dataclass(frozen=True)
+class _ScheduleCalculation:
+    start_time: datetime
+    end_time: datetime
+    calculated_at: datetime
+    definition_revision: str
+    eligible_job_count: int
+    occurrences: list[_ScheduleOccurrence]
+    diagnostics: CronScheduleDistributionDiagnostics
 
 
 def convert_row_times_direct(row: dict, time_fields: List[str]) -> dict:
@@ -169,11 +259,587 @@ class QueryService:
         "黄金持仓客户陪伴技能",
         "query-fund-plus-cust",
         "固收+基金营销技能",
+        "query-insu-expand-cust",
+        "分行保险潜客技能",
+        "market-movement",
+        "市场异动",
+        "ncfh-report-review",
+        "如影随影-市场复盘",
+        "query-high-value-transactions",
+        "高价值动账商机盘户",
+        "query-sorted-cust",
+        "Claw精选名单",
+        "global-market-review",
+        "全球市场复盘报告-V2",
     }
+
+    @staticmethod
+    def _skill_display_expr(skill_alias: str = "s") -> str:
+        """构建技能展示名表达式。"""
+        return (
+            f"COALESCE(NULLIF({skill_alias}.cn_name, ''), "
+            f"NULLIF({skill_alias}.skill_name, ''), {skill_alias}.skill_id)"
+        )
+
+    @staticmethod
+    def _skill_binding_join(
+        job_alias: str = "j",
+        skill_alias: str = "s",
+    ) -> str:
+        """构建定时任务与技能表的关联条件。"""
+        return (
+            f"JOIN swe_skills {skill_alias} "
+            f"ON FIND_IN_SET({skill_alias}.skill_id, {job_alias}.skill_ids)"
+        )
 
     def __init__(self) -> None:
         """Initialize query service."""
         pass
+
+    @staticmethod
+    def _normalize_schedule_range(
+        start_time: datetime,
+        end_time: datetime,
+    ) -> tuple[datetime, datetime]:
+        """Validate a bounded offset-aware range and normalize it to UTC."""
+        if (
+            start_time.tzinfo is None
+            or start_time.utcoffset() is None
+            or end_time.tzinfo is None
+            or end_time.utcoffset() is None
+        ):
+            raise ScheduleDistributionValidationError(
+                "start_time and end_time must include a UTC offset.",
+            )
+        normalized_start = start_time.astimezone(timezone.utc)
+        normalized_end = end_time.astimezone(timezone.utc)
+        if normalized_end <= normalized_start:
+            raise ScheduleDistributionValidationError(
+                "end_time must be later than start_time.",
+            )
+        if normalized_end - normalized_start > SCHEDULE_RANGE_LIMIT:
+            raise ScheduleDistributionValidationError(
+                "Schedule distribution range cannot exceed seven days.",
+            )
+        return normalized_start, normalized_end
+
+    @staticmethod
+    def _schedule_runtime_dispatch_enabled() -> bool:
+        raw_value = os.environ.get(
+            SCHEDULE_DISPATCH_INTENTS_ENABLED_ENV,
+            "",
+        )
+        return raw_value.strip().lower() in _TRUE_ENV_VALUES
+
+    @staticmethod
+    def _parse_schedule_metadata(
+        raw_value: Any,
+    ) -> tuple[dict[str, Any], bool]:
+        """Return parsed metadata and whether a non-empty value was invalid."""
+        if raw_value is None or raw_value == "":
+            return {}, False
+        if isinstance(raw_value, dict):
+            return raw_value, False
+        if isinstance(raw_value, (bytes, bytearray)):
+            raw_value = raw_value.decode("utf-8", errors="ignore")
+        if not isinstance(raw_value, str):
+            return {}, True
+        try:
+            parsed = json.loads(raw_value)
+        except (TypeError, json.JSONDecodeError):
+            return {}, True
+        if not isinstance(parsed, dict):
+            return {}, True
+        return parsed, False
+
+    @staticmethod
+    def _schedule_definition_revision(
+        rows: list[dict[str, Any]],
+        *,
+        runtime_dispatch_enabled: bool,
+    ) -> str:
+        """Hash only definition fields that can change the returned result."""
+        definitions = [
+            {
+                "id": str(row.get("id") or ""),
+                "name": str(row.get("name") or ""),
+                "user_name": str(row.get("tenant_name") or ""),
+                "user_id": str(row.get("tenant_id") or ""),
+                "task_type": str(row.get("task_type") or ""),
+                "cron_expr": str(row.get("cron_expr") or ""),
+                "timezone": str(row.get("timezone") or "UTC"),
+                "meta": row.get("meta"),
+            }
+            for row in sorted(
+                rows,
+                key=lambda item: str(item.get("id") or ""),
+            )
+        ]
+        encoded = json.dumps(
+            {
+                "runtime_dispatch_enabled": runtime_dispatch_enabled,
+                "definitions": definitions,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _load_schedule_definition_rows(
+        self,
+        source_id: str,
+    ) -> list[dict[str, Any]]:
+        """Load only current active schedule definitions for one source."""
+        db = get_db_connection()
+        return await db.fetch_all(
+            """
+            SELECT
+                id, name, tenant_name, tenant_id, source_id, enabled,
+                task_type, cron_expr,
+                timezone, meta, status, updated_at, deleted_at
+            FROM swe_cron_jobs
+            WHERE source_id = %s
+              AND enabled = 1
+              AND status = 'active'
+              AND deleted_at IS NULL
+            ORDER BY id
+            """,
+            (source_id,),
+        )
+
+    @staticmethod
+    def _increment_schedule_diagnostic(
+        diagnostics: CronScheduleDistributionDiagnostics,
+        field_name: str,
+    ) -> None:
+        current = int(getattr(diagnostics, field_name))
+        setattr(diagnostics, field_name, current + 1)
+
+    def _prepare_schedule_definition(
+        self,
+        row: dict[str, Any],
+        *,
+        diagnostics: CronScheduleDistributionDiagnostics,
+        runtime_dispatch_enabled: bool,
+    ) -> _PreparedScheduleDefinition | None:
+        """Validate one definition and preserve existing diagnostic semantics."""
+        task_type_value = str(row.get("task_type") or "")
+        if task_type_value not in {TaskType.TEXT.value, TaskType.AGENT.value}:
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "unsupported_task_type_jobs",
+            )
+            return None
+        task_type = TaskType(task_type_value)
+
+        metadata, invalid_metadata = self._parse_schedule_metadata(
+            row.get("meta"),
+        )
+        if invalid_metadata:
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "invalid_metadata_jobs",
+            )
+        if (
+            runtime_dispatch_enabled
+            and metadata.get(SCHEDULE_BROADCAST_SOURCE_JOB_ID_META_KEY)
+            and bool(
+                metadata.get(
+                    SCHEDULE_BROADCAST_INTENTS_ENABLED_META_KEY,
+                ),
+            )
+        ):
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "managed_child_jobs",
+            )
+            return None
+
+        cron_expr = str(row.get("cron_expr") or "").strip()
+        if len(cron_expr.split()) != 5 or not croniter.is_valid(cron_expr):
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "invalid_cron_jobs",
+            )
+            return None
+
+        timezone_name = str(row.get("timezone") or "UTC")
+        try:
+            job_timezone: tzinfo = ZoneInfo(timezone_name)
+        except (ValueError, ZoneInfoNotFoundError):
+            job_timezone = timezone.utc
+            self._increment_schedule_diagnostic(
+                diagnostics,
+                "invalid_timezone_jobs",
+            )
+
+        return _PreparedScheduleDefinition(
+            job_id=str(row.get("id") or ""),
+            job_name=str(row.get("name") or ""),
+            user_name=str(row.get("tenant_name") or ""),
+            user_id=str(row.get("tenant_id") or ""),
+            task_type=task_type,
+            cron_expr=cron_expr,
+            timezone_name=timezone_name,
+            job_timezone=job_timezone,
+        )
+
+    @staticmethod
+    def _iter_schedule_times(
+        definition: _PreparedScheduleDefinition,
+        *,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> Iterator[datetime]:
+        """Yield UTC firing instants with Scheduler-compatible boundaries."""
+        local_start = start_time.astimezone(definition.job_timezone)
+        iterator = croniter(
+            definition.cron_expr,
+            local_start - timedelta(microseconds=1),
+        )
+        while True:
+            upcoming = iterator.get_next(datetime)
+            if upcoming.tzinfo is None:
+                upcoming = upcoming.replace(
+                    tzinfo=definition.job_timezone,
+                )
+            scheduled_at = upcoming.astimezone(timezone.utc)
+            if scheduled_at >= end_time:
+                break
+            if scheduled_at >= start_time:
+                yield scheduled_at
+
+    def _generate_schedule_occurrences(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        start_time: datetime,
+        end_time: datetime,
+        runtime_dispatch_enabled: bool,
+    ) -> tuple[
+        list[_ScheduleOccurrence],
+        CronScheduleDistributionDiagnostics,
+    ]:
+        """Expand eligible definitions using Scheduler-compatible semantics."""
+        diagnostics = CronScheduleDistributionDiagnostics()
+        occurrences: list[_ScheduleOccurrence] = []
+        for row in rows:
+            definition = self._prepare_schedule_definition(
+                row,
+                diagnostics=diagnostics,
+                runtime_dispatch_enabled=runtime_dispatch_enabled,
+            )
+            if definition is None:
+                continue
+            job_occurrences: list[_ScheduleOccurrence] = []
+            try:
+                for scheduled_at in self._iter_schedule_times(
+                    definition,
+                    start_time=start_time,
+                    end_time=end_time,
+                ):
+                    if (
+                        len(occurrences) + len(job_occurrences)
+                        >= SCHEDULE_OCCURRENCE_LIMIT
+                    ):
+                        raise ScheduleCalculationLimitExceededError(
+                            "Schedule calculation exceeded 100,000 "
+                            "planned occurrences.",
+                        )
+                    job_occurrences.append(
+                        _ScheduleOccurrence(
+                            scheduled_at=scheduled_at,
+                            job_id=definition.job_id,
+                            job_name=definition.job_name,
+                            user_name=definition.user_name,
+                            user_id=definition.user_id,
+                            task_type=definition.task_type,
+                            cron_expr=definition.cron_expr,
+                            timezone=definition.timezone_name,
+                        ),
+                    )
+            except ScheduleCalculationLimitExceededError:
+                raise
+            except (CroniterBadCronError, CroniterBadDateError, ValueError):
+                self._increment_schedule_diagnostic(
+                    diagnostics,
+                    "invalid_cron_jobs",
+                )
+                continue
+            occurrences.extend(job_occurrences)
+
+        occurrences.sort(key=lambda item: (item.scheduled_at, item.job_id))
+        return occurrences, diagnostics
+
+    def _populate_schedule_distribution_buckets(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        start_time: datetime,
+        end_time: datetime,
+        bucket_width: timedelta,
+        buckets: list[CronScheduleDistributionBucket],
+        runtime_dispatch_enabled: bool,
+    ) -> CronScheduleDistributionDiagnostics:
+        """Count firing instants directly into buckets without materializing rows."""
+        diagnostics = CronScheduleDistributionDiagnostics()
+        accepted_occurrence_count = 0
+        bucket_width_seconds = bucket_width.total_seconds()
+
+        for row in rows:
+            definition = self._prepare_schedule_definition(
+                row,
+                diagnostics=diagnostics,
+                runtime_dispatch_enabled=runtime_dispatch_enabled,
+            )
+            if definition is None:
+                continue
+
+            job_bucket_counts: dict[int, int] = {}
+            job_occurrence_count = 0
+            try:
+                for scheduled_at in self._iter_schedule_times(
+                    definition,
+                    start_time=start_time,
+                    end_time=end_time,
+                ):
+                    if (
+                        accepted_occurrence_count + job_occurrence_count
+                        >= SCHEDULE_OCCURRENCE_LIMIT
+                    ):
+                        raise ScheduleCalculationLimitExceededError(
+                            "Schedule calculation exceeded 100,000 "
+                            "planned occurrences.",
+                        )
+                    bucket_index = int(
+                        (scheduled_at - start_time).total_seconds()
+                        // bucket_width_seconds,
+                    )
+                    job_bucket_counts[bucket_index] = (
+                        job_bucket_counts.get(bucket_index, 0) + 1
+                    )
+                    job_occurrence_count += 1
+            except ScheduleCalculationLimitExceededError:
+                raise
+            except (CroniterBadCronError, CroniterBadDateError, ValueError):
+                self._increment_schedule_diagnostic(
+                    diagnostics,
+                    "invalid_cron_jobs",
+                )
+                continue
+
+            for bucket_index, count in job_bucket_counts.items():
+                bucket = buckets[bucket_index]
+                if definition.task_type is TaskType.TEXT:
+                    bucket.text_count += count
+                else:
+                    bucket.agent_count += count
+                bucket.total_count += count
+            accepted_occurrence_count += job_occurrence_count
+
+        return diagnostics
+
+    async def _calculate_schedule_occurrences(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> _ScheduleCalculation:
+        normalized_start, normalized_end = self._normalize_schedule_range(
+            start_time,
+            end_time,
+        )
+        rows = await self._load_schedule_definition_rows(source_id)
+        runtime_dispatch_enabled = self._schedule_runtime_dispatch_enabled()
+        definition_revision = self._schedule_definition_revision(
+            rows,
+            runtime_dispatch_enabled=runtime_dispatch_enabled,
+        )
+        occurrences, diagnostics = self._generate_schedule_occurrences(
+            rows,
+            start_time=normalized_start,
+            end_time=normalized_end,
+            runtime_dispatch_enabled=runtime_dispatch_enabled,
+        )
+        eligible_job_count = max(
+            len(rows)
+            - diagnostics.invalid_cron_jobs
+            - diagnostics.unsupported_task_type_jobs
+            - diagnostics.managed_child_jobs,
+            0,
+        )
+        return _ScheduleCalculation(
+            start_time=normalized_start,
+            end_time=normalized_end,
+            calculated_at=datetime.now(timezone.utc),
+            definition_revision=definition_revision,
+            eligible_job_count=eligible_job_count,
+            occurrences=occurrences,
+            diagnostics=diagnostics,
+        )
+
+    async def get_schedule_distribution(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        bucket_minutes: int,
+    ) -> CronScheduleDistributionResponse:
+        """Return Text/Agent planned firing counts in start-aligned buckets."""
+        if bucket_minutes not in SCHEDULE_BUCKET_MINUTES:
+            raise ScheduleDistributionValidationError(
+                "bucket_minutes must be one of 5, 10, 15, 30, or 60.",
+            )
+        normalized_start, normalized_end = self._normalize_schedule_range(
+            start_time,
+            end_time,
+        )
+        rows = await self._load_schedule_definition_rows(source_id)
+        runtime_dispatch_enabled = self._schedule_runtime_dispatch_enabled()
+        definition_revision = self._schedule_definition_revision(
+            rows,
+            runtime_dispatch_enabled=runtime_dispatch_enabled,
+        )
+        bucket_width = timedelta(minutes=bucket_minutes)
+        bucket_count = (
+            int(
+                (normalized_end - normalized_start).total_seconds()
+                // bucket_width.total_seconds(),
+            )
+            + (
+                1
+                if (
+                    normalized_end - normalized_start
+                ).total_seconds()
+                % bucket_width.total_seconds()
+                else 0
+            )
+        )
+        buckets = [
+            CronScheduleDistributionBucket(
+                start_time=normalized_start + index * bucket_width,
+                end_time=min(
+                    normalized_start + (index + 1) * bucket_width,
+                    normalized_end,
+                ),
+            )
+            for index in range(bucket_count)
+        ]
+        diagnostics = self._populate_schedule_distribution_buckets(
+            rows,
+            start_time=normalized_start,
+            end_time=normalized_end,
+            bucket_width=bucket_width,
+            buckets=buckets,
+            runtime_dispatch_enabled=runtime_dispatch_enabled,
+        )
+        eligible_job_count = max(
+            len(rows)
+            - diagnostics.invalid_cron_jobs
+            - diagnostics.unsupported_task_type_jobs
+            - diagnostics.managed_child_jobs,
+            0,
+        )
+
+        text_count = sum(bucket.text_count for bucket in buckets)
+        agent_count = sum(bucket.agent_count for bucket in buckets)
+        return CronScheduleDistributionResponse(
+            start_time=normalized_start,
+            end_time=normalized_end,
+            bucket_minutes=bucket_minutes,
+            calculated_at=datetime.now(timezone.utc),
+            definition_revision=definition_revision,
+            eligible_job_count=eligible_job_count,
+            text_count=text_count,
+            agent_count=agent_count,
+            total_count=text_count + agent_count,
+            buckets=buckets,
+            diagnostics=diagnostics,
+        )
+
+    async def get_schedule_distribution_details(
+        self,
+        *,
+        source_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        task_type: TaskType | str | None = None,
+        page: int = 1,
+        page_size: int = 20,
+        expected_revision: str | None = None,
+    ) -> CronScheduleDistributionDetailsResponse:
+        """Return stable, paginated, whitelisted planned firing rows."""
+        if page < 1:
+            raise ScheduleDistributionValidationError(
+                "page must be greater than or equal to one.",
+            )
+        if page_size < 1 or page_size > 100:
+            raise ScheduleDistributionValidationError(
+                "page_size must be between one and 100.",
+            )
+        if page > 1 and not expected_revision:
+            raise ScheduleDistributionValidationError(
+                "expected_revision is required after the first page.",
+            )
+        normalized_task_type: TaskType | None = None
+        if task_type is not None:
+            try:
+                normalized_task_type = TaskType(task_type)
+            except ValueError as exc:
+                raise ScheduleDistributionValidationError(
+                    "task_type must be text or agent.",
+                ) from exc
+
+        calculation = await self._calculate_schedule_occurrences(
+            source_id=source_id,
+            start_time=start_time,
+            end_time=end_time,
+        )
+        if (
+            expected_revision
+            and expected_revision != calculation.definition_revision
+        ):
+            raise ScheduleDefinitionRevisionConflictError(
+                calculation.definition_revision,
+            )
+        occurrences = calculation.occurrences
+        if normalized_task_type is not None:
+            occurrences = [
+                item
+                for item in occurrences
+                if item.task_type is normalized_task_type
+            ]
+        total = len(occurrences)
+        offset = (page - 1) * page_size
+        page_occurrences = occurrences[offset : offset + page_size]
+        return CronScheduleDistributionDetailsResponse(
+            start_time=calculation.start_time,
+            end_time=calculation.end_time,
+            task_type=normalized_task_type,
+            calculated_at=calculation.calculated_at,
+            definition_revision=calculation.definition_revision,
+            items=[
+                CronScheduleOccurrenceItem(
+                    scheduled_at=item.scheduled_at,
+                    job_id=item.job_id,
+                    job_name=item.job_name,
+                    user_name=item.user_name,
+                    user_id=item.user_id,
+                    task_type=item.task_type,
+                    cron_expr=item.cron_expr,
+                    timezone=item.timezone,
+                )
+                for item in page_occurrences
+            ],
+            total=total,
+            page=page,
+            page_size=page_size,
+            diagnostics=calculation.diagnostics,
+        )
 
     def _build_job_where_clause(
         self,
@@ -312,20 +978,49 @@ class QueryService:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         status: Optional[str] = None,
+        query: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
         """构建批调度 batch 查询条件。"""
-        conditions = ["source_id = %s"]
+        conditions = ["b.source_id = %s"]
         sql_params: list[Any] = [source_id]
 
         if start_time:
-            conditions.append("scheduled_fire_at >= %s")
+            conditions.append("b.scheduled_fire_at >= %s")
             sql_params.append(start_time)
         if end_time:
-            conditions.append("scheduled_fire_at <= %s")
+            conditions.append("b.scheduled_fire_at <= %s")
             sql_params.append(end_time)
         if status and status != "all":
-            conditions.append("status = %s")
+            conditions.append("b.status = %s")
             sql_params.append(status)
+        normalized_query = (query or "").strip().lower()
+        if normalized_query:
+            escaped_query = (
+                normalized_query.replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
+            searchable_fields = (
+                "b.batch_id",
+                "b.parent_job_id",
+                "b.parent_external_job_id",
+                "b.tenant_id",
+                "b.provider_id",
+                "b.model_id",
+                "b.agent_id",
+                "j.name",
+            )
+            conditions.append(
+                "("
+                + " OR ".join(
+                    f"LOWER(COALESCE({field}, '')) LIKE %s ESCAPE '\\\\'"
+                    for field in searchable_fields
+                )
+                + ")",
+            )
+            sql_params.extend(
+                [f"%{escaped_query}%"] * len(searchable_fields),
+            )
 
         return " AND ".join(conditions), sql_params
 
@@ -484,6 +1179,7 @@ class QueryService:
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
         status: Optional[str] = None,
+        query: Optional[str] = None,
         page: int = 1,
         page_size: int = 20,
     ) -> CronDispatchBatchesResponse:
@@ -494,20 +1190,24 @@ class QueryService:
             start_time=start_time,
             end_time=end_time,
             status=status,
+            query=query,
         )
         stats_sql = f"""
             SELECT
                 COUNT(*) AS total_batches,
-                COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'running' THEN 1 ELSE 0 END), 0)
                     AS running_batches,
-                COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'completed' THEN 1 ELSE 0 END), 0)
                     AS completed_batches,
-                COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0)
+                COALESCE(SUM(CASE WHEN b.status = 'failed' THEN 1 ELSE 0 END), 0)
                     AS failed_batches,
-                COALESCE(SUM(total_count), 0) AS total_intents,
-                COALESCE(SUM(completed_count), 0) AS completed_intents,
-                COALESCE(SUM(failed_count), 0) AS failed_intents
-            FROM swe_cron_dispatch_batches
+                COALESCE(SUM(b.total_count), 0) AS total_intents,
+                COALESCE(SUM(b.completed_count), 0) AS completed_intents,
+                COALESCE(SUM(b.failed_count), 0) AS failed_intents
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
             WHERE {where_clause}
         """
         stats_row = await db.fetch_one(stats_sql, tuple(sql_params)) or {}
@@ -533,14 +1233,20 @@ class QueryService:
         rows = await db.fetch_all(
             f"""
             SELECT
-                batch_id, parent_job_id, parent_external_job_id, tenant_id,
-                source_id, provider_id, model_id, agent_id,
-                scheduled_fire_at, callback_received_at, status,
-                lock_owner, locked_at, total_count, completed_count,
-                failed_count, error_message, completed_at, created_at, updated_at
-            FROM swe_cron_dispatch_batches
+                b.batch_id, b.parent_job_id,
+                COALESCE(j.name, '') AS parent_job_name,
+                b.parent_external_job_id, b.tenant_id,
+                b.source_id, b.provider_id, b.model_id, b.agent_id,
+                b.scheduled_fire_at, b.callback_received_at, b.status,
+                b.lock_owner, b.locked_at, b.total_count, b.completed_count,
+                b.failed_count, b.error_message, b.completed_at,
+                b.created_at, b.updated_at
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
             WHERE {where_clause}
-            ORDER BY scheduled_fire_at DESC, created_at DESC
+            ORDER BY b.scheduled_fire_at DESC, b.created_at DESC
             LIMIT %s OFFSET %s
             """,
             tuple(sql_params) + (page_size, offset),
@@ -569,13 +1275,19 @@ class QueryService:
         batch_row = await db.fetch_one(
             """
             SELECT
-                batch_id, parent_job_id, parent_external_job_id, tenant_id,
-                source_id, provider_id, model_id, agent_id,
-                scheduled_fire_at, callback_received_at, status,
-                lock_owner, locked_at, total_count, completed_count,
-                failed_count, error_message, completed_at, created_at, updated_at
-            FROM swe_cron_dispatch_batches
-            WHERE source_id = %s AND batch_id = %s
+                b.batch_id, b.parent_job_id,
+                COALESCE(j.name, '') AS parent_job_name,
+                b.parent_external_job_id, b.tenant_id,
+                b.source_id, b.provider_id, b.model_id, b.agent_id,
+                b.scheduled_fire_at, b.callback_received_at, b.status,
+                b.lock_owner, b.locked_at, b.total_count, b.completed_count,
+                b.failed_count, b.error_message, b.completed_at,
+                b.created_at, b.updated_at
+            FROM swe_cron_dispatch_batches b
+            LEFT JOIN swe_cron_jobs j
+                ON b.parent_job_id = j.id
+                AND b.source_id = j.source_id
+            WHERE b.source_id = %s AND b.batch_id = %s
             """,
             (source_id, batch_id),
         )
@@ -809,9 +1521,7 @@ class QueryService:
             execution_id=execution_row.get("execution_id"),
             trace_id=trace_id,
             subtask_count=(
-                int(execution_row.get("subtask_count") or 0)
-                if trace_id
-                else 0
+                int(execution_row.get("subtask_count") or 0) if trace_id else 0
             ),
         )
 
@@ -3186,6 +3896,88 @@ class QueryService:
             result[btn] = self._row_int(row, "customer_count")
         return result
 
+    async def _fetch_branch_contact_stats(
+        self,
+        db: Any,
+        start_time: datetime,
+        end_time: datetime,
+        bbk_filter_sql: str,
+        bbk_filter_params: List[Any],
+        source_filter_sql: str,
+        source_filter_params: List[Any],
+    ) -> dict[str, dict[str, Any]]:
+        """统计技能视角下各分行的接触客户数和客户接触率."""
+        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
+        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        contact_sql = f"""
+            SELECT
+                a.bbk_id,
+                COUNT(DISTINCT a.customer_id) AS clicked_customers,
+                COUNT(
+                    DISTINCT CASE
+                        WHEN b.cust_uid IS NOT NULL THEN b.cust_uid
+                    END
+                ) AS contacted_customers,
+                CASE
+                    WHEN COUNT(DISTINCT a.customer_id) = 0 THEN 0
+                    ELSE COUNT(
+                        DISTINCT CASE
+                            WHEN b.cust_uid IS NOT NULL THEN b.cust_uid
+                        END
+                    ) * 1.0 / COUNT(DISTINCT a.customer_id)
+                END AS contact_rate
+            FROM swe_html_preview_click_events a
+            LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
+            WHERE a.customer_id IS NOT NULL
+              AND (
+                a.clicked_at >= %s AND a.clicked_at <= %s
+                OR b.clicked_at >= %s AND b.clicked_at <= %s
+              )
+              AND a.bbk_id IS NOT NULL
+              AND a.bbk_id != ''
+              {bbk_filter_sql.replace('j.bbk_id', 'a.bbk_id')}
+              {source_filter_sql.replace('j.source_id', 'a.source_id')}
+              AND EXISTS (
+                SELECT 1
+                FROM swe_cron_executions e
+                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+                CROSS JOIN (
+                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
+                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
+                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
+                ) idx
+                WHERE e.job_id = a.cron_task_id
+                  AND t.skills_used IS NOT NULL
+                  AND t.session_id LIKE 'cron-task%%'
+                  AND JSON_LENGTH(t.skills_used) > idx.i
+                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
+                    IN ({allowed_placeholders})
+              )
+            GROUP BY a.bbk_id
+        """
+        params = (
+            [start_time, end_time, start_time, end_time]
+            + bbk_filter_params
+            + source_filter_params
+            + allowed_skills
+        )
+        logger.info(
+            f"[_fetch_branch_contact_stats] SQL: {contact_sql}, params: {params}",
+        )
+        rows = await db.fetch_all(contact_sql, tuple(params))
+        logger.info(f"[_fetch_branch_contact_stats] Result rows: {len(rows)}")
+        return {
+            row["bbk_id"]: {
+                "clicked_customers": self._row_int(row, "clicked_customers"),
+                "contacted_customers": self._row_int(
+                    row,
+                    "contacted_customers",
+                ),
+                "contact_rate": _to_float(row.get("contact_rate")),
+            }
+            for row in rows
+        }
+
     async def _fetch_branch_recommended_customers(
         self,
         db: Any,
@@ -3439,6 +4231,8 @@ class QueryService:
         phone_managers: int,
         recommended_customers: int,
         viewed_customers: int,
+        contacted_customers: int,
+        contact_rate: float,
         insight_customers: int,
         phone_customers: int,
     ) -> CronBranchRankingItem:
@@ -3456,6 +4250,8 @@ class QueryService:
             phone_managers=phone_managers,
             recommended_customers=recommended_customers,
             viewed_customers=viewed_customers,
+            contacted_customers=contacted_customers,
+            contact_rate=contact_rate,
             insight_customers=insight_customers,
             phone_customers=phone_customers,
         )
@@ -3494,6 +4290,15 @@ class QueryService:
         )
 
         branch_ids = await self._fetch_branch_skill_behavior_ids(
+            db,
+            start_time,
+            end_time,
+            bbk_filter_sql,
+            bbk_filter_params,
+            source_filter_sql,
+            source_filter_params,
+        )
+        contact_stats = await self._fetch_branch_contact_stats(
             db,
             start_time,
             end_time,
@@ -3578,6 +4383,7 @@ class QueryService:
                     source_id,
                 )
             )
+            branch_contact_stats = contact_stats.get(bbk_id, {})
             items.append(
                 self._build_branch_ranking_item(
                     bbk_id,
@@ -3592,6 +4398,8 @@ class QueryService:
                     manager_click_counts.get("phone", 0),
                     recommended_customers,
                     customer_click_counts.get("plan", 0),
+                    branch_contact_stats.get("contacted_customers", 0),
+                    branch_contact_stats.get("contact_rate", 0.0),
                     customer_click_counts.get("insight", 0),
                     customer_click_counts.get("phone", 0),
                 ),
@@ -4080,20 +4888,19 @@ class QueryService:
     ) -> list[dict]:
         """获取分行技能原始执行数据."""
         source_where = " AND j.source_id = %s" if source_id else ""
+        skill_expr = self._skill_display_expr("s")
         sql = f"""
             SELECT
                 e.job_id,
                 e.status,
                 e.async_status,
                 e.is_read,
-                t.skills_used
+                {skill_expr} AS skill_name
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+            {self._skill_binding_join("j", "s")}
             WHERE j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
-              AND t.session_id LIKE 'cron-task%%'
-              AND t.skills_used IS NOT NULL
               {source_where}
         """
         params: list = [bbk_id, start_time, end_time]
@@ -4140,38 +4947,36 @@ class QueryService:
         skill_error: dict[str, int],
     ) -> None:
         """处理单行数据的技能聚合."""
-        skills = self._parse_skills_used(row["skills_used"])
-        if not skills:
+        skill_name = str(row.get("skill_name") or "").strip()
+        if not skill_name:
             return
         job_id = row["job_id"]
         status = (row["status"] or "").lower()
         async_status = (row["async_status"] or "").lower()
         is_read = bool(row["is_read"])
-        for sk in skills:
-            sk = str(sk).strip() if sk else ""
-            if not sk or sk not in self._ALLOWED_BRANCH_SKILLS:
-                continue
-            if sk not in skill_jobs:
-                self._init_skill_dicts(
-                    skill_jobs,
-                    skill_total,
-                    skill_success,
-                    skill_read,
-                    skill_error,
-                    sk,
-                )
-            self._count_skill_execution(
+        if skill_name not in self._ALLOWED_BRANCH_SKILLS:
+            return
+        if skill_name not in skill_jobs:
+            self._init_skill_dicts(
                 skill_jobs,
                 skill_total,
                 skill_success,
                 skill_read,
                 skill_error,
-                sk,
-                job_id,
-                status,
-                async_status,
-                is_read,
+                skill_name,
             )
+        self._count_skill_execution(
+            skill_jobs,
+            skill_total,
+            skill_success,
+            skill_read,
+            skill_error,
+            skill_name,
+            job_id,
+            status,
+            async_status,
+            is_read,
+        )
 
     def _build_branch_skill_items(
         self,
@@ -4409,18 +5214,145 @@ class QueryService:
             click_map[user_id][row["button_type"]] = row["customer_count"]
         return click_map
 
+    async def _fetch_manager_contact_stats(
+        self,
+        db: DatabaseConnection,
+        bbk_id: str,
+        start_time: datetime,
+        end_time: datetime,
+        source_id: Optional[str],
+    ) -> dict[str, dict[str, Any]]:
+        """查询客户经理维度的接触客户数和客户接触率."""
+        placeholders, allowed_skills = self._build_allowed_skill_filter()
+        source_where = " AND a.source_id = %s" if source_id else ""
+        sql = f"""
+            SELECT
+                a.user_id,
+                COUNT(DISTINCT a.customer_id) AS clicked_customers,
+                COUNT(
+                    DISTINCT CASE
+                        WHEN b.cust_uid IS NOT NULL THEN b.cust_uid
+                    END
+                ) AS contacted_customers,
+                CASE
+                    WHEN COUNT(DISTINCT a.customer_id) = 0 THEN 0
+                    ELSE COUNT(
+                        DISTINCT CASE
+                            WHEN b.cust_uid IS NOT NULL THEN b.cust_uid
+                        END
+                    ) * 1.0 / COUNT(DISTINCT a.customer_id)
+                END AS contact_rate
+            FROM swe_html_preview_click_events a
+            LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
+            WHERE a.bbk_id = %s
+              AND a.customer_id IS NOT NULL
+              AND (
+                a.clicked_at >= %s AND a.clicked_at <= %s
+                OR b.clicked_at >= %s AND b.clicked_at <= %s
+              )
+              {source_where}
+              AND EXISTS (
+                SELECT 1
+                FROM swe_cron_executions e
+                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+                CROSS JOIN (
+                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
+                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
+                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
+                ) idx
+                WHERE e.job_id = a.cron_task_id
+                  AND t.skills_used IS NOT NULL
+                  AND t.session_id LIKE 'cron-task%%'
+                  AND JSON_LENGTH(t.skills_used) > idx.i
+                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
+                    IN ({placeholders})
+              )
+            GROUP BY a.user_id
+        """
+        params: list = [bbk_id, start_time, end_time, start_time, end_time]
+        if source_id:
+            params.append(source_id)
+        params.extend(allowed_skills)
+        logger.info(
+            f"[_fetch_manager_contact_stats] SQL: {sql}, params: {params}",
+        )
+        # 调试：查EXISTS子查询是否能匹配
+        debug_sql3 = """
+            SELECT COUNT(DISTINCT a.id) as matched_cnt
+            FROM swe_html_preview_click_events a
+            WHERE a.bbk_id = %s AND a.customer_id IS NOT NULL
+            AND a.clicked_at >= %s AND a.clicked_at <= %s
+            AND EXISTS (
+                SELECT 1
+                FROM swe_cron_executions e
+                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+                CROSS JOIN (
+                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
+                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
+                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
+                ) idx
+                WHERE e.job_id = a.cron_task_id
+                  AND t.skills_used IS NOT NULL
+                  AND t.session_id LIKE 'cron-task%%'
+                  AND JSON_LENGTH(t.skills_used) > idx.i
+                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
+                    IN ({placeholders})
+            )
+        """
+        debug_row3 = await db.fetch_one(
+            debug_sql3.format(placeholders=placeholders),
+            (bbk_id, start_time, end_time) + tuple(allowed_skills),
+        )
+        logger.info(
+            f"[_fetch_manager_contact_stats] Debug EXISTS match: {debug_row3}",
+        )
+
+        # 调试：查cron_task_id是否匹配
+        debug_sql4 = """
+            SELECT a.id, a.cron_task_id, e.job_id, t.skills_used
+            FROM swe_html_preview_click_events a
+            LEFT JOIN swe_cron_executions e ON e.job_id = a.cron_task_id
+            LEFT JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+            WHERE a.bbk_id = %s AND a.customer_id IS NOT NULL
+            AND a.clicked_at >= %s AND a.clicked_at <= %s
+            LIMIT 5
+        """
+        debug_rows4 = await db.fetch_all(
+            debug_sql4,
+            (bbk_id, start_time, end_time),
+        )
+        logger.info(
+            f"[_fetch_manager_contact_stats] Debug cron_task mapping: {debug_rows4}",
+        )
+
+        rows = await db.fetch_all(sql, tuple(params))
+        logger.info(f"[_fetch_manager_contact_stats] Result rows: {len(rows)}")
+        return {
+            row["user_id"]: {
+                "clicked_customers": self._row_int(row, "clicked_customers"),
+                "contacted_customers": self._row_int(
+                    row,
+                    "contacted_customers",
+                ),
+                "contact_rate": _to_float(row.get("contact_rate")),
+            }
+            for row in rows
+        }
+
     def _build_manager_summary_items(
         self,
         base_rows: list[dict],
         skill_count_map: dict[str, int],
         recommended_map: dict[str, int],
         click_map: dict[str, dict[str, int]],
+        contact_map: dict[str, dict[str, Any]],
     ) -> list[BranchManagerSummaryItem]:
         """构建客户经理汇总结果."""
         items: list[BranchManagerSummaryItem] = []
         for row in base_rows:
             user_id = row["user_id"]
             user_clicks = click_map.get(user_id, {})
+            user_contact = contact_map.get(user_id, {})
             items.append(
                 BranchManagerSummaryItem(
                     user_id=user_id,
@@ -4431,6 +5363,11 @@ class QueryService:
                     read_tasks=row["read_tasks"] or 0,
                     recommended_customers=recommended_map.get(user_id, 0),
                     viewed_customers=user_clicks.get("plan", 0),
+                    contacted_customers=user_contact.get(
+                        "contacted_customers",
+                        0,
+                    ),
+                    contact_rate=user_contact.get("contact_rate", 0.0),
                     insight_customers=user_clicks.get("insight", 0),
                     phone_customers=user_clicks.get("phone", 0),
                 ),
@@ -4455,7 +5392,7 @@ class QueryService:
         end_str = end_date or end_time.strftime("%Y-%m-%d")
 
         # 并行查询各项数据
-        base_rows, skill_count_map, recommended_map, click_map = (
+        base_rows, skill_count_map, recommended_map, click_map, contact_map = (
             await asyncio.gather(
                 self._fetch_manager_base_info(
                     db,
@@ -4485,6 +5422,13 @@ class QueryService:
                     end_time,
                     source_id,
                 ),
+                self._fetch_manager_contact_stats(
+                    db,
+                    bbk_id,
+                    start_time,
+                    end_time,
+                    source_id,
+                ),
             )
         )
 
@@ -4493,6 +5437,7 @@ class QueryService:
             skill_count_map,
             recommended_map,
             click_map,
+            contact_map,
         )
 
         return BranchManagerSummaryResponse(
@@ -4513,8 +5458,8 @@ class QueryService:
     ) -> BranchSkillManagerResponse:
         """获取分行+技能的客户经理维度数据。
 
-        从 swe_cron_executions 出发，联结 jobs 获取 tenant_name，
-        联结 traces 筛选技能，LEFT JOIN click_events 统计点击指标。
+        从 swe_cron_executions 出发，联结 jobs 和 skill_ids，
+        再按技能展示名筛选，LEFT JOIN click_events 统计点击指标。
         无点击记录时 plan/insight/phone 计数为 0，last_click_time 为 None。
         user_name 取自 swe_cron_jobs.tenant_name。
         """
@@ -4526,6 +5471,7 @@ class QueryService:
 
         source_where = " AND j.source_id = %s" if source_id else ""
         click_source_on = " AND c.source_id = %s" if source_id else ""
+        skill_expr = self._skill_display_expr("s")
 
         sql = f"""
             SELECT
@@ -4538,16 +5484,14 @@ class QueryService:
                 MAX(c.clicked_at) AS last_click_time
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+            {self._skill_binding_join("j", "s")}
             LEFT JOIN swe_html_preview_click_events c
                 ON c.cron_task_id = e.job_id
                 AND c.clicked_at >= %s AND c.clicked_at <= %s
                 {click_source_on}
             WHERE j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
-              AND t.skills_used IS NOT NULL
-              AND JSON_CONTAINS(t.skills_used, JSON_QUOTE(%s))
-              AND t.session_id LIKE 'cron-task%%'
+              AND {skill_expr} = %s
               {source_where}
             GROUP BY j.tenant_id
             ORDER BY read_count DESC
@@ -4603,9 +5547,8 @@ class QueryService:
     ) -> BranchSkillManagerCustomerResponse:
         """获取分行+技能+客户经理的客户维度数据。
 
-        从 swe_html_preview_click_events 出发，通过 cron_executions
-        联结 traces，筛选 skills_used 包含指定技能以及指定客户经理的行，
-        按客户聚合点击行为。
+        从 swe_html_preview_click_events 出发，通过任务绑定技能和技能表
+        过滤指定技能以及客户经理的行，按客户聚合点击行为。
         """
         db = get_db_connection()
 
@@ -4614,6 +5557,7 @@ class QueryService:
         end_str = end_date or end_time.strftime("%Y-%m-%d")
 
         source_where = " AND c.source_id = %s" if source_id else ""
+        skill_expr = self._skill_display_expr("s")
 
         sql = f"""
             SELECT
@@ -4624,14 +5568,12 @@ class QueryService:
                 MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
                 MAX(c.clicked_at) AS click_time
             FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
+            JOIN swe_cron_jobs j ON c.cron_task_id = j.id
+            {self._skill_binding_join("j", "s")}
             WHERE c.bbk_id = %s
               AND c.user_id = %s
-              AND t.skills_used IS NOT NULL
-              AND JSON_CONTAINS(t.skills_used, JSON_QUOTE(%s))
+              AND {skill_expr} = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
-              AND t.session_id LIKE 'cron-task%%'
               {source_where}
             GROUP BY c.customer_id, c.customer_name
             ORDER BY click_time DESC
@@ -4702,10 +5644,10 @@ class QueryService:
         """查询客户经理技能统计."""
         placeholders, allowed_skills = self._build_allowed_skill_filter()
         source_where = " AND j.source_id = %s" if source_id else ""
+        skill_expr = self._skill_display_expr("s")
         sql = f"""
             SELECT
-                JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                    AS skill_name,
+                {skill_expr} AS skill_name,
                 COUNT(DISTINCT e.job_id) AS cron_task_count,
                 SUM(CASE WHEN e.status = 'success' AND e.async_status = 'success'
                     THEN 1 ELSE 0 END) AS success_count,
@@ -4715,18 +5657,10 @@ class QueryService:
                     THEN 1 ELSE 0 END) AS error_count
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
+            {self._skill_binding_join("j", "s")}
             WHERE j.bbk_id = %s AND j.tenant_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
-              AND t.skills_used IS NOT NULL AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                IN ({placeholders})
+              AND {skill_expr} IN ({placeholders})
               {source_where}
             GROUP BY skill_name
             ORDER BY success_count DESC
@@ -4851,6 +5785,7 @@ class QueryService:
 
         # 查询客户点击统计（技能过滤）
         # 只通过 cron_task_id 关联，不限制点击时间必须在执行期间
+        skill_expr = self._skill_display_expr("s")
         sql = f"""
             SELECT
                 c.customer_id,
@@ -4860,21 +5795,13 @@ class QueryService:
                 MAX(CASE WHEN c.button_type = 'phone' THEN 1 ELSE 0 END) AS clicked_phone,
                 MAX(c.clicked_at) AS click_time
             FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
+            JOIN swe_cron_jobs j ON c.cron_task_id = j.id
+            {self._skill_binding_join("j", "s")}
             WHERE c.bbk_id = %s
               AND c.user_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND c.customer_id IS NOT NULL
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) {skill_filter}
+              AND {skill_expr} {skill_filter}
               {source_where}
             GROUP BY c.customer_id, c.customer_name
             ORDER BY click_time DESC

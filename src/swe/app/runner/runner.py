@@ -7,7 +7,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Collection
@@ -33,6 +33,9 @@ from .command_dispatch import (
     _is_command,
     run_command_path,
 )
+from .hidden_context_injection import (
+    append_hidden_context_to_user_message,
+)
 from .model_call_error_detail import (
     MODEL_CALL_FAILED_MESSAGES_STATE_KEY,
     ModelCallFailureDetail,
@@ -49,6 +52,7 @@ from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
+from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.skills_manager import (
     get_skill_freshness_token,
     get_workspace_skills_dir,
@@ -157,6 +161,32 @@ class _QueryPreflight:
 
 
 @dataclass
+class _QueryRuntimeInputs:
+    """保存请求派生的运行时装配输入。"""
+
+    session_id: str
+    user_id: str
+    channel: str
+    skip_history: bool
+    agent_config: Any
+    tenant_hooks: HookConfig
+    hook_overlay: HookSessionOverlay
+    env_context: str
+    selected_context_directives: list[str]
+    auth_token: str | None
+    passthrough_headers: dict[str, str]
+
+
+@dataclass
+class _QueryRuntimeResources:
+    """保存已连接的请求资源和 hook 更新后的上下文。"""
+
+    chat: Any
+    turn_id: str
+    env_context: str
+
+
+@dataclass
 class _QueryRuntime:
     """保存单次 query 执行过程中需要在清理阶段复用的对象。"""
 
@@ -172,6 +202,7 @@ class _QueryRuntime:
     channel: str
     skip_history: bool
     pending_confirmed_skill_snapshots: dict[str, dict[str, Any]]
+    selected_context_directives: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -207,6 +238,7 @@ class _QueryTurnOutcome:
     completion_blocked: bool = False
     completion_block_reason: str = ""
     completion_marked_incomplete: bool = False
+    pre_tool_terminal_stop: bool = False
 
 
 def _match_command_with_optional_id(
@@ -1280,6 +1312,23 @@ def _select_restorable_session_skill(
     return None
 
 
+def _can_restore_confirmed_session_skill_context(
+    *,
+    session_id: str | None,
+    session_skill_detector: Any,
+    session: Any,
+) -> bool:
+    """Return whether persisted skill context has the required capabilities."""
+    return all(
+        (
+            session_id,
+            session_skill_detector is not None,
+            hasattr(session_skill_detector, "restore_confirmed_skill"),
+            hasattr(session, "get_session_skill_snapshot"),
+        ),
+    )
+
+
 def _supports_session_skill_freshness_refresh(
     *,
     session: Any,
@@ -1595,6 +1644,23 @@ def _request_system_prompt_injections(request: AgentRequest) -> list[str]:
     if value is None and isinstance(channel_meta, dict):
         value = channel_meta.get("system_prompt_injections")
     return _normalize_system_prompt_injections(value)
+
+
+def _request_selected_skill_names(request: AgentRequest) -> list[object]:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "selected_skill_names", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("selected_skill_names")
+    return list(value) if isinstance(value, list) else []
+
+
+def _request_context_references(request: AgentRequest) -> list[object]:
+    """Read the Console's typed, one-turn context references."""
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "context_references", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("context_references")
+    return list(value) if isinstance(value, list) else []
 
 
 def _request_file_url_network(request: AgentRequest) -> str:
@@ -2218,7 +2284,7 @@ class AgentRunner(Runner):
                 return None
             existing_trace_id = getattr(request, "trace_id", None)
             attach_existing = self._should_attach_existing_trace(request)
-            new_trace_id = _request_b3_trace_id(request)
+            b3_trace_id = _request_b3_trace_id(request)
             resolved_identity = await resolve_user_identity(
                 tenant_id=getattr(request, "user_id", None),
                 source_id=_request_source_id(request),
@@ -2236,9 +2302,10 @@ class AgentRunner(Runner):
                 bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
                 trace_id=(
-                    existing_trace_id if attach_existing else new_trace_id
+                    existing_trace_id if attach_existing else b3_trace_id
                 ),
                 attach_existing=attach_existing,
+                b3_trace_id=b3_trace_id,
             )
             if trace_id:
                 # 通道层负责把事件发给前端，这里写回 request 让 SSE 能透传 trace_id。
@@ -2824,13 +2891,12 @@ class AgentRunner(Runner):
     ) -> None:
         """从持久化的 session snapshot 恢复一次性 skill 续接候选。"""
         detector = getattr(runtime, "session_skill_detector", None)
-        if (
-            runtime.skip_history
-            or self.session is None
-            or not runtime.session_id
-            or detector is None
-            or not hasattr(detector, "restore_confirmed_skill")
-            or not hasattr(self.session, "get_session_skill_snapshot")
+        if runtime.skip_history or self.session is None:
+            return
+        if not _can_restore_confirmed_session_skill_context(
+            session_id=runtime.session_id,
+            session_skill_detector=detector,
+            session=self.session,
         ):
             return
 
@@ -2884,11 +2950,50 @@ class AgentRunner(Runner):
         preflight: _QueryPreflight,
     ) -> _RuntimeStartResult:
         """装配 agent、chat、MCP 客户端以及会话级 hook 运行状态。"""
+        inputs = await self._build_query_runtime_inputs(
+            request=request,
+            msgs=msgs,
+            preflight=preflight,
+        )
+        mcp_clients: list[Any] = []
+        try:
+            resources, block_result = (
+                await self._start_query_runtime_resources(
+                    request=request,
+                    msgs=msgs,
+                    inputs=inputs,
+                    mcp_clients=mcp_clients,
+                )
+            )
+            if block_result is not None:
+                return block_result
+            runtime = await self._finalize_query_runtime(
+                request=request,
+                query=query,
+                msgs=msgs,
+                preflight=preflight,
+                inputs=inputs,
+                resources=resources,
+                mcp_clients=mcp_clients,
+            )
+            return _RuntimeStartResult(runtime=runtime)
+        except Exception:
+            if mcp_clients:
+                await _cleanup_mcp_clients(mcp_clients)
+            raise
+
+    async def _build_query_runtime_inputs(
+        self,
+        *,
+        request: AgentRequest,
+        msgs: list[Any],
+        preflight: _QueryPreflight,
+    ) -> _QueryRuntimeInputs:
+        """Resolve request values needed before connecting runtime resources."""
         session_id = request.session_id
         user_id = request.user_id
         channel = getattr(request, "channel", DEFAULT_CHANNEL)
         skip_history = getattr(request, "skip_history", False)
-
         logger.info(
             "Handle agent query:\n%s",
             json.dumps(
@@ -2903,33 +3008,24 @@ class AgentRunner(Runner):
                 indent=2,
             ),
         )
-
-        env_context = build_env_context(
-            session_id=session_id,
-            user_id=user_id,
-            channel=channel,
-            working_dir=(
-                str(self.workspace_dir)
-                if self.workspace_dir
-                else str(WORKING_DIR)
-            ),
-            source_id=_request_source_id(request),
-            user_name=_request_user_name(request),
-        )
         env_context = _with_hook_context(
-            env_context,
+            build_env_context(
+                session_id=session_id,
+                user_id=user_id,
+                channel=channel,
+                working_dir=str(self.workspace_dir or WORKING_DIR),
+                source_id=_request_source_id(request),
+                user_name=_request_user_name(request),
+            ),
             preflight.hook_additional_context,
         )
         from ..source_system_config.runtime import (
             get_system_prompt_injections,
         )
-
-        env_context = _with_system_prompt_injections(
-            env_context,
-            _merge_system_prompt_injections(
-                get_system_prompt_injections(),
-                _request_system_prompt_injections(request),
-            ),
+        from .context_references import build_context_reference_directives
+        from .skill_selection import (
+            SkillUseDirective,
+            build_skill_use_directives,
         )
 
         agent_config = (
@@ -2940,120 +3036,182 @@ class AgentRunner(Runner):
                 tenant_id=self.tenant_id,
             )
         )
-        tenant_hooks = (
-            preflight.tenant_hooks
-            if preflight.tenant_hooks is not None
-            else _load_tenant_hook_config(self.tenant_id)
+        context_reference_directives = (
+            await build_context_reference_directives(
+                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                channel=channel,
+                agent_config=agent_config,
+                references=_request_context_references(request),
+            )
         )
-        hook_overlay = (
-            preflight.hook_overlay
-            if preflight.hook_overlay is not None
-            else HookSessionOverlay()
+        selected_context_skill_names = {
+            directive.name
+            for directive in context_reference_directives
+            if isinstance(directive, SkillUseDirective)
+        }
+        selected_skill_directives = build_skill_use_directives(
+            workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+            channel=channel,
+            selected_skill_names=[
+                name
+                for name in _request_selected_skill_names(request)
+                if name not in selected_context_skill_names
+            ],
         )
-        mcp_clients: list[Any] = []
-        try:
-            auth_token = getattr(request, "auth_token", None)
-            cookie_header = getattr(request, "cookie", None)
-            passthrough_headers = dict[str, str](
-                get_current_passthrough_headers() or {},
-            )
-            passthrough_headers.update(_request_passthrough_headers(request))
-            if cookie_header:
-                passthrough_headers["cookie"] = cookie_header
-            mcp_clients = await _build_and_connect_mcp_clients(
-                agent_config.mcp,
-                passthrough_headers=passthrough_headers or None,
-                session_id=session_id,
+        passthrough_headers = dict[str, str](
+            get_current_passthrough_headers() or {},
+        )
+        passthrough_headers.update(_request_passthrough_headers(request))
+        cookie_header = getattr(request, "cookie", None)
+        if cookie_header:
+            passthrough_headers["cookie"] = cookie_header
+        return _QueryRuntimeInputs(
+            session_id=session_id,
+            user_id=user_id,
+            channel=channel,
+            skip_history=skip_history,
+            agent_config=agent_config,
+            tenant_hooks=(
+                preflight.tenant_hooks
+                if preflight.tenant_hooks is not None
+                else _load_tenant_hook_config(self.tenant_id)
+            ),
+            hook_overlay=(
+                preflight.hook_overlay
+                if preflight.hook_overlay is not None
+                else HookSessionOverlay()
+            ),
+            env_context=_with_system_prompt_injections(
+                env_context,
+                _merge_system_prompt_injections(
+                    get_system_prompt_injections(),
+                    _request_system_prompt_injections(request),
+                ),
+            ),
+            selected_context_directives=[
+                directive.render()
+                for directive in [
+                    *selected_skill_directives,
+                    *context_reference_directives,
+                ]
+            ],
+            auth_token=getattr(request, "auth_token", None),
+            passthrough_headers=passthrough_headers,
+        )
+
+    async def _start_query_runtime_resources(
+        self,
+        *,
+        request: AgentRequest,
+        msgs: list[Any],
+        inputs: _QueryRuntimeInputs,
+        mcp_clients: list[Any],
+    ) -> tuple[_QueryRuntimeResources, _RuntimeStartResult | None]:
+        """Connect request resources and run the session-start hook."""
+        mcp_clients.extend(
+            await _build_and_connect_mcp_clients(
+                inputs.agent_config.mcp,
+                passthrough_headers=inputs.passthrough_headers or None,
+                session_id=inputs.session_id,
                 trace_id=getattr(request, "trace_id", None),
-            )
+            ),
+        )
+        turn_id = f"turn-{uuid4().hex}"
+        chat = await self._get_or_create_chat(
+            session_id=inputs.session_id,
+            user_id=inputs.user_id,
+            channel=inputs.channel,
+            name=_chat_name_from_messages(msgs),
+            request=request,
+            turn_id=turn_id,
+        )
+        await self._generate_session_title_before_stream(
+            request=request,
+            chat=chat,
+            msgs=msgs,
+            trace_id=getattr(request, "trace_id", None),
+        )
+        env_context, block_response = await self._emit_session_start_hook(
+            request=request,
+            tenant_hooks=inputs.tenant_hooks,
+            agent_config=inputs.agent_config,
+            hook_overlay=inputs.hook_overlay,
+            skip_history=inputs.skip_history,
+            env_context=inputs.env_context,
+        )
+        resources = _QueryRuntimeResources(
+            chat=chat,
+            turn_id=turn_id,
+            env_context=env_context,
+        )
+        if block_response is None:
+            return resources, None
+        return resources, _RuntimeStartResult(
+            block_response=block_response,
+            blocked_chat=chat,
+            blocked_mcp_clients=mcp_clients,
+            blocked_session_id=inputs.session_id,
+        )
 
-            turn_id = f"turn-{uuid4().hex}"
-            chat = await self._get_or_create_chat(
-                session_id=session_id,
-                user_id=user_id,
-                channel=channel,
-                name=_chat_name_from_messages(msgs),
-                request=request,
-                turn_id=turn_id,
-            )
-            await self._generate_session_title_before_stream(
-                request=request,
-                chat=chat,
-                msgs=msgs,
-                trace_id=getattr(request, "trace_id", None),
-            )
-            env_context, block_response = await self._emit_session_start_hook(
-                request=request,
-                tenant_hooks=tenant_hooks,
-                agent_config=agent_config,
-                hook_overlay=hook_overlay,
-                skip_history=skip_history,
-                env_context=env_context,
-            )
-            if block_response is not None:
-                return _RuntimeStartResult(
-                    block_response=block_response,
-                    blocked_chat=chat,
-                    blocked_mcp_clients=mcp_clients,
-                    blocked_session_id=session_id,
-                )
-
-            agent_build_started_at = time.perf_counter()
-            agent = self._create_agent_for_query(
-                agent_config=agent_config,
-                env_context=env_context,
-                mcp_clients=mcp_clients,
-                request=request,
-                session_id=session_id,
-                user_id=user_id,
-                channel=channel,
-                chat=chat,
-                turn_id=turn_id,
-                hook_overlay=hook_overlay,
-                auth_token=auth_token,
-                approved_tool_call=preflight.approved_tool_call,
-            )
-            await agent.register_mcp_clients()
-            agent.set_console_output_enabled(enabled=False)
-            logger.debug(
-                "swe_agent_build_duration_ms=%d agent_id=%s tenant_id=%s "
-                "mcp_client_count=%d",
-                int((time.perf_counter() - agent_build_started_at) * 1000),
-                self.agent_id,
-                self.tenant_id,
-                len(mcp_clients),
-            )
-
-            runtime = _QueryRuntime(
-                agent=agent,
-                agent_config=agent_config,
-                tenant_hooks=tenant_hooks,
-                hook_overlay=hook_overlay,
-                chat=chat,
-                session_skill_detector=None,
-                mcp_clients=mcp_clients,
-                session_id=session_id,
-                user_id=user_id,
-                channel=channel,
-                skip_history=skip_history,
-                pending_confirmed_skill_snapshots={},
-            )
-            self._attach_session_skill_detector(
-                runtime=runtime,
-                request=request,
-            )
-            await self._restore_confirmed_session_skill_context(
-                runtime=runtime,
-            )
-            await self._start_declared_session_skill(
-                runtime=runtime,
-                user_message=query or _get_last_user_text(msgs) or "",
-            )
-            return _RuntimeStartResult(runtime=runtime)
-        except Exception:
-            if mcp_clients:
-                await _cleanup_mcp_clients(mcp_clients)
-            raise
+    async def _finalize_query_runtime(
+        self,
+        *,
+        request: AgentRequest,
+        query: str | None,
+        msgs: list[Any],
+        preflight: _QueryPreflight,
+        inputs: _QueryRuntimeInputs,
+        resources: _QueryRuntimeResources,
+        mcp_clients: list[Any],
+    ) -> _QueryRuntime:
+        """Create the agent and initialize session-skill state for one turn."""
+        agent_build_started_at = time.perf_counter()
+        agent = self._create_agent_for_query(
+            agent_config=inputs.agent_config,
+            env_context=resources.env_context,
+            mcp_clients=mcp_clients,
+            request=request,
+            session_id=inputs.session_id,
+            user_id=inputs.user_id,
+            channel=inputs.channel,
+            chat=resources.chat,
+            turn_id=resources.turn_id,
+            hook_overlay=inputs.hook_overlay,
+            auth_token=inputs.auth_token,
+            approved_tool_call=preflight.approved_tool_call,
+        )
+        await agent.register_mcp_clients()
+        agent.set_console_output_enabled(enabled=False)
+        logger.debug(
+            "swe_agent_build_duration_ms=%d agent_id=%s tenant_id=%s "
+            "mcp_client_count=%d",
+            int((time.perf_counter() - agent_build_started_at) * 1000),
+            self.agent_id,
+            self.tenant_id,
+            len(mcp_clients),
+        )
+        runtime = _QueryRuntime(
+            agent=agent,
+            agent_config=inputs.agent_config,
+            tenant_hooks=inputs.tenant_hooks,
+            hook_overlay=inputs.hook_overlay,
+            chat=resources.chat,
+            session_skill_detector=None,
+            mcp_clients=mcp_clients,
+            session_id=inputs.session_id,
+            user_id=inputs.user_id,
+            channel=inputs.channel,
+            skip_history=inputs.skip_history,
+            pending_confirmed_skill_snapshots={},
+            selected_context_directives=inputs.selected_context_directives,
+        )
+        self._attach_session_skill_detector(runtime=runtime, request=request)
+        await self._restore_confirmed_session_skill_context(runtime=runtime)
+        await self._start_declared_session_skill(
+            runtime=runtime,
+            user_message=query or _get_last_user_text(msgs) or "",
+        )
+        return runtime
 
     async def _build_turn_plan(
         self,
@@ -3064,11 +3222,21 @@ class AgentRunner(Runner):
         query: str | None,
     ) -> _TurnPlan:
         """根据普通请求构建本轮输入。"""
-        del runtime, request
+        del request
         original_user_message = query or _get_last_user_text(msgs) or ""
+        turn_msgs = list(msgs)
+        if (
+            turn_msgs
+            and runtime.selected_context_directives
+            and getattr(turn_msgs[-1], "role", None) == "user"
+        ):
+            turn_msgs[-1] = append_hidden_context_to_user_message(
+                turn_msgs[-1],
+                runtime.selected_context_directives,
+            )
         return _TurnPlan(
             original_user_message=original_user_message,
-            turn_msgs=list(msgs),
+            turn_msgs=turn_msgs,
         )
 
     async def _stream_agent_turns(
@@ -3090,16 +3258,51 @@ class AgentRunner(Runner):
                 before_stop_turns,
             )
         )
-        async for msg, last in self._enforce_query_timeout(
-            stream_printing_messages(
-                agents=[runtime.agent],
-                coroutine_task=runtime.agent(turn_msgs),
-            ),
-            session_id=runtime.session_id,
-            agent=runtime.agent,
-            run_key=(runtime.chat.id if runtime.chat is not None else None),
-        ):
-            yield msg, last
+        reset_terminal_stop = getattr(
+            runtime.agent,
+            "reset_pre_tool_terminal_stop",
+            None,
+        )
+        if callable(reset_terminal_stop):
+            reset_terminal_stop()
+
+        try:
+            async for msg, last in self._enforce_query_timeout(
+                stream_printing_messages(
+                    agents=[runtime.agent],
+                    coroutine_task=runtime.agent(turn_msgs),
+                ),
+                session_id=runtime.session_id,
+                agent=runtime.agent,
+                run_key=(
+                    runtime.chat.id if runtime.chat is not None else None
+                ),
+            ):
+                yield msg, last
+        except PreToolUseTerminalStop as exc:
+            consume_terminal_stop = getattr(
+                runtime.agent,
+                "consume_pre_tool_terminal_stop",
+                None,
+            )
+            reason = (
+                consume_terminal_stop()
+                if callable(consume_terminal_stop)
+                else None
+            )
+            reason = (reason or exc.reason or "Hook requested stop").strip()
+            outcome.task_completed = False
+            outcome.completion_blocked = True
+            outcome.completion_block_reason = reason
+            outcome.pre_tool_terminal_stop = True
+            terminal_msg = Msg(
+                name="Friday",
+                role="assistant",
+                content=reason,
+            )
+            await runtime.agent.memory.add(terminal_msg)
+            yield terminal_msg, True
+            return
 
         outcome.assistant_response = _extract_assistant_response(
             runtime.agent,
@@ -3156,6 +3359,9 @@ class AgentRunner(Runner):
                 outcome=outcome,
             ):
                 yield msg, last
+
+            if outcome.pre_tool_terminal_stop:
+                return
 
             before_stop_result = await self._emit_before_stop_hook_if_needed(
                 request=request,
@@ -4076,7 +4282,12 @@ class AgentRunner(Runner):
         skill_snapshot_to_persist: dict[str, dict[str, Any]] | None = None,
     ) -> None:
         """BeforeStop 耗尽预算时仍需写入最终输出并结束 trace。"""
-        if outcome.completion_marked_incomplete:
+        if outcome.pre_tool_terminal_stop:
+            await self._end_trace_if_needed(
+                trace_id,
+                TraceStatus.COMPLETED,
+            )
+        elif outcome.completion_marked_incomplete:
             await self._index_model_output_if_needed(
                 trace_id=trace_id,
                 agent=runtime.agent,

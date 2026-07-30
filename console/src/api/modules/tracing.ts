@@ -118,6 +118,12 @@ export interface ErrorSummary {
   total_errors: number;
   model_errors: number;
   tool_errors: number;
+  model_error_codes: ModelErrorCodeCount[];
+}
+
+export interface ModelErrorCodeCount {
+  code: string;
+  count: number;
 }
 
 export interface ErrorItem {

@@ -364,30 +364,62 @@ def test_skill_prompt_hook_is_namespaced_and_loaded(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("event_name", "handler_update", "message"),
-    [
-        ("PostToolUse", {}, "blockable"),
-        ("PreToolUse", {"model": "gpt-test"}, "extra"),
-    ],
+    "event_name",
+    ["PostToolUse", "PostToolUseFailure"],
 )
-def test_invalid_skill_prompt_hooks_are_rejected(
+def test_skill_post_tool_prompt_hooks_are_allowed(
     tmp_path: Path,
     event_name: str,
-    handler_update: dict,
-    message: str,
 ) -> None:
     handler = {
         "id": "policy",
         "type": "prompt",
         "prompt": "Reject credential requests.",
     }
-    handler.update(handler_update)
     skill_root = _write_skill_hook(
         tmp_path,
         {"enabled": True, "events": {event_name: [{"hooks": [handler]}]}},
     )
 
-    with pytest.raises(SkillHookLoadError, match=message):
+    result = load_skill_hooks_for_session(
+        skill_name="xlsx",
+        skill_root=skill_root,
+        workspace_dir=tmp_path,
+        session_state=HookSessionState(),
+    )
+
+    assert (
+        result.loaded_skill_sources[0]
+        .hook_config.events[HookEventName(event_name)][0]
+        .hooks[0]
+        .type
+        == "prompt"
+    )
+
+
+def test_invalid_skill_prompt_hooks_are_rejected(tmp_path: Path) -> None:
+    skill_root = _write_skill_hook(
+        tmp_path,
+        {
+            "enabled": True,
+            "events": {
+                "PreToolUse": [
+                    {
+                        "hooks": [
+                            {
+                                "id": "policy",
+                                "type": "prompt",
+                                "prompt": "Reject credential requests.",
+                                "model": "gpt-test",
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+    )
+
+    with pytest.raises(SkillHookLoadError, match="extra"):
         load_skill_hooks_for_session(
             skill_name="xlsx",
             skill_root=skill_root,
