@@ -13,6 +13,7 @@ import codecs
 import heapq
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from functools import cache, wraps
 from pathlib import Path, PurePosixPath
-from typing import Mapping
+from typing import BinaryIO, Mapping
 
 from pydantic import BaseModel
 
@@ -39,6 +40,8 @@ _WORKSPACE_LOCKS: dict[str, threading.RLock] = {}
 FILE_MANAGER_PAGE_SIZE = 100
 TEXT_PREVIEW_LIMIT_BYTES = 1024 * 1024
 _FILE_READ_CHUNK_BYTES = 64 * 1024
+_FILE_MANAGER_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+_LARGE_PREVIEW_PROBE_BYTES = 4
 _WORKING_HIDDEN_TOP_LEVEL = frozenset({"sessions", "governance"})
 _NATURAL_PARTS = re.compile(r"(\d+)")
 _CURSOR_SECRET_ENV_VAR = "SWE_FILE_MANAGER_CURSOR_SECRET"
@@ -55,6 +58,10 @@ class FileManagerNotFoundError(FileManagerPathError):
 
 class FileManagerConflictError(FileManagerPathError):
     """A mutation would replace a newer or already-existing file."""
+
+
+class FileManagerUploadTooLargeError(FileManagerPathError):
+    """A streamed upload exceeded the File Manager byte limit."""
 
 
 class FileManagerOutcomeUncertainError(FileManagerPathError):
@@ -504,40 +511,64 @@ class FileManagerService:
             initial_stat = os.fstat(file_fd)
             if not stat_module.S_ISREG(initial_stat.st_mode):
                 raise FileManagerPathError("Path is not a regular file")
-            preview = bytearray()
-            content_digest = hashlib.sha256()
-            decoder = codecs.getincrementaldecoder("utf-8")("strict")
-            is_text = True
-            has_control_character = False
-            with os.fdopen(file_fd, "rb", closefd=False) as handle:
-                while chunk := handle.read(_FILE_READ_CHUNK_BYTES):
-                    content_digest.update(chunk)
-                    remaining_preview = TEXT_PREVIEW_LIMIT_BYTES - len(preview)
-                    if remaining_preview > 0:
-                        preview.extend(chunk[:remaining_preview])
-                    if not is_text:
-                        continue
-                    try:
-                        decoded_chunk = decoder.decode(chunk, final=False)
-                    except UnicodeDecodeError:
-                        is_text = False
-                        continue
-                    if self._contains_disallowed_control_character(
-                        decoded_chunk,
-                    ):
-                        has_control_character = True
-                if is_text:
-                    try:
-                        tail = decoder.decode(b"", final=True)
-                    except UnicodeDecodeError:
-                        is_text = False
-                    else:
-                        has_control_character = (
-                            has_control_character
-                            or self._contains_disallowed_control_character(
-                                tail,
+            is_truncated = initial_stat.st_size > TEXT_PREVIEW_LIMIT_BYTES
+            if is_truncated:
+                with os.fdopen(file_fd, "rb", closefd=False) as handle:
+                    sampled = handle.read(
+                        TEXT_PREVIEW_LIMIT_BYTES + _LARGE_PREVIEW_PROBE_BYTES,
+                    )
+                decoded = self._decode_text_sample(
+                    sampled[:TEXT_PREVIEW_LIMIT_BYTES],
+                    sample_is_truncated=True,
+                )
+                is_text = (
+                    decoded is not None
+                    and not self._contains_disallowed_control_character(
+                        decoded,
+                    )
+                )
+                preview = (
+                    decoded.encode("utf-8") if decoded is not None else sampled
+                )
+                revision = (
+                    f"stat:{initial_stat.st_dev}:{initial_stat.st_ino}:"
+                    f"{initial_stat.st_size}:{initial_stat.st_mtime_ns}"
+                )
+            else:
+                preview = bytearray()
+                content_digest = hashlib.sha256()
+                decoder = codecs.getincrementaldecoder("utf-8")("strict")
+                is_text = True
+                has_control_character = False
+                with os.fdopen(file_fd, "rb", closefd=False) as handle:
+                    while chunk := handle.read(_FILE_READ_CHUNK_BYTES):
+                        content_digest.update(chunk)
+                        preview.extend(chunk)
+                        if not is_text:
+                            continue
+                        try:
+                            decoded_chunk = decoder.decode(chunk, final=False)
+                        except UnicodeDecodeError:
+                            is_text = False
+                            continue
+                        if self._contains_disallowed_control_character(
+                            decoded_chunk,
+                        ):
+                            has_control_character = True
+                    if is_text:
+                        try:
+                            tail = decoder.decode(b"", final=True)
+                        except UnicodeDecodeError:
+                            is_text = False
+                        else:
+                            has_control_character = (
+                                has_control_character
+                                or self._contains_disallowed_control_character(
+                                    tail,
+                                )
                             )
-                        )
+                is_text = is_text and not has_control_character
+                revision = content_digest.hexdigest()
             final_stat = os.fstat(file_fd)
         except OSError as exc:
             raise FileManagerPathError("Unable to read file") from exc
@@ -548,7 +579,6 @@ class FileManagerService:
             final_stat,
         ):
             raise FileManagerPathError("File changed while being read")
-        is_text = is_text and not has_control_character
         return FileManagerReadSnapshot(
             path=normalised_path,
             size_bytes=initial_stat.st_size,
@@ -556,9 +586,9 @@ class FileManagerService:
                 initial_stat.st_mtime,
                 tz=timezone.utc,
             ),
-            revision=content_digest.hexdigest(),
+            revision=revision,
             is_text=is_text,
-            is_truncated=initial_stat.st_size > TEXT_PREVIEW_LIMIT_BYTES,
+            is_truncated=is_truncated,
             preview_bytes=bytes(preview),
         )
 
@@ -687,6 +717,24 @@ class FileManagerService:
     ) -> FileManagerItem:
         """Publish a new upload without following links or replacing names."""
 
+        if not isinstance(content, bytes):
+            raise FileManagerPathError("Upload content must be bytes")
+        return self.upload_stream(
+            root,
+            directory_path,
+            filename,
+            io.BytesIO(content),
+        )
+
+    def upload_stream(
+        self,
+        root: FileManagerRoot | str,
+        directory_path: str,
+        filename: str,
+        source: BinaryIO,
+    ) -> FileManagerItem:
+        """Publish a bounded file-like upload without retaining its body."""
+
         resolved_root, normalised_directory = self._validate_root_and_path(
             root,
             directory_path,
@@ -696,8 +744,6 @@ class FileManagerService:
                 "Uploads are not available for this root",
             )
         safe_filename = self._validate_upload_filename(filename)
-        if not isinstance(content, bytes):
-            raise FileManagerPathError("Upload content must be bytes")
         directory_fd = self._open_directory_fd(
             resolved_root,
             normalised_directory,
@@ -713,7 +759,14 @@ class FileManagerService:
                 0o600,
                 dir_fd=directory_fd,
             )
-            _write_all(temporary_fd, content)
+            copied_bytes = 0
+            while chunk := source.read(_FILE_READ_CHUNK_BYTES):
+                copied_bytes += len(chunk)
+                if copied_bytes > _FILE_MANAGER_MAX_UPLOAD_BYTES:
+                    raise FileManagerUploadTooLargeError(
+                        "File too large (max 10 MB)",
+                    )
+                _write_all(temporary_fd, chunk)
             os.fsync(temporary_fd)
             os.close(temporary_fd)
             temporary_fd = None

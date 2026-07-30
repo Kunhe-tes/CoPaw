@@ -43,6 +43,7 @@ from ..file_manager import (
     FileManagerNotFoundError,
     FileManagerPathError,
     FileManagerTextPreview,
+    FileManagerUploadTooLargeError,
     get_file_manager_service,
 )
 from ..file_manager_execution import (
@@ -1168,8 +1169,7 @@ async def post_file_manager_upload(
 ) -> FileManagerItem:
     """Upload to the currently browsed directory, never renaming or replacing."""
 
-    content = await file.read(MAX_UPLOAD_BYTES + 1)
-    if len(content) > MAX_UPLOAD_BYTES:
+    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
         _audit_file_manager_mutation(
             request,
             action="upload",
@@ -1187,12 +1187,20 @@ async def post_file_manager_upload(
     filename = file.filename or ""
     try:
         item = await run_file_manager_mutation(
-            service.upload_bytes,
+            service.upload_stream,
             root,
             path,
             filename,
-            content,
+            file.file,
         )
+    except FileManagerUploadTooLargeError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=_file_manager_upload_audit_path(path, filename),
+            outcome="failure",
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except FileManagerPathError as exc:
         _audit_file_manager_mutation(
             request,

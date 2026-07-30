@@ -5,6 +5,7 @@ import base64
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
@@ -520,7 +521,7 @@ def test_large_invalid_utf8_after_sample_boundary_is_rejected(
     assert preview.content is None
 
 
-def test_large_text_with_invalid_utf8_after_preview_is_rejected(
+def test_large_text_with_invalid_utf8_after_preview_stays_read_only_text(
     tmp_path: Path,
 ) -> None:
     (tmp_path / "late-invalid.txt").write_bytes(
@@ -532,8 +533,8 @@ def test_large_text_with_invalid_utf8_after_preview_is_rejected(
         "late-invalid.txt",
     )
 
-    assert preview.is_text is False
-    assert preview.content is None
+    assert preview.is_text is True
+    assert preview.content == "a" * (1024 * 1024)
     assert preview.editable is False
 
 
@@ -829,6 +830,39 @@ def test_upload_rejects_collisions_and_never_writes_through_links(
     assert uploaded.path == "fresh.txt"
     assert (tmp_path / "media" / "fresh.txt").read_bytes() == b"fresh"
     assert outside.read_text(encoding="utf-8") == "outside"
+
+
+def test_upload_stream_reads_bounded_chunks_and_cleans_up_over_limit(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "media").mkdir()
+    service = _service(tmp_path)
+
+    class RecordingSource(io.BytesIO):
+        def __init__(self, data: bytes) -> None:
+            super().__init__(data)
+            self.read_sizes: list[int] = []
+
+        def read(self, size: int | None = -1) -> bytes:
+            assert size is not None and size > 0
+            self.read_sizes.append(size)
+            return super().read(size)
+
+    source = RecordingSource(b"x" * (file_manager._FILE_READ_CHUNK_BYTES + 1))
+    item = service.upload_stream("upload", "", "chunked.bin", source)
+
+    assert (tmp_path / "media" / item.name).read_bytes() == source.getvalue()
+    assert set(source.read_sizes) == {file_manager._FILE_READ_CHUNK_BYTES}
+
+    with pytest.raises(FileManagerPathError, match="File too large"):
+        service.upload_stream(
+            "upload",
+            "",
+            "too-large.bin",
+            io.BytesIO(b"x" * (10 * 1024 * 1024 + 1)),
+        )
+    assert not (tmp_path / "media" / "too-large.bin").exists()
+    assert not list((tmp_path / "media").glob(".too-large.bin.file-manager-*"))
 
 
 @pytest.mark.parametrize("root", ["conversation", "recycle"])
