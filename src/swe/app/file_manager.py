@@ -1271,6 +1271,72 @@ class FileManagerService:
     ) -> FileManagerDirectoryListing:
         """Adapt archive metadata without exposing its control-file paths."""
 
+        index_path = (
+            self._workspace_dir / "governance" / "archive" / "index.json"
+        )
+        try:
+            index_stat = index_path.stat()
+        except FileNotFoundError:
+            identity = (0, 0, 0)
+        else:
+            identity = (
+                index_stat.st_dev,
+                index_stat.st_ino,
+                index_stat.st_mtime_ns,
+            )
+        key = (str(self._workspace_dir), FileManagerRoot.RECYCLE.value, "", "")
+        cursor_state = self._validate_cursor_context(
+            cursor,
+            FileManagerRoot.RECYCLE,
+            "",
+            None,
+        )
+        if cursor_state is not None:
+            last_path, last_kind, snapshot_version = cursor_state
+            if snapshot_version is None:
+                raise FileManagerConflictError(
+                    "Directory listing changed; refresh and retry",
+                )
+            snapshot = self._get_directory_snapshot(
+                key,
+                snapshot_version,
+                identity,
+            )
+            if snapshot is None:
+                raise FileManagerConflictError(
+                    "Directory listing changed; refresh and retry",
+                )
+            snapshot_items = list(snapshot.items)
+            start = next(
+                (
+                    index + 1
+                    for index, item in enumerate(snapshot_items)
+                    if item.path == last_path and item.kind is last_kind
+                ),
+                -1,
+            )
+            if start < 0:
+                raise FileManagerConflictError(
+                    "Directory listing changed; refresh and retry",
+                )
+            page = snapshot_items[start : start + FILE_MANAGER_PAGE_SIZE]
+            next_cursor = None
+            if start + FILE_MANAGER_PAGE_SIZE < len(snapshot_items):
+                next_cursor = self._encode_cursor(
+                    FileManagerRoot.RECYCLE,
+                    "",
+                    None,
+                    page[-1].path,
+                    page[-1].kind,
+                    snapshot_version,
+                )
+            return self._listing(
+                FileManagerRoot.RECYCLE,
+                "",
+                page,
+                next_cursor,
+            )
+
         items: list[FileManagerItem] = []
         for item in self._load_recovered_archive_index().get("items", []):
             if not isinstance(item, dict):
