@@ -28,6 +28,8 @@ class PublishSkillRequest(BaseModel):
     # 同步模式：直接传递用户已有的 skill_id 和 cn_name，无需再解析
     skill_id: str = ""
     cn_name: str = ""
+    # 是否纳入统计
+    include_in_statistics: bool = False
 
 
 class DistributeRequest(BaseModel):
@@ -56,6 +58,7 @@ class MarketSkillResponse(BaseModel):
     call_count: int = 0
     user_count: int = 0
     version_unchanged: bool = False
+    include_in_statistics: bool = False  # 是否纳入统计
 
 
 class SkillUserStat(BaseModel):

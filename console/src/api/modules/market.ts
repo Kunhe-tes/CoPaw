@@ -86,6 +86,8 @@ export interface PublishSkillRequest {
   // 同步模式：直接传递用户已有的 skill_id 和 cn_name，无需再解析
   skill_id?: string;
   cn_name?: string;
+  // 是否纳入统计
+  include_in_statistics?: boolean;
 }
 
 export interface DistributeRequest {

@@ -660,130 +660,141 @@ export function SkillDetailDrawer(
     <>
       <div style={{ height: "100%", display: "flex", flexDirection: "column", backgroundColor: "#fafafa" }}>
         {/* 顶栏：固定 */}
-        <div style={HEADER_STYLE}>
-          {/* 左侧：元数据 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            {/* 状态徽章（标题前） */}
-            <Tag
-              bordered={false}
-              style={{
-                margin: 0,
-                borderRadius: 6,
-                padding: "2px 8px",
-                fontSize: 12,
-                backgroundColor: skill.status === "active" ? "#f6ffed" : "#fff1f0",
-                color: statusColor,
-              }}
-            >
-              <CheckCircle size={12} style={{ marginRight: 4 }} />
-              {statusText}
-            </Tag>
+        <div style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
+          padding: "12px 20px",
+          backgroundColor: "#fff",
+          borderBottom: "1px solid #f0f0f0",
+        }}>
+          {/* 单行：状态图标 + 名称 + 元数据 + 操作按钮 */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            {/* 左侧：状态图标 + 名称 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              {/* 发布状态图标（仅已发布时显示） */}
+              {skill.status === "active" && (
+                <Tooltip title="已发布">
+                  <span style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    backgroundColor: "#52c41a",
+                    cursor: "pointer",
+                  }}>
+                    <CheckCircle size={12} style={{ color: "#fff" }} />
+                  </span>
+                </Tooltip>
+              )}
 
-            {/* 统计状态徽章（仅管理员可见，只显示状态） */}
-            {isManager && (
-              <Tag
-                bordered={false}
-                style={{
-                  margin: 0,
-                  borderRadius: 6,
-                  padding: "2px 8px",
-                  fontSize: 12,
-                  backgroundColor: includeInStatistics ? "#e6f4ff" : "#f5f5f5",
-                  color: includeInStatistics ? "#1677ff" : "#8c8c8c",
-                }}
-              >
-                <BarChart3 size={12} style={{ marginRight: 4 }} />
-                {includeInStatistics ? "已纳入统计" : "未纳入统计"}
-              </Tag>
-            )}
+              {/* 统计状态图标（仅已纳入统计时显示，仅管理员可见） */}
+              {isManager && includeInStatistics && (
+                <Tooltip title="已纳入统计">
+                  <span style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    backgroundColor: "#2f54eb",
+                    cursor: "pointer",
+                  }}>
+                    <BarChart3 size={12} style={{ color: "#fff" }} />
+                  </span>
+                </Tooltip>
+              )}
 
-            {/* 中文名（大号） + 技能名（小号） */}
-            {isEditing ? (
-              <Input
-                value={draftCnName}
-                onChange={(e) => setDraftCnName(e.target.value)}
-                style={{ width: 200, fontSize: 14 }}
-                maxLength={50}
-                showCount
-                placeholder="输入中文名称"
-              />
-            ) : (
-              <span style={CHINESE_NAME_STYLE}>
-                {chineseName}
-                {chineseName && skillName && (
-                  <span style={SKILL_NAME_STYLE}> ({skillName})</span>
-                )}
-                {!chineseName && skillName && (
-                  <span style={CHINESE_NAME_STYLE}>{skillName}</span>
-                )}
-              </span>
-            )}
-
-            {/* 编辑按钮 */}
-            {isManager && !isEditing && (
-              <Tooltip title="编辑中文名">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<EditOutlined style={{ fontSize: 12, color: "#3769fc" }} />}
-                  onClick={handleEditStart}
-                  style={{ padding: 4 }}
+              {/* 中文名（大号） + 技能名（小号） */}
+              {isEditing ? (
+                <Input
+                  value={draftCnName}
+                  onChange={(e) => setDraftCnName(e.target.value)}
+                  style={{ width: 200, fontSize: 14 }}
+                  maxLength={50}
+                  showCount
+                  placeholder="输入中文名称"
                 />
-              </Tooltip>
-            )}
+              ) : (
+                <span style={CHINESE_NAME_STYLE}>
+                  {chineseName}
+                  {chineseName && skillName && (
+                    <span style={SKILL_NAME_STYLE}> ({skillName})</span>
+                  )}
+                  {!chineseName && skillName && (
+                    <span style={CHINESE_NAME_STYLE}>{skillName}</span>
+                  )}
+                </span>
+              )}
 
-            {/* 编辑时显示保存/取消按钮 */}
-            {isManager && isEditing && (
-              <>
-                <Button
-                  size="small"
-                  onClick={handleEditCancel}
-                  disabled={isSaving}
-                  style={{ height: 24, borderRadius: 4 }}
-                >
-                  取消
-                </Button>
-                <Button
-                  size="small"
-                  type="primary"
-                  onClick={handleSaveClick}
-                  loading={isSaving}
-                  style={{ height: 24, borderRadius: 4 }}
-                >
-                  保存
-                </Button>
-              </>
-            )}
+              {/* 编辑按钮 */}
+              {isManager && !isEditing && (
+                <Tooltip title="编辑中文名">
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<EditOutlined style={{ fontSize: 12, color: "#3769fc" }} />}
+                    onClick={handleEditStart}
+                    style={{ padding: 4 }}
+                  />
+                </Tooltip>
+              )}
 
-            {/* 分类 */}
-            {normalizedCategoryName && (
+              {/* 编辑时显示保存/取消按钮 */}
+              {isManager && isEditing && (
+                <>
+                  <Button
+                    size="small"
+                    onClick={handleEditCancel}
+                    disabled={isSaving}
+                    style={{ height: 24, borderRadius: 4 }}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    size="small"
+                    type="primary"
+                    onClick={handleSaveClick}
+                    loading={isSaving}
+                    style={{ height: 24, borderRadius: 4 }}
+                  >
+                    保存
+                  </Button>
+                </>
+              )}
+
+              {/* 分类 */}
+              {normalizedCategoryName && (
+                <span style={META_ITEM_STYLE}>
+                  <TagIcon size={12} />
+                  {normalizedCategoryName}
+                </span>
+              )}
+
+              {/* 版本 */}
               <span style={META_ITEM_STYLE}>
-                <TagIcon size={12} />
-                {normalizedCategoryName}
+                <GitBranch size={12} />
+                v{skill.version}
               </span>
-            )}
 
-            {/* 版本 */}
-            <span style={META_ITEM_STYLE}>
-              <GitBranch size={12} />
-              v{skill.version}
-            </span>
+              {/* 创建时间 */}
+              <span style={META_ITEM_STYLE}>
+                <Calendar size={12} />
+                {formatDate(skill.created_at)}
+              </span>
 
-            {/* 创建时间 */}
-            <span style={META_ITEM_STYLE}>
-              <Calendar size={12} />
-              {formatDate(skill.created_at)}
-            </span>
+              {/* 创建人 */}
+              <span style={META_ITEM_STYLE}>
+                <Users size={12} />
+                {skill.creator_name || "未知"}
+              </span>
+            </div>
 
-            {/* 创建人 */}
-            <span style={META_ITEM_STYLE}>
-              <Users size={12} />
-              {skill.creator_name || "未知"}
-            </span>
-          </div>
-
-          {/* 右侧：操作按钮 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* 右侧：操作按钮 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Button
               onClick={handleDownloadCurrentVersion}
               loading={downloadingCurrentVersion}
@@ -827,6 +838,7 @@ export function SkillDetailDrawer(
             )}
           </div>
         </div>
+      </div>
 
         {/* 主区域：文档 + 用户明细 */}
         <div

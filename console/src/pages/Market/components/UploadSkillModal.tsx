@@ -67,7 +67,7 @@ export default function UploadSkillModal({
       setSkillIdUsedCount(0);
       setSkillIdUsedBy([]);
       setSelectedCategory(null);
-      setSelectedBbkIds([]);
+      setSelectedBbkIds([BBK_ID_MAP[0].value]);  // 默认选择第一个分行
       setSkillExists(false);
       setIncludeInStatistics(false);
     }
@@ -330,7 +330,7 @@ export default function UploadSkillModal({
           onChange={(e) => setIncludeInStatistics(e.target.checked)}
         >
           是否纳入统计
-          <Tooltip title="勾选后，该技能的使用数据将展示在运营看板的使用排行榜中">
+          <Tooltip title="勾选后，该技能的使用数据将纳入统计分析">
             <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
           </Tooltip>
         </Checkbox>

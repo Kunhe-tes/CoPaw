@@ -548,7 +548,14 @@ def _process_skill_upload_single(
     skill_id: Optional[str] = None,
     bbk_ids: Optional[list[str]] = None,
     include_in_statistics: bool = False,
-) -> tuple[Optional[str], Optional[dict], Optional[str], str, bool]:
+) -> tuple[
+    Optional[str],
+    Optional[dict],
+    Optional[str],
+    str,
+    bool,
+    Optional[str],
+]:
     """处理单个技能的上架逻辑.
 
     Args:
@@ -559,7 +566,7 @@ def _process_skill_upload_single(
         include_in_statistics: 是否纳入排行榜统计
 
     Returns:
-        (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
+        (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged, item_id)
     """
     skill_json, skill_md, name, description, version = _parse_skill_metadata(
         skill_dir,
@@ -597,7 +604,7 @@ def _process_skill_upload_single(
             "existing_creator_name": existing.creator_name,
             "existing_version": existing.version,
         }
-        return None, conflict_info, name, resolved_cn_name, False
+        return None, conflict_info, name, resolved_cn_name, False, None
 
     version_unchanged = False
     cn_name_changed = False
@@ -653,7 +660,7 @@ def _process_skill_upload_single(
 
     save_index(svc.marketplace_root, source_id, items)
 
-    return name, None, name, resolved_cn_name, version_unchanged
+    return name, None, name, resolved_cn_name, version_unchanged, item.item_id
 
 
 async def _process_published_skill_record(
@@ -782,6 +789,7 @@ async def publish_skill_upload(
                 first_name,
                 resolved_cn_name,
                 version_unchanged,
+                item_id,
             ) = await asyncio.to_thread(
                 _process_skill_upload_single,
                 skill_dir,
@@ -822,6 +830,26 @@ async def publish_skill_upload(
                         parsed_cn_name,
                     )
                 )
+
+                # 同步写入 swe_marketplace_skills 表
+                if item_id and svc.db and svc.db.is_connected:
+                    from market.marketplace.market_skill_registry import (
+                        MarketSkillRegistry,
+                    )
+
+                    registry = MarketSkillRegistry(svc.db)
+                    await registry.upsert_market_skill(
+                        source_id=source_id,
+                        item_id=item_id,
+                        skill_id=skill_id,
+                        skill_name=imported_name,
+                        cn_name=resolved_cn_name,
+                        include_in_statistics=include_in_statistics,
+                        creator_id=x_user_id,
+                        creator_name=user_name,
+                        updator_id=x_user_id,
+                        updator_name=user_name,
+                    )
     finally:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -908,6 +936,7 @@ async def publish_skill(
         created_at=item.created_at,
         updated_at=item.updated_at,
         version_unchanged=version_unchanged,
+        include_in_statistics=item.include_in_statistics,
     )
 
 
