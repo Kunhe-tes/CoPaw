@@ -1186,6 +1186,27 @@ class FileManagerService:
         transition = index.get("transition")
         if not isinstance(transition, dict):
             return index
+        operation, item, archive_item_id, original_path = (
+            self._archive_transition_details(transition)
+        )
+        items = self._archive_index_items(index)
+        items = self._recover_archive_transition_items(
+            operation,
+            transition,
+            item,
+            archive_item_id,
+            original_path,
+            items,
+        )
+        recovered = {"version": 1, "items": items}
+        self._save_archive_index(recovered)
+        return recovered
+
+    def _archive_transition_details(
+        self,
+        transition: Mapping[str, object],
+    ) -> tuple[str, dict[str, object], str, str]:
+        """Validate and extract the metadata needed to recover a transition."""
         operation = transition.get("operation")
         item = transition.get("item")
         if not isinstance(operation, str) or not isinstance(item, dict):
@@ -1193,50 +1214,123 @@ class FileManagerService:
         archive_item_id = self._validate_archive_item_id(
             str(item.get("id") or ""),
         )
-        original_path = self._validate_archive_original_path(item)
-        payload_exists = self._archive_payload_exists(archive_item_id)
-        existing_items = index.get("items")
-        items = (
-            list(existing_items) if isinstance(existing_items, list) else []
+        return (
+            operation,
+            item,
+            archive_item_id,
+            self._validate_archive_original_path(item),
         )
+
+    @staticmethod
+    def _archive_index_items(index: Mapping[str, object]) -> list[object]:
+        """Copy the index's item list, tolerating a missing list."""
+        existing_items = index.get("items")
+        return list(existing_items) if isinstance(existing_items, list) else []
+
+    def _recover_archive_transition_items(
+        self,
+        operation: str,
+        transition: Mapping[str, object],
+        item: dict[str, object],
+        archive_item_id: str,
+        original_path: str,
+        items: list[object],
+    ) -> list[object]:
+        """Apply recovery rules for one interrupted archive operation."""
+        payload_exists = self._archive_payload_exists(archive_item_id)
+        if operation == "archive":
+            return self._add_archive_item_if_missing(
+                items,
+                item,
+                archive_item_id,
+                payload_exists,
+            )
+        if operation == "restore":
+            return self._recover_restore_transition_items(
+                items,
+                transition,
+                item,
+                archive_item_id,
+                original_path,
+                payload_exists,
+            )
+        if operation == "purge":
+            return self._recover_purge_transition_items(
+                items,
+                item,
+                archive_item_id,
+                payload_exists,
+            )
+        raise FileManagerPathError("Invalid archive transition")
+
+    def _recover_restore_transition_items(
+        self,
+        items: list[object],
+        transition: Mapping[str, object],
+        item: dict[str, object],
+        archive_item_id: str,
+        original_path: str,
+        payload_exists: bool,
+    ) -> list[object]:
+        """Retain restore metadata unless its payload was safely consumed."""
+        recovered = self._add_archive_item_if_missing(
+            items,
+            item,
+            archive_item_id,
+            payload_exists,
+        )
+        target_identity = transition.get("target_identity")
+        target_matches = isinstance(target_identity, dict) and (
+            target_identity == self._workspace_file_identity(original_path)
+        )
+        if target_matches and not payload_exists:
+            return self._remove_archive_item(recovered, archive_item_id)
+        return recovered
+
+    def _recover_purge_transition_items(
+        self,
+        items: list[object],
+        item: dict[str, object],
+        archive_item_id: str,
+        payload_exists: bool,
+    ) -> list[object]:
+        """Restore purge metadata only while the archived payload remains."""
+        if payload_exists:
+            return self._add_archive_item_if_missing(
+                items,
+                item,
+                archive_item_id,
+                payload_exists=True,
+            )
+        return self._remove_archive_item(items, archive_item_id)
+
+    @staticmethod
+    def _add_archive_item_if_missing(
+        items: list[object],
+        item: dict[str, object],
+        archive_item_id: str,
+        payload_exists: bool,
+    ) -> list[object]:
+        """Add one recovered item when its payload is still present."""
         item_ids = {
             str(row.get("id") or "") for row in items if isinstance(row, dict)
         }
-        if operation == "archive":
-            if payload_exists and archive_item_id not in item_ids:
-                items.append(item)
-        elif operation == "restore":
-            target_identity = transition.get("target_identity")
-            target_matches = isinstance(
-                target_identity,
-                dict,
-            ) and target_identity == self._workspace_file_identity(
-                original_path,
-            )
-            if payload_exists and archive_item_id not in item_ids:
-                items.append(item)
-            elif target_matches and not payload_exists:
-                items = [
-                    row
-                    for row in items
-                    if not isinstance(row, dict)
-                    or str(row.get("id") or "") != archive_item_id
-                ]
-        elif operation == "purge":
-            if payload_exists and archive_item_id not in item_ids:
-                items.append(item)
-            elif not payload_exists:
-                items = [
-                    row
-                    for row in items
-                    if not isinstance(row, dict)
-                    or str(row.get("id") or "") != archive_item_id
-                ]
-        else:
-            raise FileManagerPathError("Invalid archive transition")
-        recovered = {"version": 1, "items": items}
-        self._save_archive_index(recovered)
-        return recovered
+        if payload_exists and archive_item_id not in item_ids:
+            return [*items, item]
+        return items
+
+    @staticmethod
+    def _remove_archive_item(
+        items: list[object],
+        archive_item_id: str,
+    ) -> list[object]:
+        """Remove a recovered archive item without changing malformed rows."""
+        return [
+            row
+            for row in items
+            if not isinstance(row, dict)
+            or str(row.get("id") or "") != archive_item_id
+        ]
 
     def _archive_payload_exists(self, archive_item_id: str) -> bool:
         try:
