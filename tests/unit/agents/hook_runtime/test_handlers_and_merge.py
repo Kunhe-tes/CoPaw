@@ -1100,6 +1100,76 @@ async def test_runtime_emits_prompt_command_and_http_handlers_concurrently(
 
 
 @pytest.mark.asyncio
+async def test_runtime_stop_executes_handlers_but_discards_all_effects(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    executed_handler_ids: list[str] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del context, workspace_dir
+        executed_handler_ids.append(handler.id)
+        return HookHandlerResult(
+            handler_id=handler.id,
+            order=0,
+            output=HookOutput(
+                continue_=False,
+                stop_reason="ignored stop request",
+                system_message="ignored system message",
+                suppress_output=True,
+                hook_specific_output={
+                    "additionalContext": "ignored context",
+                    "updatedInput": {"command": "ignored"},
+                    "sessionTitle": "ignored title",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "ignored denial",
+                },
+            ),
+            decision=HookDecision.STOP,
+            reason="ignored stop request",
+        )
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="stop-observer",
+                                command="echo",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    result = await runtime.emit(
+        _context(HookEventName.STOP),
+        workspace_dir=Path("/tmp"),
+    )
+
+    assert executed_handler_ids == ["stop-observer"]
+    assert result.decision == HookDecision.NONE
+    assert result.reason == ""
+    assert result.additional_context == []
+    assert result.hook_specific_outputs == {}
+    assert result.permission_decisions == []
+    assert result.updated_input is None
+    assert result.session_title is None
+    assert result.suppress_output is False
+    assert result.system_messages == []
+
+
+@pytest.mark.asyncio
 async def test_runtime_injects_conversation_snapshot_per_handler(
     monkeypatch,
 ) -> None:

@@ -18,6 +18,7 @@ from .models import (
     HookConfig,
     HookContext,
     HookSessionOverlay,
+    HookEventName,
     MergedHookResult,
 )
 from .resolver import HookResolver, once_key
@@ -100,6 +101,8 @@ class HookRuntime:
             )
         except Exception as exc:
             logger.warning("Failed to emit hook telemetry: %s", exc)
+        if context.hook_event_name == HookEventName.STOP:
+            return MergedHookResult()
         return merged
 
     async def _capture_conversation_snapshot(
