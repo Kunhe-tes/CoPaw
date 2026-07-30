@@ -435,6 +435,7 @@ async def test_command_handler_env_injects_runtime_claims(
     context = _context().model_copy(
         update={
             "effective_tenant_id": encode_scope_id("tenant-a", "source-a"),
+            "chat_id": "chat-uuid-1",
             "trace_id": "trace-1",
         },
     )
@@ -453,6 +454,7 @@ async def test_command_handler_env_injects_runtime_claims(
         "source-a",
     )
     assert observed["SWE_SESSION_ID"] == "session-1"
+    assert observed["SWE_CHAT_ID"] == "chat-uuid-1"
     assert observed["SWE_TRACE_ID"] == "trace-1"
 
 
@@ -583,6 +585,7 @@ async def test_http_handler_injects_canonical_runtime_claim_headers(
     context = _context().model_copy(
         update={
             "effective_tenant_id": encode_scope_id("tenant-a", "source-a"),
+            "chat_id": "chat-uuid-1",
             "trace_id": "trace-1",
         },
     )
@@ -608,6 +611,7 @@ async def test_http_handler_injects_canonical_runtime_claim_headers(
         "x-swe-source-id": "source-a",
         "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-session-id": "session-1",
+        "x-swe-chat-id": "chat-uuid-1",
         "x-swe-trace-id": "trace-1",
     }
 

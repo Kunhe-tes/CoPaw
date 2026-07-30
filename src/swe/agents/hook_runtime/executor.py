@@ -473,6 +473,7 @@ def _build_command_handler_env(
         source_id=context.source_id,
         runtime_scope_id=context.effective_tenant_id,
         session_id=context.session_id,
+        chat_id=context.chat_id,
         trace_id=context.trace_id,
     )
 
@@ -516,6 +517,7 @@ def _build_http_headers(
         source_id=context.source_id,
         runtime_scope_id=context.effective_tenant_id,
         session_id=context.session_id,
+        chat_id=context.chat_id,
         trace_id=context.trace_id,
     )
 

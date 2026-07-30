@@ -1218,6 +1218,15 @@ async def test_prepare_query_runtime_resolves_chat_before_connecting_mcp(
         events.append("chat")
         return chat
 
+    async def build_context_reference_directives(*args, **kwargs):
+        del args, kwargs
+        from swe.runtime_invocation_claims import (
+            build_runtime_invocation_claims,
+        )
+
+        events.append(("discovery", build_runtime_invocation_claims().chat_id))
+        return []
+
     setattr(
         runner,
         "_chat_manager",
@@ -1235,6 +1244,10 @@ async def test_prepare_query_runtime_resolves_chat_before_connecting_mcp(
     monkeypatch.setattr(
         "swe.app.runner.runner._build_and_connect_mcp_clients",
         build_clients,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        build_context_reference_directives,
     )
     monkeypatch.setattr(
         "swe.app.runner.runner.load_agent_config",
@@ -1262,7 +1275,11 @@ async def test_prepare_query_runtime_resolves_chat_before_connecting_mcp(
     )
 
     assert result.runtime is not None
-    assert events == ["chat", ("mcp", "chat-uuid-1")]
+    assert events == [
+        "chat",
+        ("discovery", "chat-uuid-1"),
+        ("mcp", "chat-uuid-1"),
+    ]
 
 
 @pytest.mark.asyncio

@@ -3044,11 +3044,6 @@ class AgentRunner(Runner):
         from ..source_system_config.runtime import (
             get_system_prompt_injections,
         )
-        from .context_references import build_context_reference_directives
-        from .skill_selection import (
-            SkillUseDirective,
-            build_skill_use_directives,
-        )
 
         agent_config = (
             preflight.agent_config
@@ -3057,28 +3052,6 @@ class AgentRunner(Runner):
                 self.agent_id,
                 tenant_id=self.tenant_id,
             )
-        )
-        context_reference_directives = (
-            await build_context_reference_directives(
-                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                channel=channel,
-                agent_config=agent_config,
-                references=_request_context_references(request),
-            )
-        )
-        selected_context_skill_names = {
-            directive.name
-            for directive in context_reference_directives
-            if isinstance(directive, SkillUseDirective)
-        }
-        selected_skill_directives = build_skill_use_directives(
-            workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-            channel=channel,
-            selected_skill_names=[
-                name
-                for name in _request_selected_skill_names(request)
-                if name not in selected_context_skill_names
-            ],
         )
         passthrough_headers = dict[str, str](
             get_current_passthrough_headers() or {},
@@ -3110,13 +3083,7 @@ class AgentRunner(Runner):
                     _request_system_prompt_injections(request),
                 ),
             ),
-            selected_context_directives=[
-                directive.render()
-                for directive in [
-                    *selected_skill_directives,
-                    *context_reference_directives,
-                ]
-            ],
+            selected_context_directives=[],
             auth_token=getattr(request, "auth_token", None),
             passthrough_headers=passthrough_headers,
         )
@@ -3139,6 +3106,44 @@ class AgentRunner(Runner):
             request=request,
             turn_id=turn_id,
         )
+        with runtime_invocation_claims_context(
+            chat_id=chat.id if chat is not None else None,
+        ):
+            from .context_references import build_context_reference_directives
+            from .skill_selection import (
+                SkillUseDirective,
+                build_skill_use_directives,
+            )
+
+            context_reference_directives = (
+                await build_context_reference_directives(
+                    workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                    channel=inputs.channel,
+                    agent_config=inputs.agent_config,
+                    references=_request_context_references(request),
+                )
+            )
+            selected_context_skill_names = {
+                directive.name
+                for directive in context_reference_directives
+                if isinstance(directive, SkillUseDirective)
+            }
+            selected_skill_directives = build_skill_use_directives(
+                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                channel=inputs.channel,
+                selected_skill_names=[
+                    name
+                    for name in _request_selected_skill_names(request)
+                    if name not in selected_context_skill_names
+                ],
+            )
+            inputs.selected_context_directives = [
+                directive.render()
+                for directive in [
+                    *selected_skill_directives,
+                    *context_reference_directives,
+                ]
+            ]
         mcp_clients.extend(
             await _build_and_connect_mcp_clients(
                 inputs.agent_config.mcp,
