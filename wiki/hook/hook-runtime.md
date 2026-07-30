@@ -24,6 +24,7 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 - `BeforeStop` 是“完成门禁”：候选回复已经生成后才触发；返回 `block` 会让 Agent 在同一次请求里继续做事，而不是立刻结束。
 - `PostToolUse` 和 `PostToolUseFailure` 不能撤销已经发生的工具调用，但现在所有经 Tool Guard 执行的工具路径（包括预批准和受保护的内置工具）都会进入对应的后置 hook；它们适合审计、诊断，或用终止决策结束当前回合。
 - `continue: false` 或 `decision: "stop"` 是回合级终止，而不只是“阻断当前工具”：在工具事件中命中后会阻止后续推理，并取消仍在等待的并行工具调用。
+- `Stop` 是纯观测回调：handler 会照常执行、记 telemetry 和 `once` 状态，但所有返回字段（包括错误的 `failPolicy` 效果）都会静默丢弃。
 - Skill 自带 hook 只有在该 Skill 在当前会话里被激活后才会生效。
 - 多个 handler 会并发执行，不要依赖“前一个 handler 的输出给后一个 handler 使用”。
 
@@ -35,7 +36,7 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 - 对高风险工具调用弹出人工审批
 - 在工具执行成功或失败后补充审计和诊断信息
 - 在回复结束前要求先完成测试、构建或 lint
-- 在回合结束时记录收尾信息，供下一轮对话继续使用
+- 在回合结束时向外部审计或埋点系统记录最终状态
 
 ## 新人推荐阅读顺序
 
@@ -65,7 +66,7 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 | `PostToolUse` | 工具成功返回后 | 成功结果已经保留；普通 `block` 不会撤销它，终止决策会结束当前回合 | 审计记录、补充工具结果说明、在结果出现后停止继续推理 |
 | `PostToolUseFailure` | 工具调用抛出失败后 | 原始失败已被记录；普通 `block` 不会吞掉它，终止决策会结束当前回合 | 记录错误、提示排查方向、在失败后停止继续推理 |
 | `BeforeStop` | 候选回复已经流出后、正式结束前 | 用户通常已经看到了候选回复；若返回 `block`，系统会继续同一任务 | 完成门禁、测试门禁、发布前检查 |
-| `Stop` | 系统允许结束后、当前轮真正结束前 | 如果被阻断，用户会再看到一条阻断说明，本轮结束 | 最终审计、写入收尾上下文 |
+| `Stop` | 系统允许结束后、当前轮真正结束前 | handler 的返回值不会产生用户可见内容或流程变化 | 最终审计、埋点、外部通知 |
 
 实际请求路径里还有一个顺序细节：如果当前请求带有文本用户输入，`UserPromptSubmit` 会在 preflight 阶段先执行；之后系统装配 Agent 主流程时才执行 `SessionStart`。所以上表按生命周期概念排序，不表示所有请求里严格按表格顺序触发。
 
@@ -76,12 +77,12 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 这两个事件最容易混淆。
 
 - `BeforeStop` 是“现在能不能结束”。如果返回 `block`，系统会自动继续当前任务，而不是直接结束。
-- `Stop` 是“已经准备结束了，最后再做一次收尾”。如果返回阻断，当前轮会结束，但不会自动续跑。
+- `Stop` 是“已经准备结束了，最后再做一次观测”。handler 可以发送审计、埋点或外部通知，但它的所有返回值都会被静默丢弃。
 
 还有一个很重要的用户可见差异：
 
 - `BeforeStop` 触发时，候选回复通常已经被用户看到了。
-- `Stop` 触发时，候选回复通常也已经被用户看到了；若 hook 阻断，系统会追加一条说明，而不是把前面的回复“撤回”。
+- `Stop` 触发时，候选回复通常也已经被用户看到了；它既不会追加说明，也不会撤回、阻断或续跑该回复。
 
 ## 配置写在哪里
 
@@ -475,6 +476,8 @@ Skill 级 `hooks/hooks.json` 示例：
 - `block`
 - `stop`
 
+`Stop` 虽然可以配置 `prompt` handler，但其模型判断结果和任何其他 handler 输出都会被静默丢弃；不要用它做完成门禁或流程控制。
+
 `BeforeStop` 上更严格，只允许：
 
 - `allow`
@@ -777,7 +780,7 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 - `BeforeStop`
   表示“现在还不能结束，请继续当前任务”。
 - `Stop`
-  会在当前轮末尾追加一条阻断说明，然后结束本轮，不会自动续跑。
+  handler 仍会执行，但 `block`、`deny`、`stop` 和其他全部输出都不会改变当前轮。
 
 ### 4. 终止当前回合：`continue: false` 或 `decision: "stop"`
 
@@ -809,9 +812,10 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 - 在 `PreToolUse` 命中时，当前工具不会执行；运行时会写入 `hook_stopped` 工具结果，并取消同一回合中仍未完成的并行工具调用。
 - 在 `PostToolUse` 命中时，已完成的成功工具结果会保留，然后结束当前回合并取消等待中的并行工具调用。
 - 在 `PostToolUseFailure` 命中时，hook 仍会先拿到原始失败信息；终止决策会以回合终止取代正常的失败继续路径。
-- `SessionStart` / `UserPromptSubmit` / `Stop` 同样可以使用它结束当前流程。
+- `SessionStart` / `UserPromptSubmit` 同样可以使用它结束当前流程。
 - `BeforeStop` 不支持这个字段
 - 在 `BeforeStop` 上只能用 `allow` 或 `block`
+- `Stop` 的该字段会被静默丢弃
 
 ### 5. 补充上下文：`additionalContext`
 
@@ -829,10 +833,12 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 
 - `SessionStart` / `UserPromptSubmit`
   会被追加到本轮 Agent 的初始上下文中
-- `PostToolUse` / `PostToolUseFailure` / `Stop`
+- `PostToolUse` / `PostToolUseFailure`
   会作为系统说明写入内存，供后续推理或下一轮继续使用
 - `BeforeStop`
   不支持 `additionalContext`
+- `Stop`
+  的 `additionalContext` 会被静默丢弃，不会写入 memory
 
 实务上最常见的用法：
 
@@ -924,6 +930,8 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 ```text
 continue:false / decision:stop > block/deny > ask > allow > none
 ```
+
+这套合并规则不适用于 `Stop`：它会先让所有命中的 handler 执行完，再把整个合并结果替换为空结果。
 
 另外还有几条固定规则：
 
@@ -1244,7 +1252,7 @@ Skill 自带 `http` handler：
 }
 ```
 
-### 示例 7：真正结束前追加收尾信息
+### 示例 7：真正结束后发送审计/埋点
 
 ```json
 {
@@ -1272,9 +1280,15 @@ Skill 自带 `http` handler：
 
 适合做：
 
-- 当前轮真正结束前写入收尾上下文
-- 记录最终审计说明
-- 在需要时用 `continue: false` 明确停止当前轮
+- 向日志、指标或审计系统发送最终状态
+- 触发不影响会话的外部收尾动作
+
+不适合做：
+
+- 返回 `additionalContext` 写入记忆
+- 返回 `block` / `deny` / `stop` 或 `continue: false` 控制当前轮
+
+这些返回值都会静默丢弃；如需影响候选回复是否继续，使用 `BeforeStop` 的 `block`。
 
 ## 验证方式
 
@@ -1282,11 +1296,13 @@ Skill 自带 `http` handler：
 
 ### 验证 1：确认 hook 已命中
 
-先用一个最简单的 handler，返回固定 `additionalContext` 或固定 `block`，确认：
+先在会产生效果的事件上用一个最简单的 handler，返回固定 `additionalContext` 或固定 `block`，确认：
 
 - 事件名写对了
 - 文件路径写对了
 - `enabled` 已打开
+
+验证 `Stop` 时不要观察 stdout 的返回效果；应改为检查 handler 写入的外部审计、日志或指标。
 
 ### 验证 2：确认工具名和字段名
 

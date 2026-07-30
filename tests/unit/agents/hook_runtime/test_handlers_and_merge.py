@@ -1170,6 +1170,43 @@ async def test_runtime_stop_executes_handlers_but_discards_all_effects(
 
 
 @pytest.mark.asyncio
+async def test_runtime_stop_discards_fail_policy_block_effect(
+    tmp_path: Path,
+) -> None:
+    """Stop handler 的执行失败仍可被 telemetry 记录，但不能阻断当前请求。"""
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    script = tmp_path / "fail_stop_observer.py"
+    script.write_text("raise SystemExit(1)\n", encoding="utf-8")
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="failing-stop-observer",
+                                argv=["python", str(script)],
+                                fail_policy=FailPolicy.BLOCK,
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    result = await runtime.emit(
+        _context(HookEventName.STOP),
+        workspace_dir=tmp_path,
+    )
+
+    assert result.decision == HookDecision.NONE
+    assert result.reason == ""
+
+
+@pytest.mark.asyncio
 async def test_runtime_injects_conversation_snapshot_per_handler(
     monkeypatch,
 ) -> None:

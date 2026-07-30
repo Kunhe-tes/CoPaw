@@ -19,22 +19,19 @@ def _load_payload() -> dict[str, object]:
 
 
 def _build_output(payload: dict[str, object]) -> dict[str, object]:
-    """根据 assistant_response 生成 Stop 事件输出。"""
-    response_text = str(payload.get("assistant_response") or "")
-    if REVIEW_SENTINEL in response_text:
-        return {
-            "continue": False,
-            "stopReason": "候选回复显式要求等待人工复核，本轮在 Stop 阶段结束",
-        }
+    """Stop 只做观测，stdout 不返回任何运行时效果。"""
+    del payload
+    return {}
 
+
+def _build_audit_record(payload: dict[str, object]) -> dict[str, object]:
+    """构造给外部日志采集器消费的 Stop 审计记录。"""
     tool_name = str(payload.get("tool_name") or "")
     return {
-        "hookSpecificOutput": {
-            "additionalContext": [
-                "Stop hook 已执行最终收尾。",
-                f"最后一次相关工具: {tool_name or 'unknown'}。",
-            ],
-        },
+        "event": "Stop",
+        "tool_name": tool_name or "unknown",
+        "review_sentinel_detected": REVIEW_SENTINEL
+        in str(payload.get("assistant_response") or ""),
     }
 
 
@@ -46,6 +43,10 @@ def main() -> int:
         print(f"invalid hook payload: {exc}", file=sys.stderr)
         return 1
 
+    print(
+        json.dumps(_build_audit_record(payload), ensure_ascii=False),
+        file=sys.stderr,
+    )
     print(json.dumps(_build_output(payload), ensure_ascii=False))
     return 0
 

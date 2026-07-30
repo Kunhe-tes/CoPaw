@@ -35,7 +35,7 @@
 | `BeforeStop` | [before-stop-prompt-demo](before-stop-prompt-demo/SKILL.md) | `prompt` | 演示结束前 gate，只允许 `allow` / `block` |
 | `BeforeStop` | [final-output-prompt-guard-demo](final-output-prompt-guard-demo/SKILL.md) | `prompt` | 演示通过提示词审查 Agent 最终输出规范，不符合则 `block`，符合则 `allow` |
 | `BeforeStop` | [before-stop-history-http-guard-demo](before-stop-history-http-guard-demo/SKILL.md) | `command` | 演示读取完整会话历史并调用外部接口判定最终输出 |
-| `Stop` | [stop-command-summary-demo](stop-command-summary-demo/SKILL.md) | `command` | 演示真正结束前补充收尾上下文或停止说明 |
+| `Stop` | [stop-command-summary-demo](stop-command-summary-demo/SKILL.md) | `command` | 演示结束时发送最终审计/埋点；handler 输出会被忽略 |
 
 ## Handler 覆盖
 
@@ -43,7 +43,7 @@
 | --- | --- | --- |
 | `command` | `user-prompt-submit-command-demo`、`pre-tool-use-command-demo`、`conditional-pre-tool-use-demo`、`snapshot-post-tool-audit-demo`、`mcp-failure-fallback-demo`、`http-auth-failure-guard-demo`、`before-stop-history-http-guard-demo`、`stop-command-summary-demo` | skill 级必须使用 `argv`，脚本必须放在 `scripts/` 下 |
 | `http` | `hook-http-demo`、`tenant-pre-tool-use-http-policy-demo` | skill 级不能写明文 `headers` 与 `allowedEnvVars`；租户级可用 `headers` / `headerSecretRefs` 接远端策略服务 |
-| `prompt` | `session-start-prompt-demo`、`before-stop-prompt-demo`、`final-output-prompt-guard-demo` | 可挂到全部 7 个事件；普通事件支持 `allow` / `deny` / `block` / `stop`，`BeforeStop` 仅支持 `allow` / `block` |
+| `prompt` | `session-start-prompt-demo`、`before-stop-prompt-demo`、`final-output-prompt-guard-demo` | 可挂到全部 7 个事件；普通事件支持 `allow` / `deny` / `block` / `stop`，`BeforeStop` 仅支持 `allow` / `block`，`Stop` 的输出始终被忽略 |
 
 ## 使用方式
 
@@ -56,6 +56,7 @@
    - `http` handler 是否误写了 skill 级不允许的字段
    - 只有确实需要上下文时才打开 `includeConversationSnapshot`
    - `BeforeStop` 是否只返回 `allow` / `block`
+   - `Stop` 是否只做外部审计、埋点或通知，而不依赖任何返回字段
 
 ## 额外说明
 
@@ -74,5 +75,6 @@
   `assistant_response`，用提示词判断最终答复是否直接回应请求、是否有验证依据、是否说明限制。
 - `before-stop-history-http-guard-demo` 面向完整历史审查：在 `BeforeStop` 阶段读取
   `transcript_path` 指向的完整会话 JSON，再调用外部策略接口返回 `allow` / `block`。
+- `stop-command-summary-demo` 面向完成后的外部观测：脚本把审计记录写给外部日志采集，而 stdout 的 `{}` 不会改变会话、memory 或候选回复。
 - prompt 样例目录里的 `scripts/*.py` 不是 hook runtime 自动执行的 handler，而是用于
   生成最小 `HookContext` 样本，方便你手工调试 prompt 规则。

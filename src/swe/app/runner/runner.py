@@ -3468,7 +3468,7 @@ class AgentRunner(Runner):
         plan: _TurnPlan,
         outcome: _QueryTurnOutcome,
     ) -> Msg | None:
-        """执行 STOP hook，必要时把附加上下文写入 agent memory。"""
+        """执行纯观测的 STOP hook，并静默忽略其返回结果。"""
         if not _hook_config_enabled(
             runtime.tenant_hooks,
             runtime.agent_config,
