@@ -117,7 +117,7 @@ import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
-import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
+import FileManager from "./components/FileManager";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
@@ -1628,7 +1628,7 @@ export default function ChatPage() {
             <RuntimeLoadingBridge bridgeRef={runtimeLoadingBridgeRef} />
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
-            {!isContentOnly && <GeneratedFilesDrawer />}
+            {!isContentOnly && <FileManager />}
             {!isContentOnly && <ModelSelector />}
             {/* <ChatActionGroup /> */}
           </>
@@ -1828,6 +1828,7 @@ export default function ChatPage() {
             onConsumed={() => setAutoPreviewTriggerKey(0)}
           >
             <div
+              data-chat-shell
               style={{
                 height: "100%",
                 width: "100%",
@@ -1853,6 +1854,7 @@ export default function ChatPage() {
               {/* ==================== 首页改版结束 ==================== */}
               <div
                 className={styles.chatMessagesArea}
+                data-chat-messages-area
                 style={{ flex: 1, minWidth: 0, position: "relative" }}
                 onDragEnter={isContentOnly ? undefined : handleDragEnter}
                 onDragLeave={isContentOnly ? undefined : handleDragLeave}

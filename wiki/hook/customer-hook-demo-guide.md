@@ -41,7 +41,7 @@
 | 改写工具输入 | `hookSpecificOutput.updatedInput` | [pre-tool-use-command-demo](pre-tool-use-command-demo/SKILL.md) |
 | 注入上下文 | `hookSpecificOutput.additionalContext` | [hook-http-demo](hook-http-demo/SKILL.md)、[mcp-failure-fallback-demo](mcp-failure-fallback-demo/SKILL.md) |
 | 设置会话标题 | `hookSpecificOutput.sessionTitle` | [user-prompt-submit-command-demo](user-prompt-submit-command-demo/SKILL.md) |
-| 停止当前流程 | `continue = false` | [stop-command-summary-demo](stop-command-summary-demo/SKILL.md) |
+| 终止当前回合 | `continue = false` 或 `decision = "stop"` | [stop-command-summary-demo](stop-command-summary-demo/SKILL.md) |
 
 ## 完成门禁预算配置
 
@@ -72,6 +72,7 @@
 
 - 不要把 `tool_response` 和 `conversation_snapshot` 混成一个概念；前者是当前工具结果，后者是最近对话裁剪。
 - 不要在 `BeforeStop` 返回 `additionalContext` 或 `continue: false`；它只适合 `allow` / `block`。
+- 不要把工具后置事件的普通 `block` 当成回合终止；要结束当前回合，使用 `continue: false` 或 `decision: "stop"`。终止会取消尚未完成的并行工具调用，但不会撤销已经发生的外部副作用。
 - 不要在 Skill 级 `command` handler 使用 `command` 字符串；用 `argv`。
 - 不要让多个 handler 同时返回 `updatedInput`；运行时会阻断以避免结果不确定。
 - 不要依赖多个 handler 的执行顺序；同一分组下 handler 会并发执行。

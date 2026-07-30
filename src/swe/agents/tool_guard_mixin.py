@@ -1335,6 +1335,7 @@ class ToolGuardMixin:
         )
 
         action: _GuardAction | None = None
+        guard_check_failed = False
         with self._agent_phase_context(
             "tool_guard",
             tool_name=tool_name,
@@ -1346,10 +1347,20 @@ class ToolGuardMixin:
                     action = await self._decide_guard_action(tool_call)
                 except Exception as exc:
                     logger.warning(
-                        "Tool guard check error (non-blocking): %s",
+                        "Tool guard check error; denying tool execution: %s",
                         exc,
                         exc_info=True,
                     )
+                    guard_check_failed = True
+
+        if guard_check_failed:
+            result = await self._acting_hook_denied(
+                tool_call,
+                tool_name,
+                "Tool guard check failed; execution was denied.",
+            )
+            await self._emit_tool_trace_end(span_id, result)
+            return result
 
         if action is not None and action.kind != "preapproved":
             result = await self._execute_guard_action(action, tool_call)

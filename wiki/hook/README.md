@@ -43,7 +43,7 @@
 | --- | --- | --- |
 | `command` | `user-prompt-submit-command-demo`、`pre-tool-use-command-demo`、`conditional-pre-tool-use-demo`、`snapshot-post-tool-audit-demo`、`mcp-failure-fallback-demo`、`http-auth-failure-guard-demo`、`before-stop-history-http-guard-demo`、`stop-command-summary-demo` | skill 级必须使用 `argv`，脚本必须放在 `scripts/` 下 |
 | `http` | `hook-http-demo`、`tenant-pre-tool-use-http-policy-demo` | skill 级不能写明文 `headers` 与 `allowedEnvVars`；租户级可用 `headers` / `headerSecretRefs` 接远端策略服务 |
-| `prompt` | `session-start-prompt-demo`、`before-stop-prompt-demo`、`final-output-prompt-guard-demo` | 只能挂到 `SessionStart`、`UserPromptSubmit`、`PreToolUse`、`BeforeStop`、`Stop` |
+| `prompt` | `session-start-prompt-demo`、`before-stop-prompt-demo`、`final-output-prompt-guard-demo` | 可挂到全部 7 个事件；普通事件支持 `allow` / `deny` / `block` / `stop`，`BeforeStop` 仅支持 `allow` / `block` |
 
 ## 使用方式
 
@@ -60,6 +60,7 @@
 ## 额外说明
 
 - `hook-http-demo` 保留了原有目录名，但它覆盖的事件就是 `PostToolUse`。如果你想同时观察“当前工具结果”和“最近对话上下文”，优先看这个 demo，再按需给 handler 打开 `includeConversationSnapshot`。
+- `PostToolUse` / `PostToolUseFailure` 现在覆盖普通调用、Tool Guard 预批准调用和受保护的 source-built-in tool。它们不能回滚外部副作用；若要在工具事件后直接结束当前回合，返回 `continue: false` 或 `decision: "stop"`，不要把普通 `block` 当作终止信号。
 - `tenant-pre-tool-use-http-policy-demo` 是租户级配置示例，不是 skill 级目录；它演示
   `~/.swe/<tenant_id>/config.json` 里需要多包一层根字段 `hooks`。
 - `conditional-pre-tool-use-demo` 专门演示 `if` 表达式。真实配置里建议先从简单条件开始验证，再逐步增加复杂度。

@@ -453,6 +453,25 @@ def _initialize_source_system_config(
         logger.warning("Failed to initialize source system config: %s", e)
 
 
+def _initialize_source_tools(app: FastAPI) -> None:
+    """Initialize the source-owned tool catalogue outside tenant workspaces."""
+    try:
+        from ..constant import WORKING_DIR
+        from .source_tools.service import (
+            SourceToolService,
+            install_source_tool_service,
+        )
+        from .source_tools.store import SourceToolStore
+
+        app.state.source_tool_service = SourceToolService(
+            SourceToolStore(WORKING_DIR / "source_tool_library"),
+        )
+        install_source_tool_service(app.state.source_tool_service)
+        logger.info("Source tool library initialized")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to initialize source tool library: %s", exc)
+
+
 async def _initialize_approval_audit_store(
     app: FastAPI,
     db_connection: Any | None,
@@ -784,6 +803,7 @@ async def lifespan(
         tenant_workspace_pool,
         multi_agent_manager,
     )
+    _initialize_source_tools(app)
 
     # --- 初始化定时任务分发用户反查快照 ---
     await _initialize_approval_audit_store(app, db_connection)

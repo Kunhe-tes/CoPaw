@@ -132,6 +132,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         namesake_strategy: NamesakeStrategy = "skip",
         workspace_dir: Path | None = None,
         task_tracker: Any | None = None,
+        source_tool_versions: tuple[Any, ...] = (),
     ):
         """Initialize SWEAgent.
 
@@ -160,6 +161,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         self._namesake_strategy = namesake_strategy
         self._workspace_dir = workspace_dir
         self._task_tracker = task_tracker
+        self._source_tool_versions = tuple(source_tool_versions)
         self._init_agent_phase_state()
 
         # Extract configuration from agent_config
@@ -171,6 +173,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
 
         # Load and register skills
         self._register_skills(toolkit)
+        self._register_source_tools(toolkit)
 
         # Build system prompt
         sys_prompt = self._build_sys_prompt()
@@ -359,6 +362,81 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                 )
 
         return toolkit
+
+    def _register_source_tools(self, toolkit: Toolkit) -> None:
+        """Register the Agent-start source-tool snapshot after skills are known."""
+        if not self._source_tool_versions:
+            return
+        from ..config.config import _default_builtin_tools
+        from .source_tools import SourceToolRuntime, build_source_tool_function
+
+        builtin_names = set(_default_builtin_tools())
+        runtime = SourceToolRuntime(
+            tenant_id=self._request_context.get("tenant_id") or None,
+            source_id=self._request_context.get("source_id") or None,
+            workspace_dir=Path(self._workspace_dir or WORKING_DIR),
+            agent_id=self._request_context.get("agent_id") or None,
+        )
+        configured_tools = getattr(
+            self._agent_config.tools,
+            "builtin_tools",
+            {},
+        )
+        enabled_tools = {
+            name: tool.enabled for name, tool in configured_tools.items()
+        }
+        for version in self._source_tool_versions:
+            if not enabled_tools.get(version.name, True):
+                logger.debug("Skipped disabled source tool: %s", version.name)
+                continue
+            is_builtin_override = version.name in builtin_names
+            if not is_builtin_override and version.name in toolkit.tools:
+                raise RuntimeError(
+                    "source tool collides with a skill or managed tool: "
+                    f"{version.name}",
+                )
+            source_schema = {
+                "type": "function",
+                "function": {
+                    "name": version.name,
+                    "description": version.description,
+                    "parameters": version.json_schema,
+                },
+            }
+            if is_builtin_override:
+                registered = toolkit.tools.get(version.name)
+                registered_schema = getattr(registered, "json_schema", None)
+                registered_parameters = (
+                    registered_schema.get("function", {}).get("parameters")
+                    if isinstance(registered_schema, dict)
+                    else None
+                )
+                if registered_parameters != version.json_schema:
+                    raise RuntimeError(
+                        "source override schema must match the code-defined "
+                        f"builtin: {version.name}",
+                    )
+            tool_func = build_source_tool_function(version, runtime)
+            toolkit.register_tool_function(
+                tool_func,
+                func_name=version.name,
+                func_description=version.description,
+                json_schema=source_schema,
+                namesake_strategy=(
+                    "override" if is_builtin_override else "raise"
+                ),
+                async_execution=(
+                    version.name == "execute_shell_command"
+                    and enabled_tools.get(
+                        "execute_shell_command",
+                        False,
+                    )
+                    and configured_tools[
+                        "execute_shell_command"
+                    ].async_execution
+                ),
+            )
+            self._normalize_registered_tool_functions(toolkit, [version.name])
 
     @staticmethod
     def _normalize_registered_tool_functions(
@@ -680,22 +758,45 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         """
         for i, client in enumerate(self._mcp_clients):
             client_name = getattr(client, "name", repr(client))
-            # Set progress callback so MCP notifications reset the watchdog.
-            if hasattr(client, "on_progress_callback"):
-                client.on_progress_callback = self._reset_watchdog
+            configured_tools = getattr(
+                self._agent_config.tools,
+                "builtin_tools",
+                {},
+            )
+            source_tool_names = {
+                version.name
+                for version in self._source_tool_versions
+                if configured_tools.get(version.name, None) is None
+                or configured_tools[version.name].enabled
+            }
+            collisions: list[str] = []
             try:
-                existing_tool_names = set(self.toolkit.tools)
-                await self.toolkit.register_mcp_client(
-                    client,
-                    namesake_strategy=namesake_strategy,
+                client_tools = await client.list_tools()
+                if hasattr(client_tools, "tools"):
+                    client_tools = client_tools.tools
+                collisions = sorted(
+                    source_tool_names
+                    & {
+                        str(getattr(tool, "name", "")) for tool in client_tools
+                    },
                 )
-                # Wire watchdog callback into MCPToolFunction instances
-                # registered by this client.
-                self._wire_mcp_progress_callbacks(client)
-                self._normalize_registered_tool_functions(
-                    self.toolkit,
-                    sorted(set(self.toolkit.tools) - existing_tool_names),
-                )
+                if not collisions:
+                    # Set progress callback so MCP notifications reset the
+                    # watchdog.
+                    if hasattr(client, "on_progress_callback"):
+                        client.on_progress_callback = self._reset_watchdog
+                    existing_tool_names = set(self.toolkit.tools)
+                    await self.toolkit.register_mcp_client(
+                        client,
+                        namesake_strategy=namesake_strategy,
+                    )
+                    # Wire watchdog callback into MCPToolFunction instances
+                    # registered by this client.
+                    self._wire_mcp_progress_callbacks(client)
+                    self._normalize_registered_tool_functions(
+                        self.toolkit,
+                        sorted(set(self.toolkit.tools) - existing_tool_names),
+                    )
             except (ClosedResourceError, asyncio.CancelledError) as error:
                 if self._should_propagate_cancelled_error(error):
                     raise
@@ -753,6 +854,11 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
                     client_name,
                     e,
                     exc_info=True,
+                )
+            if collisions:
+                raise RuntimeError(
+                    "MCP tool collides with an active source tool: "
+                    + ", ".join(collisions),
                 )
 
     def _wire_mcp_progress_callbacks(self, client: Any) -> None:
