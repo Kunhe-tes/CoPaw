@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "events": {
-    "BeforeStop": [
+    "Stop": [
       {
         "id": "full-history-final-output-gate",
         "hooks": [
@@ -10,7 +10,7 @@
             "type": "command",
             "argv": [
               "python",
-              "scripts/before_stop_history_http_guard.py"
+              "scripts/stop_history_http_guard.py"
             ],
             "timeout": 15,
             "failPolicy": "block",

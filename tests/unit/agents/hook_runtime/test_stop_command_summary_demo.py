@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""验证 Stop 命令样例只做外部观测。"""
+"""验证 Stop 命令样例记录审计后批准完成。"""
 
 from __future__ import annotations
 
@@ -28,8 +28,8 @@ def _run_script(
     )
 
 
-def test_stop_demo_observes_payload_but_returns_no_runtime_effect() -> None:
-    """普通回复和旧的复核哨兵都只能产生审计记录，不能产生 hook 效果。"""
+def test_stop_demo_observes_payload_and_returns_allow() -> None:
+    """普通回复和复核哨兵都会产生审计记录并批准完成。"""
     for payload in (
         {"tool_name": "search", "assistant_response": "任务完成"},
         {
@@ -40,7 +40,10 @@ def test_stop_demo_observes_payload_but_returns_no_runtime_effect() -> None:
         result = _run_script(payload)
 
         assert result.returncode == 0
-        assert json.loads(result.stdout) == {}
+        assert json.loads(result.stdout) == {
+            "decision": "allow",
+            "reason": "summary recorded",
+        }
         audit_record = json.loads(result.stderr)
         assert audit_record["event"] == "Stop"
         assert audit_record["tool_name"] == payload["tool_name"]
