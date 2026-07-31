@@ -22,16 +22,17 @@ skill hook configuration.
 - **WHEN** a hook configuration omits a prompt handler's `failPolicy`
 - **THEN** the parsed handler SHALL use `failPolicy="block"`
 
-### Requirement: Prompt handlers SHALL only be valid on blockable events
+### Requirement: Prompt handlers SHALL only be valid on supported lifecycle events
 The system SHALL allow prompt handlers only on `SessionStart`,
-`UserPromptSubmit`, `PreToolUse`, and `Stop`.
+`UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, and
+`Stop`.
 
 #### Scenario: Prompt handler is valid on Stop
 - **WHEN** hook configuration defines a `prompt` handler under `Stop`
 - **THEN** the system SHALL accept the handler configuration
 
-#### Scenario: Prompt handler is rejected on unsupported events
-- **WHEN** hook configuration defines a prompt handler under `BeforeStop`, `PostToolUse`, or `PostToolUseFailure`
+#### Scenario: Prompt handler is rejected on the removed BeforeStop event
+- **WHEN** hook configuration defines a prompt handler under `BeforeStop`
 - **THEN** the system SHALL reject the handler configuration during validation
 
 ### Requirement: Prompt handlers SHALL assemble model input with fixed layers
