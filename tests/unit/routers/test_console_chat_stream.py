@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
@@ -553,6 +555,75 @@ def test_console_upload_allows_archive_and_document_extensions(
     assert stored_files[0].read_bytes() == b"content"
 
 
+def test_console_upload_uses_workspace_copy_for_context_reference(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+    custom_media_dir = tmp_path / "custom-media"
+    workspace_dir = tmp_path / "workspace"
+
+    class _FakeUploadChannelManager:
+        async def get_channel(self, name: str):
+            assert name == "console"
+            return SimpleNamespace(media_dir=custom_media_dir)
+
+    workspace = SimpleNamespace(
+        channel_manager=_FakeUploadChannelManager(),
+        workspace_dir=workspace_dir,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/console/upload",
+        files={"file": ("report.pdf", b"content", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    referenced_path = Path(body["url"])
+    assert referenced_path.parent == workspace_dir / "media"
+    assert referenced_path.read_bytes() == b"content"
+    assert (custom_media_dir / referenced_path.name).read_bytes() == b"content"
+
+    native_payload: dict[str, Any] = {
+        "content_parts": [
+            {"type": "file", "file_url": str(referenced_path)},
+        ],
+        "meta": {
+            "context_references": [
+                {
+                    "type": "skill",
+                    "id": "skill:document_reader",
+                    "name": "document_reader",
+                },
+            ],
+        },
+    }
+    asyncio.run(
+        console_router._append_uploaded_attachment_references(
+            native_payload,
+            workspace,
+        ),
+    )
+    assert native_payload["meta"]["context_references"][-1] == {
+        "type": "workspace_file",
+        "id": f"workspace_file:media/{referenced_path.name}",
+        "root": "media",
+        "relative_path": referenced_path.name,
+    }
+
+
 def test_console_chat_stream_emits_keepalive_and_disables_proxy_buffering(
     monkeypatch,
 ) -> None:
@@ -738,6 +809,171 @@ def test_console_chat_copies_structured_context_references_to_native_meta(
 
     assert tracker.payload is not None
     assert tracker.payload["meta"]["context_references"] == references
+
+
+def test_console_chat_adds_uploaded_attachment_as_workspace_reference(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A selected skill must be able to read a file attached in the same turn."""
+
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _CapturingTaskTracker:
+        def __init__(self) -> None:
+            self.payload = None
+
+        async def attach_or_start(self, _run_key, payload, _stream_fn):
+            self.payload = payload
+            return object(), True
+
+        async def stream_from_queue(self, _queue, _run_key):
+            yield 'data: {"done": true}\n\n'
+
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    uploaded_file = media_dir / "stored_report.pdf"
+    uploaded_file.write_bytes(b"report")
+    tracker = _CapturingTaskTracker()
+
+    class _FakeChannelManager:
+        async def get_channel(self, name: str):
+            assert name == "console"
+            channel = _FakeConsoleChannel()
+            channel.media_dir = media_dir
+            return channel
+
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=tracker,
+        workspace_dir=tmp_path,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    client = TestClient(app)
+    skill_reference = {
+        "type": "skill",
+        "id": "skill:document_reader",
+        "name": "document_reader",
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json={
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请分析附件"},
+                        {
+                            "type": "file",
+                            "file_url": (
+                                "http://testserver/files/preview"
+                                f"{uploaded_file.as_posix()}"
+                            ),
+                            "file_name": "report.pdf",
+                        },
+                    ],
+                },
+            ],
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "context_references": [skill_reference],
+        },
+    ) as response:
+        assert response.status_code == 200
+        next(response.iter_lines())
+
+    assert tracker.payload is not None
+    assert tracker.payload["meta"]["context_references"] == [
+        skill_reference,
+        {
+            "type": "workspace_file",
+            "id": "workspace_file:media/stored_report.pdf",
+            "root": "media",
+            "relative_path": "stored_report.pdf",
+        },
+    ]
+
+
+def test_attachment_reference_keeps_selected_skill_within_runner_limit(
+    tmp_path,
+) -> None:
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    uploaded_file = media_dir / "stored_report.pdf"
+    uploaded_file.write_bytes(b"report")
+
+    class _FakeChannelManager:
+        async def get_channel(self, name: str):
+            assert name == "console"
+            channel = _FakeConsoleChannel()
+            channel.media_dir = media_dir
+            return channel
+
+    skill_reference = {
+        "type": "skill",
+        "id": "skill:document_reader",
+        "name": "document_reader",
+    }
+    native_payload: dict[str, Any] = {
+        "content_parts": [
+            {
+                "type": "file",
+                "file_url": (
+                    "http://testserver/files/preview"
+                    f"{uploaded_file.as_posix()}"
+                ),
+            },
+        ],
+        "meta": {
+            "context_references": [
+                *[
+                    {"type": "mcp_tool", "id": f"mcp:tool-{index}"}
+                    for index in range(10)
+                ],
+                skill_reference,
+                {
+                    "type": "workspace_file",
+                    "id": "workspace_file:media/stored_report.pdf",
+                    "root": "wrong-root",
+                    "relative_path": "wrong-path",
+                },
+            ],
+        },
+    }
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        workspace_dir=tmp_path,
+    )
+
+    asyncio.run(
+        console_router._append_uploaded_attachment_references(
+            native_payload,
+            workspace,
+        ),
+    )
+
+    references = native_payload["meta"]["context_references"]
+    assert len(references) == 12
+    assert references[0] == skill_reference
+    assert references[-1] == {
+        "type": "workspace_file",
+        "id": "workspace_file:media/stored_report.pdf",
+        "root": "media",
+        "relative_path": "stored_report.pdf",
+    }
 
 
 def test_generated_files_returns_chat_files_sorted_by_time(
