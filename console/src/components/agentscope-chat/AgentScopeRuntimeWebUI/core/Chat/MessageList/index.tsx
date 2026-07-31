@@ -15,7 +15,6 @@ import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnly
 
 export default function MessageList(props: {
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
-  sessionNotFound?: boolean;
 }) {
   const isContentOnly = useChatContentOnly();
   const messages = useContextSelector(
@@ -36,6 +35,10 @@ export default function MessageList(props: {
   const isSessionLoading = useContextSelector(
     ChatAnywhereSessionsContext,
     (v) => v.isSessionLoading,
+  );
+  const sessionNotFound = useContextSelector(
+    ChatAnywhereSessionsContext,
+    (v) => v.sessionNotFound,
   );
   const bubbleListOptions = useChatAnywhereOptions((v) => v.theme?.bubbleList);
   const listRef = React.useRef<{ scrollToBottom: () => void } | null>(null);
@@ -58,24 +61,25 @@ export default function MessageList(props: {
     );
   }
 
-  if (isContentOnly && props.sessionNotFound) {
+  if (isContentOnly && sessionNotFound) {
     return (
       <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
         <Result
           status="404"
           title="会话不存在"
-          subTitle="当前会话可能已被删除，或访问链接已经失效。"
+          subTitle="该会话不存在或已被删除"
         />
       </div>
     );
   }
 
-  if (safeMessages.length === 0)
+  if (safeMessages.length === 0) {
     return (
       <div className={cls(prefixCls, `${prefixCls}-welcome`)}>
         {!isContentOnly && <Welcome onSubmit={props.onSubmit} />}
       </div>
     );
+  }
 
   return (
     <Bubble.List

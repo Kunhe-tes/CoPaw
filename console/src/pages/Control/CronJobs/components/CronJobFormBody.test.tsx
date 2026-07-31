@@ -33,4 +33,34 @@ describe("CronJobFormBody", () => {
       screen.queryByText("cronJobs.broadcastDispatchIntents"),
     ).not.toBeInTheDocument();
   });
+
+  it("renders bound skill ids as an optional multi-select", () => {
+    const Wrapper = () => {
+      const [form] = Form.useForm();
+
+      return (
+        <Form form={form}>
+          <CronJobFormBody
+            form={form}
+            executionModelOptions={[]}
+            executionModelLoading={false}
+            tenantDefaultModelLabel="Tenant default"
+            skillOptions={[
+              {
+                value: "skill-a",
+                label: "数据分析 (skill-a)",
+              },
+            ]}
+            skillOptionsLoading={false}
+          />
+        </Form>
+      );
+    };
+
+    render(<Wrapper />);
+
+    const field = screen.getByLabelText("绑定技能ID");
+    expect(field.closest(".ant-select")).toHaveClass("ant-select-multiple");
+    expect(screen.queryByPlaceholderText("skill-a, skill_b")).toBeNull();
+  });
 });

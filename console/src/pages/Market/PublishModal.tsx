@@ -1,5 +1,5 @@
-import { Modal, Form, Input, Select, Button, Spin, message } from "antd";
-import { ExclamationCircleOutlined } from "@ant-design/icons";
+import { Modal, Form, Input, Select, Button, Spin, message, Checkbox, Tooltip } from "antd";
+import { ExclamationCircleOutlined, InfoCircleOutlined } from "@ant-design/icons";
 import { useState, useEffect } from "react";
 import { marketApi, PublishSkillRequest, type Category } from "../../api/modules/market";
 import { BBK_ID_MAP } from "../../constants/bbk";
@@ -140,6 +140,7 @@ export function PublishModal({ open, sourceId, userId, onClose, onSuccess, initi
         source_user_version: initialData?.version,
         skill_id: initialData?.skillId || "", // 直接传递用户数据中的 skill_id
         cn_name: initialData?.cnName || "", // 直接传递用户数据中的 cn_name
+        include_in_statistics: values.include_in_statistics || false,
       };
       const result = await marketApi.publishSkill(sourceId, payload);
       if (result.version_unchanged) {
@@ -242,7 +243,7 @@ export function PublishModal({ open, sourceId, userId, onClose, onSuccess, initi
         </Button>,
       ]}
     >
-      <Form form={form} layout="vertical">
+      <Form form={form} layout="vertical" initialValues={{ bbk_ids: [BBK_ID_MAP[0].value] }}>
         <Form.Item name="name" label="技能名称" rules={[{ required: true }]}>
           <Input disabled={!!initialData} />
         </Form.Item>
@@ -263,6 +264,14 @@ export function PublishModal({ open, sourceId, userId, onClose, onSuccess, initi
             placeholder="设置技能所属的分行"
             options={BBK_ID_MAP}
           />
+        </Form.Item>
+        <Form.Item name="include_in_statistics" valuePropName="checked">
+          <Checkbox>
+            是否纳入统计
+            <Tooltip title="勾选后，该技能的使用数据将纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。">
+              <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
+            </Tooltip>
+          </Checkbox>
         </Form.Item>
       </Form>
     </Modal>

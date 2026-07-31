@@ -29,6 +29,9 @@ class MarketItem(BaseModel):
     created_at: Optional[str] = None  # ISO8601 string from index.json
     updated_at: Optional[str] = None
 
+    # 新增字段：是否纳入统计（仅对 skill 类型生效）
+    include_in_statistics: bool = False  # 默认不纳入统计
+
 
 class CategoryItem(BaseModel):
     """分类条目."""

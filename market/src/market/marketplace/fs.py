@@ -320,11 +320,15 @@ def save_index(
     """原子写入市场索引."""
     path = get_index_path(marketplace_root, source_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # MCP 条目不写入 skill_id 字段（保持历史数据兼容）
+    # MCP 条目不写入 skill_id 和 include_in_statistics 字段（仅对 skill 类型生效）
     data = {
         "items": [
             item.model_dump(
-                exclude={"skill_id"} if item.item_type != "skill" else set(),
+                exclude=(
+                    {"skill_id", "include_in_statistics"}
+                    if item.item_type != "skill"
+                    else set()
+                ),
             )
             for item in items
         ],

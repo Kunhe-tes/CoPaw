@@ -463,10 +463,17 @@ export function TenantSelector({
               </div>
               <Select
                 mode="multiple"
+                showSearch
                 placeholder={t("tenantSelector.selectOrganizationPlaceholder")}
                 value={selectedBbkIds}
                 onChange={setSelectedBbkIds}
                 options={BBK_ID_MAP}
+                filterOption={(input, option) => {
+                  const keyword = input.trim().toLowerCase();
+                  const label = String(option?.label ?? "").toLowerCase();
+                  const value = String(option?.value ?? "").toLowerCase();
+                  return label.includes(keyword) || value.includes(keyword);
+                }}
                 className={styles.orgSelect}
               />
               <div className={styles.hint}>

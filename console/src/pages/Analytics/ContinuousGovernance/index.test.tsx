@@ -33,6 +33,9 @@ vi.mock("../../../stores/iframeStore", () => ({
   useIframeStore: (selector: (state: { source: string }) => unknown) =>
     selector({ source: "RMASSIST" }),
 }));
+vi.mock("./CronScheduleDistribution", () => ({
+  default: () => <div data-testid="schedule-distribution-panel" />,
+}));
 
 describe("ContinuousGovernancePage", () => {
   afterEach(() => {
@@ -600,5 +603,25 @@ describe("ContinuousGovernancePage", () => {
       await screen.findByTestId("governance-kpi-archive_files"),
     ).toHaveTextContent("3");
     expect(screen.getAllByText("memory/old.md").length).toBeGreaterThan(0);
+  });
+
+  it("lazily mounts the scheduled firing distribution in a third tab", async () => {
+    render(<ContinuousGovernancePage />);
+
+    expect(
+      screen.getByRole("tab", { name: "定时任务触发分布" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("schedule-distribution-panel"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("tab", { name: "定时任务触发分布" }),
+    );
+
+    expect(
+      await screen.findByTestId("schedule-distribution-panel"),
+    ).toBeInTheDocument();
+    expect(mocks.dreamLogsApi.archiveReport).not.toHaveBeenCalled();
   });
 });

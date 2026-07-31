@@ -10,7 +10,7 @@ import {
 import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle } from "lucide-react";
+import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle, BarChart3 } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
 import type { DistributionRecord } from "../../api/types";
@@ -342,6 +342,10 @@ export function SkillDetailDrawer(
   const [usagePage, setUsagePage] = useState(1);
   const [usagePageSize, setUsagePageSize] = useState(DEFAULT_USAGE_PAGE_SIZE);
 
+  // 统计配置相关状态
+  const [includeInStatistics, setIncludeInStatistics] = useState<boolean>(false);
+  const [isUpdatingStatistics, setIsUpdatingStatistics] = useState(false);
+
   const triggerBrowserDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
@@ -479,6 +483,32 @@ export function SkillDetailDrawer(
     handleSave(syncToUsers, syncToUsers ? selectedUserIds : []);
   }, [handleSave, syncToUsers, selectedUserIds]);
 
+  // 初始化统计配置状态
+  useEffect(() => {
+    if (skill) {
+      setIncludeInStatistics(skill.include_in_statistics ?? false);
+    }
+  }, [skill]);
+
+  // 更新统计配置
+  const handleStatisticsConfigChange = useCallback(async (checked: boolean) => {
+    if (!skill || !sourceId) return;
+
+    setIsUpdatingStatistics(true);
+    try {
+      await marketApi.updateSkillStatisticsConfig(sourceId, skill.item_id, {
+        include_in_statistics: checked,
+      });
+      setIncludeInStatistics(checked);
+      message.success(checked ? "已纳入统计" : "已取消统计");
+      onRefresh?.();
+    } catch {
+      message.error("更新失败");
+    } finally {
+      setIsUpdatingStatistics(false);
+    }
+  }, [skill, sourceId, onRefresh]);
+
   const moreMenuItems: MenuProps["items"] = useMemo(() => {
     const items: MenuProps["items"] = [];
     if (onRecall) {
@@ -523,8 +553,27 @@ export function SkillDetailDrawer(
         },
       });
     }
+    // 统计配置修改（仅管理员）
+    if (isManager) {
+      items.push({
+        key: "toggle_statistics",
+        icon: <BarChart3 size={12} />,
+        label: includeInStatistics ? "取消纳入统计" : "纳入统计",
+        onClick: () => {
+          Modal.confirm({
+            title: "确认操作",
+            content: includeInStatistics
+              ? "取消后该技能将不再纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。"
+              : "纳入后该技能将纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。",
+            okText: includeInStatistics ? "取消统计" : "纳入统计",
+            cancelText: "取消",
+            onOk: () => handleStatisticsConfigChange(!includeInStatistics),
+          });
+        },
+      });
+    }
     return items;
-  }, [onRecall, onUnpublish, onDelete]);
+  }, [onRecall, onUnpublish, onDelete, isManager, includeInStatistics, handleStatisticsConfigChange]);
 
   useEffect(() => {
     if (!open || !skill || !sourceId) {
@@ -611,112 +660,141 @@ export function SkillDetailDrawer(
     <>
       <div style={{ height: "100%", display: "flex", flexDirection: "column", backgroundColor: "#fafafa" }}>
         {/* 顶栏：固定 */}
-        <div style={HEADER_STYLE}>
-          {/* 左侧：元数据 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            {/* 状态徽章（标题前） */}
-            <Tag
-              bordered={false}
-              style={{
-                margin: 0,
-                borderRadius: 6,
-                padding: "2px 8px",
-                fontSize: 12,
-                backgroundColor: skill.status === "active" ? "#f6ffed" : "#fff1f0",
-                color: statusColor,
-              }}
-            >
-              <CheckCircle size={12} style={{ marginRight: 4 }} />
-              {statusText}
-            </Tag>
+        <div style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 10,
+          padding: "12px 20px",
+          backgroundColor: "#fff",
+          borderBottom: "1px solid #f0f0f0",
+        }}>
+          {/* 单行：状态图标 + 名称 + 元数据 + 操作按钮 */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            {/* 左侧：状态图标 + 名称 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              {/* 发布状态图标（仅已发布时显示） */}
+              {skill.status === "active" && (
+                <Tooltip title="已发布">
+                  <span style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    backgroundColor: "#52c41a",
+                    cursor: "pointer",
+                  }}>
+                    <CheckCircle size={12} style={{ color: "#fff" }} />
+                  </span>
+                </Tooltip>
+              )}
 
-            {/* 中文名（大号） + 技能名（小号） */}
-            {isEditing ? (
-              <Input
-                value={draftCnName}
-                onChange={(e) => setDraftCnName(e.target.value)}
-                style={{ width: 200, fontSize: 14 }}
-                maxLength={50}
-                showCount
-                placeholder="输入中文名称"
-              />
-            ) : (
-              <span style={CHINESE_NAME_STYLE}>
-                {chineseName}
-                {chineseName && skillName && (
-                  <span style={SKILL_NAME_STYLE}> ({skillName})</span>
-                )}
-                {!chineseName && skillName && (
-                  <span style={CHINESE_NAME_STYLE}>{skillName}</span>
-                )}
-              </span>
-            )}
+              {/* 统计状态图标（仅已纳入统计时显示，仅管理员可见） */}
+              {isManager && includeInStatistics && (
+                <Tooltip title="已纳入统计">
+                  <span style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    backgroundColor: "#2f54eb",
+                    cursor: "pointer",
+                  }}>
+                    <BarChart3 size={12} style={{ color: "#fff" }} />
+                  </span>
+                </Tooltip>
+              )}
 
-            {/* 编辑按钮 */}
-            {isManager && !isEditing && (
-              <Tooltip title="编辑中文名">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<EditOutlined style={{ fontSize: 12, color: "#3769fc" }} />}
-                  onClick={handleEditStart}
-                  style={{ padding: 4 }}
+              {/* 中文名（大号） + 技能名（小号） */}
+              {isEditing ? (
+                <Input
+                  value={draftCnName}
+                  onChange={(e) => setDraftCnName(e.target.value)}
+                  style={{ width: 200, fontSize: 14 }}
+                  maxLength={50}
+                  showCount
+                  placeholder="输入中文名称"
                 />
-              </Tooltip>
-            )}
+              ) : (
+                <span style={CHINESE_NAME_STYLE}>
+                  {chineseName}
+                  {chineseName && skillName && (
+                    <span style={SKILL_NAME_STYLE}> ({skillName})</span>
+                  )}
+                  {!chineseName && skillName && (
+                    <span style={CHINESE_NAME_STYLE}>{skillName}</span>
+                  )}
+                </span>
+              )}
 
-            {/* 编辑时显示保存/取消按钮 */}
-            {isManager && isEditing && (
-              <>
-                <Button
-                  size="small"
-                  onClick={handleEditCancel}
-                  disabled={isSaving}
-                  style={{ height: 24, borderRadius: 4 }}
-                >
-                  取消
-                </Button>
-                <Button
-                  size="small"
-                  type="primary"
-                  onClick={handleSaveClick}
-                  loading={isSaving}
-                  style={{ height: 24, borderRadius: 4 }}
-                >
-                  保存
-                </Button>
-              </>
-            )}
+              {/* 编辑按钮 */}
+              {isManager && !isEditing && (
+                <Tooltip title="编辑中文名">
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<EditOutlined style={{ fontSize: 12, color: "#3769fc" }} />}
+                    onClick={handleEditStart}
+                    style={{ padding: 4 }}
+                  />
+                </Tooltip>
+              )}
 
-            {/* 分类 */}
-            {normalizedCategoryName && (
+              {/* 编辑时显示保存/取消按钮 */}
+              {isManager && isEditing && (
+                <>
+                  <Button
+                    size="small"
+                    onClick={handleEditCancel}
+                    disabled={isSaving}
+                    style={{ height: 24, borderRadius: 4 }}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    size="small"
+                    type="primary"
+                    onClick={handleSaveClick}
+                    loading={isSaving}
+                    style={{ height: 24, borderRadius: 4 }}
+                  >
+                    保存
+                  </Button>
+                </>
+              )}
+
+              {/* 分类 */}
+              {normalizedCategoryName && (
+                <span style={META_ITEM_STYLE}>
+                  <TagIcon size={12} />
+                  {normalizedCategoryName}
+                </span>
+              )}
+
+              {/* 版本 */}
               <span style={META_ITEM_STYLE}>
-                <TagIcon size={12} />
-                {normalizedCategoryName}
+                <GitBranch size={12} />
+                v{skill.version}
               </span>
-            )}
 
-            {/* 版本 */}
-            <span style={META_ITEM_STYLE}>
-              <GitBranch size={12} />
-              v{skill.version}
-            </span>
+              {/* 创建时间 */}
+              <span style={META_ITEM_STYLE}>
+                <Calendar size={12} />
+                {formatDate(skill.created_at)}
+              </span>
 
-            {/* 创建时间 */}
-            <span style={META_ITEM_STYLE}>
-              <Calendar size={12} />
-              {formatDate(skill.created_at)}
-            </span>
+              {/* 创建人 */}
+              <span style={META_ITEM_STYLE}>
+                <Users size={12} />
+                {skill.creator_name || "未知"}
+              </span>
+            </div>
 
-            {/* 创建人 */}
-            <span style={META_ITEM_STYLE}>
-              <Users size={12} />
-              {skill.creator_name || "未知"}
-            </span>
-          </div>
-
-          {/* 右侧：操作按钮 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* 右侧：操作按钮 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <Button
               onClick={handleDownloadCurrentVersion}
               loading={downloadingCurrentVersion}
@@ -760,6 +838,7 @@ export function SkillDetailDrawer(
             )}
           </div>
         </div>
+      </div>
 
         {/* 主区域：文档 + 用户明细 */}
         <div

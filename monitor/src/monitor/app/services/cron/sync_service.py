@@ -16,7 +16,11 @@ import httpx
 
 from ...database import get_db_connection
 from ...models.cron import CronJobSyncRequest, ExecutionSyncRequest
-from ....utils.bbk import get_bbk_id_by_name, get_bbk_name_by_id
+from ....utils.bbk import (
+    get_bbk_id_by_name,
+    get_bbk_name_by_id,
+    normalize_bbk_id_to_primary,
+)
 from ....utils.scope_decode import (
     is_encoded_scope_id,
     try_decode_tenant_id,
@@ -84,9 +88,12 @@ def _to_beijing_naive(value: Optional[datetime]) -> Optional[datetime]:
     return value.astimezone(_BEIJING_TZ).replace(tzinfo=None)
 
 
-def _positive_int(value: object, default: Optional[int] = None) -> Optional[int]:
+def _positive_int(
+    value: object,
+    default: Optional[int] = None,
+) -> Optional[int]:
     try:
-        parsed = int(value)  # type: ignore[arg-type]
+        parsed = int(value)  # type: ignore[call-overload]
     except (TypeError, ValueError):
         return default
     return parsed if parsed > 0 else default
@@ -115,6 +122,26 @@ def _extract_dispatch_identity_columns(
     return intent_id, batch_id, dispatch_attempt
 
 
+def _extract_broadcast_source_job_id(raw_meta: Optional[str]) -> str:
+    """从 meta JSON 中提取 broadcast_source_job_id。
+
+    Args:
+        raw_meta: meta 字段的 JSON 字符串
+
+    Returns:
+        broadcast_source_job_id 字符串，不存在则返回空字符串
+    """
+    if not raw_meta:
+        return ""
+    try:
+        meta = json.loads(raw_meta)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(meta, dict):
+        return ""
+    return str(meta.get("broadcast_source_job_id") or "").strip()
+
+
 def _extract_bbk_id_from_path_name(path_name: Optional[str]) -> Optional[str]:
     """从 pathName 中提取 BBK ID。
 
@@ -135,6 +162,18 @@ def _extract_bbk_id_from_path_name(path_name: Optional[str]) -> Optional[str]:
         return get_bbk_id_by_name(parts[1])
 
     return None
+
+
+def _normalize_request_bbk_id(
+    request: CronJobSyncRequest,
+) -> CronJobSyncRequest:
+    if not str(request.bbk_id or "").strip():
+        return request
+
+    normalized_bbk_id = normalize_bbk_id_to_primary(request.bbk_id)
+    if normalized_bbk_id == request.bbk_id:
+        return request
+    return request.model_copy(update={"bbk_id": normalized_bbk_id or ""})
 
 
 async def _fetch_user_info(
@@ -253,12 +292,12 @@ async def _enrich_sync_request(
                 not request.bbk_id
                 or not get_bbk_name_by_id(str(request.bbk_id).strip())
             ):
-                update_fields["bbk_id"] = bbk_id
+                update_fields["bbk_id"] = normalize_bbk_id_to_primary(bbk_id)
 
             if update_fields:
                 request = request.model_copy(update=update_fields)
 
-        return request
+        return _normalize_request_bbk_id(request)
 
     except Exception as e:
         # 任何异常都返回原始请求，确保数据不丢失
@@ -299,6 +338,11 @@ class SyncService:
 
         now = _get_beijing_now()
 
+        # 从 meta 中提取 broadcast_source_job_id
+        broadcast_source_job_id = _extract_broadcast_source_job_id(
+            request.meta,
+        )
+
         if existing:
             # Update existing job, clear deleted_at if it was deleted
             deleted_at_value = (
@@ -333,6 +377,7 @@ class SyncService:
                     job_origin = %s,
                     subscription_key = %s,
                     skill_ids = %s,
+                    broadcast_source_job_id = %s,
                     meta = %s,
                     status = %s,
                     pause_reason = %s,
@@ -364,6 +409,7 @@ class SyncService:
                     request.job_origin,
                     request.subscription_key,
                     request.skill_ids,
+                    broadcast_source_job_id,
                     request.meta,
                     request.status,
                     request.pause_reason,
@@ -388,10 +434,10 @@ class SyncService:
                     text_content, request_input,
                     creator_user_id, task_chat_id, task_session_id,
                     job_origin, subscription_key, skill_ids,
-                    meta,
+                    broadcast_source_job_id, meta,
                     status, pause_reason, created_at, updated_at
                 ) VALUES (
-                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -419,6 +465,7 @@ class SyncService:
                     request.job_origin,
                     request.subscription_key,
                     request.skill_ids,
+                    broadcast_source_job_id,
                     request.meta,
                     request.status,
                     request.pause_reason,
@@ -606,7 +653,7 @@ class SyncService:
         else:
             raw_id = row[0]
         try:
-            return int(raw_id)
+            return int(raw_id)  # type: ignore[arg-type]
         except (TypeError, ValueError):
             return None
 

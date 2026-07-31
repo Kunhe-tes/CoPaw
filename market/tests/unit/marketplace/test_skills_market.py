@@ -531,3 +531,83 @@ def test_switch_version_falls_back_to_created_by_when_no_source_user(tmp_path):
     item = items[0]
     assert item.creator_id == "admin_id"
     assert item.creator_name == "Admin"
+
+
+def test_update_statistics_config_returns_200(tmp_path):
+    """测试更新统计配置接口."""
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    req = PublishSkillRequest(
+        name="skill_stats",
+        description="test",
+        creator_id="u1",
+        creator_name="User",
+        skill_json={},
+        skill_md="",
+    )
+    item, _ = asyncio.run(svc.publish_skill("src_a", req))
+
+    client = TestClient(app)
+    resp = client.patch(
+        f"/api/market/skills/{item.item_id}/statistics",
+        json={"include_in_statistics": False},
+        headers={
+            "X-Source-Id": "src_a",
+            "X-Manager": "true",
+            "X-User-Id": "u1",
+            "X-User-Name": "User",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+
+
+def test_update_statistics_config_non_manager_returns_403(tmp_path):
+    """测试非管理员无法更新统计配置."""
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    req = PublishSkillRequest(
+        name="skill_stats2",
+        description="test",
+        creator_id="u1",
+        creator_name="User",
+        skill_json={},
+        skill_md="",
+    )
+    item, _ = asyncio.run(svc.publish_skill("src_a", req))
+
+    client = TestClient(app)
+    resp = client.patch(
+        f"/api/market/skills/{item.item_id}/statistics",
+        json={"include_in_statistics": False},
+        headers={
+            "X-Source-Id": "src_a",
+            "X-User-Id": "u1",
+        },
+    )
+    assert resp.status_code == 403
+
+
+def test_init_statistics_returns_200(tmp_path):
+    """测试初始化历史数据接口（dry_run 模式）."""
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    # dry_run 模式会检查数据库连接
+    resp = client.post(
+        "/api/market/admin/skills/init-statistics",
+        json={
+            "source_ids": ["src_a"],
+            "default_include": True,
+            "dry_run": True,
+        },
+    )
+    # 由于 mock 数据库连接，dry_run 模式应该成功
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "processed" in data
+    assert "errors" in data

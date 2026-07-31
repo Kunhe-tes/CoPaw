@@ -63,7 +63,7 @@ function directoryAnchor(
   capabilities: FileManagerDirectoryListing["capabilities"],
 ): FileManagerDirectoryListing {
   const label =
-    path.split("/").filter(Boolean).at(-1) ||
+    path.split("/").filter(Boolean).slice(-1)[0] ||
     shortcutRoots.find((item) => item.root === root)?.label ||
     "工作目录";
   const anchorPath = `${virtualAnchorPrefix}${path}`;

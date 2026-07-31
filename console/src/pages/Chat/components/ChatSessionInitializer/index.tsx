@@ -3,6 +3,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 // ==================== 组件引入方式变更 (Kun He) ====================
 import { useChatAnywhereSessionsState } from "@/components/agentscope-chat";
 // ==================== 组件引入方式变更结束 ====================
+import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import { useAgentStore } from "@/stores/agentStore";
 import { getInitialSessionSelection } from "../../sessionApi/initialSessionSelection";
 import { getSessionAgentId } from "../../sessionApi/sessionAgent";
@@ -37,25 +38,48 @@ function isLocalTimestampSessionId(sessionId: string | undefined): boolean {
 const ChatSessionInitializer: React.FC = () => {
   const location = useLocation();
   const navigate = useNavigate();
+  const isContentOnly = useChatContentOnly();
 
-  const { sessions, currentSessionId, setCurrentSessionId } =
-    useChatAnywhereSessionsState();
+  const {
+    sessions,
+    currentSessionId,
+    isSessionsListLoading,
+    setCurrentSessionId,
+    setSessionLoading,
+    setSessionNotFound,
+  } = useChatAnywhereSessionsState();
   const { selectedAgent, setSelectedAgent } = useAgentStore();
 
   const currentSessionIdRef = useRef(currentSessionId);
   currentSessionIdRef.current = currentSessionId;
 
   useEffect(() => {
-    if (!sessions.length) return;
+    const requestedSessionId = location.pathname.match(/^\/chat\/(.+)$/)?.[1];
+    const isNumericContentOnlyTarget =
+      isContentOnly && isLocalTimestampSessionId(requestedSessionId);
 
-    const { requestedSessionId, resolvedSessionId } = getInitialSessionSelection({
+    if (isNumericContentOnlyTarget && isSessionsListLoading) return;
+    if (!sessions.length && !isNumericContentOnlyTarget) return;
+
+    const { resolvedSessionId } = getInitialSessionSelection({
       pathname: location.pathname,
       sessionList: sessions,
     });
 
+    const matching = sessions.find((s) => s.id === resolvedSessionId);
+    if (isNumericContentOnlyTarget && !matching) {
+      setCurrentSessionId(undefined);
+      setSessionLoading(false);
+      setSessionNotFound(true);
+      return;
+    }
+
     if (!resolvedSessionId) return;
 
-    const matching = sessions.find((s) => s.id === resolvedSessionId);
+    if (isContentOnly && matching) {
+      setSessionNotFound(false);
+    }
+
     if (matching && currentSessionIdRef.current !== matching.id) {
       const sessionAgentId = getSessionAgentId(
         (matching as { meta?: Record<string, unknown> | null }).meta,
@@ -84,11 +108,15 @@ const ChatSessionInitializer: React.FC = () => {
     // Intentionally exclude currentSessionId from deps: only react to URL / session list changes.
     // currentSessionId is read via ref to avoid circular triggers.
   }, [
+    isContentOnly,
+    isSessionsListLoading,
     location.pathname,
     navigate,
     selectedAgent,
     sessions,
     setCurrentSessionId,
+    setSessionLoading,
+    setSessionNotFound,
     setSelectedAgent,
   ]);
 

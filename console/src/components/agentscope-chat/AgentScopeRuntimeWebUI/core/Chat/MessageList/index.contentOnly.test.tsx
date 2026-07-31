@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   sessionsContext: {},
   messages: [] as Array<{ id: string }>,
   isSessionLoading: false,
+  sessionNotFound: false,
 }));
 
 vi.mock("use-context-selector", () => ({
@@ -21,6 +22,7 @@ vi.mock("use-context-selector", () => ({
     return selector({
       currentSessionId: "chat-1",
       isSessionLoading: mocks.isSessionLoading,
+      sessionNotFound: mocks.sessionNotFound,
     });
   },
 }));
@@ -55,16 +57,10 @@ vi.mock("../Welcome", () => ({
 }));
 
 vi.mock("antd", () => ({
-  Result: ({
-    title,
-    subTitle,
-  }: {
-    title: React.ReactNode;
-    subTitle: React.ReactNode;
-  }) => (
-    <div data-testid="not-found">
-      {title}
-      {subTitle}
+  Result: ({ title, subTitle }: { title: string; subTitle: string }) => (
+    <div data-testid="not-found-result">
+      <span>{title}</span>
+      <span>{subTitle}</span>
     </div>
   ),
   Spin: () => <div data-testid="spin">loading</div>,
@@ -74,6 +70,7 @@ describe("MessageList content-only composition", () => {
   beforeEach(() => {
     mocks.messages = [];
     mocks.isSessionLoading = false;
+    mocks.sessionNotFound = false;
   });
 
   afterEach(() => {
@@ -95,30 +92,39 @@ describe("MessageList content-only composition", () => {
 
     expect(screen.queryByTestId("welcome")).not.toBeInTheDocument();
     expect(screen.queryByTestId("bubble-list")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("not-found-result")).not.toBeInTheDocument();
   });
 
-  it("shows a friendly not-found state only in content-only mode", () => {
-    const { rerender } = render(
-      <MessageList onSubmit={vi.fn()} sessionNotFound />,
-    );
+  it("renders an unavailable result for an active content-only 404", () => {
+    mocks.sessionNotFound = true;
 
-    expect(screen.queryByTestId("not-found")).not.toBeInTheDocument();
-    expect(screen.getByTestId("welcome")).toBeInTheDocument();
-
-    rerender(
+    render(
       <ChatContentOnlyProvider enabled>
-        <MessageList onSubmit={vi.fn()} sessionNotFound />
+        <MessageList onSubmit={vi.fn()} />
       </ChatContentOnlyProvider>,
     );
 
-    expect(screen.getByTestId("not-found")).toHaveTextContent(
-      "会话不存在当前会话可能已被删除，或访问链接已经失效。",
+    expect(screen.getByTestId("not-found-result")).toHaveTextContent(
+      "会话不存在",
+    );
+    expect(screen.getByTestId("not-found-result")).toHaveTextContent(
+      "该会话不存在或已被删除",
     );
     expect(screen.queryByTestId("welcome")).not.toBeInTheDocument();
   });
 
+  it("does not replace normal chat with the content-only 404 result", () => {
+    mocks.sessionNotFound = true;
+
+    render(<MessageList onSubmit={vi.fn()} />);
+
+    expect(screen.getByTestId("welcome")).toBeInTheDocument();
+    expect(screen.queryByTestId("not-found-result")).not.toBeInTheDocument();
+  });
+
   it("keeps the existing session loading state unchanged", () => {
     mocks.isSessionLoading = true;
+    mocks.sessionNotFound = true;
 
     render(
       <ChatContentOnlyProvider enabled>
@@ -127,6 +133,7 @@ describe("MessageList content-only composition", () => {
     );
 
     expect(screen.getByTestId("spin")).toBeInTheDocument();
+    expect(screen.queryByTestId("not-found-result")).not.toBeInTheDocument();
   });
 
   it("keeps loaded messages on the existing Bubble list", () => {

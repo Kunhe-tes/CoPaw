@@ -4,7 +4,7 @@ import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatConten
 import Chat from ".";
 
 const mocks = vi.hoisted(() => ({
-  useChatAnywhereSessionLoader: vi.fn(() => false),
+  useChatAnywhereSessionLoader: vi.fn(),
 }));
 
 vi.mock("@/components/agentscope-chat", () => ({
@@ -40,11 +40,7 @@ vi.mock("./Input", () => ({
 }));
 
 vi.mock("./MessageList", () => ({
-  default: ({ sessionNotFound }: { sessionNotFound?: boolean }) => (
-    <div data-testid="message-list">
-      {sessionNotFound ? "not-found" : "available"}
-    </div>
-  ),
+  default: () => <div data-testid="message-list" />,
 }));
 
 vi.mock("./styles", () => ({
@@ -55,7 +51,6 @@ describe("Chat content-only composition", () => {
   afterEach(() => {
     cleanup();
     mocks.useChatAnywhereSessionLoader.mockReset();
-    mocks.useChatAnywhereSessionLoader.mockReturnValue(false);
   });
 
   it("keeps the normal input mounted for interactive chat", () => {
@@ -63,20 +58,22 @@ describe("Chat content-only composition", () => {
 
     expect(screen.getByTestId("message-list")).toBeInTheDocument();
     expect(screen.getByTestId("chat-input")).toBeInTheDocument();
-    expect(mocks.useChatAnywhereSessionLoader).toHaveBeenCalledWith(false);
+    expect(mocks.useChatAnywhereSessionLoader).toHaveBeenCalledWith({
+      finishLoadingWithoutSession: false,
+    });
   });
 
   it("does not mount the input or its paste/upload listeners in content-only mode", () => {
-    mocks.useChatAnywhereSessionLoader.mockReturnValue(true);
-
     render(
       <ChatContentOnlyProvider enabled>
         <Chat />
       </ChatContentOnlyProvider>,
     );
 
-    expect(screen.getByTestId("message-list")).toHaveTextContent("not-found");
+    expect(screen.getByTestId("message-list")).toBeInTheDocument();
     expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
-    expect(mocks.useChatAnywhereSessionLoader).toHaveBeenCalledWith(true);
+    expect(mocks.useChatAnywhereSessionLoader).toHaveBeenCalledWith({
+      finishLoadingWithoutSession: true,
+    });
   });
 });
