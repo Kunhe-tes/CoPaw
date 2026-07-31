@@ -21,7 +21,6 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 如果你只想快速上手，先记住下面几条：
 
 - `PreToolUse` 是最常用的事件：可以拒绝工具、要求审批、改写工具输入。
-- `Stop` 是“完成门禁”：候选回复已经生成后才触发；返回 `block` 会让 Agent 在同一次请求里继续做事，而不是立刻结束。
 - `PostToolUse` 和 `PostToolUseFailure` 不能撤销已经发生的工具调用，但现在所有经 Tool Guard 执行的工具路径（包括预批准和受保护的内置工具）都会进入对应的后置 hook；它们适合审计、诊断，或用终止决策结束当前回合。
 - `continue: false` 或 `decision: "stop"` 是回合级终止，而不只是“阻断当前工具”：在工具事件中命中后会阻止后续推理，并取消仍在等待的并行工具调用。
 - `Stop` 是统一完成门禁：每个 handler 可先执行审计、埋点或通知；合并后的 `allow` / `block` 决定候选回复是否完成。显式 `block` 可触发有上限的自动续跑，`failPolicy: block` 的执行失败则直接以未完成结束。
@@ -496,7 +495,7 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `cwd` | 当前 workspace 路径 |
 | `workspace_dir` | 当前 workspace 路径 |
 | `prompt` | 用户本轮文本输入 |
-| `assistant_response` | 当前候选回复；主要见于 `Stop` 和 `Stop` |
+| `assistant_response` | 当前候选回复；主要见于 `Stop` |
 | `tool_name` | 工具名 |
 | `tool_input` | 工具输入对象 |
 | `tool_use_id` | 工具调用 ID |
@@ -529,19 +528,19 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `turn_id` | 部分 | 请求上下文里有 turn 时会传 |
 | `source` | 部分 | `SessionStart` 这类 runner 事件会传；当前主流程常见值是 `startup` / `resume` |
 | `model` | 部分 | 当前主流程只在 `SessionStart` 传当前激活模型标签 |
-| `prompt` | 部分 | `UserPromptSubmit`、`Stop`、`Stop` 常见；tool 事件当前不传 |
+| `prompt` | 部分 | `UserPromptSubmit`、`Stop` 常见；tool 事件当前不传 |
 | `tool_name` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
 | `tool_input` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
 | `tool_use_id` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
 | `tool_response` | 部分 | 主要见于 `PostToolUse`，值为当前工具调用最终 `tool_result.output`；无法提取时省略 |
-| `assistant_response` | 部分 | 主要见于 `Stop` 和 `Stop` |
+| `assistant_response` | 部分 | 主要见于 `Stop` |
 | `error` | 部分 | 主要见于 `PostToolUseFailure` |
 | `conversation_snapshot` | 部分 | 仅对声明了 `includeConversationSnapshot: true` 的 handler 注入；值是当前 Agent 内存或 session state memory 里的最近若干条规范化消息 |
 | `conversation_snapshot_meta` | 部分 | 与 `conversation_snapshot` 配套；包含 `included_messages`、`omitted_messages`、`limit` 以及可选的 `reasoning_omitted` / `media_content_omitted` / `unavailable` 信息 |
 
 这张表的关键结论是：
 
-- 如果你写的是 runner 侧 hook，例如 `SessionStart`、`UserPromptSubmit`、`Stop`、`Stop`，重点看 `prompt`、`assistant_response`、`source`、`model`。
+- 如果你写的是 runner 侧 hook，例如 `SessionStart`、`UserPromptSubmit`、`Stop`，重点看 `prompt`、`assistant_response`、`source`、`model`。
 - 如果你写的是 tool 侧 hook，例如 `PreToolUse`、`PostToolUse`、`PostToolUseFailure`，重点看 `tool_name`、`tool_input`、`tool_use_id`、`tool_response`、`error`。其中 `tool_response` 是当前工具调用的业务输出，不是完整 `tool_result` 块，也不需要通过 `includeConversationSnapshot` 获取。
 - 如果你要把“当前事件字段”与“最近对话上下文”一起送给外部策略，就同时使用事件字段和 `conversation_snapshot`，不要试图只从快照里反推当前事件。
 - `permission_mode`、`effort`、`agent_type` 虽然在模型里有字段，但当前实现还没有把它们接进真实 hook payload，不要把它们当成当前可依赖入参。
@@ -1235,7 +1234,7 @@ Skill 自带 `http` handler：
 }
 ```
 
-### 示例 7：真正结束后发送审计/埋点
+### 示例 7：在完成门禁中发送审计/埋点
 
 ```json
 {
@@ -1263,7 +1262,7 @@ Skill 自带 `http` handler：
 
 适合做：
 
-- 向日志、指标或审计系统发送最终状态
+- 向日志、指标或审计系统记录当前候选回复
 - 触发不影响会话的外部收尾动作
 
 不适合做：
@@ -1285,7 +1284,7 @@ Skill 自带 `http` handler：
 - 文件路径写对了
 - `enabled` 已打开
 
-验证 `Stop` 时不要观察 stdout 的返回效果；应改为检查 handler 写入的外部审计、日志或指标。
+验证 `Stop` 时不要只观察 stdout；还应检查 handler 写入的外部审计、日志或指标，以及 `allow` / `block` 对完成状态的影响。
 
 ### 验证 2：确认工具名和字段名
 
