@@ -1,0 +1,1413 @@
+import {
+  Alert,
+  Button,
+  Checkbox,
+  Empty,
+  Input,
+  Popover,
+  Progress,
+  Radio,
+  Skeleton,
+  Space,
+  Tag,
+  Tooltip,
+} from "antd";
+import {
+  ArrowDown,
+  ArrowLeft,
+  ArrowUp,
+  Check,
+  CircleAlert,
+  CircleCheck,
+  Clock3,
+  FileCheck2,
+  Pause,
+  Play,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Trash2,
+  X,
+} from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+
+import { wplusSopApi } from "@/api/modules/wplusSop";
+import type {
+  WPlusSopAnswerValue,
+  WPlusSopCommandType,
+  WPlusSopQuestion,
+  WPlusSopSafeStreamTrace,
+  WPlusSopSession,
+  WPlusSopStage,
+} from "@/api/types/wplusSop";
+import {
+  applySessionEvent,
+  buildResultTable,
+  createCommandRequestId,
+  getSessionStateLabel,
+  validateStageQueue,
+} from "./sessionView";
+import styles from "./index.module.less";
+
+type LoadState = "loading" | "ready" | "unavailable" | "error";
+
+const STREAM_MAX_RECONNECTS = 3;
+const STREAM_RECONNECT_BASE_DELAY_MS = 250;
+
+interface LoadSessionOptions {
+  background?: boolean;
+  preserveStageDraft?: boolean;
+}
+
+interface AnswerDraft {
+  scope: string | null;
+  values: Record<string, WPlusSopAnswerValue>;
+}
+
+interface ActiveSafeStreamTrace extends WPlusSopSafeStreamTrace {
+  session_id: string;
+  run_id: string;
+}
+
+function errorStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("status" in error)) {
+    return undefined;
+  }
+  return Number((error as { status?: unknown }).status);
+}
+
+function isGenerating(session: WPlusSopSession): boolean {
+  return [
+    "GeneratingStageProposal",
+    "GeneratingQuestions",
+    "GeneratingTrial",
+    "ExecutingTrial",
+    "FinalizingOutputs",
+    "PendingExit",
+  ].includes(session.state);
+}
+
+function stateProgress(session: WPlusSopSession): number {
+  const confirmed = session.stages.filter(
+    (stage) => stage.status === "confirmed",
+  ).length;
+  if (!session.stages.length) return 8;
+  if (session.state === "Completed") return 100;
+  return Math.min(
+    94,
+    Math.round((confirmed / session.stages.length) * 82) + 12,
+  );
+}
+
+function StageQueueEditor({
+  session,
+  stages,
+  busy,
+  onChange,
+  onConfirm,
+}: {
+  session: WPlusSopSession;
+  stages: WPlusSopStage[];
+  busy: boolean;
+  onChange: (stages: WPlusSopStage[]) => void;
+  onConfirm: () => void;
+}) {
+  const validation = validateStageQueue(stages);
+  const move = (index: number, direction: -1 | 1) => {
+    const target = index + direction;
+    if (target < 0 || target >= stages.length) return;
+    const next = [...stages];
+    [next[index], next[target]] = [next[target], next[index]];
+    onChange(next);
+  };
+  const add = () => {
+    if (stages.length >= 4) return;
+    const suffix = createCommandRequestId().slice(-6);
+    onChange([
+      ...stages,
+      {
+        stage_id: `stage_${suffix}`,
+        title: `新环节 ${stages.length + 1}`,
+        description: "",
+        status: "pending",
+      },
+    ]);
+  };
+
+  return (
+    <section className={styles.workSection} aria-labelledby="stage-queue-title">
+      <div className={styles.sectionHeading}>
+        <div>
+          <span className={styles.eyebrow}>流程 01</span>
+          <h2 id="stage-queue-title">确认 SOP 环节</h2>
+          <p>可重命名、增删或调整顺序；确认时会一次性保存整个队列。</p>
+        </div>
+        <Tag color="cyan">限制 2–4 个</Tag>
+      </div>
+
+      <ol className={styles.stageEditor}>
+        {stages.map((stage, index) => (
+          <li key={stage.stage_id} className={styles.stageEditorRow}>
+            <span className={styles.stageNumber}>
+              {String(index + 1).padStart(2, "0")}
+            </span>
+            <div className={styles.stageFields}>
+              <Input
+                aria-label={`环节 ${index + 1} 名称`}
+                value={stage.title}
+                onChange={(event) =>
+                  onChange(
+                    stages.map((item) =>
+                      item.stage_id === stage.stage_id
+                        ? { ...item, title: event.target.value }
+                        : item,
+                    ),
+                  )
+                }
+              />
+              <Input
+                aria-label={`环节 ${index + 1} 说明`}
+                placeholder="这个环节要确认什么"
+                value={stage.description || ""}
+                onChange={(event) =>
+                  onChange(
+                    stages.map((item) =>
+                      item.stage_id === stage.stage_id
+                        ? { ...item, description: event.target.value }
+                        : item,
+                    ),
+                  )
+                }
+              />
+            </div>
+            <Space size={2} className={styles.stageActions}>
+              <Tooltip title="上移">
+                <Button
+                  type="text"
+                  icon={<ArrowUp size={16} />}
+                  aria-label={`将“${stage.title}”上移`}
+                  disabled={index === 0}
+                  onClick={() => move(index, -1)}
+                />
+              </Tooltip>
+              <Tooltip title="下移">
+                <Button
+                  type="text"
+                  icon={<ArrowDown size={16} />}
+                  aria-label={`将“${stage.title}”下移`}
+                  disabled={index === stages.length - 1}
+                  onClick={() => move(index, 1)}
+                />
+              </Tooltip>
+              <Tooltip title="删除">
+                <Button
+                  danger
+                  type="text"
+                  icon={<Trash2 size={16} />}
+                  aria-label={`删除“${stage.title}”`}
+                  disabled={stages.length <= 2}
+                  onClick={() =>
+                    onChange(
+                      stages.filter((item) => item.stage_id !== stage.stage_id),
+                    )
+                  }
+                />
+              </Tooltip>
+            </Space>
+          </li>
+        ))}
+      </ol>
+
+      {!validation.valid && (
+        <Alert
+          type="warning"
+          showIcon
+          message={validation.message}
+          className={styles.inlineAlert}
+        />
+      )}
+      <div className={styles.sectionActions}>
+        <Button
+          icon={<Plus size={16} />}
+          disabled={stages.length >= 4}
+          onClick={add}
+        >
+          增加环节
+        </Button>
+        <Button
+          type="primary"
+          icon={<Check size={16} />}
+          loading={busy}
+          disabled={
+            !validation.valid || session.state !== "AwaitingQueueConfirmation"
+          }
+          onClick={onConfirm}
+        >
+          确认这 {stages.length} 个环节
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+function QuestionField({
+  question,
+  value,
+  onChange,
+}: {
+  question: WPlusSopQuestion;
+  value: WPlusSopAnswerValue | undefined;
+  onChange: (value: WPlusSopAnswerValue) => void;
+}) {
+  if (question.kind === "single_select") {
+    return (
+      <Radio.Group
+        className={styles.optionList}
+        value={typeof value === "string" ? value : undefined}
+        onChange={(event) => onChange(event.target.value)}
+      >
+        {(question.options || []).map((option) => (
+          <Radio key={option.option_id} value={option.option_id}>
+            <span>{option.label}</span>
+            {option.description && (
+              <small className={styles.optionDescription}>
+                {option.description}
+              </small>
+            )}
+          </Radio>
+        ))}
+      </Radio.Group>
+    );
+  }
+  if (question.kind === "multi_select") {
+    return (
+      <Checkbox.Group
+        className={styles.optionList}
+        value={Array.isArray(value) ? value : []}
+        onChange={(values) => onChange(values.map(String))}
+      >
+        {(question.options || []).map((option) => (
+          <Checkbox key={option.option_id} value={option.option_id}>
+            {option.label}
+          </Checkbox>
+        ))}
+      </Checkbox.Group>
+    );
+  }
+  return (
+    <Input.TextArea
+      aria-label={question.prompt}
+      autoSize={{ minRows: 3, maxRows: 8 }}
+      value={typeof value === "string" ? value : ""}
+      onChange={(event) => onChange(event.target.value)}
+      placeholder="输入你的补充说明"
+    />
+  );
+}
+
+function QuestionBatchPanel({
+  session,
+  answers,
+  busy,
+  onAnswer,
+  onSubmit,
+}: {
+  session: WPlusSopSession;
+  answers: Record<string, WPlusSopAnswerValue>;
+  busy: boolean;
+  onAnswer: (questionId: string, value: WPlusSopAnswerValue) => void;
+  onSubmit: () => void;
+}) {
+  const batch = session.question_batch;
+  if (!batch) return null;
+  const complete = batch.questions.every((question) => {
+    if (!question.required) return true;
+    const value = answers[question.question_id];
+    return Array.isArray(value)
+      ? value.length > 0
+      : Boolean(value && value.trim());
+  });
+
+  return (
+    <section className={styles.workSection} aria-labelledby="question-title">
+      <div className={styles.sectionHeading}>
+        <div>
+          <span className={styles.eyebrow}>流程 02</span>
+          <h2 id="question-title">补齐本环节信息</h2>
+          <p>一次提交整批回答；必填项齐全后才会开始系统预跑。</p>
+        </div>
+        <Tag>{batch.questions.length} 个问题</Tag>
+      </div>
+      <div className={styles.questionList}>
+        {batch.questions.map((question, index) => (
+          <fieldset key={question.question_id} className={styles.question}>
+            <legend>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              {question.prompt}
+              {question.required && <em>必填</em>}
+            </legend>
+            {question.help_text && <p>{question.help_text}</p>}
+            <QuestionField
+              question={question}
+              value={answers[question.question_id]}
+              onChange={(value) => onAnswer(question.question_id, value)}
+            />
+          </fieldset>
+        ))}
+      </div>
+      <div className={styles.sectionActions}>
+        <span className={styles.actionHint}>
+          {complete ? "回答已齐全" : "请先完成所有必填项"}
+        </span>
+        <Button
+          type="primary"
+          loading={busy}
+          disabled={!complete}
+          onClick={onSubmit}
+        >
+          提交本轮 {batch.questions.length} 个回答
+        </Button>
+      </div>
+    </section>
+  );
+}
+
+function TrialPanel({
+  session,
+  feedback,
+  busy,
+  onFeedback,
+  onRerun,
+  onAccept,
+}: {
+  session: WPlusSopSession;
+  feedback: string;
+  busy: boolean;
+  onFeedback: (value: string) => void;
+  onRerun: () => void;
+  onAccept: () => void;
+}) {
+  const trial = session.trial;
+  if (!trial) return null;
+  const table = buildResultTable(trial.result_rows, trial.result_columns);
+  return (
+    <section className={styles.workSection} aria-labelledby="trial-title">
+      <div className={styles.sectionHeading}>
+        <div>
+          <span className={styles.eyebrow}>流程 03</span>
+          <h2 id="trial-title">系统预跑结果</h2>
+          <p>CoPaw 已代你调用真实能力；检查结果后可反馈并重新预跑。</p>
+        </div>
+        <Tag
+          color={
+            trial.status === "completed"
+              ? "success"
+              : trial.status === "failed"
+              ? "error"
+              : "processing"
+          }
+        >
+          {trial.status === "completed"
+            ? "预跑完成"
+            : trial.status === "failed"
+            ? "预跑失败"
+            : "预跑中"}
+        </Tag>
+      </div>
+
+      {trial.steps.length > 0 && (
+        <ol className={styles.runSteps}>
+          {trial.steps.map((step) => (
+            <li key={step.step_id} data-status={step.status}>
+              {step.status === "completed" ? (
+                <CircleCheck size={18} />
+              ) : step.status === "failed" ? (
+                <CircleAlert size={18} />
+              ) : (
+                <Clock3 size={18} />
+              )}
+              <div>
+                <strong>{step.title}</strong>
+                {step.summary && <span>{step.summary}</span>}
+              </div>
+            </li>
+          ))}
+        </ol>
+      )}
+
+      {trial.summary && <p className={styles.trialSummary}>{trial.summary}</p>}
+      {table.columns.length > 0 && (
+        <div className={styles.tableWrap}>
+          <table>
+            <thead>
+              <tr>
+                {table.columns.map((column) => (
+                  <th key={column.field}>{column.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {table.rows.map((row, index) => (
+                <tr key={index}>
+                  {table.columns.map((column) => (
+                    <td key={column.field}>{row[column.field]}</td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {session.state === "AwaitingTrialFeedback" && (
+        <div className={styles.feedbackBox}>
+          <label htmlFor="wplus-trial-feedback">预跑反馈</label>
+          <Input.TextArea
+            id="wplus-trial-feedback"
+            autoSize={{ minRows: 4, maxRows: 9 }}
+            value={feedback}
+            onChange={(event) => onFeedback(event.target.value)}
+            placeholder="例如：排除缺少任务日期的记录，并在结果中补充客户分层"
+          />
+          <div className={styles.sectionActions}>
+            <Button
+              icon={<Check size={16} />}
+              disabled={busy}
+              onClick={onAccept}
+            >
+              结果符合预期
+            </Button>
+            <Button
+              type="primary"
+              icon={<RotateCcw size={16} />}
+              loading={busy}
+              disabled={!feedback.trim()}
+              onClick={onRerun}
+            >
+              提交反馈并重新预跑
+            </Button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function EvidenceRail({ session }: { session: WPlusSopSession }) {
+  return (
+    <aside className={styles.evidenceRail} aria-label="本次 SOP 证据">
+      <div className={styles.railSection}>
+        <h2>已确认事实</h2>
+        {session.facts?.length ? (
+          <ul>
+            {session.facts.map((fact) => (
+              <li key={fact}>
+                <Check size={14} />
+                <span>{fact}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>回答后会在这里汇总稳定事实。</p>
+        )}
+      </div>
+      <div className={styles.railSection}>
+        <h2>仍需确认</h2>
+        {session.unknowns?.length ? (
+          <ul>
+            {session.unknowns.map((unknown) => (
+              <li key={unknown}>
+                <Clock3 size={14} />
+                <span>{unknown}</span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>当前没有记录中的未知项。</p>
+        )}
+      </div>
+      <div className={styles.railSection}>
+        <h2>能力证据</h2>
+        {session.capabilities?.length ? (
+          <ul className={styles.capabilityList}>
+            {session.capabilities.map((capability) => (
+              <li key={capability.capability_id}>
+                <span>{capability.name}</span>
+                <Tag
+                  color={
+                    capability.verification_status === "verified"
+                      ? "success"
+                      : "warning"
+                  }
+                >
+                  {capability.verification_status === "verified"
+                    ? "已验证"
+                    : "待补证"}
+                </Tag>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p>预跑后会显示所用能力与验证状态。</p>
+        )}
+      </div>
+    </aside>
+  );
+}
+
+export default function WPlusSopWorkspace() {
+  const { sessionId = "" } = useParams();
+  const [loadState, setLoadState] = useState<LoadState>("loading");
+  const [session, setSession] = useState<WPlusSopSession | null>(null);
+  const sessionRef = useRef<WPlusSopSession | null>(null);
+  const [stages, setStages] = useState<WPlusSopStage[]>([]);
+  const [answerDraft, setAnswerDraft] = useState<AnswerDraft>({
+    scope: null,
+    values: {},
+  });
+  const [feedback, setFeedback] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [safeStreamTrace, setSafeStreamTrace] =
+    useState<ActiveSafeStreamTrace | null>(null);
+  const [debugPopoverOpen, setDebugPopoverOpen] = useState(false);
+  const debugTraceRef = useRef<HTMLPreElement | null>(null);
+  const debugShouldFollowRef = useRef(true);
+  const debugPopoverPinnedRef = useRef(false);
+  const debugPopoverCloseTimerRef = useRef<number | null>(null);
+  const [downloadingArtifactId, setDownloadingArtifactId] = useState<
+    string | null
+  >(null);
+
+  const commitSession = useCallback(
+    (
+      snapshot: WPlusSopSession,
+      options: { preserveStageDraft?: boolean } = {},
+    ) => {
+      const current = sessionRef.current;
+      if (
+        current?.session_id === snapshot.session_id &&
+        current.state_version > snapshot.state_version
+      ) {
+        return false;
+      }
+      sessionRef.current = snapshot;
+      setSession(snapshot);
+      if (!options.preserveStageDraft) {
+        setStages(snapshot.stages.map((stage) => ({ ...stage })));
+      }
+      return true;
+    },
+    [],
+  );
+
+  const loadSession = useCallback(
+    async (signal?: AbortSignal, options: LoadSessionOptions = {}) => {
+      try {
+        const snapshot = await wplusSopApi.getSession(sessionId, signal);
+        commitSession(snapshot, options);
+        setLoadState("ready");
+        return snapshot;
+      } catch (error) {
+        if (signal?.aborted) return null;
+        if (errorStatus(error) === 404) {
+          setLoadState("unavailable");
+        } else if (!options.background) {
+          setLoadState("error");
+        }
+        return null;
+      }
+    },
+    [commitSession, sessionId],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadSession(controller.signal);
+    return () => controller.abort();
+  }, [loadSession]);
+
+  useEffect(() => {
+    const subscribedSession = sessionRef.current;
+    if (
+      loadState !== "ready" ||
+      !subscribedSession ||
+      subscribedSession.session_id !== sessionId
+    ) {
+      return;
+    }
+    const subscribedSessionId = subscribedSession.session_id;
+    const initialStateVersion = subscribedSession.state_version;
+
+    let disposed = false;
+    let reconnectAttempts = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let recovering = false;
+    let subscription: ReturnType<
+      typeof wplusSopApi.subscribeSessionEvents
+    > | null = null;
+    const recoverStream = async () => {
+      if (disposed || recovering) return;
+      recovering = true;
+      await loadSession(undefined, {
+        background: true,
+        preserveStageDraft:
+          sessionRef.current?.state === "AwaitingQueueConfirmation",
+      });
+      recovering = false;
+      if (disposed) return;
+
+      const current = sessionRef.current;
+      if (
+        !current ||
+        current.session_id !== subscribedSessionId ||
+        current.state === "Completed" ||
+        current.state === "Terminated"
+      ) {
+        return;
+      }
+      if (reconnectAttempts >= STREAM_MAX_RECONNECTS) {
+        setNotice("实时连接多次中断，已保留最新快照；可重新加载页面继续。");
+        return;
+      }
+
+      const delay = STREAM_RECONNECT_BASE_DELAY_MS * 2 ** reconnectAttempts;
+      reconnectAttempts += 1;
+      setNotice("实时连接暂时中断，已刷新最新状态，正在尝试重新连接。");
+      reconnectTimer = setTimeout(() => connect(current.state_version), delay);
+    };
+
+    const connect = (afterStateVersion: number) => {
+      if (disposed) return;
+      subscription?.close();
+      subscription = wplusSopApi.subscribeSessionEvents(
+        subscribedSessionId,
+        afterStateVersion,
+        (event) => {
+          const current = sessionRef.current;
+          if (!current) return;
+          if (event.kind === "safe_stream_trace") {
+            const trace = event.safe_stream_trace;
+            const currentRunId = current.trial?.run_id;
+            if (
+              disposed ||
+              event.session_id !== subscribedSessionId ||
+              current.session_id !== subscribedSessionId ||
+              !isGenerating(current) ||
+              !event.run_id ||
+              event.run_id !== currentRunId ||
+              !trace
+            ) {
+              return;
+            }
+            setSafeStreamTrace((existing) => {
+              if (
+                existing?.session_id === current.session_id &&
+                existing?.run_id === event.run_id &&
+                existing.sequence >= trace.sequence
+              ) {
+                return existing;
+              }
+              return {
+                session_id: event.session_id,
+                run_id: event.run_id,
+                sequence: trace.sequence,
+                summary_text: trace.summary_text,
+                truncated: trace.truncated,
+              };
+            });
+            return;
+          }
+          const decision = applySessionEvent(current, event);
+          if (decision.action === "reload") {
+            void loadSession(undefined, {
+              background: true,
+              preserveStageDraft: current.state === "AwaitingQueueConfirmation",
+            });
+            return;
+          }
+          if (decision.action === "apply") {
+            reconnectAttempts = 0;
+            commitSession(decision.session, {
+              preserveStageDraft:
+                current.state === "AwaitingQueueConfirmation" &&
+                decision.session.state === "AwaitingQueueConfirmation",
+            });
+          }
+        },
+        () => {
+          void recoverStream();
+        },
+      );
+    };
+
+    connect(initialStateVersion);
+    return () => {
+      disposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      subscription?.close();
+    };
+  }, [commitSession, loadSession, loadState, session?.session_id, sessionId]);
+
+  const currentRunId = session?.trial?.run_id ?? null;
+  const sessionIsGenerating = session ? isGenerating(session) : false;
+  const activeSafeStreamTrace =
+    sessionIsGenerating &&
+    safeStreamTrace?.session_id === session?.session_id &&
+    safeStreamTrace.run_id === currentRunId
+      ? safeStreamTrace
+      : null;
+
+  const clearDebugPopoverCloseTimer = useCallback(() => {
+    if (debugPopoverCloseTimerRef.current !== null) {
+      window.clearTimeout(debugPopoverCloseTimerRef.current);
+      debugPopoverCloseTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleDebugPopoverClose = useCallback(() => {
+    clearDebugPopoverCloseTimer();
+    if (debugPopoverPinnedRef.current) return;
+    debugPopoverCloseTimerRef.current = window.setTimeout(() => {
+      debugPopoverCloseTimerRef.current = null;
+      if (!debugPopoverPinnedRef.current) {
+        setDebugPopoverOpen(false);
+      }
+    }, 120);
+  }, [clearDebugPopoverCloseTimer]);
+
+  useEffect(() => {
+    clearDebugPopoverCloseTimer();
+    debugPopoverPinnedRef.current = false;
+    debugShouldFollowRef.current = true;
+    setSafeStreamTrace(null);
+    setDebugPopoverOpen(false);
+  }, [clearDebugPopoverCloseTimer, session?.session_id]);
+
+  useEffect(() => {
+    if (!sessionIsGenerating) {
+      clearDebugPopoverCloseTimer();
+      debugPopoverPinnedRef.current = false;
+      setDebugPopoverOpen(false);
+    }
+  }, [clearDebugPopoverCloseTimer, currentRunId, sessionIsGenerating]);
+
+  useEffect(() => {
+    debugShouldFollowRef.current = true;
+  }, [currentRunId, session?.session_id]);
+
+  useEffect(
+    () => () => {
+      clearDebugPopoverCloseTimer();
+    },
+    [clearDebugPopoverCloseTimer],
+  );
+
+  useEffect(() => {
+    if (!debugPopoverOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        clearDebugPopoverCloseTimer();
+        debugPopoverPinnedRef.current = false;
+        setDebugPopoverOpen(false);
+      }
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [clearDebugPopoverCloseTimer, debugPopoverOpen]);
+
+  const handleDebugTraceScroll = useCallback(() => {
+    const trace = debugTraceRef.current;
+    if (!trace) return;
+    const distanceFromBottom =
+      trace.scrollHeight - trace.scrollTop - trace.clientHeight;
+    debugShouldFollowRef.current = distanceFromBottom <= 24;
+  }, []);
+
+  useEffect(() => {
+    const trace = debugTraceRef.current;
+    if (
+      debugPopoverOpen &&
+      trace &&
+      debugShouldFollowRef.current &&
+      activeSafeStreamTrace?.summary_text
+    ) {
+      trace.scrollTop = trace.scrollHeight;
+    }
+  }, [
+    activeSafeStreamTrace?.sequence,
+    activeSafeStreamTrace?.summary_text,
+    debugPopoverOpen,
+  ]);
+
+  const answerScope = session?.question_batch
+    ? `${session.session_id}:${session.question_batch.batch_id}`
+    : null;
+  const answers = useMemo(
+    () => (answerDraft.scope === answerScope ? answerDraft.values : {}),
+    [answerDraft, answerScope],
+  );
+
+  useEffect(() => {
+    setAnswerDraft((current) =>
+      current.scope === answerScope
+        ? current
+        : { scope: answerScope, values: {} },
+    );
+  }, [answerScope]);
+
+  const downloadArtifact = useCallback(
+    async (artifactId: string, filename: string) => {
+      if (!session) return;
+      setDownloadingArtifactId(artifactId);
+      setNotice(null);
+      try {
+        const blob = await wplusSopApi.downloadArtifact(
+          session.session_id,
+          artifactId,
+        );
+        const objectUrl = URL.createObjectURL(blob);
+        const anchor = document.createElement("a");
+        anchor.href = objectUrl;
+        anchor.download = filename;
+        anchor.style.display = "none";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        URL.revokeObjectURL(objectUrl);
+      } catch {
+        setNotice("产物下载失败，请稍后重试。");
+      } finally {
+        setDownloadingArtifactId(null);
+      }
+    },
+    [session],
+  );
+
+  const sendCommand = useCallback(
+    async (
+      command: WPlusSopCommandType,
+      payload: Record<string, unknown> = {},
+    ) => {
+      if (!session) return null;
+      setBusy(true);
+      setNotice(null);
+      try {
+        const receipt = await wplusSopApi.sendCommand(session.session_id, {
+          command,
+          command_request_id: createCommandRequestId(),
+          expected_state_version: session.state_version,
+          payload,
+        });
+        commitSession(receipt.session);
+        return receipt.session;
+      } catch (error) {
+        const status = errorStatus(error);
+        if (status === 409) {
+          await loadSession(undefined, {
+            background: true,
+            preserveStageDraft: command === "confirm_stage_queue",
+          });
+          setNotice("页面状态已变化，已重新同步；你的输入草稿仍然保留。");
+        } else if (status === 404) {
+          setLoadState("unavailable");
+        } else {
+          setNotice("操作没有完成，请稍后重试。");
+        }
+        return null;
+      } finally {
+        setBusy(false);
+      }
+    },
+    [commitSession, loadSession, session],
+  );
+
+  const submitAnswers = useCallback(async () => {
+    if (!session?.question_batch) return;
+    const next = await sendCommand("submit_answers", {
+      batch_id: session.question_batch.batch_id,
+      answers,
+    });
+    if (next) {
+      setAnswerDraft({ scope: null, values: {} });
+    }
+  }, [answers, sendCommand, session]);
+
+  const mainPanel = useMemo(() => {
+    if (!session) return null;
+    if (session.state === "AwaitingQueueConfirmation") {
+      return (
+        <StageQueueEditor
+          session={session}
+          stages={stages}
+          busy={busy}
+          onChange={setStages}
+          onConfirm={() => void sendCommand("confirm_stage_queue", { stages })}
+        />
+      );
+    }
+    if (session.state === "AwaitingAnswer") {
+      return (
+        <QuestionBatchPanel
+          session={session}
+          answers={answers}
+          busy={busy}
+          onAnswer={(questionId, value) => {
+            setAnswerDraft((current) => ({
+              scope: answerScope,
+              values: {
+                ...(current.scope === answerScope ? current.values : {}),
+                [questionId]: value,
+              },
+            }));
+          }}
+          onSubmit={() => void submitAnswers()}
+        />
+      );
+    }
+    if (session.state === "AwaitingTrialFeedback" && session.trial) {
+      return (
+        <TrialPanel
+          session={session}
+          feedback={feedback}
+          busy={busy}
+          onFeedback={setFeedback}
+          onRerun={() =>
+            void sendCommand("submit_trial_feedback", {
+              feedback: feedback.trim(),
+              rerun_of_run_id: session.trial?.run_id,
+            })
+          }
+          onAccept={() => void sendCommand("accept_trial")}
+        />
+      );
+    }
+    if (session.state === "AwaitingStageConfirmation") {
+      const currentStage = session.stages.find(
+        (stage) => stage.stage_id === session.current_stage_id,
+      );
+      return (
+        <section className={styles.decisionPanel}>
+          <CircleCheck size={34} />
+          <span className={styles.eyebrow}>环节验收</span>
+          <h2>{currentStage?.title || "当前环节"}已通过预跑</h2>
+          <p>确认后将锁定本环节事实，并进入下一个环节。</p>
+          <Button
+            type="primary"
+            size="large"
+            loading={busy}
+            onClick={() => void sendCommand("confirm_stage")}
+          >
+            确认并继续
+          </Button>
+        </section>
+      );
+    }
+    if (session.state === "PendingExit") {
+      return (
+        <section className={styles.decisionPanel}>
+          <Pause size={34} />
+          <span className={styles.eyebrow}>正在安全退出</span>
+          <h2>等待当前完整响应落盘</h2>
+          <p>
+            系统会在下一个稳定事件边界暂停；你也可以取消本轮运行并立即暂停。
+          </p>
+          <Space wrap>
+            <Button
+              loading={busy}
+              onClick={() => void sendCommand("continue_waiting")}
+            >
+              继续等待
+            </Button>
+            <Button
+              danger
+              loading={busy}
+              onClick={() => void sendCommand("cancel_run_and_pause")}
+            >
+              取消本轮并暂停
+            </Button>
+          </Space>
+        </section>
+      );
+    }
+    if (session.state === "Paused") {
+      return (
+        <section className={styles.decisionPanel}>
+          <Pause size={34} />
+          <span className={styles.eyebrow}>已保存</span>
+          <h2>工作台已暂停</h2>
+          <p>所有环节、回答和预跑结果都已保留。</p>
+          <Button
+            type="primary"
+            icon={<Play size={16} />}
+            loading={busy}
+            onClick={() => void sendCommand("resume")}
+          >
+            从上次位置继续
+          </Button>
+        </section>
+      );
+    }
+    if (session.state === "RecoverableFailure") {
+      return (
+        <section className={styles.decisionPanel}>
+          <CircleAlert size={34} />
+          <span className={styles.eyebrow}>可恢复失败</span>
+          <h2>本轮运行没有完成</h2>
+          <p>{session.failure?.message || "运行时暂时不可用。"}</p>
+          <Button
+            type="primary"
+            icon={<RefreshCw size={16} />}
+            loading={busy}
+            onClick={() =>
+              void sendCommand("retry_current_turn", {
+                target_state: session.resume_state || "GeneratingQuestions",
+                retry_of_run_id: session.failure?.failed_run_id,
+              })
+            }
+          >
+            重试当前轮
+          </Button>
+        </section>
+      );
+    }
+    if (session.state === "MemoryReview") {
+      return (
+        <section className={styles.workSection}>
+          <div className={styles.sectionHeading}>
+            <div>
+              <span className={styles.eyebrow}>完成前检查</span>
+              <h2>选择可复用记忆</h2>
+              <p>只有你明确批准的候选项才会保存。</p>
+            </div>
+          </div>
+          <div className={styles.memoryList}>
+            {(session.memory_candidates || []).map((candidate) => (
+              <article key={candidate.candidate_id}>
+                <div>
+                  <strong>{candidate.title}</strong>
+                  {candidate.description && <p>{candidate.description}</p>}
+                </div>
+                {candidate.status === "pending" ? (
+                  <Space>
+                    <Button
+                      onClick={() =>
+                        void sendCommand("resolve_memory", {
+                          candidate_id: candidate.candidate_id,
+                          decision: "reject",
+                        })
+                      }
+                    >
+                      不保存
+                    </Button>
+                    <Button
+                      type="primary"
+                      onClick={() =>
+                        void sendCommand("resolve_memory", {
+                          candidate_id: candidate.candidate_id,
+                          decision: "approve",
+                        })
+                      }
+                    >
+                      保存
+                    </Button>
+                  </Space>
+                ) : (
+                  <Tag>{candidate.status}</Tag>
+                )}
+              </article>
+            ))}
+          </div>
+          <Button onClick={() => void sendCommand("skip_memory")}>
+            跳过剩余候选
+          </Button>
+        </section>
+      );
+    }
+    if (session.state === "Completed") {
+      return (
+        <section className={styles.decisionPanel}>
+          <FileCheck2 size={34} />
+          <span className={styles.eyebrow}>SOP 已完成</span>
+          <h2>结果已生成并通过结构校验</h2>
+          <div className={styles.artifactList}>
+            {(session.artifacts || []).map((artifact) => (
+              <Button
+                key={artifact.artifact_id}
+                type="text"
+                disabled={!artifact.download_url}
+                loading={downloadingArtifactId === artifact.artifact_id}
+                onClick={() =>
+                  void downloadArtifact(artifact.artifact_id, artifact.name)
+                }
+              >
+                <FileCheck2 size={16} />
+                {artifact.name}
+              </Button>
+            ))}
+          </div>
+        </section>
+      );
+    }
+    if (session.state === "Terminated") {
+      return (
+        <section className={styles.decisionPanel}>
+          <X size={34} />
+          <span className={styles.eyebrow}>会话结束</span>
+          <h2>这个 SOP 工作台已彻底结束</h2>
+          <p>历史过程仍可审计，但不能继续运行。</p>
+        </section>
+      );
+    }
+    return (
+      <section className={styles.runningPanel}>
+        <div className={styles.runPulse}>
+          <RefreshCw size={22} />
+        </div>
+        <span className={styles.eyebrow}>CoPaw 正在处理</span>
+        <h2>{getSessionStateLabel(session)}</h2>
+        <p>本轮由系统在后台完成。你可以离开页面，运行不会中断。</p>
+        <Progress
+          percent={stateProgress(session)}
+          showInfo={false}
+          strokeColor="#13786f"
+        />
+        <Popover
+          key={session.session_id}
+          placement="bottom"
+          trigger={[]}
+          open={debugPopoverOpen}
+          destroyOnHidden
+          content={
+            <div
+              className={styles.debugStreamPopover}
+              data-testid="wplus-debug-stream-popover"
+              onMouseEnter={clearDebugPopoverCloseTimer}
+              onMouseLeave={scheduleDebugPopoverClose}
+            >
+              <div
+                className={styles.debugStreamTitle}
+                data-testid="wplus-debug-stream-title"
+              >
+                实时流追踪（调试）
+              </div>
+              {activeSafeStreamTrace?.summary_text ? (
+                <pre
+                  ref={debugTraceRef}
+                  data-testid="wplus-debug-stream-trace"
+                  onScroll={handleDebugTraceScroll}
+                >
+                  {activeSafeStreamTrace.summary_text}
+                </pre>
+              ) : (
+                <p className={styles.debugStreamEmpty}>等待流追踪摘要…</p>
+              )}
+              {activeSafeStreamTrace?.truncated ? (
+                <p className={styles.debugStreamTruncated}>
+                  较早内容已截断，仅显示最近片段。
+                </p>
+              ) : null}
+              <p className={styles.debugStreamNote}>
+                仅展示帧类型、状态和长度，正文、工具输出和结构化业务数据已隐藏。
+              </p>
+            </div>
+          }
+        >
+          <Button
+            className={styles.debugStreamTrigger}
+            size="small"
+            aria-label="查看实时流追踪（调试）"
+            aria-expanded={debugPopoverOpen}
+            onMouseEnter={() => {
+              clearDebugPopoverCloseTimer();
+              if (!debugPopoverOpen) {
+                debugShouldFollowRef.current = true;
+              }
+              setDebugPopoverOpen(true);
+            }}
+            onMouseLeave={(event) => {
+              if (
+                !debugPopoverPinnedRef.current &&
+                document.activeElement !== event.currentTarget
+              ) {
+                scheduleDebugPopoverClose();
+              }
+            }}
+            onFocus={() => {
+              clearDebugPopoverCloseTimer();
+              if (!debugPopoverOpen) {
+                debugShouldFollowRef.current = true;
+              }
+              setDebugPopoverOpen(true);
+            }}
+            onBlur={() => {
+              if (!debugPopoverPinnedRef.current) {
+                scheduleDebugPopoverClose();
+              }
+            }}
+            onClick={() => {
+              clearDebugPopoverCloseTimer();
+              debugPopoverPinnedRef.current = true;
+              debugShouldFollowRef.current = true;
+              setDebugPopoverOpen(true);
+            }}
+          >
+            实时流追踪
+          </Button>
+        </Popover>
+      </section>
+    );
+  }, [
+    answers,
+    busy,
+    downloadArtifact,
+    downloadingArtifactId,
+    feedback,
+    activeSafeStreamTrace,
+    clearDebugPopoverCloseTimer,
+    debugPopoverOpen,
+    handleDebugTraceScroll,
+    scheduleDebugPopoverClose,
+    sendCommand,
+    session,
+    stages,
+    submitAnswers,
+    answerScope,
+  ]);
+
+  if (loadState === "loading") {
+    return (
+      <main className={styles.statePage}>
+        <Skeleton active paragraph={{ rows: 8 }} />
+      </main>
+    );
+  }
+  if (loadState === "unavailable") {
+    return (
+      <main className={styles.statePage}>
+        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={null}>
+          <h1>无法访问这个工作台</h1>
+          <p>它可能不存在，或不属于当前账号与 Chat。</p>
+          <Button onClick={() => window.history.back()}>返回上一页</Button>
+        </Empty>
+      </main>
+    );
+  }
+  if (loadState === "error" || !session) {
+    return (
+      <main className={styles.statePage}>
+        <CircleAlert size={38} />
+        <h1>工作台暂时无法加载</h1>
+        <p>没有修改任何数据。请检查连接后重试。</p>
+        <Button type="primary" onClick={() => void loadSession()}>
+          重新加载
+        </Button>
+      </main>
+    );
+  }
+
+  return (
+    <main className={styles.workspace}>
+      <header className={styles.topbar}>
+        <div>
+          <Link to={`/chat/${session.chat_id}`} className={styles.backLink}>
+            <ArrowLeft size={16} />
+            返回所属 Chat
+          </Link>
+          <div className={styles.titleRow}>
+            <div className={styles.productMark}>W+</div>
+            <div>
+              <h1>{session.title}</h1>
+              <p>
+                状态版本 {session.state_version} · 修订 {session.revision}
+              </p>
+            </div>
+          </div>
+        </div>
+        <div className={styles.headerActions}>
+          <Tag
+            color={
+              session.state === "Completed"
+                ? "success"
+                : session.state === "RecoverableFailure"
+                ? "error"
+                : isGenerating(session)
+                ? "processing"
+                : "cyan"
+            }
+          >
+            {getSessionStateLabel(session)}
+          </Tag>
+          {!["Completed", "Terminated", "Paused", "PendingExit"].includes(
+            session.state,
+          ) && (
+            <Button
+              icon={<Pause size={15} />}
+              disabled={busy}
+              onClick={() => void sendCommand("save_and_exit")}
+            >
+              保存并退出
+            </Button>
+          )}
+        </div>
+      </header>
+
+      {notice && (
+        <Alert
+          className={styles.notice}
+          type="info"
+          showIcon
+          closable
+          message={notice}
+          onClose={() => setNotice(null)}
+        />
+      )}
+
+      <section className={styles.progressBand} aria-label="SOP 环节进度">
+        <div className={styles.progressMeta}>
+          <span>完整预跑流程</span>
+          <strong>{stateProgress(session)}%</strong>
+        </div>
+        <Progress
+          percent={stateProgress(session)}
+          showInfo={false}
+          strokeColor="#13786f"
+          trailColor="#dfe8e7"
+        />
+        <ol>
+          {session.stages.length ? (
+            session.stages.map((stage, index) => (
+              <li key={stage.stage_id} data-status={stage.status}>
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <div>
+                  <strong>{stage.title}</strong>
+                  <small>
+                    {stage.status === "confirmed"
+                      ? "已确认"
+                      : stage.status === "current"
+                      ? "当前环节"
+                      : "等待中"}
+                  </small>
+                </div>
+              </li>
+            ))
+          ) : (
+            <li data-status="current">
+              <span>01</span>
+              <div>
+                <strong>生成环节提案</strong>
+                <small>正在分析请求</small>
+              </div>
+            </li>
+          )}
+        </ol>
+      </section>
+
+      <div className={styles.workspaceGrid}>
+        <div className={styles.primaryColumn}>{mainPanel}</div>
+        <EvidenceRail session={session} />
+      </div>
+    </main>
+  );
+}

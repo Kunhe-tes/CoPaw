@@ -1,0 +1,172 @@
+# W+ SOP 使用持久化会话、专用工作台和结构化交互信封
+
+## 决策
+
+CoPaw 为 `wplus-sop-miner` 提供绑定所属 Chat 的专用工作台，路由为 `/wplus-sop/:sessionId`。工作台不是第二套 Chat，也不是独立于 CoPaw 的应用；它是同一 Chat、同一 Agent 工作流的结构化交互视图。
+
+后端持久化的 `W+ SOP Clarification Session` 是工作流唯一事实来源。版本化的 `Structured Interaction Envelope` 在 Agent、后端状态机、Chat 投影和工作台之间传递环节队列、题组、回答、预跑、反馈、环节确认、修订、结果和状态变化。前端不得从 Markdown、JSON 代码块、React 内存或 Chat 消息反推按钮、当前环节或恢复状态。
+
+底层信封保持技能中性，以复用类型校验、幂等、状态版本和审计机制；第一版产品入口、路由、页面和业务状态机仍只服务 `wplus-sop-miner`，不同时建设通用交互式技能平台。
+
+## 页面与 Chat 的责任边界
+
+- 显式调用 Miner 时，Chat 使用原始消息渲染“进入 W+ SOP 工作台”卡片；用户确认后创建 SOP 会话并跳转，用户不需要重复输入需求。
+- 隐式识别 Miner 时，Chat 先显示说明识别理由、建议环节数和数据边界的“确认进入/继续普通 Chat”卡片。拒绝后继续普通 Chat，并在当前请求中抑制重复识别。
+- 用户点击进入后，后端必须先完成会话持久化，再返回 `session_id` 和 `/wplus-sop/:sessionId`。页面不得先跳转再依赖前端补建会话。
+- Chat 中的入口卡在会话创建后变为只读状态卡，显示当前环节、运行状态和“继续工作台”按钮；暂停后也通过该卡恢复，不重新创建会话。
+- 工作台是题组回答、预跑启动与重试、预跑反馈、环节确认、历史修订、记忆授权和结束操作的唯一写入口。
+- 工作台提交继续触发所属 Chat 的同一 Agent 回合，不创建第二条对话历史。
+- Chat 只保存不可变审计投影、会话控制卡和恢复入口；Chat 中的问题卡和答案卡只读，不提供第二套提交控件。
+- 活动会话锁定所属 Chat 的普通输入。只有明确保存退出、完成或彻底结束后才恢复普通输入；普通导航离开工作台不会自动暂停。
+- 一个 Chat 同时最多存在一个活动或暂停的 W+ SOP 会话。完成或彻底结束后可以创建新会话，同时保留历史记录。
+
+## 首轮与逐环节状态机
+
+Miner 的第一次响应只能生成 2–4 个业务环节的候选队列。用户确认或调整队列之前，不得生成第一个澄清问题。
+
+平台状态机必须显式表达以下主路径：
+
+```text
+GeneratingStageProposal
+→ AwaitingQueueConfirmation
+→ GeneratingQuestions
+→ AwaitingAnswer
+→ GeneratingTrial
+→ ExecutingTrial
+→ AwaitingTrialFeedback
+→ AwaitingStageConfirmation
+→ GeneratingQuestions（下一环节）
+→ FinalizingOutputs
+→ MemoryReview
+→ Completed
+```
+
+每个环节内部仍遵守 Miner 的业务状态：
+
+```text
+clarifying
+→ ready_for_trial
+→ trial_running
+→ feedback_review
+→ awaiting_stage_confirmation
+→ confirmed
+```
+
+当前环节没有到达 `confirmed` 时不得进入下一环节。反馈改变流程时返回当前环节重新预跑；环节确认与下一环节激活必须作为一次原子状态转换。生成期间请求退出时进入 `PendingExit`，等当前完整响应持久化后再转为 `Paused` 或 `Terminated`；该状态只接受“继续等待”或“取消本轮并暂停”，不得用第二次 `save_and_exit` 覆盖原恢复态。终止性失败进入 `RecoverableFailure`，重试不得重复保存答案或触发第二个 Agent 回合。
+
+`ExecutingTrial` 由 CoPaw 后端 Agent 和平台工具运行时负责。工作台只发起带状态版本和幂等键的运行请求、订阅进度并展示结果，不在浏览器中直接执行 W+、OpenCLI 或 MCP。只读能力可以在当前授权范围内自动运行；涉及写入、外部通知或不可逆动作的步骤必须使用安全预跑能力、沙箱或既有审批机制，不得因为属于 SOP 预跑而绕过权限确认。
+
+## Structured Interaction Envelope
+
+公共信封至少包含：
+
+```json
+{
+  "object": "structured_interaction",
+  "protocol_version": 1,
+  "interaction": "wplus_sop",
+  "event_id": "evt_...",
+  "session_id": "sop_...",
+  "chat_id": "chat_...",
+  "revision": 1,
+  "round": 1,
+  "state_version": 3,
+  "kind": "question_batch",
+  "payload": {}
+}
+```
+
+第一版事件至少覆盖：
+
+- `stage_proposal`
+- `stage_queue_confirmed`
+- `lifecycle_progress`
+- `question_batch`
+- `answer_accepted`
+- `trial_plan`
+- `trial_execution_started`
+- `trial_execution_progress`
+- `trial_execution_completed`
+- `trial_execution_failed`
+- `trial_feedback_accepted`
+- `stage_confirmation_required`
+- `stage_confirmed`
+- `revision_applied`
+- `sop_result`
+- `memory_candidates`
+- `session_state_changed`
+- `recoverable_failure`
+- `termination_summary`
+
+每个 `question_batch` 包含 1–3 题，并在完整题组通过 schema 校验后一次性开放。题目必须有稳定的 `question_id`，选项必须有稳定的 `option_id`；支持单选、多选和自由文本。回答提交携带 `expected_state_version` 和幂等 `request_id`，后端原子保存整轮回答并只启动一次 Miner 回合。
+
+## 能力证据与嵌套出参
+
+工作台在预跑或证据面板中展示 Miner 实际引用的能力契约。用户提交完整题组后，CoPaw 后端按照冻结的输入快照执行当前环节的完整预跑，依次调用已授权的 W+、OpenCLI 或 MCP 能力，并通过结构化事件流回传步骤级进度、脱敏结果摘要、schema 校验和失败位置。用户不需要复制命令或切换到外部环境。
+
+每次预跑必须生成稳定的 `run_id`，记录能力版本、输入快照、开始与结束时间、步骤结果、授权决策和最终状态。原始客户响应只能存在于受控运行环境；工作台和 Chat 投影仅接收脱敏结果、计数、结构校验、警告和可审计的执行摘要。
+
+当能力出参包含对象、对象列表或多层列表时，信封保留能力目录中的递归结构，不得把子字段平铺成无父级的字段清单：
+
+```json
+{
+  "name": "items",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "name": { "type": "string" },
+      "children": {
+        "type": "array",
+        "items": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    }
+  }
+}
+```
+
+界面将这类契约渲染为可展开的字段树，并显示能力的 `verification_status` 与 `output_contract_status`。只展示字段定义和脱敏示例结构，不展示客户姓名、客户标识、账号、卡号、余额、交易明细或原始响应。
+
+## 工作台交互基线
+
+- 页面持续显示环节队列、当前环节、已确认环节和未开始环节；当前主任务始终只有一个。
+- 中央工作区承载当前题组、预跑进度、脱敏结果、反馈输入或最终结果，底部主操作与当前状态一致。
+- 预跑开始后展示正在执行的步骤、当前能力、运行 ID 和耗时；完成后固定展示反馈输入框。用户可以确认结果符合预期，也可以填写卡点、字段缺失或结果偏差并提交，提交反馈后由系统重新执行受影响步骤。
+- 预跑执行中禁用重复启动；刷新或 SSE 重连后根据持久化 `run_id` 恢复同一次运行，不得启动第二次预跑。
+- 能力证据、已确认事实、明确未知项和历史修订属于上下文信息，不能与当前主操作争夺视觉焦点。
+- 完整题组未通过 schema 校验、回答未填写完整或状态版本已经过期时，提交按钮不可用。
+- 保存退出、彻底结束和历史修订必须解释影响范围；彻底结束生成只读摘要并醒目标记“不是有效 SOP”。
+- 刷新、重复点击、双标签页和 SSE 重连不得产生重复回答、重复 Chat 审计消息或重复 Agent 回合。
+- 窄屏下环节队列变为横向进度区，证据与历史进入抽屉；主操作保持至少 44px 点击高度并提供明确焦点状态。
+
+## 最终结果与记忆
+
+所有环节完成澄清、预跑、反馈和确认后，Miner 才能生成结果。工作台展示经过校验的机器可读 SOP、可读 SOP 和 HTML 结果，并通过复用 Session ownership 校验的下载接口返回实际内容；前端不得把无地址的占位项伪装成可交付产物。是否额外交付 `example_result.html` 由 Miner 输出契约和可用模板共同决定，不把缺失模板伪装成成功产物。
+
+最终文件生成不立即完成会话。工作台进入 `MemoryReview`，逐项处理记忆候选或选择跳过全部；全部候选处理完成后才进入 `Completed`。第一版只提示结果可以交给 `wplus-skill-builder`，不自动或一键调用 Builder。
+
+## 持久化与一致性
+
+后端至少持久化会话归属、技能版本或内容快照标识、状态版本、修订号、轮次、环节队列、当前有效题组与回答、失效历史、预跑运行 ID、输入快照、步骤进度、脱敏结果摘要、用户反馈、授权记录、命令 receipt、运行 attempt 谱系、幂等请求、待执行退出动作、持久化 Chat 投影 outbox、最终结果和记忆授权状态。
+
+所有读写、SSE 订阅、结果下载和 active-session lookup 都校验租户、来源、用户、Agent 与所属 Chat；缺失身份或归属不匹配时 fail closed，并以 404 避免泄露会话是否存在。所有写操作还校验当前状态、预期状态版本和幂等请求。每个用户动作使用稳定的 `command_request_id`；每次真实执行创建新的 `run_id`/`attempt_id`，失败重试或反馈重跑通过 `retry_of_run_id`/`rerun_of_run_id` 关联旧运行。
+
+W+ 事件日志是唯一提交点；同一提交持久化 Chat 投影 outbox，随后确定性补写 Chat，并按投影事件 ID 去重。这样即使 Chat 写失败或进程在两次写之间重启，也能对账补齐而不产生半提交或重复卡片。SSE 只承担实时提示，持久化 Session 投影才是恢复真源；重复或旧版本事件被忽略，版本缺口触发重新读取投影。V1 的本地 JSON 写路径只支持单进程桌面部署，多 worker 部署必须使用支持跨进程事务与锁的数据库 store。
+
+历史答案修订采用追加式审计：旧记录保留并标记失效，修订点之后的题组、回答、派生结果和未执行记忆选择全部失效。
+
+## 后果与被否决方案
+
+这一选择增加了持久化模型、状态转换、结构化 Agent 输出、前后端协议和测试成本，但换取刷新恢复、暂停恢复、答案修订、单一写入口、双标签页并发控制和不可变审计。
+
+被否决的方案包括：
+
+- 从 Markdown 或 JSON 代码块解析交互卡片；
+- 只在前端保存工作台状态；
+- 让 Chat 和工作台同时提交答案；
+- 创建不绑定原 Chat 的第二套对话；
+- 第一版扩张为所有技能共用的通用工作台；
+- 把对象列表出参平铺为失去父子关系的字段清单。

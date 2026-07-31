@@ -1,0 +1,4 @@
+interface:
+  display_name: "W+ SOP 挖掘器"
+  short_description: "逐环节澄清、预跑、反馈确认并生成可交付的 W+ 工作流程 SOP"
+  default_prompt: "使用 $wplus-sop-miner 将具体工作需求澄清成经过预跑确认的 SOP。"

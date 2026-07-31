@@ -1479,6 +1479,12 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             description="update task progress state",
             display_to_user=False,
         ),
+        "emit_wplus_sop_event": BuiltinToolConfig(
+            name="emit_wplus_sop_event",
+            enabled=True,
+            description="commit a typed W+ SOP workspace event",
+            display_to_user=False,
+        ),
     }
 
 

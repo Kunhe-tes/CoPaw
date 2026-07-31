@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/wplus/state-schema-1.1.json",
+  "title": "W+ SOP clarification state",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "mode",
+    "lifecycle_status",
+    "request_summary",
+    "queue_confirmed",
+    "current_stage_id",
+    "stage_queue",
+    "confirmed_facts",
+    "assumptions",
+    "open_questions",
+    "next_required_transition"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.1" },
+    "mode": { "enum": ["wplus", "generic_fallback"] },
+    "lifecycle_status": { "enum": ["active", "blocked", "finalizing", "complete"] },
+    "request_summary": { "type": "string", "minLength": 1 },
+    "queue_confirmed": { "type": "boolean" },
+    "current_stage_id": { "type": ["string", "null"] },
+    "stage_queue": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "status",
+          "round",
+          "question_total",
+          "question_resolved",
+          "verification_mode",
+          "trial_notes",
+          "selected_capability_ids"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^stage-[1-9][0-9]*$" },
+          "name": { "type": "string", "minLength": 1 },
+          "status": {
+            "enum": [
+              "pending",
+              "clarifying",
+              "ready_for_trial",
+              "trial_running",
+              "feedback_review",
+              "awaiting_stage_confirmation",
+              "confirmed",
+              "blocked"
+            ]
+          },
+          "round": { "type": "integer", "minimum": 0 },
+          "question_total": { "type": "integer", "minimum": 0 },
+          "question_resolved": { "type": "integer", "minimum": 0 },
+          "verification_mode": { "enum": ["original", "trial_run", "user_confirmed"] },
+          "trial_notes": { "type": "array", "items": { "type": "string" } },
+          "selected_capability_ids": { "type": "array", "items": { "type": "string" } }
+        },
+        "additionalProperties": false
+      }
+    },
+    "confirmed_facts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["stage_id", "field", "value", "evidence"],
+        "properties": {
+          "stage_id": { "type": "string" },
+          "field": { "type": "string" },
+          "value": {},
+          "evidence": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    },
+    "assumptions": { "type": "array", "items": { "type": "string" } },
+    "open_questions": { "type": "array", "items": { "type": "string" } },
+    "candidate_capabilities": { "type": "array", "items": { "type": "string" } },
+    "next_required_transition": {
+      "enum": [
+        "confirm_queue",
+        "ask_stage_questions",
+        "start_stage_trial",
+        "collect_stage_feedback",
+        "confirm_stage",
+        "advance_to_next_stage",
+        "finalize_outputs",
+        "none"
+      ]
+    }
+  },
+  "additionalProperties": false
+}

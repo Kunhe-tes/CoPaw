@@ -59,6 +59,7 @@ from .tools import (
     create_recover_evidence_tool,
     copy_file_to_static,
     update_task_progress,
+    emit_wplus_sop_event,
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
@@ -309,6 +310,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             "get_current_time": get_current_time,
             "copy_file_to_static": copy_file_to_static,
             "update_task_progress": update_task_progress,
+            "emit_wplus_sop_event": emit_wplus_sop_event,
         }
 
         # Register only enabled tools

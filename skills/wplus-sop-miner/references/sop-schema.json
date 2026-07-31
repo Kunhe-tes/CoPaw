@@ -1,0 +1,175 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/wplus/sop-schema-1.1.json",
+  "title": "Confirmed W+ SOP specification",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "title",
+    "request_summary",
+    "queue_confirmed",
+    "status",
+    "trigger",
+    "actor",
+    "stages",
+    "capability_snapshot",
+    "open_questions",
+    "memory_candidates"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.1" },
+    "title": { "type": "string", "minLength": 1 },
+    "request_summary": { "type": "string", "minLength": 1 },
+    "queue_confirmed": { "const": true },
+    "status": { "enum": ["complete", "blocked"] },
+    "trigger": { "type": "string", "minLength": 1 },
+    "actor": { "type": "string" },
+    "stages": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 4,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "status",
+          "verification_mode",
+          "entry_point",
+          "data_scope",
+          "decision_logic",
+          "output",
+          "next_action",
+          "trial_notes",
+          "execution"
+        ],
+        "properties": {
+          "id": { "type": "string", "pattern": "^stage-[1-9][0-9]*$" },
+          "name": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["complete", "blocked"] },
+          "verification_mode": {
+            "enum": ["original", "trial_run", "user_confirmed"],
+            "default": "original",
+            "description": "验证模式：原始/试运行/用户确认"
+          },
+          "entry_point": { "type": "string" },
+          "data_scope": { "type": "object" },
+          "decision_logic": { "type": "string" },
+          "output": { "type": "string" },
+          "next_action": { "type": "string" },
+          "trial_notes": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string" },
+            "description": "试运行过程中用户反馈的记录"
+          },
+          "execution": {
+            "type": "object",
+            "required": ["mode", "capability_ids", "parameter_bindings", "confirmation_required"],
+            "properties": {
+              "mode": { "enum": ["opencli", "analysis", "human_action", "unsupported"] },
+              "capability_ids": { "type": "array", "items": { "type": "string" } },
+              "parameter_bindings": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "object",
+                  "required": ["source"],
+                  "properties": {
+                    "source": { "enum": ["constant", "user_input", "stage_output"] },
+                    "value": {},
+                    "stage_id": { "type": "string" },
+                    "field": { "type": "string" }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "confirmation_required": { "type": "boolean" }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "capability_snapshot": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/capability" }
+    },
+    "open_questions": { "type": "array", "items": { "type": "string" } },
+    "memory_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "content", "evidence"],
+        "properties": {
+          "type": { "enum": ["common_wplus_knowledge", "user_wplus_usage", "sop_case"] },
+          "content": { "type": "object" },
+          "evidence": { "type": "string", "minLength": 1 }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": { "status": { "const": "complete" } },
+        "required": ["status"]
+      },
+      "then": {
+        "properties": {
+          "stages": {
+            "items": {
+              "properties": {
+                "status": { "const": "complete" },
+                "verification_mode": { "const": "user_confirmed" }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "capability": {
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "mode",
+        "verification_status",
+        "sensitivity",
+        "inputs",
+        "outputs",
+        "output_contract_status",
+        "adapter"
+      ],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "mode": { "const": "read" },
+        "verification_status": { "enum": ["verified", "partial", "unverified"] },
+        "sensitivity": { "enum": ["internal", "customer_financial"] },
+        "inputs": { "type": "array" },
+        "outputs": { "type": "array" },
+        "output_contract_status": { "enum": ["documented", "undocumented"] },
+        "adapter": {
+          "type": "object",
+          "required": ["name", "command", "arguments", "format"],
+          "properties": {
+            "name": { "type": "string" },
+            "command": { "type": "string" },
+            "arguments": {
+              "type": "object",
+              "additionalProperties": { "type": "string", "pattern": "^--" }
+            },
+            "format": { "enum": ["json", "yaml"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}
