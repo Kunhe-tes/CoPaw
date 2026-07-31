@@ -98,7 +98,7 @@ Message Channel
 
 补充约定：`/console/chat` 的 SSE 事件流中，`object=response` 的终态帧（如 `status=completed` 或 `status=failed`）允许只推进状态字段而不重复携带 `output`。前端必须把这类空 `output` 终态帧视为合法结束信号，不能据此继续保持 loading，也不能清空已经渲染出的最后一条消息。
 
-补充说明：控制台当前不再提供“回答后校验”驱动的继续执行卡片。聊天主链路完成后，前端只继续轮询 suggestions 等现有附加能力；额外自动续跑仅保留 `BeforeStop` Hook 的门禁保护场景。
+补充说明：控制台当前不再提供“回答后校验”驱动的继续执行卡片。聊天主链路完成后，前端只继续轮询 suggestions 等现有附加能力；额外自动续跑仅由 `Stop` 完成门禁的显式 `block` 触发。
 
 ## 关联功能域
 

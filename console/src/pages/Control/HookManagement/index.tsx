@@ -50,7 +50,6 @@ const events: HookEventName[] = [
   "PreToolUse",
   "PostToolUse",
   "PostToolUseFailure",
-  "BeforeStop",
   "Stop",
 ];
 

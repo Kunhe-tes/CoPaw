@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""读取完整会话历史并调用外部策略接口判定 BeforeStop。"""
+"""读取完整会话历史并调用外部策略接口判定 Stop。"""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ DEFAULT_TIMEOUT_SECONDS = 10.0
 
 
 def _block(reason: str) -> dict[str, str]:
-    """构造 BeforeStop 支持的保守阻断输出。"""
+    """构造 Stop 支持的保守阻断输出。"""
     return {
         "decision": "block",
         "reason": reason[:2000],
@@ -133,7 +133,7 @@ def _parse_policy_response(
 
 
 def _normalize_policy_decision(response: dict[str, Any]) -> dict[str, str]:
-    """把外部策略响应归一成 BeforeStop 支持的 hook 输出。"""
+    """把外部策略响应归一成 Stop 支持的 hook 输出。"""
     decision = str(response.get("decision") or "").strip()
     reason = str(response.get("reason") or "").strip()
     if decision not in {"allow", "block"}:
@@ -154,8 +154,8 @@ def _normalize_policy_decision(response: dict[str, Any]) -> dict[str, str]:
 
 def _build_output(payload: dict[str, Any]) -> dict[str, str]:
     """读取完整历史、调用外部接口并构造 hook 输出。"""
-    if payload.get("hook_event_name") != "BeforeStop":
-        return {"decision": "allow", "reason": "非 BeforeStop 事件，跳过检查"}
+    if payload.get("hook_event_name") != "Stop":
+        return {"decision": "allow", "reason": "非 Stop 事件，跳过检查"}
 
     transcript, error = _read_transcript(payload)
     if error is not None or transcript is None:

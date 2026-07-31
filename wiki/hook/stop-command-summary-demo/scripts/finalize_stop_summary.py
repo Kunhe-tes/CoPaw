@@ -19,9 +19,12 @@ def _load_payload() -> dict[str, object]:
 
 
 def _build_output(payload: dict[str, object]) -> dict[str, object]:
-    """Stop 只做观测，stdout 不返回任何运行时效果。"""
+    """记录审计后明确批准当前候选回复完成。"""
     del payload
-    return {}
+    return {
+        "decision": "allow",
+        "reason": "summary recorded",
+    }
 
 
 def _build_audit_record(payload: dict[str, object]) -> dict[str, object]:

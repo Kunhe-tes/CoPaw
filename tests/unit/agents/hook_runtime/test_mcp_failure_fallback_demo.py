@@ -110,23 +110,23 @@ def test_demo_skill_hook_config_loads_from_repo_files() -> None:
 
     source = result.loaded_skill_sources[0]
     assert set(source.hook_config.events.keys()) == {
-        HookEventName.BEFORE_STOP,
+        HookEventName.STOP,
         HookEventName.POST_TOOL_USE_FAILURE,
     }
 
-    before_stop_group = source.hook_config.events[HookEventName.BEFORE_STOP][0]
-    before_stop_handler = before_stop_group.hooks[0]
+    stop_group = source.hook_config.events[HookEventName.STOP][0]
+    stop_handler = stop_group.hooks[0]
     assert (
-        before_stop_group.id
+        stop_group.id
         == "skill:mcp-failure-fallback-demo:mcp-response-consistency-check"
     )
-    assert before_stop_handler.id == (
+    assert stop_handler.id == (
         "skill:mcp-failure-fallback-demo:" "mcp-response-consistency-judge"
     )
-    assert before_stop_handler.type == "prompt"
-    assert before_stop_handler.fail_policy == "allow"
-    assert "assistant_response" in before_stop_handler.prompt
-    assert "HookContext JSON" in before_stop_handler.prompt
+    assert stop_handler.type == "prompt"
+    assert stop_handler.fail_policy == "allow"
+    assert "assistant_response" in stop_handler.prompt
+    assert "HookContext JSON" in stop_handler.prompt
 
     group = source.hook_config.events[HookEventName.POST_TOOL_USE_FAILURE][0]
     handler = group.hooks[0]

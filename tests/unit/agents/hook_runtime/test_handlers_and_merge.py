@@ -669,7 +669,7 @@ def test_prompt_judgment_output_repairs_malformed_json() -> None:
         ('{"decision":"block","reason":"继续完成测试"}', HookDecision.BLOCK),
     ],
 )
-def test_before_stop_prompt_judgment_accepts_gate_decisions(
+def test_stop_prompt_judgment_accepts_gate_decisions(
     text: str,
     decision: HookDecision,
 ) -> None:
@@ -677,7 +677,7 @@ def test_before_stop_prompt_judgment_accepts_gate_decisions(
         handler_id="policy",
         order=0,
         text=text,
-        event_name=HookEventName.BEFORE_STOP,
+        event_name=HookEventName.STOP,
     )
 
     assert result.decision == decision
@@ -709,7 +709,7 @@ def test_before_stop_prompt_judgment_accepts_gate_decisions(
         ),
     ],
 )
-def test_before_stop_prompt_judgment_rejects_unsupported_outputs(
+def test_stop_prompt_judgment_rejects_unsupported_outputs(
     text: str,
 ) -> None:
     with pytest.raises(ValueError):
@@ -717,7 +717,7 @@ def test_before_stop_prompt_judgment_rejects_unsupported_outputs(
             handler_id="policy",
             order=0,
             text=text,
-            event_name=HookEventName.BEFORE_STOP,
+            event_name=HookEventName.STOP,
         )
 
 
@@ -728,7 +728,7 @@ def test_before_stop_prompt_judgment_rejects_unsupported_outputs(
         ({"decision": "block", "reason": "run tests"}, HookDecision.BLOCK),
     ],
 )
-def test_before_stop_hook_output_accepts_gate_decisions(
+def test_stop_hook_output_accepts_gate_decisions(
     raw_output: dict,
     decision: HookDecision,
 ) -> None:
@@ -736,7 +736,7 @@ def test_before_stop_hook_output_accepts_gate_decisions(
         handler_id="policy",
         order=0,
         raw_output=raw_output,
-        event_name=HookEventName.BEFORE_STOP,
+        event_name=HookEventName.STOP,
     )
 
     assert result.decision == decision
@@ -746,6 +746,7 @@ def test_before_stop_hook_output_accepts_gate_decisions(
 @pytest.mark.parametrize(
     "raw_output",
     [
+        {},
         {"decision": "deny", "reason": "no"},
         {"decision": "ask", "reason": "review"},
         {"continue": False, "stopReason": "stop"},
@@ -760,7 +761,7 @@ def test_before_stop_hook_output_accepts_gate_decisions(
         {"hookSpecificOutput": {"additionalContext": "extra"}},
     ],
 )
-def test_before_stop_hook_output_rejects_unsupported_fields(
+def test_stop_hook_output_rejects_unsupported_fields(
     raw_output: dict,
 ) -> None:
     with pytest.raises(ValueError):
@@ -768,7 +769,7 @@ def test_before_stop_hook_output_rejects_unsupported_fields(
             handler_id="policy",
             order=0,
             raw_output=raw_output,
-            event_name=HookEventName.BEFORE_STOP,
+            event_name=HookEventName.STOP,
         )
 
 
@@ -800,10 +801,9 @@ def test_generic_canonical_stop_is_terminal(
         HookEventName.SESSION_START,
         HookEventName.USER_PROMPT_SUBMIT,
         HookEventName.PRE_TOOL_USE,
-        HookEventName.STOP,
     ],
 )
-def test_non_before_stop_prompt_judgment_still_accepts_deny(
+def test_non_stop_prompt_judgment_still_accepts_deny(
     event_name: HookEventName,
 ) -> None:
     result = normalize_prompt_judgment_output(
@@ -825,7 +825,7 @@ def test_non_before_stop_prompt_judgment_still_accepts_deny(
         (FailPolicy.ALLOW, HookDecision.NONE),
     ],
 )
-async def test_before_stop_prompt_handler_invalid_output_uses_fail_policy(
+async def test_stop_prompt_handler_invalid_output_uses_fail_policy(
     monkeypatch,
     tmp_path: Path,
     fail_policy: FailPolicy,
@@ -849,7 +849,7 @@ async def test_before_stop_prompt_handler_invalid_output_uses_fail_policy(
             prompt="检查是否可以停止。",
             failPolicy=fail_policy,
         ),
-        _context(HookEventName.BEFORE_STOP),
+        _context(HookEventName.STOP),
         workspace_dir=tmp_path,
     )
 
@@ -1100,7 +1100,7 @@ async def test_runtime_emits_prompt_command_and_http_handlers_concurrently(
 
 
 @pytest.mark.asyncio
-async def test_runtime_stop_executes_handlers_but_discards_all_effects(
+async def test_runtime_stop_executes_handlers_and_returns_gate_result(
     monkeypatch,
 ) -> None:
     from swe.agents.hook_runtime.runtime import HookRuntime
@@ -1113,21 +1113,9 @@ async def test_runtime_stop_executes_handlers_but_discards_all_effects(
         return HookHandlerResult(
             handler_id=handler.id,
             order=0,
-            output=HookOutput(
-                continue_=False,
-                stop_reason="ignored stop request",
-                system_message="ignored system message",
-                suppress_output=True,
-                hook_specific_output={
-                    "additionalContext": "ignored context",
-                    "updatedInput": {"command": "ignored"},
-                    "sessionTitle": "ignored title",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": "ignored denial",
-                },
-            ),
-            decision=HookDecision.STOP,
-            reason="ignored stop request",
+            output=HookOutput(decision="block", reason="completion blocked"),
+            decision=HookDecision.BLOCK,
+            reason="completion blocked",
         )
 
     monkeypatch.setattr(
@@ -1158,8 +1146,8 @@ async def test_runtime_stop_executes_handlers_but_discards_all_effects(
     )
 
     assert executed_handler_ids == ["stop-observer"]
-    assert result.decision == HookDecision.NONE
-    assert result.reason == ""
+    assert result.decision == HookDecision.BLOCK
+    assert result.reason == "completion blocked"
     assert result.additional_context == []
     assert result.hook_specific_outputs == {}
     assert result.permission_decisions == []
@@ -1170,10 +1158,10 @@ async def test_runtime_stop_executes_handlers_but_discards_all_effects(
 
 
 @pytest.mark.asyncio
-async def test_runtime_stop_discards_fail_policy_block_effect(
+async def test_runtime_stop_preserves_fail_policy_block_effect(
     tmp_path: Path,
 ) -> None:
-    """Stop handler 的执行失败仍可被 telemetry 记录，但不能阻断当前请求。"""
+    """Stop handler 的阻断失败必须交给 runner 结束当前请求。"""
     from swe.agents.hook_runtime.runtime import HookRuntime
 
     script = tmp_path / "fail_stop_observer.py"
@@ -1202,8 +1190,8 @@ async def test_runtime_stop_discards_fail_policy_block_effect(
         workspace_dir=tmp_path,
     )
 
-    assert result.decision == HookDecision.NONE
-    assert result.reason == ""
+    assert result.decision == HookDecision.BLOCK
+    assert result.reason
 
 
 @pytest.mark.asyncio
@@ -1589,6 +1577,33 @@ def test_merge_continue_false_overrides_other_decisions() -> None:
 
     assert merged.decision == HookDecision.STOP
     assert merged.reason == "stop now"
+
+
+def test_merge_blocking_failure_preserves_its_reason_over_prior_block() -> (
+    None
+):
+    policy = CommandHookHandlerConfig(id="policy", command="echo")
+    audit = CommandHookHandlerConfig(
+        id="audit",
+        command="echo",
+        failPolicy=FailPolicy.BLOCK,
+    )
+    plan = _plan(policy, audit)
+
+    merged = merge_hook_results(
+        plan,
+        [
+            plan.handlers[0].success(
+                {"decision": "block", "reason": "policy requires review"},
+            ),
+            plan.handlers[1].failure("audit service timed out", "timeout"),
+        ],
+    )
+
+    assert merged.decision == HookDecision.BLOCK
+    assert merged.reason == "policy requires review"
+    assert merged.has_blocking_failure is True
+    assert merged.blocking_failure_reason == "audit service timed out"
 
 
 def test_merge_stop_wins_over_multiple_updated_inputs() -> None:
