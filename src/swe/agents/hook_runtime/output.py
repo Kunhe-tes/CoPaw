@@ -16,11 +16,11 @@ _PROMPT_JUDGMENT_DECISIONS = {
     "block": HookDecision.BLOCK,
     "stop": HookDecision.STOP,
 }
-_BEFORE_STOP_PROMPT_JUDGMENT_DECISIONS = {
+_STOP_PROMPT_JUDGMENT_DECISIONS = {
     "allow": HookDecision.ALLOW,
     "block": HookDecision.BLOCK,
 }
-_BEFORE_STOP_UNSUPPORTED_TOP_LEVEL_EFFECT_FIELDS = (
+_STOP_UNSUPPORTED_TOP_LEVEL_EFFECT_FIELDS = (
     ("continue_", "continue"),
     ("stop_reason", "stopReason"),
     ("suppress_output", "suppressOutput"),
@@ -35,31 +35,31 @@ def _event_name_value(event_name: HookEventName | str | None) -> str:
 def _prompt_judgment_decisions(
     event_name: HookEventName | str | None,
 ) -> dict[str, HookDecision]:
-    if _event_name_value(event_name) == HookEventName.BEFORE_STOP.value:
-        return _BEFORE_STOP_PROMPT_JUDGMENT_DECISIONS
+    if _event_name_value(event_name) == HookEventName.STOP.value:
+        return _STOP_PROMPT_JUDGMENT_DECISIONS
     return _PROMPT_JUDGMENT_DECISIONS
 
 
-def _validate_before_stop_hook_output(output: HookOutput) -> None:
+def _validate_stop_hook_output(output: HookOutput) -> None:
     if output.decision and output.decision not in {"allow", "block"}:
-        raise ValueError("BeforeStop hook output has unsupported decision")
+        raise ValueError("Stop hook output has unsupported decision")
 
     unsupported_effect_fields = [
         field_name
         for attr_name, field_name in (
-            _BEFORE_STOP_UNSUPPORTED_TOP_LEVEL_EFFECT_FIELDS
+            _STOP_UNSUPPORTED_TOP_LEVEL_EFFECT_FIELDS
         )
         if getattr(output, attr_name) is not None
     ]
     if unsupported_effect_fields:
         raise ValueError(
-            "BeforeStop hook output has unsupported output fields",
+            "Stop hook output has unsupported output fields",
         )
 
     specific = output.hook_specific_output or {}
     if specific:
         raise ValueError(
-            "BeforeStop hook output has unsupported hookSpecificOutput",
+            "Stop hook output has unsupported hookSpecificOutput",
         )
 
 
@@ -83,16 +83,14 @@ def normalize_hook_output(
     event_name: HookEventName | str | None = None,
 ) -> HookHandlerResult:
     output = HookOutput.model_validate(raw_output)
-    is_before_stop = (
-        _event_name_value(event_name) == HookEventName.BEFORE_STOP.value
-    )
-    if is_before_stop:
-        _validate_before_stop_hook_output(output)
+    is_stop = _event_name_value(event_name) == HookEventName.STOP.value
+    if is_stop:
+        _validate_stop_hook_output(output)
 
     decision = HookDecision.NONE
     reason = output.reason or ""
 
-    if is_before_stop and output.decision == "allow":
+    if is_stop and output.decision == "allow":
         decision = HookDecision.ALLOW
     elif output.continue_ is False:
         decision = HookDecision.STOP

@@ -16,7 +16,6 @@ class HookEventName(str, Enum):
     PRE_TOOL_USE = "PreToolUse"
     POST_TOOL_USE = "PostToolUse"
     POST_TOOL_USE_FAILURE = "PostToolUseFailure"
-    BEFORE_STOP = "BeforeStop"
     STOP = "Stop"
 
 
@@ -27,7 +26,6 @@ PROMPT_HANDLER_BLOCKABLE_EVENTS = {
     HookEventName.PRE_TOOL_USE,
     HookEventName.POST_TOOL_USE,
     HookEventName.POST_TOOL_USE_FAILURE,
-    HookEventName.BEFORE_STOP,
     HookEventName.STOP,
 }
 
