@@ -156,6 +156,8 @@ def merge_hook_results(
     updated_inputs: _UpdatedInputs = []
 
     for result in by_order:
+        if result.failed and result.decision == HookDecision.BLOCK:
+            merged.has_blocking_failure = True
         _merge_hook_specific_output(merged, result, updated_inputs)
         _merge_output_flags(merged, result)
         _merge_decision(merged, result)

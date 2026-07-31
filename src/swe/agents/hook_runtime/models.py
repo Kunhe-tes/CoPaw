@@ -163,6 +163,7 @@ class MergedHookResult(BaseModel):
     session_title: str | None = None
     suppress_output: bool = False
     system_messages: list[str] = Field(default_factory=list)
+    has_blocking_failure: bool = False
 
     @property
     def blocked(self) -> bool:

@@ -657,12 +657,11 @@ class HookRuntimeRunningConfig(BaseModel):
 
     model_config = ConfigDict(extra="ignore")
 
-    max_before_stop_turns: Optional[int] = Field(
+    max_stop_turns: Optional[int] = Field(
         default=None,
         ge=0,
         description=(
-            "BeforeStop 阻断后允许自动续跑的最大轮数；"
-            "未配置时使用 Runner 默认值"
+            "Stop 阻断后允许自动续跑的最大轮数；" "未配置时使用 Runner 默认值"
         ),
     )
     max_automatic_follow_up_turns: Optional[int] = Field(
@@ -688,12 +687,12 @@ class AgentsRunningConfig(BaseModel):
         ),
     )
 
-    max_before_stop_turns: Optional[int] = Field(
+    max_stop_turns: Optional[int] = Field(
         default=None,
         ge=0,
         description=(
-            "BeforeStop 阻断后允许自动续跑的最大轮数；"
-            "兼容旧版 running 顶层配置"
+            "Stop 阻断后允许自动续跑的最大轮数；"
+            "未配置时由 hook_runtime 配置或默认值决定"
         ),
     )
 
