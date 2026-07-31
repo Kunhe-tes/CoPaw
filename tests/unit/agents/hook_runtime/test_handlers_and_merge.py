@@ -1579,6 +1579,33 @@ def test_merge_continue_false_overrides_other_decisions() -> None:
     assert merged.reason == "stop now"
 
 
+def test_merge_blocking_failure_preserves_its_reason_over_prior_block() -> (
+    None
+):
+    policy = CommandHookHandlerConfig(id="policy", command="echo")
+    audit = CommandHookHandlerConfig(
+        id="audit",
+        command="echo",
+        failPolicy=FailPolicy.BLOCK,
+    )
+    plan = _plan(policy, audit)
+
+    merged = merge_hook_results(
+        plan,
+        [
+            plan.handlers[0].success(
+                {"decision": "block", "reason": "policy requires review"},
+            ),
+            plan.handlers[1].failure("audit service timed out", "timeout"),
+        ],
+    )
+
+    assert merged.decision == HookDecision.BLOCK
+    assert merged.reason == "policy requires review"
+    assert merged.has_blocking_failure is True
+    assert merged.blocking_failure_reason == "audit service timed out"
+
+
 def test_merge_stop_wins_over_multiple_updated_inputs() -> None:
     stopper = CommandHookHandlerConfig(id="stopper", command="echo")
     first_updater = CommandHookHandlerConfig(

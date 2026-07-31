@@ -26,6 +26,20 @@ def test_hook_runtime_budget_fields_accept_real_config_values() -> None:
     assert config.hook_runtime.max_automatic_follow_up_turns == 2
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"max_before_stop_turns": 1},
+        {"hook_runtime": {"max_before_stop_turns": 1}},
+    ],
+)
+def test_legacy_before_stop_budget_key_is_rejected(
+    payload: dict,
+) -> None:
+    with pytest.raises(ValidationError, match="max_before_stop_turns"):
+        AgentsRunningConfig.model_validate(payload)
+
+
 def test_workload_specific_llm_config_fields_use_defaults() -> None:
     config = AgentsRunningConfig()
 

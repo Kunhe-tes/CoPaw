@@ -673,6 +673,15 @@ class HookRuntimeRunningConfig(BaseModel):
         ),
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_before_stop_budget(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_before_stop_turns" in data:
+            raise ValueError(
+                "max_before_stop_turns has been removed; use max_stop_turns",
+            )
+        return data
+
 
 class AgentsRunningConfig(BaseModel):
     """Agent runtime behavior configuration."""
@@ -854,6 +863,15 @@ class AgentsRunningConfig(BaseModel):
                 DEFAULT_LLM_CRON_MAX_CONCURRENT
             )
         return normalized
+
+    @model_validator(mode="before")
+    @classmethod
+    def reject_legacy_before_stop_budget(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "max_before_stop_turns" in data:
+            raise ValueError(
+                "max_before_stop_turns has been removed; use max_stop_turns",
+            )
+        return data
 
     @model_validator(mode="after")
     def validate_llm_retry_backoff(self) -> "AgentsRunningConfig":

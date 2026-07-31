@@ -1143,14 +1143,19 @@ def _extract_text_from_blocks(blocks: list) -> str:
     return "\n".join(texts) if texts else ""
 
 
-def _extract_assistant_response(agent: SWEAgent) -> str:
-    """从 agent memory 中提取最后的助手响应文本."""
+def _extract_assistant_response(
+    agent: SWEAgent,
+    *,
+    memory_start: int = 0,
+) -> str:
+    """从 agent memory 的当前 turn 中提取最后的助手响应文本."""
     if not agent or not hasattr(agent, "memory"):
         return ""
 
     try:
         # memory.content 是 list of (Msg, marks) tuples
-        for msg, _marks in reversed(agent.memory.content):
+        memory = agent.memory.content
+        for msg, _marks in reversed(memory[max(memory_start, 0) :]):
             if msg.role != "assistant" or not hasattr(msg, "content"):
                 continue
             # content 可能是 list of blocks 或 string
@@ -3276,6 +3281,8 @@ class AgentRunner(Runner):
     ):
         """流式执行当前 agent turn。"""
         turn_msgs = plan.turn_msgs
+        outcome.assistant_response = ""
+        memory_start = len(getattr(runtime.agent.memory, "content", []))
         stop_turns = _resolve_max_stop_turns(
             runtime.agent_config,
         )
@@ -3334,6 +3341,7 @@ class AgentRunner(Runner):
 
         outcome.assistant_response = _extract_assistant_response(
             runtime.agent,
+            memory_start=memory_start,
         )
         outcome.task_completed = True
 
@@ -3401,7 +3409,11 @@ class AgentRunner(Runner):
                 stop_result is not None
                 and stop_result.decision == HookDecision.BLOCK
             ):
-                reason = stop_result.reason or "Stop blocked completion"
+                reason = (
+                    stop_result.blocking_failure_reason
+                    if stop_result.has_blocking_failure
+                    else stop_result.reason
+                ) or "Stop blocked completion"
                 if (
                     not stop_result.has_blocking_failure
                     and _should_stop_follow_up(outcome)

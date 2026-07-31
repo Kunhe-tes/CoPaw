@@ -164,6 +164,7 @@ class MergedHookResult(BaseModel):
     suppress_output: bool = False
     system_messages: list[str] = Field(default_factory=list)
     has_blocking_failure: bool = False
+    blocking_failure_reason: str = ""
 
     @property
     def blocked(self) -> bool:

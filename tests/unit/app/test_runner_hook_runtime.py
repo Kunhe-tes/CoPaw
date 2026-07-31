@@ -1582,8 +1582,9 @@ async def test_query_handler_stop_blocking_failure_finishes_without_follow_up(
             stop_calls += 1
             return MergedHookResult(
                 decision=HookDecision.BLOCK,
-                reason="audit service failed",
+                reason="policy requires review",
                 has_blocking_failure=True,
+                blocking_failure_reason="audit service failed",
             )
         return MergedHookResult()
 
@@ -1609,6 +1610,69 @@ async def test_query_handler_stop_blocking_failure_finishes_without_follow_up(
     assert len(outputs) == 2
     assert "任务未完成" in outputs[-1][0].get_text_content()
     assert "audit service failed" in outputs[-1][0].get_text_content()
+
+
+@pytest.mark.asyncio
+async def test_query_handler_skips_stop_when_turn_has_no_new_assistant_response(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class NoResponseAgent(_FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.memory.content.append(
+                (
+                    Msg(name="Friday", role="assistant", content="old reply"),
+                    [],
+                ),
+            )
+
+        async def __call__(self, turn_msgs):
+            for msg in turn_msgs:
+                self.memory.content.append((msg, []))
+            return []
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    setattr(runner, "_chat_manager", None)
+    _patch_normal_agent_path(monkeypatch)
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", NoResponseAgent)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(HookConfig(enabled=True)),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(enabled=True),
+    )
+    stop_calls = 0
+
+    async def fake_emit_runner_hook(event_name, **kwargs):
+        nonlocal stop_calls
+        if event_name == HookEventName.STOP:
+            stop_calls += 1
+        return MergedHookResult()
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        fake_emit_runner_hook,
+    )
+
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="hello")],
+            request=SimpleNamespace(
+                session_id="session-1",
+                user_id="user-1",
+                channel="console",
+                channel_meta={},
+            ),
+        )
+    ]
+
+    assert outputs == []
+    assert stop_calls == 0
 
 
 @pytest.mark.asyncio
