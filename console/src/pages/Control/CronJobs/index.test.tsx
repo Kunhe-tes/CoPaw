@@ -119,7 +119,18 @@ vi.mock("./components", () => ({
   DEFAULT_FORM_VALUES: {
     schedule: {},
   },
-  JobDrawer: () => null,
+  JobDrawer: ({
+    skillOptions,
+  }: {
+    skillOptions: Array<{ value: string; label: string }>;
+  }) => (
+    <div
+      data-testid="skill-options"
+      data-values={skillOptions.map((option) => option.value).join(",")}
+    >
+      {skillOptions.length}
+    </div>
+  ),
   BroadcastChildrenModal: () => null,
   isBroadcastChildJob: () => false,
   useCronJobs: () => ({
@@ -232,6 +243,35 @@ describe("CronJobsPage broadcast task refresh", () => {
       await screen.findByText("Broadcasting 4/5 tenants"),
     ).toBeInTheDocument();
   }, 30000);
+
+  it("deduplicates loaded skill options before passing them to the drawer", async () => {
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "default",
+      count: 2,
+      skills: [
+        {
+          skill_id: "same-skill-id",
+          skill_name: "first_skill_name",
+          cn_name: "首次展示",
+        },
+        {
+          skill_id: "same-skill-id",
+          skill_name: "second_skill_name",
+          cn_name: "重复展示",
+        },
+      ],
+    });
+
+    render(<CronJobsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-options")).toHaveTextContent("1");
+    });
+    expect(screen.getByTestId("skill-options")).toHaveAttribute(
+      "data-values",
+      "same-skill-id",
+    );
+  });
 
   it("prevents a second broadcast from the visible completed result", async () => {
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });
