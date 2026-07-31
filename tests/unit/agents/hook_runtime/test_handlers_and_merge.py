@@ -746,6 +746,7 @@ def test_stop_hook_output_accepts_gate_decisions(
 @pytest.mark.parametrize(
     "raw_output",
     [
+        {},
         {"decision": "deny", "reason": "no"},
         {"decision": "ask", "reason": "review"},
         {"continue": False, "stopReason": "stop"},

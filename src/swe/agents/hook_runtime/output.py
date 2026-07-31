@@ -41,7 +41,7 @@ def _prompt_judgment_decisions(
 
 
 def _validate_stop_hook_output(output: HookOutput) -> None:
-    if output.decision and output.decision not in {"allow", "block"}:
+    if output.decision not in {"allow", "block"}:
         raise ValueError("Stop hook output has unsupported decision")
 
     unsupported_effect_fields = [
