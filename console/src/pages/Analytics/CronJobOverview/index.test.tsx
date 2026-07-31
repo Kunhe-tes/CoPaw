@@ -249,4 +249,55 @@ describe("CronJobOverview summary cards", () => {
       container.querySelector(`.${styles.drillDownTableScroll}`),
     ).toBeNull();
   });
+
+  it("renders branch skill details returned by the backend without local filtering", async () => {
+    monitorApiMock.getCronBranchTaskBehavior.mockResolvedValueOnce({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      items: [
+        {
+          rank: 1,
+          bbk_id: "100",
+          bbk_name: "测试分行",
+          manager_count: 1,
+          total_tasks: 2,
+          success_count: 2,
+          success_rate: 1,
+          read_tasks: 1,
+          read_rate: 0.5,
+        },
+      ],
+    });
+    monitorApiMock.getBranchSkills.mockResolvedValueOnce({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      bbk_id: "100",
+      bbk_name: "测试分行",
+      items: [
+        {
+          skill_name: "insurance_mkt",
+          cron_task_count: 2,
+          success_count: 2,
+          success_rate: 1,
+          read_count: 1,
+          error_count: 0,
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("测试分行"));
+
+    expect(await screen.findByText("insurance_mkt")).toBeInTheDocument();
+  });
 });
