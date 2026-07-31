@@ -29,14 +29,9 @@ export const eventMetadata: Record<
     description: "在 Agent 的工具调用失败后触发。",
     order: 5,
   },
-  BeforeStop: {
-    label: "停止前",
-    description: "在 Agent 准备停止前触发。",
-    order: 6,
-  },
   Stop: {
     label: "停止",
-    description: "在 Agent 停止时触发。",
-    order: 7,
+    description: "在候选回复完成前触发，可记录并批准或阻断完成。",
+    order: 6,
   },
 };
