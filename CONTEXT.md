@@ -863,6 +863,14 @@ _Avoid_: logical chat session, UI session, conversation identity
 The timestamp of the most recent persisted change to a **Chat Record**. It establishes recency when Chat Records are listed.
 _Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
 
+**Conversation Compaction Boundary**:
+The durable, user-visible separator within one **Chat Record** marking the point where automatic context compaction or an explicit `/compact` archived earlier messages. It appears immediately through a non-message stream event and is restored from the archive on reload; its archived-message count is the number of display-safe history messages, not rendered cards; it never represents `/new` or `/clear`.
+_Avoid_: history-clear marker, new-conversation marker, summary message
+
+**Conversation Compaction Archive**:
+The Chat-Record-scoped durable store of messages removed by **Conversation Compaction Boundaries**, with exactly one committed immutable message batch per boundary. Deleting its **Chat Record** permanently deletes this archive, while existing Logical Chat Session state follows its separate retention policy.
+_Avoid_: shared daily dialog file, chat transcript, session state
+
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
