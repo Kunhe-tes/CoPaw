@@ -93,6 +93,21 @@ async def run_command_path(  # pylint: disable=too-many-statements
 
     session_id = getattr(request, "session_id", "") or ""
     user_id = getattr(request, "user_id", "") or ""
+    request_meta = getattr(request, "channel_meta", None) or {}
+    chat_id = (
+        getattr(request, "chat_id", "") or request_meta.get("chat_id") or ""
+    )
+    if not chat_id:
+        chat_manager = getattr(runner, "_chat_manager", None)
+        if chat_manager is not None and session_id:
+            chat_id = (
+                await chat_manager.get_chat_id_by_session(
+                    session_id,
+                    getattr(request, "channel", "console") or "console",
+                    user_id,
+                )
+                or ""
+            )
 
     # Daemon path
     parsed = parse_daemon_query(query)
@@ -240,7 +255,9 @@ async def run_command_path(  # pylint: disable=too-many-statements
         return
 
     # Conversation path: lightweight memory + CommandHandler
-    memory = runner.memory_manager.get_in_memory_memory()
+    memory = runner.memory_manager.get_in_memory_memory(
+        chat_id=chat_id or None,
+    )
     session_state = await runner.session.get_session_state_dict(
         session_id=session_id,
         user_id=user_id,
@@ -257,6 +274,7 @@ async def run_command_path(  # pylint: disable=too-many-statements
             "session_id": session_id,
             "user_id": user_id,
             "channel": getattr(request, "channel", "") or "",
+            "chat_id": chat_id or None,
             "trace_id": getattr(request, "trace_id", None),
         },
     )

@@ -189,6 +189,39 @@ async def test_cursor_is_bound_to_its_chat_and_rejects_tampering(
 
 
 @pytest.mark.asyncio
+async def test_cursor_survives_a_store_instance_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chat_id = _chat_id()
+    monkeypatch.setattr(
+        conversation_archive,
+        "SECRET_DIR",
+        tmp_path / "secret",
+    )
+    monkeypatch.delenv("SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET", raising=False)
+    conversation_archive._load_or_create_cursor_secret.cache_clear()
+    try:
+        first_store = ConversationArchiveStore(tmp_path / "dialog")
+        await first_store.commit(
+            chat_id,
+            [_message(index) for index in range(51)],
+        )
+        first_page = await first_store.read_page(chat_id)
+        assert first_page.next_cursor is not None
+
+        restarted_store = ConversationArchiveStore(tmp_path / "dialog")
+        next_page = await restarted_store.read_page(
+            chat_id,
+            before=first_page.next_cursor,
+        )
+
+        assert [message.id for message in next_page.messages] == ["message-0"]
+    finally:
+        conversation_archive._load_or_create_cursor_secret.cache_clear()
+
+
+@pytest.mark.asyncio
 async def test_boundary_allows_missing_message_timestamps(
     tmp_path: Path,
 ) -> None:
@@ -316,3 +349,19 @@ async def test_delete_chat_only_removes_the_validated_chat_archive(
     ] == [
         "message-2",
     ]
+
+
+@pytest.mark.asyncio
+async def test_deleted_chat_archive_cannot_be_recreated(
+    tmp_path: Path,
+) -> None:
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    chat_id = _chat_id()
+    await store.commit(chat_id, [_message(1)])
+
+    await store.delete_chat(chat_id)
+
+    with pytest.raises(ValueError, match="has been deleted"):
+        await store.commit(chat_id, [_message(2)])
+    assert not (tmp_path / "dialog" / chat_id).exists()
+    assert (tmp_path / "dialog" / ".deleted" / chat_id).is_file()

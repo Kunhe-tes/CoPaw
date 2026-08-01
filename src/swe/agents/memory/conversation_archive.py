@@ -16,6 +16,7 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -23,6 +24,7 @@ import fcntl
 
 from agentscope.message import Msg
 
+from swe.constant import SECRET_DIR
 from swe.app.runner.hidden_context_injection import (
     redact_hidden_context_for_display,
 )
@@ -32,7 +34,54 @@ logger = logging.getLogger(__name__)
 _MANIFEST_NAME = "manifest.json"
 _MAX_PAGE_SIZE = 50
 _CURSOR_SIGNATURE_SIZE = hashlib.sha256().digest_size
-_CURSOR_SECRET = os.urandom(_CURSOR_SIGNATURE_SIZE)
+_CURSOR_SECRET_ENV_VAR = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
+_CURSOR_SECRET_FILE_NAME = "conversation-archive-cursor-secret"
+
+
+@cache
+def _load_or_create_cursor_secret() -> bytes:
+    """Return a private, process-independent archive cursor signing key."""
+    configured_secret = os.environ.get(_CURSOR_SECRET_ENV_VAR)
+    if configured_secret is not None:
+        if not configured_secret:
+            raise ValueError(
+                "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET must not be empty",
+            )
+        return configured_secret.encode("utf-8")
+
+    SECRET_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    secret_path = SECRET_DIR / _CURSOR_SECRET_FILE_NAME
+    try:
+        return secret_path.read_bytes()
+    except FileNotFoundError:
+        pass
+
+    secret = os.urandom(48)
+    temporary_path = SECRET_DIR / (
+        f".{_CURSOR_SECRET_FILE_NAME}.{os.getpid()}.{os.urandom(12).hex()}"
+    )
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(
+            temporary_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        os.write(descriptor, secret)
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        try:
+            os.link(temporary_path, secret_path)
+        except FileExistsError:
+            pass
+        else:
+            ConversationArchiveStore._fsync_directory(SECRET_DIR)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        temporary_path.unlink(missing_ok=True)
+    return secret_path.read_bytes()
 
 
 @dataclass(frozen=True)
@@ -141,8 +190,18 @@ class ConversationArchivePage:
 class ConversationArchiveStore:
     """Persist and page compacted messages without cross-chat visibility."""
 
-    def __init__(self, dialog_root: str | Path) -> None:
+    def __init__(
+        self,
+        dialog_root: str | Path,
+        *,
+        cursor_secret: bytes | None = None,
+    ) -> None:
         self._dialog_root = Path(dialog_root)
+        self._cursor_secret = cursor_secret or _load_or_create_cursor_secret()
+        if not self._cursor_secret:
+            raise ValueError(
+                "Conversation archive cursor secret must not be empty",
+            )
 
     async def commit(
         self,
@@ -168,8 +227,10 @@ class ConversationArchiveStore:
             )
 
         chat_dir = self.path_for(canonical_chat_id)
-        chat_dir.mkdir(parents=True, exist_ok=True)
-        with self._chat_lock(chat_dir):
+        with self._chat_lock(canonical_chat_id):
+            if self._tombstone_path(canonical_chat_id).exists():
+                raise ValueError("Conversation archive has been deleted")
+            chat_dir.mkdir(parents=True, exist_ok=True)
             boundary = ConversationArchiveBoundary(
                 id=str(uuid.uuid4()),
                 chat_id=canonical_chat_id,
@@ -207,45 +268,55 @@ class ConversationArchiveStore:
         canonical_chat_id = self._validate_chat_id(chat_id)
         page_size = self._normalize_page_size(limit)
         chat_dir = self.path_for(canonical_chat_id)
-        manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
-        boundaries = self._visible_boundaries(manifest, canonical_chat_id)
-        cursor = (
-            self._decode_cursor(
-                before,
-                canonical_chat_id,
-                boundaries,
+        with self._chat_lock(canonical_chat_id):
+            if self._tombstone_path(canonical_chat_id).exists():
+                return ConversationArchivePage([], [], False, None)
+            manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
+            boundaries = self._visible_boundaries(manifest, canonical_chat_id)
+            cursor = (
+                self._decode_cursor(
+                    before,
+                    canonical_chat_id,
+                    boundaries,
+                    chat_dir,
+                )
+                if before
+                else None
+            )
+            selected = self._select_page(
                 chat_dir,
+                boundaries,
+                cursor,
+                page_size,
             )
-            if before
-            else None
-        )
-        selected = self._select_page(chat_dir, boundaries, cursor, page_size)
 
-        messages = [item[2] for item in reversed(selected)]
-        page_boundaries = [
-            item[0]
-            for item in reversed(selected)
-            if item[2].id == item[0].last_message_id
-        ]
-        has_more = len(selected) == page_size and self._has_previous_message(
-            chat_dir,
-            boundaries,
-            selected,
-        )
-        next_cursor = None
-        if has_more and selected:
-            oldest = selected[-1]
-            next_cursor = self._encode_cursor(
-                canonical_chat_id,
-                oldest[0].id,
-                oldest[1],
+            messages = [item[2] for item in reversed(selected)]
+            page_boundaries = [
+                item[0]
+                for item in reversed(selected)
+                if item[2].id == item[0].last_message_id
+            ]
+            has_more = len(
+                selected,
+            ) == page_size and self._has_previous_message(
+                chat_dir,
+                boundaries,
+                selected,
             )
-        return ConversationArchivePage(
-            messages=messages,
-            boundaries=page_boundaries,
-            has_more=has_more,
-            next_cursor=next_cursor,
-        )
+            next_cursor = None
+            if has_more and selected:
+                oldest = selected[-1]
+                next_cursor = self._encode_cursor(
+                    canonical_chat_id,
+                    oldest[0].id,
+                    oldest[1],
+                )
+            return ConversationArchivePage(
+                messages=messages,
+                boundaries=page_boundaries,
+                has_more=has_more,
+                next_cursor=next_cursor,
+            )
 
     async def delete_chat(self, chat_id: str) -> None:
         """Delete only the validated chat's archive directory."""
@@ -254,11 +325,17 @@ class ConversationArchiveStore:
     def _delete_chat(self, chat_id: str) -> None:
         canonical_chat_id = self._validate_chat_id(chat_id)
         chat_dir = self.path_for(canonical_chat_id)
-        if chat_dir.exists():
-            shutil.rmtree(chat_dir)
+        with self._chat_lock(canonical_chat_id):
+            self._atomic_write(self._tombstone_path(canonical_chat_id), "")
+            if chat_dir.exists():
+                shutil.rmtree(chat_dir)
+                self._fsync_directory(chat_dir.parent)
 
     def _chat_dir(self, canonical_chat_id: str) -> Path:
         return self._dialog_root / canonical_chat_id
+
+    def _tombstone_path(self, canonical_chat_id: str) -> Path:
+        return self._dialog_root / ".deleted" / canonical_chat_id
 
     def path_for(self, chat_id: str) -> Path:
         """Return the validated archive directory for one chat record."""
@@ -440,10 +517,10 @@ class ConversationArchiveStore:
         finally:
             os.close(descriptor)
 
-    @staticmethod
     @contextlib.contextmanager
-    def _chat_lock(chat_dir: Path):
-        lock_path = chat_dir / ".manifest.lock"
+    def _chat_lock(self, canonical_chat_id: str):
+        lock_path = self._dialog_root / ".locks" / f"{canonical_chat_id}.lock"
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         with lock_path.open("a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
             try:
@@ -483,8 +560,8 @@ class ConversationArchiveStore:
                     records.append(None)
         return records
 
-    @staticmethod
     def _encode_cursor(
+        self,
         chat_id: str,
         boundary_id: str,
         message_index: int,
@@ -498,7 +575,7 @@ class ConversationArchiveStore:
             separators=(",", ":"),
         ).encode("utf-8")
         signature = hmac.new(
-            _CURSOR_SECRET,
+            self._cursor_secret,
             raw,
             hashlib.sha256,
         ).digest()
@@ -508,8 +585,8 @@ class ConversationArchiveStore:
             .rstrip("=")
         )
 
-    @staticmethod
     def _decode_cursor(
+        self,
         cursor: str,
         chat_id: str,
         boundaries: list[ConversationArchiveBoundary],
@@ -525,7 +602,7 @@ class ConversationArchiveStore:
                 signed_value[-_CURSOR_SIGNATURE_SIZE:],
             )
             expected_signature = hmac.new(
-                _CURSOR_SECRET,
+                self._cursor_secret,
                 raw,
                 hashlib.sha256,
             ).digest()
@@ -563,7 +640,7 @@ class ConversationArchiveStore:
         )
         if boundary is None:
             raise ValueError("Invalid conversation archive cursor")
-        records = ConversationArchiveStore._read_batch(
+        records = self._read_batch(
             chat_dir / f"{boundary.id}.jsonl",
         )
         if message_index >= len(records) or records[message_index] is None:

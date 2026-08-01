@@ -1723,10 +1723,13 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
     const chatHistory = await api.getChat(realId);
     const backendGenerating = isGenerating(chatHistory);
-    const backendMessages = convertMessagesForSession(
-      chatHistory.messages || [],
-      fromList?.meta || {},
-      fromList?.name,
+    const backendMessages = withArchiveBoundaries(
+      convertMessagesForSession(
+        chatHistory.messages || [],
+        fromList?.meta || {},
+        fromList?.name,
+      ),
+      chatHistory.archive?.boundaries,
     );
     const messages =
       backendMessages.length > 0 ? backendMessages : fromList.messages || [];

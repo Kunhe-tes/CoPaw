@@ -1399,6 +1399,48 @@ describe("SessionApi identity mapping", () => {
 });
 
 describe("archived conversation card conversion", () => {
+  it("keeps the compaction boundary after a local timestamp session resolves", async () => {
+    const sessionApi = new SessionApi();
+    await sessionApi.createSession({ name: "new chat", messages: [] });
+    const localSessionId = sessionApi.getPendingSessionId();
+    expect(localSessionId).toBeTruthy();
+    apiMocks.listChats.mockResolvedValue([
+      {
+        id: "chat-real-1",
+        name: "new chat",
+        session_id: localSessionId,
+        user_id: "user-1",
+        channel: "console",
+        meta: {},
+        status: "idle",
+        created_at: "2026-08-01T00:00:00Z",
+      },
+    ]);
+    apiMocks.getChat.mockResolvedValue({
+      id: "chat-real-1",
+      messages: [{ id: "online-1", role: "user", content: "current" }],
+      archive: {
+        has_more: true,
+        boundaries: [
+          {
+            id: "boundary-1",
+            archived_message_count: 3,
+            first_message_id: "archived-1",
+            last_message_id: "archived-3",
+            created_at: "2026-08-01T12:00:00+00:00",
+          },
+        ],
+      },
+    });
+
+    await sessionApi.updateSession({ id: localSessionId!, name: "new chat" });
+    const session = await sessionApi.getSession(localSessionId!);
+
+    expect(session.messages?.[0]?.cards?.[0]?.code).toBe(
+      "ConversationCompactionBoundary",
+    );
+  });
+
   it("shows the latest archive boundary before online messages", async () => {
     apiMocks.getChat.mockResolvedValue({
       id: "chat-real-1",

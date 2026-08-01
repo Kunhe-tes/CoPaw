@@ -62,8 +62,15 @@ export default function MessageList(props: {
   const historyLoadingRef = React.useRef(false);
   const historyDoneRef = React.useRef(false);
   const historyGenerationRef = React.useRef(0);
+  const compactionRefreshRef = React.useRef(0);
+  const activeSessionRef = React.useRef(currentSessionId);
   const isPrependingHistoryRef = React.useRef(false);
   const backendChatId = sessionApi.getChatIdForSession(currentSessionId || "");
+
+  React.useLayoutEffect(() => {
+    activeSessionRef.current = currentSessionId;
+    compactionRefreshRef.current += 1;
+  }, [currentSessionId]);
 
   React.useEffect(() => {
     historyCursorRef.current = null;
@@ -103,6 +110,8 @@ export default function MessageList(props: {
           scrollElement.scrollTop = oldTop;
         }
       });
+    } catch {
+      // The next upward scroll remains a retry; no persistent UI is needed.
     } finally {
       if (generation === historyGenerationRef.current) {
         historyLoadingRef.current = false;
@@ -125,12 +134,17 @@ export default function MessageList(props: {
         historyCursorRef.current = null;
         historyDoneRef.current = false;
         historyGenerationRef.current += 1;
+        const refresh = ++compactionRefreshRef.current;
+        const requestedSessionId = currentSessionId;
+        const requestedChatId = detail.chat_id;
         void sessionApi
-          .getSession(currentSessionId)
+          .getSession(requestedSessionId)
           .then((session) => {
             if (
-              sessionApi.getChatIdForSession(currentSessionId) ===
-              detail.chat_id
+              refresh === compactionRefreshRef.current &&
+              activeSessionRef.current === requestedSessionId &&
+              sessionApi.getChatIdForSession(requestedSessionId) ===
+                requestedChatId
             ) {
               setMessages(session.messages || []);
             }

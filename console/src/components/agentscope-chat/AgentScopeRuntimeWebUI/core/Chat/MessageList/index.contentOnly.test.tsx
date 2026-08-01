@@ -10,6 +10,7 @@ const mocks = vi.hoisted(() => ({
   setMessages: vi.fn(),
   isSessionLoading: false,
   sessionNotFound: false,
+  currentSessionId: "chat-1",
 }));
 
 const apiMocks = vi.hoisted(() => ({
@@ -30,7 +31,7 @@ vi.mock("use-context-selector", () => ({
       });
     }
     return selector({
-      currentSessionId: "chat-1",
+      currentSessionId: mocks.currentSessionId,
       isSessionLoading: mocks.isSessionLoading,
       sessionNotFound: mocks.sessionNotFound,
     });
@@ -113,6 +114,7 @@ describe("MessageList content-only composition", () => {
     apiMocks.getChatIdForSession.mockReturnValue("chat-real-1");
     mocks.isSessionLoading = false;
     mocks.sessionNotFound = false;
+    mocks.currentSessionId = "chat-1";
   });
 
   afterEach(() => {
@@ -243,5 +245,44 @@ describe("MessageList content-only composition", () => {
     expect(mocks.messages).toEqual([
       { id: "conversation-compaction-boundary-1" },
     ]);
+  });
+
+  it("does not let an earlier compaction refresh overwrite a switched session", async () => {
+    mocks.messages = [{ id: "message-for-chat-1" }];
+    let resolveSession!: (value: { messages: Array<{ id: string }> }) => void;
+    apiMocks.getSession.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSession = resolve;
+      }),
+    );
+    apiMocks.getChatIdForSession.mockImplementation((sessionId: string) =>
+      sessionId === "chat-1" ? "chat-real-1" : "chat-real-2",
+    );
+
+    const rendered = render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+    await waitFor(() => {
+      expect(apiMocks.getSession).toHaveBeenCalledWith("chat-1");
+    });
+
+    mocks.currentSessionId = "chat-2";
+    mocks.messages = [{ id: "message-for-chat-2" }];
+    rendered.rerender(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    resolveSession({ messages: [{ id: "stale-message-for-chat-1" }] });
+
+    await Promise.resolve();
+    expect(mocks.messages).toEqual([{ id: "message-for-chat-2" }]);
   });
 });

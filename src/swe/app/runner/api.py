@@ -695,7 +695,6 @@ async def create_chat(
 async def batch_delete_chats(
     chat_ids: list[str],
     mgr: ChatManager = Depends(get_chat_manager),
-    workspace=Depends(get_workspace),
 ):
     """Delete chats by chat IDs.
 
@@ -707,11 +706,6 @@ async def batch_delete_chats(
 
     """
     deleted = await mgr.delete_chats(chat_ids=chat_ids)
-    if deleted:
-        store = _archive_store(workspace)
-        if store is not None:
-            for chat_id in chat_ids:
-                await store.delete_chat(chat_id)
     return {"deleted": deleted}
 
 
@@ -857,7 +851,6 @@ async def update_chat(
 async def delete_chat(
     chat_id: str,
     mgr: ChatManager = Depends(get_chat_manager),
-    workspace=Depends(get_workspace),
 ):
     """Delete a chat by UUID.
 
@@ -880,7 +873,4 @@ async def delete_chat(
             status_code=404,
             detail=f"Chat not found: {chat_id}",
         )
-    store = _archive_store(workspace)
-    if store is not None:
-        await store.delete_chat(chat_id)
     return {"deleted": True}
