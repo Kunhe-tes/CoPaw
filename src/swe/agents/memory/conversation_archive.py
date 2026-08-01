@@ -5,6 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -16,6 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
+import fcntl
+
 from agentscope.message import Msg
 
 from swe.app.runner.hidden_context_injection import (
@@ -26,6 +31,8 @@ logger = logging.getLogger(__name__)
 
 _MANIFEST_NAME = "manifest.json"
 _MAX_PAGE_SIZE = 50
+_CURSOR_SIGNATURE_SIZE = hashlib.sha256().digest_size
+_CURSOR_SECRET = os.urandom(_CURSOR_SIGNATURE_SIZE)
 
 
 @dataclass(frozen=True)
@@ -57,13 +64,24 @@ class ConversationArchiveBoundary:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ConversationArchiveBoundary":
         """Parse one manifest entry."""
+        if not isinstance(value, dict):
+            raise ValueError("boundary must be a JSON object")
         return cls(
-            id=str(value["id"]),
-            chat_id=str(value["chat_id"]),
-            created_at=str(value["created_at"]),
-            archived_message_count=int(value["archived_message_count"]),
-            first_message_id=str(value["first_message_id"]),
-            last_message_id=str(value["last_message_id"]),
+            id=cls._canonical_uuid(value["id"], "id"),
+            chat_id=cls._canonical_uuid(value["chat_id"], "chat_id"),
+            created_at=cls._timestamp(value["created_at"], "created_at"),
+            archived_message_count=cls._positive_int(
+                value["archived_message_count"],
+                "archived_message_count",
+            ),
+            first_message_id=cls._non_empty_string(
+                value["first_message_id"],
+                "first_message_id",
+            ),
+            last_message_id=cls._non_empty_string(
+                value["last_message_id"],
+                "last_message_id",
+            ),
             first_timestamp=cls._optional_string(value["first_timestamp"]),
             last_timestamp=cls._optional_string(value["last_timestamp"]),
         )
@@ -73,6 +91,41 @@ class ConversationArchiveBoundary:
         if value is None or isinstance(value, str):
             return value
         raise ValueError("timestamp must be a string or null")
+
+    @staticmethod
+    def _canonical_uuid(value: Any, field: str) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{field} must be a canonical UUID string")
+        try:
+            parsed = uuid.UUID(value)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"{field} must be a canonical UUID string",
+            ) from exc
+        if str(parsed) != value:
+            raise ValueError(f"{field} must be a canonical UUID string")
+        return value
+
+    @staticmethod
+    def _non_empty_string(value: Any, field: str) -> str:
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field} must be a non-empty string")
+        return value
+
+    @staticmethod
+    def _positive_int(value: Any, field: str) -> int:
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise ValueError(f"{field} must be a positive integer")
+        return value
+
+    @staticmethod
+    def _timestamp(value: Any, field: str) -> str:
+        value = ConversationArchiveBoundary._non_empty_string(value, field)
+        try:
+            datetime.fromisoformat(value)
+        except ValueError as exc:
+            raise ValueError(f"{field} must be an ISO timestamp") from exc
+        return value
 
 
 @dataclass(frozen=True)
@@ -114,26 +167,26 @@ class ConversationArchiveStore:
                 "Conversation archive messages must be Msg instances",
             )
 
-        chat_dir = self._chat_dir(canonical_chat_id)
+        chat_dir = self.path_for(canonical_chat_id)
         chat_dir.mkdir(parents=True, exist_ok=True)
-        boundary = ConversationArchiveBoundary(
-            id=str(uuid.uuid4()),
-            chat_id=canonical_chat_id,
-            created_at=datetime.now(timezone.utc).isoformat(),
-            archived_message_count=len(archived_messages),
-            first_message_id=archived_messages[0].id,
-            last_message_id=archived_messages[-1].id,
-            first_timestamp=archived_messages[0].timestamp,
-            last_timestamp=archived_messages[-1].timestamp,
-        )
-        batch_path = chat_dir / f"{boundary.id}.jsonl"
-        self._write_batch(batch_path, archived_messages)
+        with self._chat_lock(chat_dir):
+            boundary = ConversationArchiveBoundary(
+                id=str(uuid.uuid4()),
+                chat_id=canonical_chat_id,
+                created_at=datetime.now(timezone.utc).isoformat(),
+                archived_message_count=len(archived_messages),
+                first_message_id=archived_messages[0].id,
+                last_message_id=archived_messages[-1].id,
+                first_timestamp=archived_messages[0].timestamp,
+                last_timestamp=archived_messages[-1].timestamp,
+            )
+            batch_path = chat_dir / f"{boundary.id}.jsonl"
+            self._write_batch(batch_path, archived_messages)
 
-        manifest_path = chat_dir / _MANIFEST_NAME
-        manifest = self._read_manifest(manifest_path)
-        boundaries = manifest["boundaries"]
-        boundaries.append(boundary.to_dict())
-        self._replace_manifest(manifest_path, manifest)
+            manifest_path = chat_dir / _MANIFEST_NAME
+            manifest = self._read_manifest(manifest_path)
+            manifest["boundaries"].append(boundary.to_dict())
+            self._replace_manifest(manifest_path, manifest)
         return boundary
 
     async def read_page(
@@ -153,17 +206,26 @@ class ConversationArchiveStore:
     ) -> ConversationArchivePage:
         canonical_chat_id = self._validate_chat_id(chat_id)
         page_size = self._normalize_page_size(limit)
-        chat_dir = self._chat_dir(canonical_chat_id)
+        chat_dir = self.path_for(canonical_chat_id)
         manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
         boundaries = self._visible_boundaries(manifest, canonical_chat_id)
-        cursor = self._decode_cursor(before) if before else None
+        cursor = (
+            self._decode_cursor(
+                before,
+                canonical_chat_id,
+                boundaries,
+                chat_dir,
+            )
+            if before
+            else None
+        )
         selected = self._select_page(chat_dir, boundaries, cursor, page_size)
 
         messages = [item[2] for item in reversed(selected)]
         page_boundaries = [
             item[0]
             for item in reversed(selected)
-            if item[1] == item[0].archived_message_count - 1
+            if item[2].id == item[0].last_message_id
         ]
         has_more = len(selected) == page_size and self._has_previous_message(
             chat_dir,
@@ -173,7 +235,11 @@ class ConversationArchiveStore:
         next_cursor = None
         if has_more and selected:
             oldest = selected[-1]
-            next_cursor = self._encode_cursor(oldest[0].id, oldest[1])
+            next_cursor = self._encode_cursor(
+                canonical_chat_id,
+                oldest[0].id,
+                oldest[1],
+            )
         return ConversationArchivePage(
             messages=messages,
             boundaries=page_boundaries,
@@ -187,12 +253,16 @@ class ConversationArchiveStore:
 
     def _delete_chat(self, chat_id: str) -> None:
         canonical_chat_id = self._validate_chat_id(chat_id)
-        chat_dir = self._chat_dir(canonical_chat_id)
+        chat_dir = self.path_for(canonical_chat_id)
         if chat_dir.exists():
             shutil.rmtree(chat_dir)
 
     def _chat_dir(self, canonical_chat_id: str) -> Path:
         return self._dialog_root / canonical_chat_id
+
+    def path_for(self, chat_id: str) -> Path:
+        """Return the validated archive directory for one chat record."""
+        return self._chat_dir(self._validate_chat_id(chat_id))
 
     @staticmethod
     def _validate_chat_id(chat_id: str) -> str:
@@ -264,6 +334,12 @@ class ConversationArchiveStore:
         before_reached = cursor is None
         for boundary in reversed(boundaries):
             records = self._read_batch(chat_dir / f"{boundary.id}.jsonl")
+            if not self._batch_matches_boundary(boundary, records):
+                logger.warning(
+                    "Skipping inconsistent conversation archive batch: %s",
+                    boundary.id,
+                )
+                continue
             upper_index = len(records) - 1
             if cursor is not None and boundary.id == cursor[0]:
                 before_reached = True
@@ -279,6 +355,24 @@ class ConversationArchiveStore:
                 if len(selected) == limit:
                     return selected
         return selected
+
+    @staticmethod
+    def _batch_matches_boundary(
+        boundary: ConversationArchiveBoundary,
+        records: list[Msg | None],
+    ) -> bool:
+        if len(records) < boundary.archived_message_count:
+            return False
+        if not records or records[0] is None or records[-1] is None:
+            return False
+        first_message = records[0]
+        last_message = records[-1]
+        return bool(
+            first_message.id == boundary.first_message_id
+            and last_message.id == boundary.last_message_id
+            and first_message.timestamp == boundary.first_timestamp
+            and last_message.timestamp == boundary.last_timestamp,
+        )
 
     def _has_previous_message(
         self,
@@ -332,10 +426,30 @@ class ConversationArchiveStore:
                 file_handle.flush()
                 os.fsync(file_handle.fileno())
             os.replace(temporary_path, path)
+            ConversationArchiveStore._fsync_directory(path.parent)
         except Exception:
             if temporary_path is not None:
                 temporary_path.unlink(missing_ok=True)
             raise
+
+    @staticmethod
+    def _fsync_directory(path: Path) -> None:
+        descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    @staticmethod
+    @contextlib.contextmanager
+    def _chat_lock(chat_dir: Path):
+        lock_path = chat_dir / ".manifest.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     @staticmethod
     def _read_batch(path: Path) -> list[Msg | None]:
@@ -370,32 +484,89 @@ class ConversationArchiveStore:
         return records
 
     @staticmethod
-    def _encode_cursor(boundary_id: str, message_index: int) -> str:
+    def _encode_cursor(
+        chat_id: str,
+        boundary_id: str,
+        message_index: int,
+    ) -> str:
         raw = json.dumps(
-            {"boundary_id": boundary_id, "message_index": message_index},
+            {
+                "chat_id": chat_id,
+                "boundary_id": boundary_id,
+                "message_index": message_index,
+            },
             separators=(",", ":"),
         ).encode("utf-8")
-        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        signature = hmac.new(
+            _CURSOR_SECRET,
+            raw,
+            hashlib.sha256,
+        ).digest()
+        return (
+            base64.urlsafe_b64encode(raw + signature)
+            .decode("ascii")
+            .rstrip("=")
+        )
 
     @staticmethod
-    def _decode_cursor(cursor: str) -> tuple[str, int]:
+    def _decode_cursor(
+        cursor: str,
+        chat_id: str,
+        boundaries: list[ConversationArchiveBoundary],
+        chat_dir: Path,
+    ) -> tuple[str, int]:
         if not isinstance(cursor, str):
             raise ValueError("Invalid conversation archive cursor")
         try:
             padding = "=" * (-len(cursor) % 4)
-            value = json.loads(
-                base64.urlsafe_b64decode(cursor + padding).decode("utf-8"),
+            signed_value = base64.urlsafe_b64decode(cursor + padding)
+            raw, signature = (
+                signed_value[:-_CURSOR_SIGNATURE_SIZE],
+                signed_value[-_CURSOR_SIGNATURE_SIZE:],
             )
+            expected_signature = hmac.new(
+                _CURSOR_SECRET,
+                raw,
+                hashlib.sha256,
+            ).digest()
+            if not hmac.compare_digest(signature, expected_signature):
+                raise ValueError("invalid signature")
+            value = json.loads(raw.decode("utf-8"))
+            cursor_chat_id = value["chat_id"]
             boundary_id = value["boundary_id"]
             message_index = value["message_index"]
-        except (KeyError, TypeError, ValueError, UnicodeDecodeError) as exc:
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeDecodeError,
+            base64.binascii.Error,
+        ) as exc:
             raise ValueError("Invalid conversation archive cursor") from exc
         if (
-            not isinstance(boundary_id, str)
+            cursor_chat_id != chat_id
             or not isinstance(message_index, int)
             or isinstance(message_index, bool)
             or message_index < 0
         ):
+            raise ValueError("Invalid conversation archive cursor")
+        try:
+            boundary_id = ConversationArchiveBoundary._canonical_uuid(
+                boundary_id,
+                "boundary_id",
+            )
+        except ValueError as exc:
+            raise ValueError("Invalid conversation archive cursor") from exc
+        boundary = next(
+            (item for item in boundaries if item.id == boundary_id),
+            None,
+        )
+        if boundary is None:
+            raise ValueError("Invalid conversation archive cursor")
+        records = ConversationArchiveStore._read_batch(
+            chat_dir / f"{boundary.id}.jsonl",
+        )
+        if message_index >= len(records) or records[message_index] is None:
             raise ValueError("Invalid conversation archive cursor")
         return boundary_id, message_index
 

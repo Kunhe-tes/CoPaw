@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Tests for chat-scoped conversation compaction archives."""
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -112,6 +113,79 @@ async def test_archive_paths_are_isolated_by_canonical_chat_uuid(
         await store.commit("../../other-chat", [_message(3)])
     with pytest.raises(ValueError):
         await store.delete_chat(first_chat_id.upper())
+
+
+@pytest.mark.asyncio
+async def test_manifest_cannot_traverse_into_another_chat_archive(
+    tmp_path: Path,
+) -> None:
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    first_chat_id = _chat_id()
+    second_chat_id = _chat_id()
+    first_boundary = await store.commit(first_chat_id, [_message(1)])
+    second_boundary = await store.commit(second_chat_id, [_message(2)])
+    manifest_path = tmp_path / "dialog" / first_chat_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["boundaries"][0][
+        "id"
+    ] = f"../{second_chat_id}/{second_boundary.id}"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    page = await store.read_page(first_chat_id)
+
+    assert page.messages == []
+    assert first_boundary.id != second_boundary.id
+
+
+@pytest.mark.asyncio
+async def test_concurrent_commits_preserve_each_visible_boundary(
+    tmp_path: Path,
+) -> None:
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    chat_id = _chat_id()
+
+    first_boundary, second_boundary = await asyncio.gather(
+        store.commit(chat_id, [_message(1)]),
+        store.commit(chat_id, [_message(2)]),
+    )
+
+    page = await store.read_page(chat_id)
+    assert {boundary.id for boundary in page.boundaries} == {
+        first_boundary.id,
+        second_boundary.id,
+    }
+    assert {message.id for message in page.messages} == {
+        "message-1",
+        "message-2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_cursor_is_bound_to_its_chat_and_rejects_tampering(
+    tmp_path: Path,
+) -> None:
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    first_chat_id = _chat_id()
+    second_chat_id = _chat_id()
+    await store.commit(first_chat_id, [_message(index) for index in range(51)])
+    await store.commit(second_chat_id, [_message(99)])
+
+    page = await store.read_page(first_chat_id)
+    assert page.next_cursor is not None
+
+    with pytest.raises(
+        ValueError,
+        match="Invalid conversation archive cursor",
+    ):
+        await store.read_page(second_chat_id, before=page.next_cursor)
+    with pytest.raises(
+        ValueError,
+        match="Invalid conversation archive cursor",
+    ):
+        await store.read_page(
+            first_chat_id,
+            before=page.next_cursor[:-1] + "x",
+        )
 
 
 @pytest.mark.asyncio
