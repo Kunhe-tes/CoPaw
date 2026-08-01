@@ -15,6 +15,7 @@ export interface BubbleListRef {
    * @descriptionEn Method to scroll to the bottom of the list for auto-scrolling to latest messages
    */
   scrollToBottom(): void;
+  getScrollElement(): HTMLDivElement | null;
 }
 
 export type BubbleDataType = BubbleProps & {
@@ -44,6 +45,7 @@ export interface BubbleListProps extends React.HTMLAttributes<HTMLDivElement> {
   };
   pagination?: boolean;
   order?: "asc" | "desc";
+  onReachStart?: () => void;
 }
 
 interface BubbleListContentProps {
@@ -177,12 +179,15 @@ const BubbleList: React.ForwardRefRenderFunction<
 
   const handleScroll = useCallback(() => {
     const scrollEl = scrollRef.current;
-    if (scrollEl) {
+    const reachedStart =
+      scrollEl && (isDesc ? scrollEl.scrollTop <= -24 : scrollEl.scrollTop <= 24);
+    if (reachedStart) {
+      props.onReachStart?.();
     }
     const isAtBottom = checkIsAtBottom();
     isAtBottomRef.current = isAtBottom;
     setShowScrollToBottom(checkShowScrollToBottom());
-  }, [checkIsAtBottom, checkShowScrollToBottom]);
+  }, [checkIsAtBottom, checkShowScrollToBottom, isDesc, props.onReachStart]);
 
   React.useImperativeHandle(
     ref,
@@ -190,6 +195,7 @@ const BubbleList: React.ForwardRefRenderFunction<
       scrollToBottom: () => {
         scrollToBottom("auto");
       },
+      getScrollElement: () => scrollRef.current,
     }),
     [scrollToBottom],
   );

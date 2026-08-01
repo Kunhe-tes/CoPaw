@@ -12,6 +12,14 @@ import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext
 import React from "react";
 import { Result, Spin } from "antd";
 import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
+import { chatApi } from "@/api/modules/chat";
+import sessionApi, {
+  convertArchivedPage,
+} from "@/pages/Chat/sessionApi";
+import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
+import useChatAnywhereEventEmitter from "../../Context/useChatAnywhereEventEmitter";
+
+const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
 
 export default function MessageList(props: {
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
@@ -20,6 +28,10 @@ export default function MessageList(props: {
   const messages = useContextSelector(
     ChatAnywhereMessagesContext,
     (v) => v.messages,
+  );
+  const setMessages = useContextSelector(
+    ChatAnywhereMessagesContext,
+    (v) => v.setMessages,
   );
   const safeMessages = React.useMemo(
     () => [...(messages || [])].reverse(),
@@ -41,13 +53,102 @@ export default function MessageList(props: {
     (v) => v.sessionNotFound,
   );
   const bubbleListOptions = useChatAnywhereOptions((v) => v.theme?.bubbleList);
-  const listRef = React.useRef<{ scrollToBottom: () => void } | null>(null);
+  const listRef = React.useRef<{
+    scrollToBottom: () => void;
+    getScrollElement: () => HTMLDivElement | null;
+  } | null>(null);
   const prevMessagesLengthRef = React.useRef(safeMessages.length);
+  const historyCursorRef = React.useRef<string | null>(null);
+  const historyLoadingRef = React.useRef(false);
+  const historyDoneRef = React.useRef(false);
+  const historyGenerationRef = React.useRef(0);
+  const isPrependingHistoryRef = React.useRef(false);
+  const backendChatId = sessionApi.getChatIdForSession(currentSessionId || "");
 
   React.useEffect(() => {
-    if (safeMessages.length > prevMessagesLengthRef.current) {
+    historyCursorRef.current = null;
+    historyLoadingRef.current = false;
+    historyDoneRef.current = false;
+    historyGenerationRef.current += 1;
+  }, [backendChatId]);
+
+  const loadOlderHistory = React.useCallback(async () => {
+    if (!backendChatId || historyLoadingRef.current || historyDoneRef.current) {
+      return;
+    }
+    historyLoadingRef.current = true;
+    const generation = historyGenerationRef.current;
+    const scrollElement = listRef.current?.getScrollElement();
+    const oldTop = scrollElement?.scrollTop ?? 0;
+    try {
+      const page = await chatApi.getChatHistory(
+        backendChatId,
+        historyCursorRef.current,
+      );
+      if (generation !== historyGenerationRef.current) return;
+      historyCursorRef.current = page.next_cursor || null;
+      historyDoneRef.current = !page.has_more;
+      const older: IAgentScopeRuntimeWebUIMessage[] = convertArchivedPage(
+        page.messages || [],
+        page.boundaries || [],
+      );
+      isPrependingHistoryRef.current = older.length > 0;
+      // @ts-ignore
+      setMessages((current) => {
+        const known = new Set(current.map((message) => message.id));
+        return [...older.filter((message) => !known.has(message.id)), ...current];
+      });
+      requestAnimationFrame(() => {
+        if (scrollElement && generation === historyGenerationRef.current) {
+          scrollElement.scrollTop = oldTop;
+        }
+      });
+    } finally {
+      if (generation === historyGenerationRef.current) {
+        historyLoadingRef.current = false;
+      }
+    }
+  }, [backendChatId, setMessages]);
+
+  useChatAnywhereEventEmitter(
+    {
+      type: CONVERSATION_COMPACTION_EVENT,
+      callback: (event) => {
+        const detail = event.detail as { chat_id?: unknown } | undefined;
+        if (
+          typeof detail?.chat_id !== "string" ||
+          detail.chat_id !== backendChatId ||
+          !currentSessionId
+        ) {
+          return;
+        }
+        historyCursorRef.current = null;
+        historyDoneRef.current = false;
+        historyGenerationRef.current += 1;
+        void sessionApi
+          .getSession(currentSessionId)
+          .then((session) => {
+            if (
+              sessionApi.getChatIdForSession(currentSessionId) ===
+              detail.chat_id
+            ) {
+              setMessages(session.messages || []);
+            }
+          })
+          .catch(() => undefined);
+      },
+    },
+    [backendChatId, currentSessionId, setMessages],
+  );
+
+  React.useEffect(() => {
+    if (
+      safeMessages.length > prevMessagesLengthRef.current &&
+      !isPrependingHistoryRef.current
+    ) {
       listRef.current?.scrollToBottom();
     }
+    isPrependingHistoryRef.current = false;
     prevMessagesLengthRef.current = safeMessages.length;
   }, [safeMessages.length]);
 
@@ -91,6 +192,7 @@ export default function MessageList(props: {
         wrapper: prefixCls,
       }}
       items={safeMessages}
+      onReachStart={() => void loadOlderHistory()}
     />
   );
 }

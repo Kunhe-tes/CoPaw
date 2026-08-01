@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import MessageList from ".";
@@ -7,8 +7,15 @@ const mocks = vi.hoisted(() => ({
   messagesContext: {},
   sessionsContext: {},
   messages: [] as Array<{ id: string }>,
+  setMessages: vi.fn(),
   isSessionLoading: false,
   sessionNotFound: false,
+}));
+
+const apiMocks = vi.hoisted(() => ({
+  getChatHistory: vi.fn(),
+  getChatIdForSession: vi.fn(),
+  getSession: vi.fn(),
 }));
 
 vi.mock("use-context-selector", () => ({
@@ -17,7 +24,10 @@ vi.mock("use-context-selector", () => ({
     selector: (value: unknown) => unknown,
   ) => {
     if (context === mocks.messagesContext) {
-      return selector({ messages: mocks.messages });
+      return selector({
+        messages: mocks.messages,
+        setMessages: mocks.setMessages,
+      });
     }
     return selector({
       currentSessionId: "chat-1",
@@ -37,13 +47,36 @@ vi.mock("../../Context/ChatAnywhereSessionsContext", () => ({
 
 vi.mock("@/components/agentscope-chat", () => ({
   Bubble: {
-    List: ({ items }: { items: unknown[] }) => (
-      <div data-testid="bubble-list">{items.length}</div>
+    List: ({
+      items,
+      onReachStart,
+    }: {
+      items: unknown[];
+      onReachStart?: () => void;
+    }) => (
+      <button data-testid="bubble-list" onClick={onReachStart}>
+        {items.length}
+      </button>
     ),
   },
   useProviderContext: () => ({
     getPrefixCls: (name: string) => `copaw-${name}`,
   }),
+}));
+
+vi.mock("@/api/modules/chat", () => ({
+  chatApi: {
+    getChatHistory: apiMocks.getChatHistory,
+  },
+}));
+
+vi.mock("@/pages/Chat/sessionApi", () => ({
+  convertMessages: (messages: Array<{ id: string }>) => messages,
+  convertArchivedPage: (messages: Array<{ id: string }>) => messages,
+  default: {
+    getChatIdForSession: apiMocks.getChatIdForSession,
+    getSession: apiMocks.getSession,
+  },
 }));
 
 vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
@@ -69,6 +102,15 @@ vi.mock("antd", () => ({
 describe("MessageList content-only composition", () => {
   beforeEach(() => {
     mocks.messages = [];
+    mocks.setMessages.mockReset();
+    mocks.setMessages.mockImplementation((update) => {
+      mocks.messages =
+        typeof update === "function" ? update(mocks.messages) : update;
+    });
+    apiMocks.getChatHistory.mockReset();
+    apiMocks.getChatIdForSession.mockReset();
+    apiMocks.getSession.mockReset();
+    apiMocks.getChatIdForSession.mockReturnValue("chat-real-1");
     mocks.isSessionLoading = false;
     mocks.sessionNotFound = false;
   });
@@ -146,5 +188,60 @@ describe("MessageList content-only composition", () => {
     );
 
     expect(screen.getByTestId("bubble-list")).toHaveTextContent("1");
+  });
+
+  it("loads archived history with the resolved backend chat ID", async () => {
+    mocks.messages = [{ id: "online-message" }];
+    apiMocks.getChatHistory.mockResolvedValue({
+      messages: [{ id: "archived-message" }],
+      boundaries: [],
+      has_more: false,
+      next_cursor: null,
+    });
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    fireEvent.click(screen.getByTestId("bubble-list"));
+
+    await waitFor(() => {
+      expect(apiMocks.getChatHistory).toHaveBeenCalledWith(
+        "chat-real-1",
+        null,
+      );
+    });
+    expect(mocks.messages).toEqual([
+      { id: "archived-message" },
+      { id: "online-message" },
+    ]);
+  });
+
+  it("refreshes the active session when a compaction boundary arrives", async () => {
+    mocks.messages = [{ id: "old-message" }];
+    apiMocks.getSession.mockResolvedValue({
+      messages: [{ id: "conversation-compaction-boundary-1" }],
+    });
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(apiMocks.getSession).toHaveBeenCalledWith("chat-1");
+    });
+    expect(mocks.messages).toEqual([
+      { id: "conversation-compaction-boundary-1" },
+    ]);
   });
 });
