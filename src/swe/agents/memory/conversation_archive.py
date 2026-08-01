@@ -571,8 +571,39 @@ class ConversationArchiveStore:
         return boundary_id, message_index
 
 
+def attach_conversation_archive(
+    memory: Any,
+    dialog_root: str | Path,
+    chat_id: str,
+) -> Any:
+    """Make a ReMe in-memory object archive compactions by chat record ID."""
+    archive_store = ConversationArchiveStore(dialog_root)
+    canonical_chat_id = archive_store._validate_chat_id(chat_id)
+
+    async def archive_compacted_messages(
+        messages: Sequence[Msg],
+    ) -> ConversationArchiveBoundary:
+        boundary = await archive_store.commit(canonical_chat_id, messages)
+        archived_ids = {message.id for message in messages}
+        memory.content = [
+            (message, marks)
+            for message, marks in memory.content
+            if message.id not in archived_ids
+        ]
+        return boundary
+
+    def clear_content() -> None:
+        memory.content.clear()
+
+    memory.conversation_archive_store = archive_store
+    memory.archive_compacted_messages = archive_compacted_messages
+    memory.clear_content = clear_content
+    return memory
+
+
 __all__ = [
     "ConversationArchiveBoundary",
     "ConversationArchivePage",
     "ConversationArchiveStore",
+    "attach_conversation_archive",
 ]

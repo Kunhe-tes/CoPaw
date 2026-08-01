@@ -537,14 +537,28 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             min_score=min_score,
         )
 
-    def get_in_memory_memory(self, **_kwargs) -> "ReMeInMemoryMemory | None":
+    def get_in_memory_memory(
+        self,
+        chat_id: str | None = None,
+        **_kwargs,
+    ) -> "ReMeInMemoryMemory | None":
         """Retrieve the in-memory memory object with token counting support."""
         self._warn_if_version_mismatch()
         if self._reme is None:
             return None
         agent_config = self._load_agent_config()
-        return self._reme.get_in_memory_memory(
+        memory = self._reme.get_in_memory_memory(
             as_token_counter=get_swe_token_counter(agent_config),
+        )
+        if not chat_id:
+            return memory
+
+        from .conversation_archive import attach_conversation_archive
+
+        return attach_conversation_archive(
+            memory,
+            Path(self.working_dir) / "dialog",
+            chat_id,
         )
 
     # ------------------------------------------------------------------

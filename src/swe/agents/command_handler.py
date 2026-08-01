@@ -101,7 +101,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
         """Check if the query is a system command (alias for mixin)."""
         return self.is_conversation_command(query)
 
-    async def _make_system_msg(self, text: str) -> Msg:
+    async def _make_system_msg(
+        self,
+        text: str,
+        metadata: dict | None = None,
+    ) -> Msg:
         """Create a system response message.
 
         Args:
@@ -114,6 +118,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
             name=self.agent_name,
             role="assistant",
             content=[TextBlock(type="text", text=text)],
+            metadata=metadata or {},
         )
 
     def _has_memory_manager(self) -> bool:
@@ -164,6 +169,21 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 "- Please check the logs for details\n"
                 "- If context exceeds max length, "
                 "please use `/new` or `/clear` to clear the context",
+            )
+
+        archive_messages = getattr(
+            self.memory,
+            "archive_compacted_messages",
+            None,
+        )
+        if archive_messages is not None:
+            boundary = await archive_messages(messages)
+            await self.memory.update_compressed_summary(compact_content)
+            return await self._make_system_msg(
+                "",
+                metadata={
+                    "conversation_compaction_boundary": boundary.to_dict(),
+                },
             )
 
         await self.memory.update_compressed_summary(compact_content)
