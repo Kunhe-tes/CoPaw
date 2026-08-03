@@ -9,7 +9,7 @@ import logging
 
 import httpx
 
-from ...constant import MARKET_INTERNAL_TOKEN, MARKET_INTERNAL_URL
+from ...constant import MARKET_API_BASE_URL, MARKET_INTERNAL_TOKEN
 
 logger = logging.getLogger(__name__)
 
@@ -17,8 +17,8 @@ _DEFAULT_TIMEOUT = 5.0
 
 
 def _market_url() -> str:
-    """market 内部端点的 base URL（去掉尾部斜杠）。"""
-    return MARKET_INTERNAL_URL.rstrip("/")
+    """market 内部端点的 base URL（去掉尾部斜杠，保留 /api 前缀）。"""
+    return MARKET_API_BASE_URL.rstrip("/")
 
 
 def _build_headers() -> dict[str, str]:

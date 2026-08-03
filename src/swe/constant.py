@@ -575,9 +575,11 @@ USER_INFO_API_URL = EnvVarLoader.get_str(
 # market 服务内部端点配置。
 # bootstrap 完成后回调 market 同步 swe_skills 表，仅限集群内部访问；
 # token 留空表示 market 侧不校验（开发模式）。
-MARKET_INTERNAL_URL = EnvVarLoader.get_str(
-    "SWE_MARKET_INTERNAL_URL",
-    "http://market:8090",
+# 基址应包含 /api 前缀（market FastAPI 在 _app.py:104 用 prefix="/api" 挂载），
+# 例如 http://market:8090/api；调用方拼接 {base}/market/internal/...
+MARKET_API_BASE_URL = EnvVarLoader.get_str(
+    "SWE_MARKET_API_BASE_URL",
+    "http://market:8090/api",
 )
 MARKET_INTERNAL_TOKEN = EnvVarLoader.get_str(
     "SWE_MARKET_INTERNAL_TOKEN",
