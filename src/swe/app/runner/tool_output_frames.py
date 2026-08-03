@@ -8,8 +8,8 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterator, Literal
 
-from ...agents.tools.utils import DEFAULT_MAX_BYTES
 from ...config.context import get_current_recent_max_bytes
+from ...tool_output_budget import DEFAULT_MAX_BYTES
 
 ToolOutputSource = Literal["stdout", "stderr", "message"]
 ToolOutputFrame = dict[str, Any]
