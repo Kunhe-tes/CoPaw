@@ -214,3 +214,48 @@ class MarketSkillRegistry:
         except Exception as e:
             logger.warning("Failed to get statistics eligible skills: %s", e)
             return set()
+
+    async def list_statistics_eligible_unique_skills_by_source_id(
+        self,
+        source_id: str,
+    ) -> list[dict]:
+        """查询纳入统计的市场技能下拉选项，按 skill_id 去重.
+
+        Args:
+            source_id: 应用入口标识
+
+        Returns:
+            技能列表，每个 skill_id 只返回一条记录，包含 skill_id、skill_name、cn_name
+        """
+        if not self.is_connected():
+            return []
+
+        try:
+            rows = await self.db.fetch_all(
+                """
+                SELECT
+                    skill_id,
+                    MIN(skill_name) AS skill_name,
+                    MIN(cn_name) AS cn_name
+                FROM swe_marketplace_skills
+                WHERE source_id = %s
+                  AND include_in_statistics = 1
+                  AND skill_id IS NOT NULL
+                  AND skill_id != ''
+                GROUP BY skill_id
+                ORDER BY skill_id
+                """,
+                (source_id,),
+            )
+            logger.info(
+                "Listed statistics eligible marketplace skills: source_id=%s, count=%d",
+                source_id,
+                len(rows),
+            )
+            return rows
+        except Exception as e:
+            logger.warning(
+                "Failed to list statistics eligible marketplace skills: %s",
+                e,
+            )
+            return []
