@@ -1326,12 +1326,16 @@ async def list_skills(
     Returns:
         技能列表，每个 skill_id 只返回一条记录，包含 skill_id、skill_name、cn_name
     """
-    from ...marketplace.skill_registry import SkillRegistry
+    from ...marketplace.market_skill_registry import MarketSkillRegistry
 
     svc = request.app.state.marketplace
-    registry = SkillRegistry(svc.db)
+    registry = MarketSkillRegistry(svc.db)
 
-    skills = await registry.list_unique_skills_by_source_id(body.source_id)
+    skills = (
+        await registry.list_statistics_eligible_unique_skills_by_source_id(
+            body.source_id,
+        )
+    )
     return {
         "source_id": body.source_id,
         "count": len(skills),
