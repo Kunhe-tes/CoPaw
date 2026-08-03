@@ -47,6 +47,7 @@ export interface BubbleListProps extends React.HTMLAttributes<HTMLDivElement> {
   order?: "asc" | "desc";
   onReachStart?: () => void;
   preserveScrollPosition?: boolean;
+  topContent?: React.ReactNode;
 }
 
 interface BubbleListContentProps {
@@ -181,7 +182,8 @@ const BubbleList: React.ForwardRefRenderFunction<
   const handleScroll = useCallback(() => {
     const scrollEl = scrollRef.current;
     const reachedStart =
-      scrollEl && (isDesc ? scrollEl.scrollTop <= -24 : scrollEl.scrollTop <= 24);
+      scrollEl &&
+      (isDesc ? scrollEl.scrollTop <= -24 : scrollEl.scrollTop <= 24);
     if (reachedStart) {
       onReachStart?.();
     }
@@ -254,6 +256,7 @@ const BubbleList: React.ForwardRefRenderFunction<
           {order === "desc" && (
             <div className={`${prefixCls}-order-desc-short`}></div>
           )}
+          {props.topContent}
           <BubbleListContent
             order={order}
             paginationItems={paginationItems}

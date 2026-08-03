@@ -13,9 +13,7 @@ import React from "react";
 import { Result, Spin } from "antd";
 import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import { chatApi } from "@/api/modules/chat";
-import sessionApi, {
-  convertArchivedPage,
-} from "@/pages/Chat/sessionApi";
+import sessionApi, { convertArchivedPage } from "@/pages/Chat/sessionApi";
 import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
 import useChatAnywhereEventEmitter from "../../Context/useChatAnywhereEventEmitter";
 import useTopOverscroll, {
@@ -129,7 +127,10 @@ export default function MessageList(props: {
       // @ts-expect-error Context exposes a React-style updater at runtime but omits it from its public type.
       setMessages((current) => {
         const known = new Set(current.map((message) => message.id));
-        return [...older.filter((message) => !known.has(message.id)), ...current];
+        return [
+          ...older.filter((message) => !known.has(message.id)),
+          ...current,
+        ];
       });
     } catch {
       // The next upward scroll remains a retry; no persistent UI is needed.
@@ -255,55 +256,53 @@ export default function MessageList(props: {
     ready: "松开加载更早历史",
     loading: "正在加载更早历史",
   }[historyPull.state];
+  const historyPullProgress = Math.min(
+    1,
+    historyPull.visualOffset / TOP_PULL_THRESHOLD,
+  );
+  const historyPullColor = `rgba(55, 105, 252, ${
+    0.28 + historyPullProgress * 0.72
+  })`;
 
   return (
-    <div style={{ height: "100%", position: "relative" }}>
-      <Bubble.List
-        ref={listRef}
-        pagination={bubbleListOptions?.pagination ?? true}
-        order="desc"
-        key={currentSessionId}
-        classNames={{
-          wrapper: prefixCls,
-        }}
-        items={safeMessages}
-        preserveScrollPosition={isPrependingHistoryRef.current}
-      />
-      {historyPullLabel && (
-        <div
-          aria-live="polite"
-          role="status"
-          style={{
-            alignItems: "center",
-            color: "#8A94A6",
-            display: "flex",
-            flexDirection: "column",
-            fontSize: 13,
-            gap: 4,
-            left: 0,
-            pointerEvents: "none",
-            position: "absolute",
-            right: 0,
-            top: 8,
-            transform: `translateY(${historyPull.visualOffset}px)`,
-            transition:
-              historyPull.state === "loading"
-                ? "none"
-                : "transform 80ms ease-out",
-          }}
-        >
-          <span>{historyPullLabel}</span>
-          <progress
-            aria-label="加载更早历史进度"
-            max={TOP_PULL_THRESHOLD}
-            value={
-              historyPull.state === "loading"
-                ? TOP_PULL_THRESHOLD
-                : historyPull.visualOffset
-            }
-          />
-        </div>
-      )}
-    </div>
+    <Bubble.List
+      ref={listRef}
+      pagination={bubbleListOptions?.pagination ?? true}
+      order="desc"
+      key={currentSessionId}
+      classNames={{
+        wrapper: prefixCls,
+      }}
+      items={safeMessages}
+      preserveScrollPosition={isPrependingHistoryRef.current}
+      topContent={
+        historyPullLabel ? (
+          <div
+            aria-live="polite"
+            role="status"
+            style={{
+              alignItems: "center",
+              display: "flex",
+              height: historyPull.visualOffset,
+              fontSize: 13,
+              justifyContent: "center",
+              overflow: "hidden",
+              pointerEvents: "none",
+              transition: "height 80ms ease-out",
+            }}
+          >
+            <span
+              style={{
+                color: historyPullColor,
+                opacity: Math.min(1, historyPull.visualOffset / 28),
+                transition: "color 80ms ease-out, opacity 80ms ease-out",
+              }}
+            >
+              {historyPullLabel}
+            </span>
+          </div>
+        ) : undefined
+      }
+    />
   );
 }

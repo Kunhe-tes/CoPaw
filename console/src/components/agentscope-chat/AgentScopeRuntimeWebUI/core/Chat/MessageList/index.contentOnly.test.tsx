@@ -60,9 +60,11 @@ vi.mock("@/components/agentscope-chat", () => ({
         {
           items,
           onReachStart,
+          topContent,
         }: {
           items: unknown[];
           onReachStart?: () => void;
+          topContent?: React.ReactNode;
         },
         ref,
       ) => {
@@ -89,6 +91,7 @@ vi.mock("@/components/agentscope-chat", () => ({
               });
             }}
           >
+            {topContent}
             {items.length}
           </div>
         );
@@ -270,17 +273,15 @@ describe("MessageList content-only composition", () => {
     });
     fireEvent.pointerMove(bubbleList, { clientY: 260, pointerId: 1 });
 
-    expect(screen.getByRole("status")).toHaveTextContent(
-      "松开加载更早历史",
+    expect(screen.getByRole("status")).toHaveTextContent("松开加载更早历史");
+    expect(screen.getByTestId("bubble-list")).toContainElement(
+      screen.getByRole("status"),
     );
 
     fireEvent.pointerUp(bubbleList, { clientY: 260, pointerId: 1 });
 
     await waitFor(() => {
-      expect(apiMocks.getChatHistory).toHaveBeenCalledWith(
-        "chat-real-1",
-        null,
-      );
+      expect(apiMocks.getChatHistory).toHaveBeenCalledWith("chat-real-1", null);
     });
     expect(mocks.messages).toEqual([
       { id: "archived-message" },

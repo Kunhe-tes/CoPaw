@@ -80,4 +80,21 @@ describe("useTopOverscroll", () => {
 
     expect(onTriggered).not.toHaveBeenCalled();
   });
+
+  it("accumulates wheel overscroll without requiring a pointer drag", async () => {
+    const onTriggered = vi.fn().mockResolvedValue(undefined);
+    render(<Harness onTriggered={onTriggered} />);
+    const container = screen.getByTestId("scroll-container");
+
+    fireEvent.wheel(container, { deltaY: -100 });
+    expect(container).toHaveAttribute("data-state", "pulling");
+    expect(Number(container.dataset.offset)).toBe(45);
+    expect(container.scrollTop).toBe(-645);
+
+    await act(async () => {
+      fireEvent.wheel(container, { deltaY: -60 });
+    });
+
+    expect(onTriggered).toHaveBeenCalledTimes(1);
+  });
 });
