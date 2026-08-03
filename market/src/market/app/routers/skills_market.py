@@ -1536,6 +1536,31 @@ def _resolve_tenant_dir(swe_root: Path, tenant_id: str) -> Path | None:
     return None
 
 
+def _decode_source_id_from_tenant_id(tenant_id: str) -> str | None:
+    """从 scope 编码的 tenant_id 解出 source_id 段。
+
+    src/swe 的 bootstrap_tenant_id 形如 "<user>.<source>"（来自
+    resolve_storage_tenant_id 的 scope 编码）；内部同步端点拿到该 ID 时
+    应还原 source_id 写入 swe_skills.source_id 列，避免新建租户的技能
+    因 source_id 为空而无法被 init-swe-skills 等按 source 维度的接口检索到。
+
+    Args:
+        tenant_id: bootstrap 阶段的 tenant_id（可能含 "."）
+
+    Returns:
+        解出的 source_id；无 "." 或解码失败时返回 None。
+    """
+    from ...runtime.context import decode_scope_id
+
+    if "." not in tenant_id:
+        return None
+    try:
+        _, decoded_source = decode_scope_id(tenant_id)
+    except ValueError:
+        return None
+    return decoded_source or None
+
+
 def _check_internal_caller(request: Request) -> bool:
     """校验是否来自同集群内部调用（X-Internal-Token）。"""
     from ...config.constant import MARKET_INTERNAL_TOKEN
@@ -1577,10 +1602,14 @@ async def internal_sync_skills(
             "warning": "tenant_dir_not_found",
         }
 
+    # 从 scope 编码的 tenant_id 还原 source_id，保持与 admin 端点
+    # init-swe-skills 写入 swe_skills.source_id 的语义一致
+    source_id = _decode_source_id_from_tenant_id(tenant_id)
+
     try:
         result = await process_tenant_skills(
             tenant_dir,
-            source_id=None,
+            source_id=source_id,
             registry=registry,
             force=False,
             dry_run=False,
