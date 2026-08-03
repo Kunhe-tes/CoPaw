@@ -20,6 +20,7 @@ from ...config.context import (
     resolve_storage_tenant_id,
 )
 from .tenant_initializer import TenantInitializer
+from .tenant_skill_sync import sync_skills_to_db
 from .workspace import Workspace
 
 logger = logging.getLogger(__name__)
@@ -376,6 +377,27 @@ class TenantWorkspacePool:
             await self._register_tenant_entry(bootstrap_tenant_id)
 
             logger.info("Tenant bootstrapped: %s", bootstrap_tenant_id)
+
+        except Exception as e:
+            logger.error(
+                "Failed to bootstrap tenant %s: %s",
+                bootstrap_tenant_id,
+                e,
+            )
+            raise RuntimeError(
+                f"Failed to bootstrap tenant {bootstrap_tenant_id}: {e}",
+            ) from e
+
+        # 同步 swe_skills 表（失败仅 warn，不影响 bootstrap 整体成功）
+        # 放在 try 块外，独立异常捕获，确保 market 调用失败不影响 tenant 已上线
+        try:
+            await sync_skills_to_db(bootstrap_tenant_id)
+        except Exception as exc:
+            logger.warning(
+                "swe_skills 同步异常已被吞掉 tenant=%s err=%s",
+                bootstrap_tenant_id,
+                exc,
+            )
 
         except Exception as e:
             logger.error(
