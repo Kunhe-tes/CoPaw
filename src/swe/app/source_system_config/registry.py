@@ -98,19 +98,6 @@ APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING = (
         value_type="bool",
     )
 )
-FILE_READ_TRUNCATION_ENABLED_SETTING = SourceSystemConfigSetting(
-    key="file_read_truncation.enabled",
-    path=("file_read_truncation", "enabled"),
-    default_value=True,
-    value_type="bool",
-)
-FILE_READ_TRUNCATION_MAX_BYTES_SETTING = SourceSystemConfigSetting(
-    key="file_read_truncation.max_bytes",
-    path=("file_read_truncation", "max_bytes"),
-    default_value=50000,
-    value_type="int",
-    ge=1000,
-)
 
 CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING = SourceSystemConfigSetting(
     key="cron_unread_auto_pause.enabled",
@@ -163,14 +150,12 @@ ARCHIVE_MAINTENANCE_OLD_ORPHAN_DAYS_SETTING = SourceSystemConfigSetting(
     value_type="int",
     ge=1,
 )
-ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING = (
-    SourceSystemConfigSetting(
-        key="archive_maintenance.max_workspaces_per_run",
-        path=("archive_maintenance", "max_workspaces_per_run"),
-        default_value=200,
-        value_type="int",
-        ge=1,
-    )
+ARCHIVE_MAINTENANCE_MAX_WORKSPACES_PER_RUN_SETTING = SourceSystemConfigSetting(
+    key="archive_maintenance.max_workspaces_per_run",
+    path=("archive_maintenance", "max_workspaces_per_run"),
+    default_value=200,
+    value_type="int",
+    ge=1,
 )
 ARCHIVE_MAINTENANCE_MAX_FILES_PER_WORKSPACE_SETTING = (
     SourceSystemConfigSetting(
@@ -312,8 +297,6 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     TOOL_RESULT_COMPACT_RECENT_MAX_BYTES_SETTING,
     TOOL_RESULT_COMPACT_RETENTION_DAYS_SETTING,
     APPROVAL_NOTIFICATIONS_ZHAOHU_TOOL_GUARD_ENABLED_SETTING,
-    FILE_READ_TRUNCATION_ENABLED_SETTING,
-    FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
     CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
     CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
     CRON_TASK_SESSION_CLEANUP_ENABLED_SETTING,
@@ -345,9 +328,6 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
 _MISSING = object()
 _TRUE_STRINGS = frozenset({"true", "1", "yes", "on"})
 _FALSE_STRINGS = frozenset({"false", "0", "no", "off"})
-_IMMEDIATE_TRUNCATION_ENABLED_SETTINGS = (
-    FILE_READ_TRUNCATION_ENABLED_SETTING,
-)
 _MODEL_CALL_POLICY_SETTINGS = (
     QUERY_RETRY_ENABLED_SETTING,
     QUERY_RETRY_MAX_RETRIES_SETTING,
@@ -369,8 +349,8 @@ _DEPRECATED_SYSTEM_SECTION_KEYS = frozenset(
     },
 )
 _PRESERVED_DEFAULT_SETTING_PATHS = frozenset(
-    setting.path for setting in _IMMEDIATE_TRUNCATION_ENABLED_SETTINGS
-).union(setting.path for setting in _MODEL_CALL_POLICY_SETTINGS)
+    setting.path for setting in _MODEL_CALL_POLICY_SETTINGS
+)
 
 
 def build_default_source_system_config_payload() -> dict[str, Any]:
@@ -417,7 +397,6 @@ def prune_registered_default_overrides(
             pruned.pop(SYSTEM_PROMPT_INJECTIONS_PATH[0], None)
         else:
             pruned[SYSTEM_PROMPT_INJECTIONS_PATH[0]] = normalized
-    _drop_immediate_truncation_sections_without_enabled(pruned)
     return pruned
 
 
@@ -767,17 +746,6 @@ def _normalize_daily_cron_value(
     return f"{minute_int} {hour_int} * * *"
 
 
-def _drop_immediate_truncation_sections_without_enabled(
-    payload: dict[str, Any],
-) -> None:
-    """即时截断缺少 enabled 时视为未配置，避免空对象误判为显式接管。"""
-    for setting in _IMMEDIATE_TRUNCATION_ENABLED_SETTINGS:
-        section_key = setting.path[0]
-        section = payload.get(section_key)
-        if isinstance(section, dict) and "enabled" not in section:
-            payload.pop(section_key, None)
-
-
 def _drop_deprecated_system_sections(payload: dict[str, Any]) -> None:
     """移除已经下线的系统配置段，避免死配置在读写链路中回流。"""
     for key in _DEPRECATED_SYSTEM_SECTION_KEYS:
@@ -891,8 +859,6 @@ __all__ = [
     "CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS",
     "CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES",
     "DATABASE_ACCESS_GUARD_ENABLED_SWITCH",
-    "FILE_READ_TRUNCATION_ENABLED_SETTING",
-    "FILE_READ_TRUNCATION_MAX_BYTES_SETTING",
     "LLM_ACQUIRE_TIMEOUT_SETTING",
     "LLM_CHAT_ACQUIRE_TIMEOUT_SETTING",
     "LLM_CHAT_MAX_CONCURRENT_SETTING",

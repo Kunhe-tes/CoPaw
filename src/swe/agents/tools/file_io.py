@@ -24,7 +24,6 @@ from .utils import (
     DEFAULT_MAX_BYTES,
 )
 from ...config.context import (
-    get_current_file_read_max_bytes,
     get_current_recent_max_bytes,
 )
 from ...constant import TRUNCATION_NOTICE_MARKER
@@ -139,9 +138,6 @@ def _content_byte_length(content: str, encoding: str) -> int:
 
 
 def _get_effective_file_read_max_bytes() -> int:
-    file_read_max_bytes = get_current_file_read_max_bytes()
-    if file_read_max_bytes is not None:
-        return file_read_max_bytes
     return get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
 
 
