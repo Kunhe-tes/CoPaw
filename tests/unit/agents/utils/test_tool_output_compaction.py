@@ -43,6 +43,7 @@ def test_compacts_to_exact_utf8_budget_with_line_aware_excerpt(
         text * 20,
         max_bytes=max_bytes,
         artifact_dir=tmp_path,
+        workspace_dir=tmp_path,
     )
 
     assert len(result.text.encode("utf-8")) == max_bytes
@@ -61,7 +62,12 @@ def test_marks_and_recovers_a_single_line_that_exceeds_budget(
 ) -> None:
     text = "🍀" * 500
 
-    result = compact_text_output(text, max_bytes=512, artifact_dir=tmp_path)
+    result = compact_text_output(
+        text,
+        max_bytes=512,
+        artifact_dir=tmp_path,
+        workspace_dir=tmp_path,
+    )
 
     assert len(result.text.encode("utf-8")) == 512
     assert result.text.count("<<<TRUNCATED>>>") == 1
@@ -142,6 +148,26 @@ def test_replaces_lone_surrogates_for_compaction_and_artifact(
     )
 
 
+def test_returns_original_output_without_workspace_recovery_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    text = "line\n" * 200
+
+    result = compact_text_output(
+        text,
+        max_bytes=100,
+        artifact_dir=Path("."),
+    )
+
+    assert result.text == text
+    assert result.artifact_path is None
+    assert result.original_bytes == len(text.encode("utf-8"))
+    assert result.retained_bytes == len(text.encode("utf-8"))
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_returns_original_text_when_artifact_write_cannot_be_persisted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -153,7 +179,12 @@ def test_returns_original_text_when_artifact_write_cannot_be_persisted(
 
     monkeypatch.setattr(Path, "replace", fail_replace)
 
-    result = compact_text_output(text, max_bytes=512, artifact_dir=tmp_path)
+    result = compact_text_output(
+        text,
+        max_bytes=512,
+        artifact_dir=tmp_path,
+        workspace_dir=tmp_path,
+    )
 
     assert result.text == text
     assert result.artifact_path is None

@@ -35,14 +35,22 @@ def compact_text_output(
     if original_bytes <= max_bytes:
         return CompactedText(text, None, original_bytes, original_bytes)
 
+    if workspace_dir is None:
+        return CompactedText(text, None, original_bytes, original_bytes)
+
     artifact_path = artifact_dir / f"{uuid4().hex}.txt"
-    notice = _truncation_notice(
-        original_bytes=original_bytes,
-        retained_bytes=max_bytes,
-        artifact_path=artifact_path,
-        max_bytes=max_bytes,
-        workspace_dir=workspace_dir,
-    )
+    reference = _artifact_reference(artifact_path, workspace_dir)
+    if reference is None:
+        return CompactedText(text, None, original_bytes, original_bytes)
+    try:
+        notice = _truncation_notice(
+            original_bytes=original_bytes,
+            retained_bytes=max_bytes,
+            artifact_reference=reference,
+            max_bytes=max_bytes,
+        )
+    except ValueError:
+        return CompactedText(text, None, original_bytes, original_bytes)
     encoded_notice = notice.encode("utf-8", errors="replace")
 
     if not _persist_artifact(artifact_path, encoded_text):
@@ -81,19 +89,17 @@ def _truncation_notice(
     *,
     original_bytes: int,
     retained_bytes: int,
-    artifact_path: Path,
+    artifact_reference: str,
     max_bytes: int,
-    workspace_dir: Path | None,
 ) -> str:
-    reference = _artifact_reference(artifact_path, workspace_dir)
     detailed_notice = (
         "\n<<<TRUNCATED>>> "
         f"original_bytes={original_bytes}; retained_bytes={retained_bytes}; "
-        f"read_file {reference}\n"
+        f"read_file {artifact_reference}\n"
     )
     compact_notice = (
         "\n<<<TRUNCATED>>> "
-        f"bytes={original_bytes}/{retained_bytes}; read_file {reference}\n"
+        f"bytes={original_bytes}/{retained_bytes}; read_file {artifact_reference}\n"
     )
     for notice in (detailed_notice, compact_notice):
         if len(notice.encode("utf-8", errors="replace")) <= max_bytes:
@@ -103,18 +109,14 @@ def _truncation_notice(
 
 def _artifact_reference(
     artifact_path: Path,
-    workspace_dir: Path | None,
-) -> str:
-    if workspace_dir is not None:
-        resolved_artifact = artifact_path.resolve()
-        resolved_workspace = workspace_dir.resolve()
-        try:
-            return resolved_artifact.relative_to(resolved_workspace).as_posix()
-        except ValueError:
-            return resolved_artifact.as_posix()
-    if not artifact_path.is_absolute():
-        return artifact_path.as_posix()
-    return artifact_path.as_posix()
+    workspace_dir: Path,
+) -> str | None:
+    resolved_artifact = artifact_path.resolve()
+    resolved_workspace = workspace_dir.resolve()
+    try:
+        return resolved_artifact.relative_to(resolved_workspace).as_posix()
+    except ValueError:
+        return None
 
 
 def _line_aware_excerpt(content: bytes, max_bytes: int) -> bytes:
