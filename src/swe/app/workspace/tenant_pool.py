@@ -399,16 +399,6 @@ class TenantWorkspacePool:
                 exc,
             )
 
-        except Exception as e:
-            logger.error(
-                "Failed to bootstrap tenant %s: %s",
-                bootstrap_tenant_id,
-                e,
-            )
-            raise RuntimeError(
-                f"Failed to bootstrap tenant {bootstrap_tenant_id}: {e}",
-            ) from e
-
     async def ensure_bootstrap(
         self,
         tenant_id: str,
