@@ -17,12 +17,8 @@ from swe.app.source_system_config.models import (
 from swe.app.source_system_config.runtime import bind_source_system_config
 from swe.config.config import ToolResultCompactConfig
 from swe.config.context import (
-    get_current_file_read_max_bytes,
     get_current_recent_max_bytes,
-    get_current_tool_result_retention_days,
-    set_current_file_read_max_bytes,
     set_current_recent_max_bytes,
-    set_current_tool_result_retention_days,
 )
 
 
@@ -36,10 +32,6 @@ def _build_effective_config() -> EffectiveSourceSystemConfig:
                     "recent_max_bytes": 32000,
                     "retention_days": 8,
                 },
-                "file_read_truncation": {
-                    "enabled": True,
-                    "max_bytes": 12000,
-                },
             },
         ).merged_with_defaults(),
         raw_config=SourceSystemConfig.model_validate(
@@ -47,10 +39,6 @@ def _build_effective_config() -> EffectiveSourceSystemConfig:
                 "tool_result_compact": {
                     "recent_max_bytes": 32000,
                     "retention_days": 8,
-                },
-                "file_read_truncation": {
-                    "enabled": True,
-                    "max_bytes": 12000,
                 },
             },
         ),
@@ -97,8 +85,6 @@ async def test_reply_binds_source_output_truncation_contexts(
         assert msg is None
         assert structured_model is None
         assert get_current_recent_max_bytes() == 32000
-        assert get_current_file_read_max_bytes() == 12000
-        assert get_current_tool_result_retention_days() == 8
         return SimpleNamespace(ok=True)
 
     monkeypatch.setattr(
@@ -116,7 +102,5 @@ async def test_reply_binds_source_output_truncation_contexts(
             result = await SWEAgent.reply(agent, None)
         finally:
             set_current_recent_max_bytes(None)
-            set_current_file_read_max_bytes(None)
-            set_current_tool_result_retention_days(None)
 
     assert result.ok is True
