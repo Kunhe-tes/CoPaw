@@ -406,7 +406,11 @@ export function SkillScannerSection() {
                       dataSource={blockedHistory}
                       columns={blockedColumns}
                       rowKey={(_, idx) => String(idx)}
-                      pagination={false}
+                      pagination={{
+                        defaultPageSize: 20,
+                        showSizeChanger: true,
+                        pageSizeOptions: ["20", "50", "100"],
+                      }}
                       size="small"
                     />
                   )}
@@ -442,7 +446,11 @@ export function SkillScannerSection() {
                       dataSource={whitelist}
                       columns={whitelistColumns}
                       rowKey="skill_name"
-                      pagination={false}
+                      pagination={{
+                        defaultPageSize: 20,
+                        showSizeChanger: true,
+                        pageSizeOptions: ["20", "50", "100"],
+                      }}
                       size="small"
                     />
                   )}
