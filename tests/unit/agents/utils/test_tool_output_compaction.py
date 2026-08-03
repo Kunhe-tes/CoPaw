@@ -70,6 +70,34 @@ def test_marks_and_recovers_a_single_line_that_exceeds_budget(
     assert result.artifact_path.read_text(encoding="utf-8") == text
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "normal line\n" * 200,
+        "🍀" * 500,
+    ],
+)
+def test_uses_recoverable_compact_notice_at_minimum_budget(
+    text: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    result = compact_text_output(
+        text,
+        max_bytes=100,
+        artifact_dir=Path("tool_result"),
+    )
+
+    assert len(result.text.encode("utf-8")) == 100
+    assert result.text.count("<<<TRUNCATED>>>") == 1
+    assert "read_file tool_result/" in result.text
+    assert result.artifact_path is not None
+    assert result.artifact_path.name in result.text
+    assert result.artifact_path.read_text(encoding="utf-8") == text
+
+
 def test_returns_original_text_when_artifact_write_cannot_be_persisted(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

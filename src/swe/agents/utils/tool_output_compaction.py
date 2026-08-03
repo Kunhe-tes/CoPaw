@@ -34,17 +34,14 @@ def compact_text_output(
     if original_bytes <= max_bytes:
         return CompactedText(text, None, original_bytes, original_bytes)
 
-    artifact_path = artifact_dir / uuid4().hex
+    artifact_path = artifact_dir / f"{uuid4().hex}.txt"
     notice = _truncation_notice(
         original_bytes=original_bytes,
         retained_bytes=max_bytes,
         artifact_path=artifact_path,
+        max_bytes=max_bytes,
     )
     encoded_notice = notice.encode("utf-8")
-    if len(encoded_notice) > max_bytes:
-        raise ValueError(
-            "max_bytes is too small for a recoverable truncation notice",
-        )
 
     if not _persist_artifact(artifact_path, encoded_text):
         return CompactedText(text, None, original_bytes, original_bytes)
@@ -80,12 +77,35 @@ def _truncation_notice(
     original_bytes: int,
     retained_bytes: int,
     artifact_path: Path,
+    max_bytes: int,
 ) -> str:
-    return (
+    reference = _artifact_reference(artifact_path)
+    detailed_notice = (
         "\n<<<TRUNCATED>>> "
         f"original_bytes={original_bytes}; retained_bytes={retained_bytes}; "
-        f"artifact_path={artifact_path}; read_file\n"
+        f"read_file {reference}\n"
     )
+    compact_notice = (
+        "\n<<<TRUNCATED>>> "
+        f"bytes={original_bytes}/{retained_bytes}; read_file {reference}\n"
+    )
+    filename_notice = (
+        "\n<<<TRUNCATED>>> "
+        f"bytes={original_bytes}/{retained_bytes}; read_file {artifact_path.name}\n"
+    )
+    for notice in (detailed_notice, compact_notice, filename_notice):
+        if len(notice.encode("utf-8")) <= max_bytes:
+            return notice
+    return filename_notice
+
+
+def _artifact_reference(artifact_path: Path) -> str:
+    if not artifact_path.is_absolute():
+        return artifact_path.as_posix()
+    try:
+        return artifact_path.relative_to(Path.cwd()).as_posix()
+    except ValueError:
+        return artifact_path.name
 
 
 def _line_aware_excerpt(content: bytes, max_bytes: int) -> bytes:
