@@ -4,9 +4,24 @@
 from __future__ import annotations
 
 import os
+import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
+
+from agentscope.message import Msg
+
+_CANONICAL_NOTICE_RE = re.compile(
+    r"\n<<<TRUNCATED>>> "
+    r"(?:original_bytes=(?P<original_bytes>\d+); "
+    r"retained_bytes=(?P<retained_bytes>\d+)|"
+    r"bytes=(?P<compact_original_bytes>\d+)/"
+    r"(?P<compact_retained_bytes>\d+)); "
+    r"read_file (?P<reference>[^\s]+)\n\Z",
+)
+_MEDIA_BLOCK_TYPES = frozenset({"audio", "file", "image", "video"})
 
 
 @dataclass(frozen=True)
@@ -56,13 +71,77 @@ def compact_text_output(
     if not _persist_artifact(artifact_path, encoded_text):
         return CompactedText(text, None, original_bytes, original_bytes)
 
-    excerpt_budget = max_bytes - len(encoded_notice)
-    excerpt = _line_aware_excerpt(encoded_text, excerpt_budget)
-    compacted = (_sanitize_excerpt(excerpt) + encoded_notice).decode(
-        "utf-8",
-        errors="replace",
+    compacted = _compacted_display(
+        encoded_text,
+        notice=encoded_notice,
+        max_bytes=max_bytes,
     )
     return CompactedText(compacted, artifact_path, original_bytes, max_bytes)
+
+
+def compact_tool_result_messages(
+    messages: list[Msg],
+    *,
+    old_max_bytes: int,
+    recent_max_bytes: int,
+    recent_n: int,
+    artifact_dir: Path,
+    workspace_dir: Path,
+) -> list[Msg]:
+    """Compact text in tool-result messages while retaining media blocks.
+
+    The latest contiguous run of tool-result messages uses the larger recent
+    budget. Older tool results use the historical budget. Existing canonical
+    displays are re-excerpted from their original artifact, never persisted
+    as a second full-output artifact.
+    """
+    if old_max_bytes < 1 or recent_max_bytes < 1:
+        raise ValueError("tool result byte budgets must be positive")
+    if recent_n < 1:
+        raise ValueError("recent_n must be positive")
+
+    recent_start = _recent_tool_result_start(messages, recent_n)
+    for index, message in enumerate(messages):
+        tool_result_blocks = _tool_result_blocks(message)
+        if not tool_result_blocks:
+            continue
+        max_bytes = (
+            recent_max_bytes if index >= recent_start else old_max_bytes
+        )
+        for block in tool_result_blocks:
+            for key in ("content", "output"):
+                if key in block:
+                    block[key] = _compact_textual_value(
+                        block[key],
+                        max_bytes=max_bytes,
+                        artifact_dir=artifact_dir,
+                        workspace_dir=workspace_dir,
+                    )
+    return messages
+
+
+def cleanup_expired_artifacts(
+    artifact_dir: Path,
+    *,
+    retention_days: int,
+) -> None:
+    """Best-effort removal of expired tool-result artifacts."""
+    if retention_days < 1:
+        raise ValueError("retention_days must be positive")
+
+    try:
+        cutoff = time.time() - retention_days * 24 * 60 * 60
+        for artifact_path in artifact_dir.glob("*.txt"):
+            try:
+                if (
+                    artifact_path.is_file()
+                    and artifact_path.stat().st_mtime < cutoff
+                ):
+                    artifact_path.unlink()
+            except OSError:
+                continue
+    except OSError:
+        return
 
 
 def _persist_artifact(artifact_path: Path, content: bytes) -> bool:
@@ -116,6 +195,147 @@ def _artifact_reference(
     try:
         return resolved_artifact.relative_to(resolved_workspace).as_posix()
     except ValueError:
+        return None
+
+
+def _compacted_display(
+    content: bytes,
+    *,
+    notice: bytes,
+    max_bytes: int,
+) -> str:
+    excerpt_budget = max_bytes - len(notice)
+    excerpt = _line_aware_excerpt(content, excerpt_budget)
+    return (_sanitize_excerpt(excerpt) + notice).decode(
+        "utf-8",
+        errors="replace",
+    )
+
+
+def _recent_tool_result_start(messages: list[Msg], recent_n: int) -> int:
+    """Return the start index of the trailing tool-result message window."""
+    recent_count = 0
+    for index in range(len(messages) - 1, -1, -1):
+        if not _tool_result_blocks(messages[index]):
+            break
+        recent_count += 1
+        if recent_count == recent_n:
+            return index
+    return len(messages) - recent_count
+
+
+def _tool_result_blocks(message: Msg) -> list[dict[str, Any]]:
+    content = getattr(message, "content", None)
+    if not isinstance(content, list):
+        return []
+    return [
+        block
+        for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_result"
+    ]
+
+
+def _compact_textual_value(
+    value: Any,
+    *,
+    max_bytes: int,
+    artifact_dir: Path,
+    workspace_dir: Path,
+) -> Any:
+    if isinstance(value, str):
+        return _compact_display_text(
+            value,
+            max_bytes=max_bytes,
+            artifact_dir=artifact_dir,
+            workspace_dir=workspace_dir,
+        )
+    if isinstance(value, list):
+        return [
+            _compact_textual_value(
+                item,
+                max_bytes=max_bytes,
+                artifact_dir=artifact_dir,
+                workspace_dir=workspace_dir,
+            )
+            for item in value
+        ]
+    if not isinstance(value, dict):
+        return value
+    if value.get("type") in _MEDIA_BLOCK_TYPES:
+        return value
+
+    compacted = value.copy()
+    text = compacted.get("text")
+    if isinstance(text, str):
+        compacted["text"] = _compact_display_text(
+            text,
+            max_bytes=max_bytes,
+            artifact_dir=artifact_dir,
+            workspace_dir=workspace_dir,
+        )
+    for key in ("content", "output"):
+        if key in compacted:
+            compacted[key] = _compact_textual_value(
+                compacted[key],
+                max_bytes=max_bytes,
+                artifact_dir=artifact_dir,
+                workspace_dir=workspace_dir,
+            )
+    return compacted
+
+
+def _compact_display_text(
+    text: str,
+    *,
+    max_bytes: int,
+    artifact_dir: Path,
+    workspace_dir: Path,
+) -> str:
+    existing = _existing_artifact(text, workspace_dir)
+    if existing is not None:
+        artifact_path, content = existing
+        if len(content) <= max_bytes:
+            return text
+        reference = _artifact_reference(artifact_path, workspace_dir)
+        if reference is None:
+            return text
+        try:
+            notice = _truncation_notice(
+                original_bytes=len(content),
+                retained_bytes=max_bytes,
+                artifact_reference=reference,
+                max_bytes=max_bytes,
+            ).encode("utf-8", errors="replace")
+        except ValueError:
+            return text
+        return _compacted_display(content, notice=notice, max_bytes=max_bytes)
+
+    if _CANONICAL_NOTICE_RE.search(text):
+        return text
+    return compact_text_output(
+        text,
+        max_bytes=max_bytes,
+        artifact_dir=artifact_dir,
+        workspace_dir=workspace_dir,
+    ).text
+
+
+def _existing_artifact(
+    text: str,
+    workspace_dir: Path,
+) -> tuple[Path, bytes] | None:
+    match = _CANONICAL_NOTICE_RE.search(text)
+    if match is None:
+        return None
+    reference = match.group("reference")
+    candidate = workspace_dir / reference
+    try:
+        artifact_path = candidate.resolve(strict=True)
+        artifact_path.relative_to(workspace_dir.resolve())
+        if not artifact_path.is_file():
+            return None
+        return artifact_path, artifact_path.read_bytes()
+    except (OSError, ValueError):
         return None
 
 

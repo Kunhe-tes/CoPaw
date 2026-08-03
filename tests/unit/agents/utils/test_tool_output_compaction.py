@@ -4,8 +4,30 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from agentscope.message import Msg
 
-from swe.agents.utils.tool_output_compaction import compact_text_output
+from swe.agents.utils.tool_output_compaction import (
+    compact_text_output,
+    compact_tool_result_messages,
+)
+
+
+def _tool_result_message(output: object) -> Msg:
+    return Msg(
+        name="assistant",
+        role="assistant",
+        content=[
+            {
+                "type": "tool_result",
+                "id": "tool-call-id",
+                "output": output,
+            },
+        ],
+    )
+
+
+def _tool_result_text(message: Msg) -> str:
+    return message.get_content_blocks("tool_result")[0]["output"][0]["text"]
 
 
 def test_returns_original_text_without_artifact_when_within_budget(
@@ -191,3 +213,125 @@ def test_returns_original_text_when_artifact_write_cannot_be_persisted(
     assert result.original_bytes == len(text.encode("utf-8"))
     assert result.retained_bytes == len(text.encode("utf-8"))
     assert list(tmp_path.iterdir()) == []
+
+
+def test_compacts_nested_tool_result_text_without_changing_image_block(
+    tmp_path: Path,
+) -> None:
+    image = {"type": "image", "source": "data:image/png;base64,abc"}
+    message = _tool_result_message(
+        [
+            {
+                "type": "text",
+                "text": "large nested text\n" * 80,
+            },
+            image,
+        ],
+    )
+
+    compact_tool_result_messages(
+        [message],
+        old_max_bytes=200,
+        recent_max_bytes=200,
+        recent_n=1,
+        artifact_dir=tmp_path / "tool_result",
+        workspace_dir=tmp_path,
+    )
+
+    assert len(_tool_result_text(message).encode("utf-8")) == 200
+    assert _tool_result_text(message).count("<<<TRUNCATED>>>") == 1
+    assert message.get_content_blocks("tool_result")[0]["output"][1] == image
+
+
+def test_recompaction_reuses_original_artifact_reference(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "tool_result"
+    message = _tool_result_message(
+        [{"type": "text", "text": "recoverable source text\n" * 80}],
+    )
+
+    compact_tool_result_messages(
+        [message],
+        old_max_bytes=500,
+        recent_max_bytes=500,
+        recent_n=1,
+        artifact_dir=artifact_dir,
+        workspace_dir=tmp_path,
+    )
+    first_display = _tool_result_text(message)
+    reference = first_display.rsplit("read_file ", maxsplit=1)[1].strip()
+    artifact = tmp_path / reference
+
+    compact_tool_result_messages(
+        [message],
+        old_max_bytes=200,
+        recent_max_bytes=200,
+        recent_n=1,
+        artifact_dir=artifact_dir,
+        workspace_dir=tmp_path,
+    )
+
+    display = _tool_result_text(message)
+    assert len(display.encode("utf-8")) == 200
+    assert display.count("<<<TRUNCATED>>>") == 1
+    assert display.rsplit("read_file ", maxsplit=1)[1].strip() == reference
+    assert (
+        artifact.read_text(encoding="utf-8")
+        == "recoverable source text\n" * 80
+    )
+    assert list(artifact_dir.glob("*.txt")) == [artifact]
+
+
+def test_recompaction_keeps_display_when_original_artifact_is_missing(
+    tmp_path: Path,
+) -> None:
+    artifact_dir = tmp_path / "tool_result"
+    message = _tool_result_message(
+        [{"type": "text", "text": "recoverable source text\n" * 80}],
+    )
+    compact_tool_result_messages(
+        [message],
+        old_max_bytes=500,
+        recent_max_bytes=500,
+        recent_n=1,
+        artifact_dir=artifact_dir,
+        workspace_dir=tmp_path,
+    )
+    original_display = _tool_result_text(message)
+    reference = original_display.rsplit("read_file ", maxsplit=1)[1].strip()
+    (tmp_path / reference).unlink()
+
+    compact_tool_result_messages(
+        [message],
+        old_max_bytes=200,
+        recent_max_bytes=200,
+        recent_n=1,
+        artifact_dir=artifact_dir,
+        workspace_dir=tmp_path,
+    )
+
+    assert _tool_result_text(message) == original_display
+
+
+def test_only_recent_trailing_tool_results_use_recent_budget(
+    tmp_path: Path,
+) -> None:
+    old_message = _tool_result_message(
+        [{"type": "text", "text": "old output\n" * 45}],
+    )
+    recent_message = _tool_result_message(
+        [{"type": "text", "text": "recent output\n" * 35}],
+    )
+
+    compact_tool_result_messages(
+        [old_message, recent_message],
+        old_max_bytes=200,
+        recent_max_bytes=800,
+        recent_n=1,
+        artifact_dir=tmp_path / "tool_result",
+        workspace_dir=tmp_path,
+    )
+
+    assert "<<<TRUNCATED>>>" in _tool_result_text(old_message)
+    assert _tool_result_text(recent_message) == "recent output\n" * 35
