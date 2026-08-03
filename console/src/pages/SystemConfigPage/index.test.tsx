@@ -780,46 +780,14 @@ describe("SystemConfigPage", () => {
     });
   }, 10_000);
 
-  it("saves explicit immediate truncation configs", async () => {
-    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
-      source_id: "portal",
-      config: {
-        file_read_truncation: {
-          enabled: true,
-          max_bytes: 50000,
-        },
-      },
-      version: 1,
-      is_default: false,
-      updated_by: "alice",
-      updated_at: "2026-05-21 10:00:00",
-    });
-
-    render(<SystemConfigPage />);
-
-    expect(await screen.findByText("工具输出控制")).toBeTruthy();
-    expect(screen.getByText("继承旧工具结果近期阈值")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "启用独立配置" }));
-    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
-
-    await waitFor(() => {
-      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
-        config: {
-          file_read_truncation: {
-            enabled: true,
-            max_bytes: 50000,
-          },
-        },
-      });
-    });
-  });
-
-  it("can restore a single immediate truncation section to inheritance", async () => {
+  it("uses the tool output override for new and recent output without a file-read field", async () => {
     mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
       source_id: "portal",
       config: {
         provider_policy: { default_model: "qwen-max" },
+        tool_result_compact: {
+          recent_max_bytes: 12000,
+        },
         file_read_truncation: {
           enabled: true,
           max_bytes: 12000,
@@ -834,6 +802,9 @@ describe("SystemConfigPage", () => {
       source_id: "portal",
       config: {
         provider_policy: { default_model: "qwen-max" },
+        tool_result_compact: {
+          recent_max_bytes: 16000,
+        },
       },
       version: 2,
       is_default: false,
@@ -844,14 +815,25 @@ describe("SystemConfigPage", () => {
     render(<SystemConfigPage />);
 
     expect(await screen.findByText("工具输出控制")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "recent_max_bytes 同时控制新产生和近期的工具输出；old_max_bytes 仅控制历史工具输出。",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("文件读取截断")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "恢复继承" }));
+    fireEvent.change(screen.getByDisplayValue("12000"), {
+      target: { value: "16000" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() => {
       expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
         config: {
           provider_policy: { default_model: "qwen-max" },
+          tool_result_compact: {
+            recent_max_bytes: 16000,
+          },
         },
       });
     });
@@ -903,35 +885,6 @@ describe("SystemConfigPage", () => {
       });
     });
   }, 10_000);
-
-  it("blocks invalid immediate truncation max bytes before saving", async () => {
-    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
-      source_id: "portal",
-      config: {
-        file_read_truncation: {
-          enabled: true,
-          max_bytes: 999,
-        },
-      },
-      version: 1,
-      is_default: false,
-      updated_by: "alice",
-      updated_at: "2026-05-21 10:00:00",
-    });
-
-    render(<SystemConfigPage />);
-
-    expect(await screen.findByText("工具输出控制")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
-
-    await waitFor(() => {
-      expect(mocks.messageApi.error).toHaveBeenCalledWith(
-        "文件读取输出片段字节数不能小于 1000",
-      );
-    });
-    expect(mocks.sourceSystemConfigApi.updateCurrent).not.toHaveBeenCalled();
-  });
 
   it("confirms restoring defaults before clearing explicit config", async () => {
     mocks.sourceSystemConfigApi.getCurrent

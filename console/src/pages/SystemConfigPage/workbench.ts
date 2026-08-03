@@ -97,8 +97,8 @@ const CAPABILITIES: CapabilityDefinition[] = [
   {
     id: "output",
     title: "工具输出",
-    description: "历史压缩与文件读取输出边界。",
-    paths: [["tool_result_compact"], ["file_read_truncation"]],
+    description: "新产生、近期与历史工具输出边界。",
+    paths: [["tool_result_compact"]],
     summary: () => "输出控制采用当前策略",
     inheritsAgent: true,
   },
