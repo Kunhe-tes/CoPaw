@@ -80,14 +80,15 @@ def test_marks_and_recovers_a_single_line_that_exceeds_budget(
 def test_uses_recoverable_compact_notice_at_minimum_budget(
     text: str,
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.chdir(tmp_path)
+    workspace_dir = tmp_path / "workspace"
+    artifact_dir = workspace_dir / "tool_result"
 
     result = compact_text_output(
         text,
         max_bytes=100,
-        artifact_dir=Path("tool_result"),
+        artifact_dir=artifact_dir,
+        workspace_dir=workspace_dir,
     )
 
     assert len(result.text.encode("utf-8")) == 100
@@ -95,7 +96,50 @@ def test_uses_recoverable_compact_notice_at_minimum_budget(
     assert "read_file tool_result/" in result.text
     assert result.artifact_path is not None
     assert result.artifact_path.name in result.text
+    reference = result.text.rsplit("read_file ", maxsplit=1)[1].strip()
+    assert workspace_dir / reference == result.artifact_path
     assert result.artifact_path.read_text(encoding="utf-8") == text
+
+
+def test_escapes_source_marker_in_displayed_excerpt(tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    artifact_dir = workspace_dir / "tool_result"
+    text = ("before\n<<<TRUNCATED>>>\nafter\n") * 100
+
+    result = compact_text_output(
+        text,
+        max_bytes=512,
+        artifact_dir=artifact_dir,
+        workspace_dir=workspace_dir,
+    )
+
+    assert result.text.count("<<<TRUNCATED>>>") == 1
+    assert "<<<TRUNCATED>>?" in result.text
+    assert result.artifact_path is not None
+    assert result.artifact_path.read_text(encoding="utf-8") == text
+
+
+def test_replaces_lone_surrogates_for_compaction_and_artifact(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    artifact_dir = workspace_dir / "tool_result"
+    text = ("before\ud800after\n") * 200
+
+    result = compact_text_output(
+        text,
+        max_bytes=512,
+        artifact_dir=artifact_dir,
+        workspace_dir=workspace_dir,
+    )
+
+    assert result.original_bytes == len(text.encode("utf-8", errors="replace"))
+    assert len(result.text.encode("utf-8", errors="replace")) == 512
+    assert result.artifact_path is not None
+    assert result.artifact_path.read_bytes() == text.encode(
+        "utf-8",
+        errors="replace",
+    )
 
 
 def test_returns_original_text_when_artifact_write_cannot_be_persisted(

@@ -24,12 +24,13 @@ def compact_text_output(
     *,
     max_bytes: int,
     artifact_dir: Path,
+    workspace_dir: Path | None = None,
 ) -> CompactedText:
     """Return *text* within ``max_bytes``, retaining oversized originals on disk."""
     if max_bytes < 1:
         raise ValueError("max_bytes must be positive")
 
-    encoded_text = text.encode("utf-8")
+    encoded_text = text.encode("utf-8", errors="replace")
     original_bytes = len(encoded_text)
     if original_bytes <= max_bytes:
         return CompactedText(text, None, original_bytes, original_bytes)
@@ -40,15 +41,19 @@ def compact_text_output(
         retained_bytes=max_bytes,
         artifact_path=artifact_path,
         max_bytes=max_bytes,
+        workspace_dir=workspace_dir,
     )
-    encoded_notice = notice.encode("utf-8")
+    encoded_notice = notice.encode("utf-8", errors="replace")
 
     if not _persist_artifact(artifact_path, encoded_text):
         return CompactedText(text, None, original_bytes, original_bytes)
 
     excerpt_budget = max_bytes - len(encoded_notice)
     excerpt = _line_aware_excerpt(encoded_text, excerpt_budget)
-    compacted = (excerpt + encoded_notice).decode("utf-8")
+    compacted = (_sanitize_excerpt(excerpt) + encoded_notice).decode(
+        "utf-8",
+        errors="replace",
+    )
     return CompactedText(compacted, artifact_path, original_bytes, max_bytes)
 
 
@@ -78,8 +83,9 @@ def _truncation_notice(
     retained_bytes: int,
     artifact_path: Path,
     max_bytes: int,
+    workspace_dir: Path | None,
 ) -> str:
-    reference = _artifact_reference(artifact_path)
+    reference = _artifact_reference(artifact_path, workspace_dir)
     detailed_notice = (
         "\n<<<TRUNCATED>>> "
         f"original_bytes={original_bytes}; retained_bytes={retained_bytes}; "
@@ -89,23 +95,26 @@ def _truncation_notice(
         "\n<<<TRUNCATED>>> "
         f"bytes={original_bytes}/{retained_bytes}; read_file {reference}\n"
     )
-    filename_notice = (
-        "\n<<<TRUNCATED>>> "
-        f"bytes={original_bytes}/{retained_bytes}; read_file {artifact_path.name}\n"
-    )
-    for notice in (detailed_notice, compact_notice, filename_notice):
-        if len(notice.encode("utf-8")) <= max_bytes:
+    for notice in (detailed_notice, compact_notice):
+        if len(notice.encode("utf-8", errors="replace")) <= max_bytes:
             return notice
-    return filename_notice
+    raise ValueError("max_bytes is too small for a usable artifact reference")
 
 
-def _artifact_reference(artifact_path: Path) -> str:
+def _artifact_reference(
+    artifact_path: Path,
+    workspace_dir: Path | None,
+) -> str:
+    if workspace_dir is not None:
+        resolved_artifact = artifact_path.resolve()
+        resolved_workspace = workspace_dir.resolve()
+        try:
+            return resolved_artifact.relative_to(resolved_workspace).as_posix()
+        except ValueError:
+            return resolved_artifact.as_posix()
     if not artifact_path.is_absolute():
         return artifact_path.as_posix()
-    try:
-        return artifact_path.relative_to(Path.cwd()).as_posix()
-    except ValueError:
-        return artifact_path.name
+    return artifact_path.as_posix()
 
 
 def _line_aware_excerpt(content: bytes, max_bytes: int) -> bytes:
@@ -125,10 +134,26 @@ def _line_aware_excerpt(content: bytes, max_bytes: int) -> bytes:
 
 
 def _utf8_prefix(content: bytes, max_bytes: int) -> bytes:
-    return content[:max_bytes].decode("utf-8", errors="ignore").encode("utf-8")
+    candidate = content[:max_bytes]
+    while candidate:
+        decoded = candidate.decode("utf-8", errors="replace")
+        encoded = decoded.encode("utf-8", errors="replace")
+        if encoded == candidate:
+            return encoded
+        candidate = candidate[:-1]
+    return b""
 
 
 def _utf8_suffix(content: bytes, max_bytes: int) -> bytes:
-    return (
-        content[-max_bytes:].decode("utf-8", errors="ignore").encode("utf-8")
-    )
+    candidate = content[-max_bytes:]
+    while candidate:
+        decoded = candidate.decode("utf-8", errors="replace")
+        encoded = decoded.encode("utf-8", errors="replace")
+        if encoded == candidate:
+            return encoded
+        candidate = candidate[1:]
+    return b""
+
+
+def _sanitize_excerpt(excerpt: bytes) -> bytes:
+    return excerpt.replace(b"<<<TRUNCATED>>>", b"<<<TRUNCATED>>?")
