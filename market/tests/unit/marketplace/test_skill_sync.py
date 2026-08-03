@@ -143,3 +143,90 @@ async def test_sync_tenant_skills_empty_workspace_returns_zero(tmp_path: Path):
 
     assert inserted == 0
     registry.upsert_skill_by_name.assert_not_called()
+
+
+def test_extract_skill_fields_prefers_manifest_skill_id(tmp_path: Path):
+    """manifest entry 的 metadata.skill_id 优先于 SKILL.md 派生。"""
+    from market.marketplace.skill_sync import _extract_skill_fields
+
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nskill_id: should_be_ignored\n---\n# demo",
+        encoding="utf-8",
+    )
+
+    entry = {
+        "source": "customized",
+        "metadata": {"skill_id": "explicit_locked_id"},
+    }
+
+    skill_id, _ = _extract_skill_fields(
+        skill_dir,
+        entry,
+        skill_name="demo",
+        user_id="alice",
+        source_id="default",
+        force=False,
+    )
+
+    assert skill_id == "explicit_locked_id"
+
+
+def test_extract_skill_fields_ignores_manifest_skill_id_when_force(
+    tmp_path: Path,
+):
+    """force=True 时跳过 manifest metadata.skill_id，走派生路径。"""
+    from market.marketplace.skill_sync import _extract_skill_fields
+
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# demo", encoding="utf-8")
+
+    entry = {
+        "source": "customized",
+        "metadata": {"skill_id": "explicit_locked_id"},
+    }
+
+    skill_id, _ = _extract_skill_fields(
+        skill_dir,
+        entry,
+        skill_name="demo",
+        user_id="alice",
+        source_id="default",
+        force=True,
+    )
+
+    # force=True 时走 extract_skill_id 派生，creator_id="" → "customized_demo"
+    assert skill_id == "customized_demo"
+
+
+def test_extract_skill_fields_consistent_across_users(tmp_path: Path):
+    """同一技能名不同 user_id 应派生相同 skill_id（creator_id 段被剥离）。"""
+    from market.marketplace.skill_sync import _extract_skill_fields
+
+    skill_dir = tmp_path / "skills" / "weather"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# weather", encoding="utf-8")
+
+    entry = {"source": "customized", "metadata": {}}
+
+    id_alice, _ = _extract_skill_fields(
+        skill_dir,
+        entry,
+        skill_name="weather",
+        user_id="alice",
+        source_id="default",
+        force=False,
+    )
+    id_bob, _ = _extract_skill_fields(
+        skill_dir,
+        entry,
+        skill_name="weather",
+        user_id="bob",
+        source_id="default",
+        force=False,
+    )
+
+    # 不同用户走 _extract_skill_fields 应得到相同 skill_id
+    assert id_alice == id_bob == "customized_weather"

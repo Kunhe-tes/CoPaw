@@ -298,25 +298,49 @@ def _extract_skill_fields(
     source_id: Optional[str],
     force: bool,
 ) -> tuple[str, str]:
-    """提取技能的 skill_id 和 cn_name."""
+    """提取技能的 skill_id 和 cn_name.
+
+    解析优先级：
+    1. manifest entry 的 metadata.skill_id（明确指定则直接使用；force=True
+       时仍走派生，方便 admin 重生成）
+    2. extract_skill_id 派生，但 creator_id 统一传 "" 以保证所有租户共享
+       同一份模板同步的技能得到相同 skill_id（不再带 customized_<user_id>
+       段）。extract_skill_id 本身的 creator_id 语义保留，由 skills_browse
+       的"我的技能"上传场景使用。
+
+    Args:
+        skill_dir: 技能目录
+        entry: manifest 中的 entry（含 source / metadata 等）
+        skill_name: 技能目录名
+        user_id: 当前处理的用户 ID（仅用于日志，**不参与 skill_id 派生**）
+        source_id: 租户 source_id
+        force: 是否强制重新生成（跳过 manifest metadata.skill_id fast path）
+    """
     from ..utils.skill_md import extract_skill_id, extract_cn_name_from_title
 
     metadata = entry.get("metadata", {})
     skill_source = entry.get("source", "customized")
 
-    skill_md_path = skill_dir / "SKILL.md"
-    md_content = ""
-    if skill_md_path.exists():
-        md_content = skill_md_path.read_text(encoding="utf-8")
-
-    if skill_source == "customized":
-        skill_id = extract_skill_id(
-            md_content,
-            skill_source,
-            skill_name,
-            creator_id=user_id,
+    # 优先：manifest entry 上的 metadata.skill_id（显式锚定，跨用户共享）
+    manifest_skill_id = metadata.get("skill_id", "")
+    if (
+        isinstance(manifest_skill_id, str)
+        and manifest_skill_id
+        and not force
+    ):
+        skill_id = manifest_skill_id
+        skill_md_path = skill_dir / "SKILL.md"
+        md_content = (
+            skill_md_path.read_text(encoding="utf-8")
+            if skill_md_path.exists()
+            else ""
         )
     else:
+        # 派生：creator_id 传 ""，保证同一技能名所有用户得到相同 id
+        skill_md_path = skill_dir / "SKILL.md"
+        md_content = ""
+        if skill_md_path.exists():
+            md_content = skill_md_path.read_text(encoding="utf-8")
         skill_id = extract_skill_id(
             md_content,
             skill_source,
