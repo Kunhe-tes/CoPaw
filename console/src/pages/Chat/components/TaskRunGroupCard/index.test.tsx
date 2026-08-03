@@ -11,6 +11,7 @@ type MockResponseData = {
     id?: string;
     type?: string;
     content?: Array<{
+      data?: unknown;
       file_url?: string;
       text?: string;
     }>;
@@ -170,6 +171,144 @@ function messageWithAutoPreviewTextResponse(
   };
 }
 
+function messageWithWrappedToolAutoPreviewResponse(
+  messageId: string,
+  responseId: string,
+): TaskRunMessage {
+  const fileName = "经营客户清单-2026-08-03auto-preview-1785740419902.html";
+  const previewUrl = `https://example.test/static/${fileName}`;
+  const wrappedOutput = `[${fileName}](${JSON.stringify({
+    type: "text",
+    text:
+      "**returnCode**: (类型: string)\\n" +
+      JSON.stringify({
+        returnCode: "SUC000",
+        body: {
+          output: {
+            previewUrl: `[${fileName}](${previewUrl})`,
+            todayNeedDealSize: 0,
+            overDealSize: 2,
+          },
+          sessionId: "2084172496587239664",
+        },
+      }),
+  })})`;
+
+  return {
+    id: messageId,
+    role: "assistant",
+    cards: [
+      {
+        code: "AgentScopeRuntimeResponseCard",
+        data: {
+          id: responseId,
+          status: "completed",
+          created_at: 0,
+          output: [
+            {
+              id: `${responseId}-tool-output`,
+              role: "tool",
+              type: "plugin_call_output",
+              status: "completed",
+              content: [
+                {
+                  type: "data",
+                  status: "completed",
+                  data: {
+                    call_id: "call-preview",
+                    name: "query_business_opportunity",
+                    arguments: {
+                      customerType: "fund-redemption",
+                    },
+                    output: wrappedOutput,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
+
+function messageWithToolFileAutoPreviewResponse(
+  messageId: string,
+  responseId: string,
+): TaskRunMessage {
+  return {
+    id: messageId,
+    role: "assistant",
+    cards: [
+      {
+        code: "AgentScopeRuntimeResponseCard",
+        data: {
+          id: responseId,
+          status: "completed",
+          created_at: 0,
+          output: [
+            {
+              id: `${responseId}-tool-output`,
+              role: "tool",
+              type: "plugin_call_output",
+              status: "completed",
+              content: [
+                {
+                  type: "file",
+                  status: "completed",
+                  file_url:
+                    "https://example.test/static/tool-report[auto-preview].html",
+                  file_name: "tool-report[auto-preview].html",
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
+
+function messageWithMisleadingAutoPreviewLabel(
+  messageId: string,
+  responseId: string,
+): TaskRunMessage {
+  const fileName = "not-a-link[auto-preview].html";
+  return {
+    id: messageId,
+    role: "assistant",
+    cards: [
+      {
+        code: "AgentScopeRuntimeResponseCard",
+        data: {
+          id: responseId,
+          status: "completed",
+          created_at: 0,
+          output: [
+            {
+              id: `${responseId}-tool-output`,
+              role: "tool",
+              type: "plugin_call_output",
+              status: "completed",
+              content: [
+                {
+                  type: "data",
+                  status: "completed",
+                  data: {
+                    call_id: "call-no-preview",
+                    name: "query_business_opportunity",
+                    output: `[${fileName}]({"type":"text","text":"schema only"})`,
+                  },
+                },
+              ],
+            },
+          ],
+        },
+      },
+    ],
+  };
+}
+
 function taskRunData(
   overrides: Partial<ChatTaskRunGroupCardData> = {},
 ): ChatTaskRunGroupCardData {
@@ -251,9 +390,7 @@ describe("TaskRunGroupCard", () => {
     expect(screen.getByTestId("task-run-steps")).toBeInTheDocument();
     expect(screen.getByTestId("response-step-response")).toBeInTheDocument();
     expect(screen.getAllByTestId("response-preview-response")).toHaveLength(1);
-    expect(getStepResponseIds()).toEqual([
-      "response-step-response",
-    ]);
+    expect(getStepResponseIds()).toEqual(["response-step-response"]);
     expect(screen.getByTestId("response-step-response")).toHaveAttribute(
       "data-show-feedback",
       "false",
@@ -292,16 +429,97 @@ describe("TaskRunGroupCard", () => {
     expect(screen.getAllByTestId("response-reasoning-response")).toHaveLength(
       2,
     );
-    expect(getStepResponseIds()).toEqual([
-      "response-reasoning-response",
-    ]);
-    expect(screen.getAllByTestId("response-reasoning-response")[1]).toHaveAttribute(
+    expect(getStepResponseIds()).toEqual(["response-reasoning-response"]);
+    expect(
+      screen.getAllByTestId("response-reasoning-response")[1],
+    ).toHaveAttribute(
       "data-output-ids",
       "reasoning-response-reasoning,final-response-message",
     );
-    expect(screen.getAllByTestId("response-reasoning-response")[1]).toHaveAttribute(
-      "data-output-types",
-      "reasoning,message",
+    expect(
+      screen.getAllByTestId("response-reasoning-response")[1],
+    ).toHaveAttribute("data-output-types", "reasoning,message");
+  });
+
+  it("isolates an auto-preview HTML URL from a wrapped tool output", () => {
+    render(
+      <TaskRunGroupCard
+        data={taskRunData({
+          finalMessages: [
+            messageWithResponse("final-message", "final-response"),
+          ],
+          stepMessages: [
+            messageWithWrappedToolAutoPreviewResponse(
+              "tool-message",
+              "tool-response",
+            ),
+          ],
+        })}
+      />,
     );
+
+    expect(screen.getByTestId("response-tool-response")).toHaveAttribute(
+      "data-output",
+      "[经营客户清单-2026-08-03auto-preview-1785740419902.html](https://example.test/static/经营客户清单-2026-08-03auto-preview-1785740419902.html)",
+    );
+    expect(screen.queryByTestId("response-final-response")).toBeNull();
+    expect(screen.queryByTestId("task-run-steps")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("task-run-toggle"));
+
+    expect(screen.getByTestId("task-run-steps")).toBeInTheDocument();
+    expect(screen.getAllByTestId("response-tool-response")).toHaveLength(2);
+    expect(screen.getAllByTestId("response-tool-response")[1]).toHaveAttribute(
+      "data-output-types",
+      "plugin_call_output,message",
+    );
+  });
+
+  it("converts a tool file preview into a plain assistant result", () => {
+    render(
+      <TaskRunGroupCard
+        data={taskRunData({
+          stepMessages: [
+            messageWithToolFileAutoPreviewResponse(
+              "tool-file-message",
+              "tool-file-response",
+            ),
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("response-tool-file-response")).toHaveAttribute(
+      "data-output",
+      "https://example.test/static/tool-report[auto-preview].html",
+    );
+    expect(screen.getByTestId("response-tool-file-response")).toHaveAttribute(
+      "data-output-types",
+      "message",
+    );
+  });
+
+  it("does not promote an auto-preview label without a valid URL", () => {
+    render(
+      <TaskRunGroupCard
+        data={taskRunData({
+          stepMessages: [
+            messageWithMisleadingAutoPreviewLabel(
+              "misleading-message",
+              "misleading-response",
+            ),
+          ],
+        })}
+      />,
+    );
+
+    expect(screen.getByTestId("response-final-response")).toBeInTheDocument();
+    expect(screen.queryByTestId("response-misleading-response")).toBeNull();
+
+    fireEvent.click(screen.getByTestId("task-run-toggle"));
+
+    expect(
+      screen.getByTestId("response-misleading-response"),
+    ).toBeInTheDocument();
   });
 });
