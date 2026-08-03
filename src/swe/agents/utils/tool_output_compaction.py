@@ -21,6 +21,7 @@ _CANONICAL_NOTICE_RE = re.compile(
     r"(?P<compact_retained_bytes>\d+)); "
     r"read_file (?P<reference>[^\s]+)\n\Z",
 )
+_ARTIFACT_FILENAME_RE = re.compile(r"[0-9a-f]{32}\.txt\Z")
 _MEDIA_BLOCK_TYPES = frozenset({"audio", "file", "image", "video"})
 
 
@@ -100,13 +101,13 @@ def compact_tool_result_messages(
     if recent_n < 1:
         raise ValueError("recent_n must be positive")
 
-    recent_start = _recent_tool_result_start(messages, recent_n)
+    recent_indexes = _recent_tool_result_indexes(messages, recent_n)
     for index, message in enumerate(messages):
         tool_result_blocks = _tool_result_blocks(message)
         if not tool_result_blocks:
             continue
         max_bytes = (
-            recent_max_bytes if index >= recent_start else old_max_bytes
+            recent_max_bytes if index in recent_indexes else old_max_bytes
         )
         for block in tool_result_blocks:
             for key in ("content", "output"):
@@ -212,16 +213,23 @@ def _compacted_display(
     )
 
 
-def _recent_tool_result_start(messages: list[Msg], recent_n: int) -> int:
-    """Return the start index of the trailing tool-result message window."""
-    recent_count = 0
+def _recent_tool_result_indexes(
+    messages: list[Msg],
+    recent_n: int,
+) -> set[int]:
+    """Select at least the N newest tool results and the trailing run."""
+    recent_indexes: set[int] = set()
+    for index in range(len(messages) - 1, -1, -1):
+        if _tool_result_blocks(messages[index]):
+            recent_indexes.add(index)
+            if len(recent_indexes) == recent_n:
+                break
+
     for index in range(len(messages) - 1, -1, -1):
         if not _tool_result_blocks(messages[index]):
             break
-        recent_count += 1
-        if recent_count == recent_n:
-            return index
-    return len(messages) - recent_count
+        recent_indexes.add(index)
+    return recent_indexes
 
 
 def _tool_result_blocks(message: Msg) -> list[dict[str, Any]]:
@@ -331,7 +339,13 @@ def _existing_artifact(
     candidate = workspace_dir / reference
     try:
         artifact_path = candidate.resolve(strict=True)
-        artifact_path.relative_to(workspace_dir.resolve())
+        artifact_dir = (workspace_dir / "tool_result").resolve()
+        if (
+            artifact_path.parent != artifact_dir
+            or not _ARTIFACT_FILENAME_RE.fullmatch(artifact_path.name)
+            or reference != f"tool_result/{artifact_path.name}"
+        ):
+            return None
         if not artifact_path.is_file():
             return None
         return artifact_path, artifact_path.read_bytes()
