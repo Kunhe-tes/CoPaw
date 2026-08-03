@@ -46,6 +46,8 @@ export interface BubbleListProps extends React.HTMLAttributes<HTMLDivElement> {
   pagination?: boolean;
   order?: "asc" | "desc";
   onReachStart?: () => void;
+  onBottomStateChange?: (isAtBottom: boolean) => void;
+  autoScrollToBottom?: boolean | "initial";
   preserveScrollPosition?: boolean;
   topContent?: React.ReactNode;
 }
@@ -126,11 +128,13 @@ const BubbleList: React.ForwardRefRenderFunction<
   BubbleListRef,
   BubbleListProps
 > = (props, ref) => {
-  const { items = [], order = "asc", onReachStart } = props;
+  const { items = [], order = "asc", onReachStart, onBottomStateChange } =
+    props;
 
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
   const isAtBottomRef = React.useRef(true);
+  const hasInitialAutoScrollRef = React.useRef(false);
   const { getPrefixCls } = useProviderContext();
   const prefixCls = getPrefixCls("bubble-list");
   const isDesc = order === "desc";
@@ -174,9 +178,10 @@ const BubbleList: React.ForwardRefRenderFunction<
         scrollEl.scrollTo({ top: scrollEl.scrollHeight, behavior });
       }
       isAtBottomRef.current = true;
+      onBottomStateChange?.(true);
       setShowScrollToBottom(false);
     },
-    [isDesc],
+    [isDesc, onBottomStateChange],
   );
 
   const handleScroll = useCallback(() => {
@@ -189,8 +194,15 @@ const BubbleList: React.ForwardRefRenderFunction<
     }
     const isAtBottom = checkIsAtBottom();
     isAtBottomRef.current = isAtBottom;
+    onBottomStateChange?.(isAtBottom);
     setShowScrollToBottom(checkShowScrollToBottom());
-  }, [checkIsAtBottom, checkShowScrollToBottom, isDesc, onReachStart]);
+  }, [
+    checkIsAtBottom,
+    checkShowScrollToBottom,
+    isDesc,
+    onBottomStateChange,
+    onReachStart,
+  ]);
 
   React.useImperativeHandle(
     ref,
@@ -213,10 +225,21 @@ const BubbleList: React.ForwardRefRenderFunction<
   });
 
   useEffect(() => {
-    if (!props.preserveScrollPosition) {
+    const initialOnly = props.autoScrollToBottom === "initial";
+    if (
+      !props.preserveScrollPosition &&
+      props.autoScrollToBottom !== false &&
+      (!initialOnly || !hasInitialAutoScrollRef.current)
+    ) {
       scrollToBottom("auto");
+      if (initialOnly) hasInitialAutoScrollRef.current = true;
     }
-  }, [items.length, props.preserveScrollPosition, scrollToBottom]);
+  }, [
+    items.length,
+    props.autoScrollToBottom,
+    props.preserveScrollPosition,
+    scrollToBottom,
+  ]);
 
   useEffect(() => {
     const scrollEl = scrollRef.current;
@@ -256,7 +279,7 @@ const BubbleList: React.ForwardRefRenderFunction<
           {order === "desc" && (
             <div className={`${prefixCls}-order-desc-short`}></div>
           )}
-          {props.topContent}
+          {order === "asc" && props.topContent}
           <BubbleListContent
             order={order}
             paginationItems={paginationItems}
@@ -266,6 +289,7 @@ const BubbleList: React.ForwardRefRenderFunction<
           >
             {props.children}
           </BubbleListContent>
+          {order === "desc" && props.topContent}
         </div>
         <ScrollToBottom
           visible={showScrollToBottom}

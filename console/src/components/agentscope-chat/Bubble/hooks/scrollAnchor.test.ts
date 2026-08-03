@@ -1,28 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { getScrollTopAfterPrepend } from "./scrollAnchor";
+import { getScrollTopAfterAnchorOffset } from "./scrollAnchor";
 
 describe("getScrollTopAfterPrepend", () => {
-  it("adds the inserted height for a top-origin list", () => {
+  it("keeps reverse-list scroll coordinates unchanged when the visible anchor stays put", () => {
     expect(
-      getScrollTopAfterPrepend({
-        clientHeight: 400,
-        newScrollHeight: 1200,
-        oldScrollHeight: 1000,
+      getScrollTopAfterAnchorOffset({
         oldScrollTop: 180,
-        order: "asc",
+        previousOffset: 96,
+        nextOffset: 96,
       }),
-    ).toBe(380);
+    ).toBe(180);
   });
 
-  it("preserves the native reverse scroll coordinate", () => {
+  it("restores the visible bubble when layout shifts it downward", () => {
     expect(
-      getScrollTopAfterPrepend({
-        clientHeight: 400,
-        newScrollHeight: 1200,
-        oldScrollHeight: 1000,
+      getScrollTopAfterAnchorOffset({
         oldScrollTop: -600,
-        order: "desc",
+        previousOffset: 96,
+        nextOffset: 136,
       }),
-    ).toBe(-600);
+    ).toBe(-560);
   });
 });

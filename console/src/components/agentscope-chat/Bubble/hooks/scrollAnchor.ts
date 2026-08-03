@@ -1,23 +1,11 @@
-export function getScrollTopAfterPrepend({
-  clientHeight,
-  newScrollHeight,
-  oldScrollHeight,
+export function getScrollTopAfterAnchorOffset({
   oldScrollTop,
-  order,
+  previousOffset,
+  nextOffset,
 }: {
-  clientHeight: number;
-  newScrollHeight: number;
-  oldScrollHeight: number;
   oldScrollTop: number;
-  order: "asc" | "desc";
+  previousOffset: number;
+  nextOffset: number;
 }): number {
-  const oldLogicalTop =
-    order === "desc"
-      ? oldScrollTop + oldScrollHeight - clientHeight
-      : oldScrollTop;
-  const newLogicalTop = oldLogicalTop + (newScrollHeight - oldScrollHeight);
-
-  return order === "desc"
-    ? newLogicalTop - newScrollHeight + clientHeight
-    : newLogicalTop;
+  return oldScrollTop + nextOffset - previousOffset;
 }
