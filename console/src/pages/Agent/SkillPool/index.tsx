@@ -30,7 +30,11 @@ import type {
   PoolSkillSpec,
 } from "../../../api/types";
 import { parseErrorDetail } from "../../../utils/error";
-import { handleScanError, checkScanWarnings } from "../../../utils/scanError";
+import {
+  captureScanWarningCursor,
+  handleScanError,
+  checkScanWarnings,
+} from "../../../utils/scanError";
 import {
   getSkillDisplaySource,
   getPoolBuiltinStatusLabel,
@@ -242,6 +246,9 @@ function SkillPoolPage() {
     targetTenantIds: string[],
   ) => {
     try {
+      const warningCursor = await captureScanWarningCursor(
+        api.getScanWarningCursor,
+      );
       const result = await api.broadcastPoolSkillsToDefaultAgents({
         skill_names: broadcastSkillNames,
         target_tenant_ids: targetTenantIds,
@@ -303,7 +310,8 @@ function SkillPoolPage() {
       for (const skillName of broadcastSkillNames) {
         await checkScanWarnings(
           skillName,
-          api.getBlockedHistory,
+          warningCursor,
+          api.getLatestScanWarning,
           api.getSkillScanner,
           t,
         );
@@ -411,6 +419,9 @@ function SkillPoolPage() {
     if (!skillName || !skillContent.trim()) return;
 
     try {
+      const warningCursor = await captureScanWarningCursor(
+        api.getScanWarningCursor,
+      );
       const result =
         mode === "edit"
           ? await api.saveSkillPoolSkill({
@@ -448,7 +459,8 @@ function SkillPoolPage() {
       await loadData(true);
       await checkScanWarnings(
         result.name || skillName,
-        api.getBlockedHistory,
+        warningCursor,
+        api.getLatestScanWarning,
         api.getSkillScanner,
         t,
       );
@@ -521,6 +533,9 @@ function SkillPoolPage() {
     let overwrite = false;
     while (true) {
       try {
+        const warningCursor = await captureScanWarningCursor(
+          api.getScanWarningCursor,
+        );
         const result = await api.uploadSkillPoolZip(file, {
           overwrite,
           rename_map: renameMap,
@@ -555,7 +570,8 @@ function SkillPoolPage() {
           for (const name of result.imported) {
             await checkScanWarnings(
               name,
-              api.getBlockedHistory,
+              warningCursor,
+              api.getLatestScanWarning,
               api.getSkillScanner,
               t,
             );
@@ -577,6 +593,9 @@ function SkillPoolPage() {
   const handleConfirmImport = async (url: string, targetName?: string) => {
     try {
       setImporting(true);
+      const warningCursor = await captureScanWarningCursor(
+        api.getScanWarningCursor,
+      );
       const result = await api.importPoolSkillFromHub({
         bundle_url: url,
         overwrite: false,
@@ -588,7 +607,8 @@ function SkillPoolPage() {
       await loadData(true);
       await checkScanWarnings(
         result.name,
-        api.getBlockedHistory,
+        warningCursor,
+        api.getLatestScanWarning,
         api.getSkillScanner,
         t,
       );
