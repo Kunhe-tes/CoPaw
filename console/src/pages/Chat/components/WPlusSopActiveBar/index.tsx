@@ -118,7 +118,7 @@ export default function WPlusSopActiveBar({
       chat_id: chatId || "",
       session_id: logicalSessionId || chatId || "",
       title: "进入 W+ SOP 工作台",
-      message: "CoPaw 将替你完成逐环节澄清、系统预跑和反馈重跑。",
+      message: "工作台将完成逐环节澄清、系统预跑和反馈重跑。",
     };
     return (
       <aside className={styles.entryOverlay} aria-label="待确认的 W+ SOP 入口">

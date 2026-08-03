@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from swe.app.wplus_sop.models import StageProposalPayload
+from swe.app.wplus_sop.models import QuestionBatchPayload, StageProposalPayload
 from swe.app.wplus_sop.runtime import (
     WPlusChatRunBusyError,
     WPlusSafeStreamTraceRegistry,
@@ -56,18 +56,14 @@ def _sse(payload):
     return f"data: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
-def test_safe_stream_trace_summarizes_frames_without_storing_text_bodies():
+def test_safe_stream_trace_collects_only_ordinary_assistant_text():
     registry = WPlusSafeStreamTraceRegistry(max_chars=1_000, max_lines=20)
     registry.start_run("sop-1", "run-1")
 
     frames = [
         {
-            "object": "response",
-            "status": "in_progress",
-        },
-        {
             "object": "message",
-            "id": "msg-safe",
+            "id": "msg-answer",
             "type": "message",
             "role": "assistant",
             "status": "in_progress",
@@ -75,151 +71,229 @@ def test_safe_stream_trace_summarizes_frames_without_storing_text_bodies():
         },
         {
             "object": "content",
-            "msg_id": "msg-safe",
+            "msg_id": "msg-answer",
             "type": "text",
             "delta": True,
             "status": "in_progress",
-            "text": "account=6222020202020202 password=hunter2",
+            "text": "普通",
         },
         {
-            "object": "tool_output_frame",
-            "source": "stdout",
-            "text": "balance=999999 token=sk-secret",
+            "object": "content",
+            "msg_id": "msg-answer",
+            "type": "text",
+            "delta": True,
+            "status": "in_progress",
+            "text": "回复",
         },
-    ]
-
-    for frame in frames:
-        registry.ingest("sop-1", "run-1", _sse(frame))
-
-    snapshot = registry.snapshot("sop-1", "run-1")
-    assert snapshot is not None
-    assert snapshot.summary_text.splitlines() == [
-        "response status=in_progress",
-        (
-            "message role=assistant type=message status=in_progress "
-            "content_types=none content_chars=0 hidden=true"
-        ),
-        "content type=text status=in_progress chars=41 hidden=true",
-        "tool_output_frame source=stdout chars=30 hidden=true",
-    ]
-    for sentinel in (
-        "6222020202020202",
-        "hunter2",
-        "999999",
-        "sk-secret",
-    ):
-        assert sentinel not in snapshot.summary_text
-    assert snapshot.truncated is False
-
-
-def test_safe_stream_trace_maps_untrusted_labels_to_fixed_whitelists():
-    registry = WPlusSafeStreamTraceRegistry(max_chars=1_000, max_lines=20)
-    registry.start_run("sop-1", "run-1")
-
-    frames = [
         {
             "object": "message",
             "id": "msg-reasoning",
             "type": "reasoning",
             "role": "assistant",
-            "status": "canceled",
-            "content": None,
+            "content": [{"type": "text", "text": "THOUGHT_SENTINEL"}],
+        },
+        {
+            "object": "content",
+            "msg_id": "msg-reasoning",
+            "type": "text",
+            "delta": True,
+            "text": "REASONING_SENTINEL",
         },
         {
             "object": "message",
             "id": "msg-tool",
             "type": "function_call",
             "role": "assistant",
-            "status": "failed",
-            "content": None,
-        },
-        {
-            "object": "message",
-            "id": "msg-mcp",
-            "type": "mcp_call",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "data", "data": {"secret": "MCP_SENTINEL"}}],
+            "content": [{"type": "text", "text": "FUNCTION_SENTINEL"}],
         },
         {
             "object": "tool_output_frame",
-            "source": "tenant/acme?credential=SOURCE_SENTINEL",
+            "source": "stdout",
             "text": "TOOL_SENTINEL",
         },
         {
-            "object": "message",
-            "id": "msg-unknown",
-            "type": "PII_TYPE_SENTINEL",
-            "role": "ROLE_SENTINEL",
-            "status": "STATUS_SENTINEL",
-            "content": [{"type": "PII_CONTENT_SENTINEL", "text": "BODY_SENTINEL"}],
+            "object": "content",
+            "msg_id": "unknown-message",
+            "type": "text",
+            "delta": True,
+            "text": "UNKNOWN_SENTINEL",
         },
-        {"object": "OBJECT_SENTINEL", "payload": "UNKNOWN_SENTINEL"},
+        {
+            "object": "content",
+            "msg_id": "msg-answer",
+            "type": "data",
+            "delta": True,
+            "data": {"secret": "DATA_SENTINEL"},
+        },
     ]
 
     for frame in frames:
         registry.ingest("sop-1", "run-1", _sse(frame))
-    registry.ingest("sop-1", "run-1", "data: not-json\n\n")
 
     snapshot = registry.snapshot("sop-1", "run-1")
     assert snapshot is not None
-    assert snapshot.summary_text.splitlines() == [
-        (
-            "message role=assistant type=reasoning status=canceled "
-            "content_types=none content_chars=0 hidden=true"
-        ),
-        (
-            "message role=assistant type=function_call status=failed "
-            "content_types=none content_chars=0 hidden=true"
-        ),
-        (
-            "message role=assistant type=mcp_call status=completed "
-            "content_types=data content_chars=0 hidden=true"
-        ),
-        "tool_output_frame source=unknown chars=13 hidden=true",
-        (
-            "message role=unknown type=unknown status=unknown "
-            "content_types=unknown content_chars=13 hidden=true"
-        ),
-        "frame object=unknown hidden=true",
-        "frame object=unknown hidden=true",
-    ]
+    assert snapshot.summary_text == "普通回复"
     for sentinel in (
-        "SENTINEL",
-        "private reasoning",
-        "tool arguments",
-        "raw customer data",
+        "THOUGHT_SENTINEL",
+        "REASONING_SENTINEL",
+        "FUNCTION_SENTINEL",
+        "TOOL_SENTINEL",
+        "UNKNOWN_SENTINEL",
+        "DATA_SENTINEL",
     ):
         assert sentinel not in snapshot.summary_text
+    assert snapshot.truncated is False
 
 
-def test_safe_stream_trace_has_fixed_capacity_and_evicts_old_runs():
-    registry = WPlusSafeStreamTraceRegistry(
-        max_chars=130,
-        max_lines=2,
-        max_active_runs=2,
-    )
+def test_safe_stream_trace_final_content_replaces_incremental_body():
+    registry = WPlusSafeStreamTraceRegistry(max_chars=1_000, max_lines=20)
     registry.start_run("sop-1", "run-1")
-    for index in range(4):
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "message",
+                "id": "msg-answer",
+                "type": "message",
+                "role": "assistant",
+                "content": None,
+            },
+        ),
+    )
+    for text in ("草稿", "内容"):
         registry.ingest(
             "sop-1",
             "run-1",
             _sse(
                 {
                     "object": "content",
+                    "msg_id": "msg-answer",
                     "type": "text",
-                    "status": "in_progress",
-                    "text": f"BODY_SENTINEL_{index}" * 100,
+                    "delta": True,
+                    "text": text,
                 },
             ),
         )
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "content",
+                "msg_id": "msg-answer",
+                "type": "text",
+                "delta": False,
+                "status": "completed",
+                "text": "最终正文",
+            },
+        ),
+    )
+
+    snapshot = registry.snapshot("sop-1", "run-1")
+    assert snapshot is not None
+    assert snapshot.summary_text == "最终正文"
+    assert snapshot.sequence == 3
+
+
+def test_safe_stream_trace_completed_message_uses_nested_text_content():
+    registry = WPlusSafeStreamTraceRegistry(max_chars=1_000, max_lines=20)
+    registry.start_run("sop-1", "run-1")
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "message",
+                "id": "msg-answer",
+                "type": "message",
+                "role": "assistant",
+                "status": "in_progress",
+                "content": None,
+            },
+        ),
+    )
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "content",
+                "msg_id": "msg-answer",
+                "type": "text",
+                "delta": True,
+                "text": "旧草稿",
+            },
+        ),
+    )
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "message",
+                "id": "msg-answer",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "object": "content",
+                        "type": "text",
+                        "delta": False,
+                        "text": "嵌套最终正文",
+                    },
+                    {"type": "data", "data": "NESTED_DATA_SENTINEL"},
+                ],
+            },
+        ),
+    )
+
+    snapshot = registry.snapshot("sop-1", "run-1")
+    assert snapshot is not None
+    assert snapshot.summary_text == "嵌套最终正文"
+    assert "NESTED_DATA_SENTINEL" not in snapshot.summary_text
+
+
+def test_safe_stream_trace_has_fixed_capacity_and_evicts_old_runs():
+    registry = WPlusSafeStreamTraceRegistry(
+        max_chars=18,
+        max_lines=2,
+        max_active_runs=2,
+    )
+    registry.start_run("sop-1", "run-1")
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "message",
+                "id": "msg-answer",
+                "type": "message",
+                "role": "assistant",
+                "content": None,
+            },
+        ),
+    )
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "content",
+                "msg_id": "msg-answer",
+                "type": "text",
+                "delta": True,
+                "text": "第一行很长\n第二行保留\n第三行保留",
+            },
+        ),
+    )
 
     first = registry.snapshot("sop-1", "run-1")
     assert first is not None
-    assert len(first.summary_text) <= 130
+    assert len(first.summary_text) <= 18
     assert len(first.summary_text.splitlines()) <= 2
-    assert all(len(line) <= 160 for line in first.summary_text.splitlines())
-    assert "BODY_SENTINEL" not in first.summary_text
+    assert first.summary_text.endswith("第三行保留")
     assert first.truncated is True
 
     registry.start_run("sop-2", "run-2")
@@ -237,7 +311,7 @@ def test_safe_stream_trace_has_fixed_capacity_and_evicts_old_runs():
     assert registry.snapshot("sop-2", "run-4") is None
 
 
-def test_safe_stream_trace_sequence_increases_for_each_safe_summary():
+def test_safe_stream_trace_sequence_only_increases_for_collected_text():
     registry = WPlusSafeStreamTraceRegistry(max_chars=1_000, max_lines=20)
     registry.start_run("sop-1", "run-1")
     registry.ingest(
@@ -254,6 +328,20 @@ def test_safe_stream_trace_sequence_increases_for_each_safe_summary():
             },
         ),
     )
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "content",
+                "msg_id": "msg-1",
+                "type": "text",
+                "delta": True,
+                "status": "in_progress",
+                "text": "第一段",
+            },
+        ),
+    )
     first = registry.snapshot("sop-1", "run-1")
     assert first is not None
     assert first.sequence == 1
@@ -261,19 +349,12 @@ def test_safe_stream_trace_sequence_increases_for_each_safe_summary():
     registry.ingest(
         "sop-1",
         "run-1",
-        _sse(
-            {
-                "object": "content",
-                "type": "text",
-                "status": "completed",
-                "text": "BODY_SENTINEL",
-            },
-        ),
+        _sse({"object": "tool_output_frame", "text": "TOOL_SENTINEL"}),
     )
     second = registry.snapshot("sop-1", "run-1")
     assert second is not None
-    assert second.sequence == 2
-    assert "BODY_SENTINEL" not in second.summary_text
+    assert second.sequence == 1
+    assert second.summary_text == "第一段"
 
 
 def test_command_text_contains_machine_readable_command():
@@ -289,6 +370,7 @@ def test_command_text_contains_machine_readable_command():
     assert body["command"] == "confirm_stage_queue"
     assert body["payload"]["stages"][0]["stage_id"] == "stage-1"
     assert "emit_wplus_sop_event" in text
+    assert "CoPaw" not in text
 
 
 def test_stage_proposal_command_requires_one_schema_valid_event():
@@ -300,7 +382,8 @@ def test_stage_proposal_command_requires_one_schema_valid_event():
         payload={"original_request": "梳理客户筛选流程"},
     )
 
-    assert "只调用一次 emit_wplus_sop_event" in text
+    assert "只允许成功持久化一个业务边界事件" in text
+    assert "工具返回 ok=false" in text
     assert "kind='stage_proposal'" in text
     assert "不得把命令输入中的 payload 原样提交" in text
     assert "不得只输出 Markdown" in text
@@ -333,9 +416,149 @@ def test_retrying_stage_proposal_keeps_the_exact_event_contract():
         },
     )
 
-    assert "只调用一次 emit_wplus_sop_event" in text
+    assert "只允许成功持久化一个业务边界事件" in text
+    assert "工具返回 ok=false" in text
     assert "kind='stage_proposal'" in text
     assert "stage_proposal payload 示例：" in text
+
+
+@pytest.mark.parametrize(
+    "target_state",
+    ["GeneratingTrial", "ExecutingTrial"],
+)
+def test_trial_command_requires_same_background_turn_to_emit_terminal_event(
+    target_state,
+):
+    text = build_wplus_command_text(
+        command="submit_answers",
+        sop_session_id="sop-1",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        payload={"current_stage_id": "stage-1"},
+        target_state=target_state,
+    )
+
+    assert "同一个后台 Agent 回合" in text
+    assert "不得在提交 trial_plan 后停止或等待另一个后台任务" in text
+    assert "trial_execution_started" in text
+    assert "直接执行 references 中已确认的 opencli 命令" in text
+    assert "不得调用其他业务工具" in text
+    assert "trial_execution_completed" in text
+    assert "trial_execution_failed" in text
+    assert "run_id 必须严格等于命令中的 run_id=\"run-1\"" in text
+    assert "attempt_id 必须严格等于命令中的 attempt_id=\"attempt-1\"" in text
+
+
+@pytest.mark.parametrize(
+    ("command", "payload"),
+    [
+        (
+            "confirm_stage_queue",
+            {
+                "stages": [{"stage_id": "stage-1", "name": "确认范围"}],
+                "current_stage_id": "stage-1",
+            },
+        ),
+        (
+            "confirm_stage",
+            {
+                "stage_id": "stage-1",
+                "next_stage_id": "stage-2",
+                "current_stage_id": "stage-2",
+            },
+        ),
+        ("resume", {"current_stage_id": "stage-1"}),
+        (
+            "retry_current_turn",
+            {
+                "target_state": "GeneratingQuestions",
+                "retry_of_run_id": "run-1",
+                "current_stage_id": "stage-1",
+            },
+        ),
+    ],
+)
+def test_generating_questions_requires_one_schema_valid_question_batch(
+    command: str,
+    payload: dict,
+) -> None:
+    text = build_wplus_command_text(
+        command=command,
+        sop_session_id="sop-1",
+        run_id="run-2",
+        attempt_id="attempt-2",
+        payload=payload,
+        target_state="GeneratingQuestions",
+    )
+
+    assert "kind='question_batch'" in text
+    assert "不得提交 kind='stage_queue_confirmed'" in text
+    assert "不得把命令输入中的 payload 原样提交" in text
+    assert "只允许成功持久化一个业务边界事件" in text
+    assert "工具返回 ok=false" in text
+    assert (
+        "question_batch.stage_id 必须严格等于命令 payload.current_stage_id="
+        in text
+    )
+    assert json.dumps(payload["current_stage_id"], ensure_ascii=False) in text
+    example_marker = "question_batch payload 示例：\n"
+    example = json.loads(
+        text.split(example_marker, maxsplit=1)[1].splitlines()[0],
+    )
+    validated = QuestionBatchPayload.model_validate(example)
+
+    assert validated.stage_id == payload["current_stage_id"]
+    assert 1 <= len(validated.questions) <= 3
+    assert all(question.question_id for question in validated.questions)
+
+
+@pytest.mark.asyncio
+async def test_start_turn_forwards_target_state_into_agent_instruction():
+    channel = SimpleNamespace(stream_one=object())
+    tracker = FakeTracker()
+    workspace = SimpleNamespace(
+        channel_manager=FakeChannelManager(channel),
+        task_tracker=tracker,
+    )
+
+    await start_wplus_chat_turn(
+        workspace=workspace,
+        chat=SimpleNamespace(id="chat-1", session_id="logical-1"),
+        user_id="user-1",
+        source_id="console",
+        sop_session_id="sop-1",
+        command="confirm_stage_queue",
+        payload={"stages": [], "current_stage_id": "stage-1"},
+        run_id="run-1",
+        attempt_id="attempt-1",
+        target_state="GeneratingQuestions",
+    )
+
+    native_payload = tracker.call[1]
+    instruction = native_payload["content_parts"][0].text
+    assert '"target_state": "GeneratingQuestions"' in instruction
+    assert '"expected_event_kind": "question_batch"' in instruction
+    assert native_payload["meta"]["wplus_sop_target_state"] == (
+        "GeneratingQuestions"
+    )
+
+
+def test_retry_target_state_falls_back_to_payload_question_contract():
+    text = build_wplus_command_text(
+        command="retry_current_turn",
+        sop_session_id="sop-1",
+        run_id="run-2",
+        attempt_id="attempt-2",
+        payload={
+            "target_state": "GeneratingQuestions",
+            "retry_of_run_id": "run-1",
+            "current_stage_id": "stage-2",
+        },
+    )
+
+    assert "kind='question_batch'" in text
+    assert "payload.current_stage_id=\"stage-2\"" in text
+    assert "工具返回 ok=false" in text
 
 
 @pytest.mark.asyncio
@@ -438,10 +661,7 @@ async def test_running_turn_feeds_process_local_safe_trace_and_cleans_up():
         "run-1",
     )
     assert snapshot is not None
-    assert "content type=text status=in_progress chars=16 hidden=true" in (
-        snapshot.summary_text
-    )
-    assert "ACCOUNT_SENTINEL" not in snapshot.summary_text
+    assert snapshot.summary_text == "ACCOUNT_SENTINEL"
 
     release_stream.set()
     await asyncio.wait_for(completed.wait(), timeout=1)
@@ -474,6 +694,7 @@ async def test_failed_stream_calls_on_complete_then_cleans_up():
         registry = get_wplus_safe_stream_trace_registry(workspace)
         snapshot = registry.snapshot("sop-1", "run-1")
         assert snapshot is not None
+        assert snapshot.summary_text == ""
         assert "TOOL_SECRET" not in snapshot.summary_text
         completed.set()
 

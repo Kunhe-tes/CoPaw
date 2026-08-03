@@ -34,7 +34,7 @@ const proposal: WPlusSopEntryProposal = {
   chat_id: "chat-1",
   session_id: "logical-1",
   title: "进入 W+ SOP 工作台",
-  message: "CoPaw 将替你完成预跑。",
+  message: "工作台将完成预跑。",
 };
 
 function renderCard() {
@@ -85,9 +85,11 @@ describe("WPlusSopEntryCard", () => {
     );
   });
 
-  it("reuses the confirm request id after an uncertain failure", async () => {
+  it("automatically retries an uncertain confirm with the same request id", async () => {
     apiMock.confirmEntry
-      .mockRejectedValueOnce(new TypeError("network interrupted"))
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Session is recoverable"), { status: 503 }),
+      )
       .mockResolvedValueOnce({
         accepted: true,
         session: { session_id: "sop-1" },
@@ -95,17 +97,11 @@ describe("WPlusSopEntryCard", () => {
     renderCard();
 
     fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
-    expect(await screen.findByText(/工作台没有成功创建/)).toBeInTheDocument();
-    await waitFor(() =>
-      expect(
-        screen.getByRole("button", { name: /进入工作台/ }),
-      ).not.toBeDisabled(),
-    );
-    fireEvent.click(screen.getByRole("button", { name: /进入工作台/ }));
 
     expect(
       await screen.findByRole("heading", { name: "W+ 工作台已打开" }),
     ).toBeInTheDocument();
+    expect(screen.queryByText(/工作台没有成功创建/)).not.toBeInTheDocument();
     expect(apiMock.confirmEntry).toHaveBeenNthCalledWith(
       1,
       "proposal-1",
@@ -117,6 +113,18 @@ describe("WPlusSopEntryCard", () => {
       "cmd-confirm",
     );
     expect(createRequestIdMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not retry a deterministic confirm failure", async () => {
+    apiMock.confirmEntry.mockRejectedValue(
+      Object.assign(new Error("proposal not found"), { status: 404 }),
+    );
+    renderCard();
+
+    fireEvent.click(screen.getByRole("button", { name: "进入工作台" }));
+
+    expect(await screen.findByText(/工作台没有成功创建/)).toBeInTheDocument();
+    expect(apiMock.confirmEntry).toHaveBeenCalledTimes(1);
   });
 
   it("rejects and emits a one-time suppressed replay request", async () => {

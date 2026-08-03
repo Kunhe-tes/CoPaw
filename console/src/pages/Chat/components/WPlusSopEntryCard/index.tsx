@@ -9,6 +9,14 @@ import { createCommandRequestId } from "@/pages/WPlusSopWorkspace/sessionView";
 import { WPLUS_SOP_REPLAY_EVENT } from "../../wplusSopEntryEvents";
 import styles from "./index.module.less";
 
+function isUncertainConfirmFailure(error: unknown): boolean {
+  if (!error || typeof error !== "object" || !("status" in error)) {
+    return true;
+  }
+  const status = (error as { status?: unknown }).status;
+  return typeof status !== "number" || status >= 500;
+}
+
 export default function WPlusSopEntryCard({
   data,
 }: {
@@ -36,10 +44,15 @@ export default function WPlusSopEntryCard({
     setBusyAction("confirm");
     setError(null);
     try {
-      const receipt = await wplusSopApi.confirmEntry(
-        data.proposal_id,
-        requestIdFor("confirm"),
-      );
+      const requestId = requestIdFor("confirm");
+      const receipt = await wplusSopApi
+        .confirmEntry(data.proposal_id, requestId)
+        .catch((error) => {
+          if (!isUncertainConfirmFailure(error)) {
+            throw error;
+          }
+          return wplusSopApi.confirmEntry(data.proposal_id, requestId);
+        });
       navigate(`/wplus-sop/${receipt.session.session_id}?from=chat`);
     } catch {
       setError("工作台没有成功创建，请稍后重试。");

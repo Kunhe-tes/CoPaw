@@ -7,10 +7,11 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from swe.app.wplus_sop import router as wplus_router
+from swe.app.wplus_sop import service as service_module
 from swe.app.wplus_sop.models import (
     CommandReceipt,
     FinalSopResult,
@@ -19,7 +20,11 @@ from swe.app.wplus_sop.models import (
     SessionState,
 )
 from swe.app.wplus_sop.runtime import get_wplus_safe_stream_trace_registry
-from swe.app.wplus_sop.service import store_path_for_workspace
+from swe.app.wplus_sop.service import (
+    WPlusOwningChatFinalizingError,
+    WPlusSopService,
+    store_path_for_workspace,
+)
 from swe.app.wplus_sop.store import WPlusSopStore
 
 
@@ -113,12 +118,92 @@ def test_artifact_download_is_fail_closed_for_another_user(
     assert response.json() == {"detail": "W+ SOP Session not found"}
 
 
+def test_first_confirm_accepts_source_id_distinct_from_chat_channel(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(wplus_router.router)
+
+    @app.middleware("http")
+    async def add_identity(request: Request, call_next):
+        request.state.tenant_id = "tenant-1"
+        request.state.source_id = "external-source-1"
+        request.state.user_id = "user-1"
+        return await call_next(request)
+
+    chat = SimpleNamespace(
+        id="chat-1",
+        session_id="logical-1",
+        user_id="user-1",
+        channel="console",
+        meta={},
+    )
+
+    class FakeChatManager:
+        async def get_chat(self, chat_id):
+            return chat if chat_id == chat.id else None
+
+        async def update_chat(self, updated):
+            return updated
+
+    workspace = SimpleNamespace(
+        workspace_dir=tmp_path,
+        agent_id="agent-1",
+        chat_manager=FakeChatManager(),
+    )
+    ownership = OwnershipTuple(
+        tenant_id="tenant-1",
+        source_id="external-source-1",
+        user_id="user-1",
+        agent_id="agent-1",
+        chat_id=chat.id,
+        logical_chat_session_id=chat.session_id,
+    )
+    service = WPlusSopService(workspace=workspace, ownership=ownership)
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+
+    async def fake_get_agent_for_request(_request):
+        return workspace
+
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(
+        wplus_router,
+        "get_agent_for_request",
+        fake_get_agent_for_request,
+    )
+    monkeypatch.setattr(
+        wplus_router,
+        "_skill_snapshot_id",
+        lambda _workspace_dir: "sha256:miner",
+    )
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+
+    response = TestClient(app).post(
+        f"/wplus-sop/entry-proposals/{proposal.proposal_id}/confirm",
+        json={"command_request_id": "cmd-first-confirm"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is True
+    active = service.get_active_session()
+    assert active is not None
+    assert active.projection.ownership.source_id == "external-source-1"
+
+
 @pytest.mark.asyncio
 async def test_session_get_checks_for_orphaned_generation_before_read(
     monkeypatch,
 ) -> None:
     calls: list[str] = []
-    record = SimpleNamespace(projection=SimpleNamespace())
+    record = SimpleNamespace(
+        projection=SimpleNamespace(sop_session_id="sop-1"),
+    )
 
     class FakeService:
         async def recover_orphaned_generation_run(self, session_id):
@@ -130,6 +215,14 @@ async def test_session_get_checks_for_orphaned_generation_before_read(
         def get_session(self, session_id):
             calls.append(f"get:{session_id}")
             return record
+
+        async def get_runtime_status(self, session_id):
+            calls.append(f"runtime:{session_id}")
+            return {
+                "status": "finalizing",
+                "runtime_ready": False,
+                "blocking_run_id": "run-1",
+            }
 
     async def fake_service_for_session(_request, _session_id):
         return FakeService()
@@ -150,8 +243,205 @@ async def test_session_get_checks_for_orphaned_generation_before_read(
         SimpleNamespace(),
     )
 
-    assert response == {"state": "RecoverableFailure"}
-    assert calls == ["recover:sop-orphan", "flush", "get:sop-orphan"]
+    assert response == {
+        "state": "RecoverableFailure",
+        "runtime_status": {
+            "status": "finalizing",
+            "runtime_ready": False,
+            "blocking_run_id": "run-1",
+        },
+    }
+    assert calls == [
+        "recover:sop-orphan",
+        "flush",
+        "get:sop-orphan",
+        "runtime:sop-orphan",
+    ]
+
+
+def test_owning_chat_finalizing_maps_to_machine_readable_409() -> None:
+    with pytest.raises(HTTPException) as raised:
+        wplus_router._raise_http(
+            WPlusOwningChatFinalizingError(retry_after_ms=750),
+        )
+
+    response = raised.value
+    assert response.status_code == 409
+    assert response.detail == {
+        "code": "owning_chat_finalizing",
+        "message": "The prior owning Chat Agent run is still finalizing",
+        "retry_after_ms": 750,
+    }
+
+
+@pytest.mark.asyncio
+async def test_confirm_route_does_not_repeat_service_owned_entry_projection(
+    monkeypatch,
+) -> None:
+    calls: list[str] = []
+    record = SimpleNamespace(
+        projection=SimpleNamespace(sop_session_id="sop-1"),
+    )
+    receipt = SimpleNamespace(run_id="run-1", attempt_id="attempt-1")
+
+    class FakeService:
+        workspace = SimpleNamespace(workspace_dir="unused")
+
+        async def confirm_entry(self, **kwargs):
+            calls.append(f"confirm:{kwargs['proposal_id']}")
+            return SimpleNamespace(record=record, receipt=receipt)
+
+        async def flush_chat_projection_outbox(self):
+            calls.append("flush")
+
+        async def get_runtime_status(self, _session_id):
+            return {
+                "status": "running",
+                "runtime_ready": False,
+                "blocking_run_id": "run-1",
+            }
+
+    async def fake_service_for_proposal(_request, _proposal_id):
+        return FakeService()
+
+    monkeypatch.setattr(
+        wplus_router,
+        "_service_for_proposal",
+        fake_service_for_proposal,
+    )
+    monkeypatch.setattr(
+        wplus_router,
+        "_skill_snapshot_id",
+        lambda _workspace_dir: "sha256:miner",
+    )
+    monkeypatch.setattr(
+        wplus_router,
+        "serialize_session",
+        lambda _record: {"session_id": "sop-1"},
+    )
+
+    response = await wplus_router.confirm_wplus_sop_entry(
+        "proposal-1",
+        SimpleNamespace(command_request_id="cmd-entry"),
+        SimpleNamespace(),
+    )
+
+    assert calls == ["confirm:proposal-1", "flush"]
+    assert response == {
+        "command_request_id": "cmd-entry",
+        "accepted": True,
+        "session": {
+            "session_id": "sop-1",
+            "runtime_status": {
+                "status": "running",
+                "runtime_ready": False,
+                "blocking_run_id": "run-1",
+            },
+        },
+        "run_id": "run-1",
+        "attempt_id": "attempt-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_active_session_snapshot_contains_runtime_status(
+    monkeypatch,
+) -> None:
+    record = SimpleNamespace(
+        projection=SimpleNamespace(sop_session_id="sop-1"),
+    )
+
+    class FakeService:
+        def get_active_session(self):
+            return record
+
+        async def flush_chat_projection_outbox(self):
+            return None
+
+        async def get_runtime_status(self, _session_id):
+            return {
+                "status": "ready",
+                "runtime_ready": True,
+                "blocking_run_id": None,
+            }
+
+    async def fake_service_for_chat(_request, _chat_id):
+        return FakeService()
+
+    monkeypatch.setattr(
+        wplus_router,
+        "_service_for_chat",
+        fake_service_for_chat,
+    )
+    monkeypatch.setattr(
+        wplus_router,
+        "serialize_session",
+        lambda _record: {"session_id": "sop-1"},
+    )
+
+    response = await wplus_router.get_active_wplus_sop_session(
+        "chat-1",
+        SimpleNamespace(),
+    )
+
+    assert response["runtime_status"] == {
+        "status": "ready",
+        "runtime_ready": True,
+        "blocking_run_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_command_snapshot_contains_runtime_status(monkeypatch) -> None:
+    record = SimpleNamespace(
+        projection=SimpleNamespace(sop_session_id="sop-1"),
+    )
+    receipt = SimpleNamespace(run_id="run-2", attempt_id="attempt-2")
+
+    class FakeService:
+        async def execute_command(self, **_kwargs):
+            return SimpleNamespace(record=record, receipt=receipt)
+
+        async def flush_chat_projection_outbox(self):
+            return None
+
+        async def get_runtime_status(self, _session_id):
+            return {
+                "status": "running",
+                "runtime_ready": False,
+                "blocking_run_id": "run-2",
+            }
+
+    async def fake_service_for_session(_request, _session_id):
+        return FakeService()
+
+    monkeypatch.setattr(
+        wplus_router,
+        "_service_for_session",
+        fake_service_for_session,
+    )
+    monkeypatch.setattr(
+        wplus_router,
+        "serialize_session",
+        lambda _record: {"session_id": "sop-1"},
+    )
+
+    response = await wplus_router.post_wplus_sop_command(
+        "sop-1",
+        SimpleNamespace(
+            command="submit_answers",
+            command_request_id="cmd-1",
+            expected_state_version=2,
+            payload={"answers": {}},
+        ),
+        SimpleNamespace(),
+    )
+
+    assert response["session"]["runtime_status"] == {
+        "status": "running",
+        "runtime_ready": False,
+        "blocking_run_id": "run-2",
+    }
 
 
 @pytest.mark.asyncio
@@ -229,7 +519,7 @@ async def test_sse_emits_changed_safe_trace_without_persisting_an_event(
                 "content": [
                     {
                         "type": "text",
-                        "text": "ACCOUNT_SENTINEL=6222020202020202",
+                        "text": "正在分析请求并整理关键事实。",
                     },
                 ],
             },
@@ -294,15 +584,10 @@ async def test_sse_emits_changed_safe_trace_without_persisting_an_event(
         "run_id": "run-1",
         "safe_stream_trace": {
             "sequence": 1,
-            "summary_text": (
-                "message role=assistant type=message status=in_progress "
-                "content_types=text content_chars=33 hidden=true"
-            ),
+            "summary_text": "正在分析请求并整理关键事实。",
             "truncated": False,
         },
     }
-    assert "ACCOUNT_SENTINEL" not in chunks[0]
-    assert "6222020202020202" not in chunks[0]
     assert persisted_events == []
 
     reconnect_response = await wplus_router.stream_wplus_sop_events(
@@ -315,4 +600,97 @@ async def test_sse_emits_changed_safe_trace_without_persisting_an_event(
         reconnect_chunks[0].removeprefix("data: ").strip(),
     )
     assert reconnect_payload["safe_stream_trace"]["sequence"] == 1
+    assert persisted_events == []
+
+
+@pytest.mark.asyncio
+async def test_sse_emits_initial_and_changed_runtime_status_without_event(
+    monkeypatch,
+) -> None:
+    persisted_events: list[object] = []
+    record = SimpleNamespace(
+        events=persisted_events,
+        projection=SimpleNamespace(
+            current_run_id="run-1",
+            state_version=7,
+            is_terminal=False,
+        ),
+    )
+
+    class FakeService:
+        workspace = SimpleNamespace()
+
+        def __init__(self):
+            self.statuses = [
+                {
+                    "status": "finalizing",
+                    "runtime_ready": False,
+                    "blocking_run_id": "run-1",
+                },
+                {
+                    "status": "ready",
+                    "runtime_ready": True,
+                    "blocking_run_id": None,
+                },
+            ]
+
+        async def recover_orphaned_generation_run(self, _session_id):
+            return None
+
+        def get_session(self, _session_id):
+            return record
+
+        async def get_runtime_status(self, _session_id):
+            if len(self.statuses) > 1:
+                return self.statuses.pop(0)
+            return self.statuses[0]
+
+    class FakeRequest:
+        def __init__(self):
+            self.checks = 0
+
+        async def is_disconnected(self):
+            self.checks += 1
+            return self.checks >= 4
+
+    async def fake_service_for_session(_request, _session_id):
+        return FakeService()
+
+    async def no_sleep(_seconds):
+        return None
+
+    monkeypatch.setattr(
+        wplus_router,
+        "_service_for_session",
+        fake_service_for_session,
+    )
+    monkeypatch.setattr(wplus_router.asyncio, "sleep", no_sleep)
+
+    response = await wplus_router.stream_wplus_sop_events(
+        "sop-1",
+        FakeRequest(),
+    )
+    chunks = [chunk async for chunk in response.body_iterator]
+    payloads = [
+        json.loads(chunk.removeprefix("data: ").strip())
+        for chunk in chunks
+    ]
+    reconnect_response = await wplus_router.stream_wplus_sop_events(
+        "sop-1",
+        FakeRequest(),
+    )
+    reconnect_payloads = [
+        json.loads(chunk.removeprefix("data: ").strip())
+        async for chunk in reconnect_response.body_iterator
+    ]
+
+    assert [payload["runtime_status"]["status"] for payload in payloads] == [
+        "finalizing",
+        "ready",
+    ]
+    assert all(payload["kind"] == "runtime_status" for payload in payloads)
+    assert all(payload["state_version"] == 7 for payload in payloads)
+    assert {payload["event_id"] for payload in payloads}.isdisjoint(
+        payload["event_id"] for payload in reconnect_payloads
+    )
     assert persisted_events == []

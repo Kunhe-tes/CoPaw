@@ -46,8 +46,18 @@ describe("validateStageQueue", () => {
     },
   ];
 
-  it("accepts two to four unique stages while keeping stable ids", () => {
+  it("accepts at least two unique stages while keeping stable ids", () => {
     expect(validateStageQueue(stages)).toEqual({ valid: true, message: null });
+    expect(
+      validateStageQueue([
+        ...stages,
+        ...[3, 4, 5].map((index) => ({
+          ...stages[1],
+          stage_id: `stage-${index}`,
+          title: `扩展环节 ${index}`,
+        })),
+      ]),
+    ).toEqual({ valid: true, message: null });
   });
 
   it("rejects duplicate, empty, or undersized queues", () => {

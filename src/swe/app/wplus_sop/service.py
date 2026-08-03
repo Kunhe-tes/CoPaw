@@ -24,6 +24,7 @@ from .models import (
     MemoryCandidateStatus,
     MemoryCandidatesPayload,
     OwnershipTuple,
+    Question,
     QuestionAnswer,
     QuestionBatchPayload,
     RecoverableFailurePayload,
@@ -64,6 +65,9 @@ logger = logging.getLogger(__name__)
 
 _OUTBOX_LOCKS_GUARD = threading.Lock()
 _OUTBOX_LOCKS: dict[str, asyncio.Lock] = {}
+_CHAT_IDLE_WAIT_TIMEOUT_SECONDS = 10.0
+_CHAT_IDLE_POLL_SECONDS = 0.05
+_CHAT_IDLE_RETRY_AFTER_MS = 1000
 
 
 def _outbox_lock(store_path: Path, chat_id: str) -> asyncio.Lock:
@@ -78,6 +82,18 @@ class WPlusOwnershipError(LookupError):
 
 class WPlusCommandError(ValueError):
     """Malformed or illegal state command."""
+
+
+class WPlusOwningChatFinalizingError(WPlusCommandError):
+    """The owning Chat has not released its prior Agent run yet."""
+
+    code = "owning_chat_finalizing"
+
+    def __init__(self, *, retry_after_ms: int = _CHAT_IDLE_RETRY_AFTER_MS):
+        super().__init__(
+            "The prior owning Chat Agent run is still finalizing",
+        )
+        self.retry_after_ms = retry_after_ms
 
 
 class WPlusRuntimeStartError(RuntimeError):
@@ -396,6 +412,47 @@ class WPlusSopService:
     def get_active_session(self) -> SessionRecord | None:
         return self.store.get_active_by_chat(self.ownership)
 
+    async def get_runtime_status(
+        self,
+        sop_session_id: str,
+    ) -> dict[str, Any]:
+        """Project transient owning-Chat availability without persisting it."""
+
+        record = self._owned_record(sop_session_id)
+        task_tracker = getattr(self.workspace, "task_tracker", None)
+        get_status = getattr(task_tracker, "get_status", None)
+        if not callable(get_status):
+            tracker_status = "idle"
+        else:
+            tracker_status = await get_status(self.ownership.chat_id)
+
+        if tracker_status == "idle":
+            status = "ready"
+        elif tracker_status == "stopping":
+            status = "stopping"
+        else:
+            projection = record.projection
+            effective_state = (
+                projection.resume_state
+                if projection.state is SessionState.PENDING_EXIT
+                else projection.state
+            )
+            status = (
+                "running"
+                if effective_state in _ORPHAN_RECOVERY_STATES
+                else "finalizing"
+            )
+        runtime_ready = status == "ready"
+        return {
+            "status": status,
+            "runtime_ready": runtime_ready,
+            "blocking_run_id": (
+                None
+                if runtime_ready
+                else record.projection.current_run_id
+            ),
+        }
+
     async def recover_orphaned_generation_run(
         self,
         sop_session_id: str,
@@ -577,41 +634,75 @@ class WPlusSopService:
                 "W+ run attempt is no longer active",
             )
 
+    def _chat_has_expected_ownership(self, chat: Any) -> bool:
+        return bool(
+            chat is not None
+            and str(getattr(chat, "id", "")) == self.ownership.chat_id
+            and str(getattr(chat, "user_id", "")) == self.ownership.user_id
+            and str(getattr(chat, "session_id", ""))
+            == self.ownership.logical_chat_session_id
+        )
+
+    @staticmethod
+    def _entry_proposal_chat_metadata(
+        proposal: WPlusEntryProposal,
+    ) -> dict[str, Any]:
+        receipt = proposal.command_receipt
+        return {
+            "proposal_id": proposal.proposal_id,
+            "mode": proposal.detection_mode.value,
+            "status": proposal.status.value,
+            "session_id": (
+                receipt.sop_session_id if receipt is not None else None
+            ),
+        }
+
     async def _verified_owned_chat(self) -> Any:
         """Load the Chat again at run start and fail closed on identity drift."""
 
         chat = await self.workspace.chat_manager.get_chat(
             self.ownership.chat_id,
         )
-        if (
-            chat is None
-            or str(getattr(chat, "user_id", "")) != self.ownership.user_id
-            or str(getattr(chat, "session_id", ""))
-            != self.ownership.logical_chat_session_id
-            or str(getattr(chat, "channel", "")) != self.ownership.source_id
-        ):
+        if not self._chat_has_expected_ownership(chat):
             raise WPlusOwnershipError(self.ownership.chat_id)
         return chat
+
+    async def _wait_for_owning_chat_idle(self) -> None:
+        """Wait for the prior Agent producer to release the owning Chat."""
+
+        task_tracker = getattr(self.workspace, "task_tracker", None)
+        get_status = getattr(task_tracker, "get_status", None)
+        if not callable(get_status):
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CHAT_IDLE_WAIT_TIMEOUT_SECONDS
+        while await get_status(self.ownership.chat_id) != "idle":
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise WPlusOwningChatFinalizingError()
+            await asyncio.sleep(min(_CHAT_IDLE_POLL_SECONDS, remaining))
 
     async def project_entry_proposal(
         self,
         proposal: WPlusEntryProposal,
+        *,
+        verified_chat: Any | None = None,
     ) -> bool:
         """Persist the proposal/control-card lifecycle in owning Chat metadata."""
 
         try:
-            chat = await self._verified_owned_chat()
-            receipt = proposal.command_receipt
+            chat = (
+                await self._verified_owned_chat()
+                if verified_chat is None
+                else verified_chat
+            )
+            if not self._chat_has_expected_ownership(chat):
+                raise WPlusOwnershipError(self.ownership.chat_id)
             chat.meta = {
                 **(chat.meta or {}),
-                "wplus_sop_entry_proposal": {
-                    "proposal_id": proposal.proposal_id,
-                    "mode": proposal.detection_mode.value,
-                    "status": proposal.status.value,
-                    "session_id": (
-                        receipt.sop_session_id if receipt is not None else None
-                    ),
-                },
+                "wplus_sop_entry_proposal": (
+                    self._entry_proposal_chat_metadata(proposal)
+                ),
             }
             await self.workspace.chat_manager.update_chat(chat)
             return True
@@ -648,7 +739,7 @@ class WPlusSopService:
             session_label = pending[-1].sop_session_id
             try:
                 chat = await chat_manager.get_chat(self.ownership.chat_id)
-                if chat is None:
+                if not self._chat_has_expected_ownership(chat):
                     return 0
                 existing_meta = chat.meta or {}
                 existing_audit = existing_meta.get("wplus_sop_audit", [])
@@ -684,8 +775,31 @@ class WPlusSopService:
                     self.ownership,
                 ):
                     return 0
+                entry_proposal = None
+                for item in reversed(pending):
+                    proposal_id = item.payload.get("entry_proposal_id")
+                    if not isinstance(proposal_id, str) or not proposal_id:
+                        continue
+                    candidate = self.store.get_entry_proposal(proposal_id)
+                    if candidate is not None and _same_ownership(
+                        candidate.ownership,
+                        self.ownership,
+                    ):
+                        entry_proposal = candidate
+                        break
                 chat.meta = {
                     **existing_meta,
+                    **(
+                        {
+                            "wplus_sop_entry_proposal": (
+                                self._entry_proposal_chat_metadata(
+                                    entry_proposal,
+                                )
+                            ),
+                        }
+                        if entry_proposal is not None
+                        else {}
+                    ),
                     "wplus_sop_session": {
                         "session_id": record.projection.sop_session_id,
                         "title": record.projection.title,
@@ -920,6 +1034,8 @@ class WPlusSopService:
                     duplicate=True,
                 )
 
+        await self._wait_for_owning_chat_idle()
+        chat = await self._verified_owned_chat()
         sop_session_id = f"sop_{uuid4().hex}"
         run_id = f"run_{uuid4().hex}"
         attempt_id = f"attempt_{uuid4().hex}"
@@ -957,6 +1073,7 @@ class WPlusSopService:
             kind=EventKind.SESSION_STATE_CHANGED.value,
             payload={
                 "state_version": projection.state_version,
+                "entry_proposal_id": proposal_id,
                 "kind": EventKind.SESSION_STATE_CHANGED.value,
                 "payload": {
                     "previous_state": None,
@@ -975,10 +1092,12 @@ class WPlusSopService:
         if mutation.duplicate:
             return mutation
 
-        chat = await self._verified_owned_chat()
         confirmed_proposal = self.store.get_entry_proposal(proposal_id)
         if confirmed_proposal is not None:
-            await self.project_entry_proposal(confirmed_proposal)
+            await self.project_entry_proposal(
+                confirmed_proposal,
+                verified_chat=chat,
+            )
         original_text = str(
             (proposal.original_request or {}).get("text", "")
             if isinstance(proposal.original_request, dict)
@@ -995,6 +1114,7 @@ class WPlusSopService:
                 payload={"original_request": original_text},
                 run_id=run_id,
                 attempt_id=attempt_id,
+                target_state=SessionState.GENERATING_STAGE_PROPOSAL.value,
                 on_complete=lambda: self._on_agent_turn_complete(
                     sop_session_id=sop_session_id,
                     run_id=run_id,
@@ -1221,32 +1341,146 @@ class WPlusSopService:
         answers: list[QuestionAnswer] = []
         for question in batch.questions:
             value = raw_answers.get(question.question_id)
-            if isinstance(value, list):
-                answers.append(
-                    QuestionAnswer(
-                        question_id=question.question_id,
-                        selected_option_ids=[str(item) for item in value],
-                    ),
-                )
-            elif question.type.value == "single_select":
-                answers.append(
-                    QuestionAnswer(
-                        question_id=question.question_id,
-                        selected_option_ids=[str(value or "")],
-                    ),
-                )
-            else:
-                answers.append(
-                    QuestionAnswer(
-                        question_id=question.question_id,
-                        text=str(value or ""),
-                    ),
-                )
+            answer = WPlusSopService._question_answer(question, value)
+            answers.append(answer)
         return AnswerAcceptedPayload(
             batch_id=batch.batch_id,
             stage_id=batch.stage_id,
             answers=answers,
         )
+
+    @staticmethod
+    def _questions_for_answer_batch(
+        record: SessionRecord,
+        answer_batch: AnswerBatch,
+    ) -> dict[str, Question]:
+        """Recover the immutable question contract used by a saved answer."""
+        for event in reversed(record.events):
+            if (
+                event.kind is EventKind.QUESTION_BATCH
+                and isinstance(event.payload, QuestionBatchPayload)
+                and event.payload.batch_id == answer_batch.batch_id
+            ):
+                return {
+                    question.question_id: question
+                    for question in event.payload.questions
+                }
+        return {}
+
+    @staticmethod
+    def _structured_question_answer(
+        question_id: str,
+        value: dict[str, Any],
+    ) -> QuestionAnswer:
+        unexpected = set(value) - {"selected_option_ids", "text"}
+        if unexpected:
+            raise WPlusCommandError(
+                "structured answers only allow selected_option_ids and text",
+            )
+        selected = value.get("selected_option_ids", [])
+        if not isinstance(selected, list) or any(
+            not isinstance(item, str) or not item for item in selected
+        ):
+            raise WPlusCommandError(
+                "selected_option_ids must be an array of non-empty strings",
+            )
+        if len(selected) != len(set(selected)):
+            raise WPlusCommandError("selected_option_ids must be unique")
+        text = value.get("text")
+        if text is not None and not isinstance(text, str):
+            raise WPlusCommandError("answer text must be a string")
+        try:
+            return QuestionAnswer(
+                question_id=question_id,
+                selected_option_ids=selected,
+                text=text,
+            )
+        except ValueError as exc:
+            raise WPlusCommandError(str(exc)) from exc
+
+    @staticmethod
+    def _validated_structured_question_answer(
+        question: Question,
+        value: dict[str, Any],
+    ) -> QuestionAnswer:
+        selected = value.get("selected_option_ids", [])
+        if not isinstance(selected, list):
+            raise WPlusCommandError(
+                "selected_option_ids must be an array of non-empty strings",
+            )
+        if question.type.value == "single_select" and len(selected) != 1:
+            raise WPlusCommandError(
+                "single_select answers require exactly one selected option",
+            )
+        if question.type.value == "multi_select" and not selected:
+            raise WPlusCommandError(
+                "multi_select answers require at least one selected option",
+            )
+        answer = WPlusSopService._structured_question_answer(
+            question.question_id,
+            value,
+        )
+        option_ids = {option.option_id for option in question.options}
+        unknown = set(answer.selected_option_ids) - option_ids
+        if unknown:
+            raise WPlusCommandError(
+                "selected option IDs must belong to the current question",
+            )
+        if question.type.value == "free_text" and answer.selected_option_ids:
+            raise WPlusCommandError(
+                "free_text answers cannot contain selected option IDs",
+            )
+        return answer
+
+    @staticmethod
+    def _legacy_question_answer(
+        question: Question,
+        value: Any,
+    ) -> QuestionAnswer:
+        if isinstance(value, list):
+            return QuestionAnswer(
+                question_id=question.question_id,
+                selected_option_ids=[str(item) for item in value],
+            )
+        if question.type.value == "single_select":
+            return QuestionAnswer(
+                question_id=question.question_id,
+                selected_option_ids=[str(value or "")],
+            )
+        return QuestionAnswer(
+            question_id=question.question_id,
+            text=str(value or ""),
+        )
+
+    @staticmethod
+    def _validate_custom_answer_text(
+        question: Question,
+        answer: QuestionAnswer,
+    ) -> None:
+        custom_option_ids = {
+            option.option_id
+            for option in question.options
+            if option.requires_custom_input
+        }
+        if custom_option_ids.intersection(answer.selected_option_ids) and not (
+            answer.text or ""
+        ).strip():
+            raise WPlusCommandError(
+                "selected option requires non-empty custom input text",
+            )
+
+    @staticmethod
+    def _question_answer(question: Question, value: Any) -> QuestionAnswer:
+        answer = (
+            WPlusSopService._validated_structured_question_answer(
+                question,
+                value,
+            )
+            if isinstance(value, dict)
+            else WPlusSopService._legacy_question_answer(question, value)
+        )
+        WPlusSopService._validate_custom_answer_text(question, answer)
+        return answer
 
     async def execute_command(
         self,
@@ -1398,9 +1632,27 @@ class WPlusSopService:
             if not isinstance(raw_answers, dict):
                 raise WPlusCommandError("answers must be an object")
             replacement_answers: list[QuestionAnswer] = []
+            original_questions = self._questions_for_answer_batch(
+                record,
+                previous,
+            )
             for prior_answer in previous.answers:
                 value = raw_answers.get(prior_answer.question_id)
-                if isinstance(value, list):
+                original_question = original_questions.get(
+                    prior_answer.question_id,
+                )
+                if original_question is not None:
+                    replacement_answers.append(
+                        self._question_answer(original_question, value),
+                    )
+                elif isinstance(value, dict):
+                    replacement_answers.append(
+                        self._structured_question_answer(
+                            prior_answer.question_id,
+                            value,
+                        ),
+                    )
+                elif isinstance(value, list):
                     replacement_answers.append(
                         QuestionAnswer(
                             question_id=prior_answer.question_id,
@@ -1682,6 +1934,23 @@ class WPlusSopService:
         else:
             raise WPlusCommandError(f"Unsupported command: {command}")
 
+        if starts_run and target_state is SessionState.GENERATING_QUESTIONS:
+            current_stage_id = changes.get(
+                "current_stage_id",
+                projection.current_stage_id,
+            )
+            if not isinstance(current_stage_id, str) or not current_stage_id:
+                raise WPlusCommandError(
+                    "Question generation requires a current_stage_id",
+                )
+            runtime_payload = {
+                **runtime_payload,
+                "current_stage_id": current_stage_id,
+            }
+
+        if starts_run:
+            await self._wait_for_owning_chat_idle()
+        chat = await self._verified_owned_chat() if starts_run else None
         run_id = f"run_{uuid4().hex}" if starts_run else None
         attempt_id = f"attempt_{uuid4().hex}" if starts_run else None
         if run_id is not None:
@@ -1775,8 +2044,7 @@ class WPlusSopService:
         if mutation.duplicate or not starts_run:
             return mutation
 
-        chat = await self._verified_owned_chat()
-        if run_id is None or attempt_id is None:
+        if chat is None or run_id is None or attempt_id is None:
             raise WPlusOwnershipError(self.ownership.chat_id)
         try:
             await start_wplus_chat_turn(
@@ -1789,6 +2057,7 @@ class WPlusSopService:
                 payload=runtime_payload,
                 run_id=run_id,
                 attempt_id=attempt_id,
+                target_state=target_state.value,
                 on_complete=lambda: self._on_agent_turn_complete(
                     sop_session_id=sop_session_id,
                     run_id=run_id,
@@ -1870,6 +2139,13 @@ class WPlusSopService:
         except ValueError as exc:
             raise WPlusCommandError(f"Unsupported event kind: {kind}") from exc
 
+        state = record.projection.state
+        effective_state = (
+            record.projection.resume_state
+            if state is SessionState.PENDING_EXIT
+            else state
+        )
+
         stable_id = uuid5(
             NAMESPACE_URL,
             f"{record.projection.sop_session_id}:{event_key}",
@@ -1911,23 +2187,53 @@ class WPlusSopService:
                 raise WPlusCommandError(
                     "event_key was already used for another W+ event",
                 )
+            if (
+                effective_state is SessionState.GENERATING_QUESTIONS
+                and event_kind is EventKind.QUESTION_BATCH
+            ):
+                historical_batch = QuestionBatchPayload.model_validate(
+                    existing_payload,
+                )
+                candidate_batch = QuestionBatchPayload.model_validate(
+                    candidate_payload,
+                )
+                current_stage_id = record.projection.current_stage_id
+                if (
+                    historical_batch.stage_id != current_stage_id
+                    or candidate_batch.stage_id != current_stage_id
+                ):
+                    raise WPlusCommandError(
+                        "question_batch stage_id="
+                        f"{candidate_batch.stage_id} does not match "
+                        f"current_stage_id={current_stage_id or 'missing'}",
+                    )
             return StoreMutation(record=record, duplicate=True)
 
-        state = record.projection.state
-        effective_state = (
-            record.projection.resume_state
-            if state is SessionState.PENDING_EXIT
-            else state
-        )
         allowed_states = _RUN_EVENT_STATES.get(event_kind)
         if (
             effective_state is None
             or allowed_states is None
             or effective_state not in allowed_states
         ):
+            allowed_event_kinds = (
+                sorted(
+                    candidate_kind.value
+                    for candidate_kind, candidate_states in (
+                        _RUN_EVENT_STATES.items()
+                    )
+                    if effective_state in candidate_states
+                )
+                if effective_state is not None
+                else []
+            )
+            allowed_event_detail = (
+                "; allowed agent events: " + ", ".join(allowed_event_kinds)
+                if allowed_event_kinds
+                else ""
+            )
             raise WPlusCommandError(
                 f"{event_kind.value} is not allowed while "
-                f"{state.value} is active",
+                f"{state.value} is active{allowed_event_detail}",
             )
 
         target = effective_state
@@ -1946,6 +2252,12 @@ class WPlusSopService:
         elif event_kind is EventKind.QUESTION_BATCH:
             target = SessionState.AWAITING_ANSWER
             typed = QuestionBatchPayload.model_validate(payload)
+            if typed.stage_id != record.projection.current_stage_id:
+                raise WPlusCommandError(
+                    f"question_batch stage_id={typed.stage_id} does not match "
+                    "current_stage_id="
+                    f"{record.projection.current_stage_id or 'missing'}",
+                )
             changes.update(
                 {
                     "current_question_batch": typed,

@@ -32,6 +32,7 @@ export interface WPlusSopQuestionOption {
   option_id: string;
   label: string;
   description?: string | null;
+  requires_custom_input?: boolean;
 }
 
 export interface WPlusSopQuestion {
@@ -49,7 +50,12 @@ export interface WPlusSopQuestionBatch {
   questions: WPlusSopQuestion[];
 }
 
-export type WPlusSopAnswerValue = string | string[];
+export interface WPlusSopCustomAnswerValue {
+  selected_option_ids: string[];
+  text?: string;
+}
+
+export type WPlusSopAnswerValue = string | string[] | WPlusSopCustomAnswerValue;
 
 export interface WPlusSopRunStep {
   step_id: string;
@@ -134,6 +140,12 @@ export interface WPlusSopPendingExit {
   timed_out?: boolean;
 }
 
+export interface WPlusSopRuntimeStatus {
+  status: "ready" | "finalizing" | "running" | "stopping";
+  runtime_ready: boolean;
+  blocking_run_id: string | null;
+}
+
 export interface WPlusSopSession {
   session_id: string;
   chat_id: string;
@@ -155,6 +167,7 @@ export interface WPlusSopSession {
   failure?: WPlusSopFailure | null;
   pending_exit?: WPlusSopPendingExit | null;
   resume_state?: WPlusSopState | null;
+  runtime_status?: WPlusSopRuntimeStatus;
   updated_at: string;
 }
 
@@ -224,6 +237,7 @@ export interface WPlusSopSessionEvent {
   run_id?: string | null;
   snapshot?: WPlusSopSession | null;
   safe_stream_trace?: WPlusSopSafeStreamTrace | null;
+  runtime_status?: WPlusSopRuntimeStatus | null;
 }
 
 export interface WPlusSopApiError extends Error {

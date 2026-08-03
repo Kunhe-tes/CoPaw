@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,13 +15,21 @@ from swe.app.wplus_sop import service as service_module
 from swe.app.wplus_sop.models import (
     CommandReceipt,
     OwnershipTuple,
+    Question,
+    QuestionBatch,
+    QuestionOption,
+    QuestionType,
     RunAttempt,
     RunStatus,
     SessionProjection,
     SessionState,
+    Stage,
 )
+from swe.app.wplus_sop.runtime import WPlusChatRunBusyError
 from swe.app.wplus_sop.service import (
     WPlusCommandError,
+    WPlusOwningChatFinalizingError,
+    WPlusOwnershipError,
     WPlusRuntimeStartError,
     WPlusSopService,
 )
@@ -51,12 +60,20 @@ class FakeTaskTracker:
     def __init__(self) -> None:
         self.stops = 0
         self.status = "idle"
+        self.status_reads = 0
+        self.idle_after_reads: int | None = None
 
     async def request_stop(self, _run_key: str) -> bool:
         self.stops += 1
         return True
 
     async def get_status(self, _run_key: str) -> str:
+        self.status_reads += 1
+        if (
+            self.idle_after_reads is not None
+            and self.status_reads >= self.idle_after_reads
+        ):
+            self.status = "idle"
         return self.status
 
     async def call_if_idle(self, _run_key: str, callback):
@@ -127,6 +144,49 @@ def _create_generation_run(
     )
 
 
+def _create_question_generation_run(
+    service: WPlusSopService,
+    *,
+    session_id: str,
+) -> None:
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.GENERATING_QUESTIONS,
+            state_version=1,
+            title="SOP",
+            stages=[
+                Stage(
+                    stage_id="stage-1",
+                    name="确认范围",
+                    status="clarifying",
+                ),
+                Stage(stage_id="stage-2", name="生成结果"),
+            ],
+            current_stage_id="stage-1",
+            current_run_id=f"run-{session_id}",
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id=f"cmd-{session_id}",
+            command="confirm_stage_queue",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+            starts_run=True,
+            run_id=f"run-{session_id}",
+            attempt_id=f"attempt-{session_id}",
+        ),
+        run_attempt=RunAttempt(
+            run_id=f"run-{session_id}",
+            attempt_id=f"attempt-{session_id}",
+            command_request_id=f"cmd-{session_id}",
+            command="confirm_stage_queue",
+            status=RunStatus.CLAIMED,
+        ),
+    )
+
+
 async def _send(
     service: WPlusSopService,
     session_id: str,
@@ -161,6 +221,64 @@ def _question_payload(stage_id: str, suffix: str) -> dict:
             },
         ],
     }
+
+
+def _create_structured_answer_session(service: WPlusSopService) -> str:
+    session_id = "sop-structured-answers"
+    stage = Stage(stage_id="stage-1", name="确认范围")
+    question_batch = QuestionBatch(
+        batch_id="batch-structured",
+        stage_id=stage.stage_id,
+        questions=[
+            Question(
+                question_id="q-single",
+                prompt="选择主要入口",
+                type=QuestionType.SINGLE_SELECT,
+                options=[
+                    QuestionOption(option_id="fixed", label="固定入口"),
+                    QuestionOption(
+                        option_id="other",
+                        label="其他入口",
+                        requires_custom_input=True,
+                    ),
+                ],
+            ),
+            Question(
+                question_id="q-multi",
+                prompt="选择辅助入口",
+                type=QuestionType.MULTI_SELECT,
+                options=[
+                    QuestionOption(option_id="chat", label="Chat"),
+                    QuestionOption(option_id="api", label="API"),
+                ],
+            ),
+            Question(
+                question_id="q-note",
+                prompt="补充约束",
+                type=QuestionType.FREE_TEXT,
+            ),
+        ],
+    )
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.AWAITING_ANSWER,
+            state_version=1,
+            title="SOP",
+            stages=[stage],
+            current_stage_id=stage.stage_id,
+            current_question_batch=question_batch,
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-create-structured-answers",
+            command="test_setup",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+    return session_id
 
 
 def _trial_plan_payload(run_id: str) -> dict:
@@ -213,6 +331,47 @@ def _trial_result_payload(run_id: str) -> dict:
 
 
 @pytest.mark.asyncio
+async def test_confirm_waits_for_owning_chat_idle_before_store_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+    before_proposal = service.store.get_entry_proposal(proposal.proposal_id)
+    service.workspace.task_tracker.status = "running"
+    monkeypatch.setattr(
+        service_module,
+        "_CHAT_IDLE_WAIT_TIMEOUT_SECONDS",
+        0.001,
+    )
+    monkeypatch.setattr(service_module, "_CHAT_IDLE_POLL_SECONDS", 0.001)
+
+    async def unexpected_start(**_kwargs):
+        pytest.fail("Agent run must not start while the owning Chat is busy")
+
+    monkeypatch.setattr(
+        service_module,
+        "start_wplus_chat_turn",
+        unexpected_start,
+    )
+
+    with pytest.raises(WPlusOwningChatFinalizingError):
+        await service.confirm_entry(
+            proposal_id=proposal.proposal_id,
+            command_request_id="cmd-entry-chat-busy",
+            skill_snapshot_id="sha256:miner",
+        )
+
+    assert service.store.get_entry_proposal(proposal.proposal_id) == (
+        before_proposal
+    )
+    assert service.get_active_session() is None
+
+
+@pytest.mark.asyncio
 async def test_confirm_persists_session_before_starting_agent_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -246,6 +405,568 @@ async def test_confirm_persists_session_before_starting_agent_turn(
     assert service.workspace.chat_manager.chat.meta[
         "wplus_sop_session"
     ]["state"] == "GeneratingStageProposal"
+    assert service.store.pending_outbox() == []
+
+
+@pytest.mark.asyncio
+async def test_confirm_allows_source_id_to_differ_from_chat_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    service.ownership = _ownership().model_copy(
+        update={"source_id": "external-source-1"},
+    )
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_start(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    mutation = await service.confirm_entry(
+        proposal_id=proposal.proposal_id,
+        command_request_id="cmd-entry-different-source",
+        skill_snapshot_id="sha256:miner",
+    )
+
+    assert (
+        mutation.record.projection.ownership.source_id == "external-source-1"
+    )
+    assert captured["source_id"] == "external-source-1"
+    assert captured["chat"] is service.workspace.chat_manager.chat
+
+
+@pytest.mark.asyncio
+async def test_confirm_reuses_verified_chat_for_entry_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+    chat = service.workspace.chat_manager.chat
+    lookups: list[str] = []
+
+    async def one_shot_get_chat(chat_id: str):
+        lookups.append(chat_id)
+        return chat if len(lookups) == 1 else None
+
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(
+        service.workspace.chat_manager,
+        "get_chat",
+        one_shot_get_chat,
+    )
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+
+    mutation = await service.confirm_entry(
+        proposal_id=proposal.proposal_id,
+        command_request_id="cmd-entry-one-chat-read",
+        skill_snapshot_id="sha256:miner",
+    )
+
+    assert mutation.record.projection.state is (
+        SessionState.GENERATING_STAGE_PROPOSAL
+    )
+    assert lookups == ["chat-1"]
+    assert service.workspace.chat_manager.updates == 1
+    assert chat.meta["wplus_sop_entry_proposal"] == {
+        "proposal_id": proposal.proposal_id,
+        "mode": "explicit",
+        "status": "confirmed",
+        "session_id": mutation.record.projection.sop_session_id,
+    }
+
+
+@pytest.mark.asyncio
+async def test_confirm_outbox_recovers_failed_entry_projection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+
+    class FailOnceChatManager:
+        def __init__(self) -> None:
+            self.chat = SimpleNamespace(
+                id="chat-1",
+                session_id="logical-1",
+                user_id="user-1",
+                channel="console",
+                meta={
+                    "wplus_sop_entry_proposal": {
+                        "proposal_id": proposal.proposal_id,
+                        "mode": "explicit",
+                        "status": "pending",
+                        "session_id": None,
+                    },
+                },
+            )
+            self.update_attempts = 0
+
+        async def get_chat(self, chat_id: str):
+            return deepcopy(self.chat) if chat_id == self.chat.id else None
+
+        async def update_chat(self, chat):
+            self.update_attempts += 1
+            if self.update_attempts == 1:
+                raise OSError("temporary chats.json write failure")
+            self.chat = deepcopy(chat)
+            return deepcopy(chat)
+
+    chat_manager = FailOnceChatManager()
+    service.workspace.chat_manager = chat_manager
+
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+
+    mutation = await service.confirm_entry(
+        proposal_id=proposal.proposal_id,
+        command_request_id="cmd-entry-recover-projection",
+        skill_snapshot_id="sha256:miner",
+    )
+    projected = await service.flush_chat_projection_outbox()
+
+    assert mutation.record.projection.state is (
+        SessionState.GENERATING_STAGE_PROPOSAL
+    )
+    assert projected == 1
+    assert chat_manager.update_attempts == 2
+    assert chat_manager.chat.meta["wplus_sop_entry_proposal"] == {
+        "proposal_id": proposal.proposal_id,
+        "mode": "explicit",
+        "status": "confirmed",
+        "session_id": mutation.record.projection.sop_session_id,
+    }
+    assert service.store.pending_outbox() == []
+
+
+@pytest.mark.asyncio
+async def test_submit_answers_accepts_structured_and_legacy_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    session_id = _create_structured_answer_session(service)
+
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    mutation = await _send(
+        service,
+        session_id,
+        "submit_answers",
+        {
+            "answers": {
+                "q-single": {
+                    "selected_option_ids": ["other"],
+                    "text": "企业微信侧边栏",
+                },
+                "q-multi": ["chat", "api"],
+                "q-note": "仅处理企业租户",
+            },
+        },
+        request_id="cmd-structured-answers",
+    )
+
+    accepted = mutation.record.projection.answers[-1].answers
+    assert mutation.record.projection.state is SessionState.GENERATING_TRIAL
+    assert accepted[0].selected_option_ids == ["other"]
+    assert accepted[0].text == "企业微信侧边栏"
+    assert accepted[1].selected_option_ids == ["chat", "api"]
+    assert accepted[2].text == "仅处理企业租户"
+
+
+@pytest.mark.asyncio
+async def test_submit_answers_waits_for_prior_chat_run_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    session_id = _create_structured_answer_session(service)
+    tracker = service.workspace.task_tracker
+    tracker.status = "running"
+    tracker.idle_after_reads = 2
+    starts: list[dict[str, object]] = []
+
+    async def fake_start(**kwargs):
+        if tracker.status != "idle":
+            raise WPlusChatRunBusyError(
+                "The owning Chat already has an active Agent run",
+            )
+        starts.append(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    mutation = await _send(
+        service,
+        session_id,
+        "submit_answers",
+        {
+            "answers": {
+                "q-single": {"selected_option_ids": ["fixed"]},
+                "q-multi": {"selected_option_ids": ["chat"]},
+                "q-note": "无",
+            },
+        },
+        request_id="cmd-wait-for-prior-chat-run",
+    )
+
+    assert tracker.status_reads >= 2
+    assert len(starts) == 1
+    assert mutation.record.projection.state is SessionState.GENERATING_TRIAL
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tracker_status", "expected_status", "runtime_ready"),
+    [
+        ("idle", "ready", True),
+        ("running", "finalizing", False),
+        ("stopping", "stopping", False),
+    ],
+)
+async def test_runtime_status_projects_owning_chat_task_state(
+    tmp_path: Path,
+    tracker_status: str,
+    expected_status: str,
+    runtime_ready: bool,
+) -> None:
+    service = _service(tmp_path)
+    session_id = _create_structured_answer_session(service)
+    service.workspace.task_tracker.status = tracker_status
+
+    status = await service.get_runtime_status(session_id)
+
+    assert status == {
+        "status": expected_status,
+        "runtime_ready": runtime_ready,
+        "blocking_run_id": (
+            None
+            if runtime_ready
+            else service.get_session(session_id).projection.current_run_id
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_without_task_tracker_is_ready(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    session_id = _create_structured_answer_session(service)
+    del service.workspace.task_tracker
+
+    assert await service.get_runtime_status(session_id) == {
+        "status": "ready",
+        "runtime_ready": True,
+        "blocking_run_id": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_runtime_status_is_running_during_active_generation(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-runtime-running"
+    _create_generation_run(
+        service,
+        session_id=session_id,
+        created_at=datetime.now(timezone.utc),
+        state=SessionState.GENERATING_QUESTIONS,
+    )
+    service.workspace.task_tracker.status = "running"
+
+    assert await service.get_runtime_status(session_id) == {
+        "status": "running",
+        "runtime_ready": False,
+        "blocking_run_id": f"run-{session_id}",
+    }
+
+
+@pytest.mark.asyncio
+async def test_prior_chat_run_timeout_does_not_mutate_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    session_id = _create_structured_answer_session(service)
+    service.workspace.task_tracker.status = "running"
+    monkeypatch.setattr(
+        service_module,
+        "_CHAT_IDLE_WAIT_TIMEOUT_SECONDS",
+        0.001,
+    )
+    monkeypatch.setattr(
+        service_module,
+        "_CHAT_IDLE_POLL_SECONDS",
+        0.001,
+    )
+    before = service.get_session(session_id)
+
+    with pytest.raises(
+        WPlusOwningChatFinalizingError,
+        match="still finalizing",
+    ) as raised:
+        await _send(
+            service,
+            session_id,
+            "submit_answers",
+            {
+                "answers": {
+                    "q-single": {"selected_option_ids": ["fixed"]},
+                    "q-multi": {"selected_option_ids": ["chat"]},
+                    "q-note": "无",
+                },
+            },
+            request_id="cmd-prior-chat-run-timeout",
+        )
+
+    assert raised.value.code == "owning_chat_finalizing"
+    assert raised.value.retry_after_ms > 0
+    assert service.get_session(session_id) == before
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer_overrides", "error_match"),
+    [
+        (
+            {"q-single": {"selected_option_ids": ["missing"]}},
+            "selected option",
+        ),
+        (
+            {
+                "q-single": {
+                    "selected_option_ids": ["fixed", "other"],
+                    "text": "自定义",
+                },
+            },
+            "single_select",
+        ),
+        (
+            {"q-multi": {"selected_option_ids": []}},
+            "multi_select",
+        ),
+        (
+            {
+                "q-single": {
+                    "selected_option_ids": ["other"],
+                    "text": "   ",
+                },
+            },
+            "custom input",
+        ),
+        (
+            {"q-multi": {"selected_option_ids": "chat"}},
+            "selected_option_ids",
+        ),
+    ],
+)
+async def test_invalid_structured_answers_do_not_advance_session(
+    tmp_path: Path,
+    answer_overrides: dict,
+    error_match: str,
+) -> None:
+    service = _service(tmp_path)
+    session_id = _create_structured_answer_session(service)
+    answers = {
+        "q-single": {"selected_option_ids": ["fixed"]},
+        "q-multi": {"selected_option_ids": ["chat"]},
+        "q-note": {"selected_option_ids": [], "text": "无"},
+        **answer_overrides,
+    }
+    before = service.get_session(session_id)
+
+    with pytest.raises(WPlusCommandError, match=error_match):
+        await _send(
+            service,
+            session_id,
+            "submit_answers",
+            {"answers": answers},
+            request_id=f"cmd-invalid-{error_match}",
+        )
+
+    assert service.get_session(session_id) == before
+
+
+@pytest.mark.asyncio
+async def test_outbox_rejects_recreated_chat_with_drifted_ownership(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    await service.confirm_entry(
+        proposal_id=proposal.proposal_id,
+        command_request_id="cmd-entry-drift-before-outbox",
+        skill_snapshot_id="sha256:miner",
+    )
+    updates_before_flush = service.workspace.chat_manager.updates
+    service.workspace.chat_manager.chat = SimpleNamespace(
+        id="chat-1",
+        session_id="other-logical-session",
+        user_id="other-user",
+        channel="console",
+        meta={},
+    )
+
+    assert await service.flush_chat_projection_outbox() == 0
+    assert service.workspace.chat_manager.updates == updates_before_flush
+    assert len(service.store.pending_outbox()) == 1
+    assert service.workspace.chat_manager.chat.meta == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chat_attribute", "drifted_value"),
+    [
+        ("id", "other-chat"),
+        ("user_id", "other-user"),
+        ("session_id", "other-logical-session"),
+    ],
+)
+async def test_confirm_rejects_chat_identity_drift_before_store_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    chat_attribute: str,
+    drifted_value: str,
+) -> None:
+    service = _service(tmp_path)
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+    before_proposal = service.store.get_entry_proposal(proposal.proposal_id)
+    setattr(service.workspace.chat_manager.chat, chat_attribute, drifted_value)
+    if chat_attribute == "id":
+        drifted_chat = service.workspace.chat_manager.chat
+
+        async def get_drifted_chat(_chat_id: str):
+            return drifted_chat
+
+        monkeypatch.setattr(
+            service.workspace.chat_manager,
+            "get_chat",
+            get_drifted_chat,
+        )
+
+    async def unexpected_start(**_kwargs):
+        pytest.fail("Agent run must not start for a drifted Chat")
+
+    monkeypatch.setattr(
+        service_module,
+        "start_wplus_chat_turn",
+        unexpected_start,
+    )
+    with pytest.raises(WPlusOwnershipError):
+        await service.confirm_entry(
+            proposal_id=proposal.proposal_id,
+            command_request_id=f"cmd-entry-drifted-{chat_attribute}",
+            skill_snapshot_id="sha256:miner",
+        )
+
+    assert service.store.get_entry_proposal(proposal.proposal_id) == (
+        before_proposal
+    )
+    assert service.store.list_sessions() == []
+    assert service.store.pending_outbox() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("chat_attribute", "drifted_value"),
+    [
+        ("id", "other-chat"),
+        ("user_id", "other-user"),
+        ("session_id", "other-logical-session"),
+    ],
+)
+async def test_run_command_rejects_chat_identity_drift_before_store_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    chat_attribute: str,
+    drifted_value: str,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-drifted-command"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.AWAITING_QUEUE_CONFIRMATION,
+            state_version=1,
+            title="SOP",
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-create-drifted-command",
+            command="confirm_entry",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+    before_record = service.get_session(session_id)
+    setattr(service.workspace.chat_manager.chat, chat_attribute, drifted_value)
+    if chat_attribute == "id":
+        drifted_chat = service.workspace.chat_manager.chat
+
+        async def get_drifted_chat(_chat_id: str):
+            return drifted_chat
+
+        monkeypatch.setattr(
+            service.workspace.chat_manager,
+            "get_chat",
+            get_drifted_chat,
+        )
+
+    async def unexpected_start(**_kwargs):
+        pytest.fail("Agent run must not start for a drifted Chat")
+
+    monkeypatch.setattr(
+        service_module,
+        "start_wplus_chat_turn",
+        unexpected_start,
+    )
+    with pytest.raises(WPlusOwnershipError):
+        await service.execute_command(
+            sop_session_id=session_id,
+            command="confirm_stage_queue",
+            command_request_id=f"cmd-run-drifted-{chat_attribute}",
+            expected_state_version=1,
+            payload={
+                "stages": [
+                    {"stage_id": "stage-1", "title": "确认范围"},
+                    {"stage_id": "stage-2", "title": "生成结果"},
+                ],
+            },
+        )
+
+    assert service.get_session(session_id) == before_record
     assert service.store.pending_outbox() == []
 
 
@@ -379,6 +1100,427 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
         "wplus_sop_session"
     ]["state"] == "Completed"
     assert service.store.pending_outbox() == []
+
+
+@pytest.mark.asyncio
+async def test_question_generation_commands_forward_server_target_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    starts: list[dict[str, object]] = []
+
+    async def fake_start(**kwargs):
+        starts.append(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    proposal = service.create_entry_proposal(
+        original_text="创建两环节 SOP",
+        mode="explicit",
+    )
+    confirmed = await service.confirm_entry(
+        proposal_id=proposal.proposal_id,
+        command_request_id="cmd-entry-target-state",
+        skill_snapshot_id="sha256:miner",
+    )
+    session_id = confirmed.record.projection.sop_session_id
+    service.append_agent_event(
+        kind="stage_proposal",
+        payload={
+            "stages": [
+                {"stage_id": "stage-1", "name": "确认范围"},
+                {"stage_id": "stage-2", "name": "生成结果"},
+            ],
+        },
+        event_key="target-state-stage-proposal",
+    )
+
+    await _send(
+        service,
+        session_id,
+        "confirm_stage_queue",
+        {
+            "stages": [
+                {"stage_id": "stage-1", "name": "确认范围"},
+                {"stage_id": "stage-2", "name": "生成结果"},
+            ],
+        },
+        request_id="cmd-target-state-queue",
+    )
+    assert starts[-1]["command"] == "confirm_stage_queue"
+    assert starts[-1]["target_state"] == "GeneratingQuestions"
+    assert starts[-1]["payload"]["current_stage_id"] == "stage-1"
+
+    service.append_agent_event(
+        kind="question_batch",
+        payload=_question_payload("stage-1", "target-state"),
+        event_key="target-state-questions",
+    )
+    await _send(
+        service,
+        session_id,
+        "submit_answers",
+        {
+            "answers": {"q-target-state": "yes"},
+        },
+        request_id="cmd-target-state-answers",
+    )
+    service.append_agent_event(
+        kind="trial_plan",
+        payload=_trial_plan_payload("target-state"),
+        event_key="target-state-trial-plan",
+    )
+    service.append_agent_event(
+        kind="trial_execution_completed",
+        payload=_trial_result_payload("target-state"),
+        event_key="target-state-trial-result",
+    )
+    await _send(
+        service,
+        session_id,
+        "accept_trial",
+        request_id="cmd-target-state-accept",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="cmd-target-state-next-stage",
+    )
+
+    assert starts[-1]["command"] == "confirm_stage"
+    assert starts[-1]["target_state"] == "GeneratingQuestions"
+    assert starts[-1]["payload"]["current_stage_id"] == "stage-2"
+
+
+@pytest.mark.asyncio
+async def test_resume_question_generation_forwards_server_target_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-resume-questions"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.PAUSED,
+            state_version=1,
+            title="SOP",
+            stages=[Stage(stage_id="stage-1", name="确认范围")],
+            current_stage_id="stage-1",
+            resume_state=SessionState.GENERATING_QUESTIONS,
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-create-resume-questions",
+            command="test_setup",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_start(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    await _send(
+        service,
+        session_id,
+        "resume",
+        request_id="cmd-resume-questions",
+    )
+
+    assert captured["target_state"] == "GeneratingQuestions"
+    assert captured["payload"]["current_stage_id"] == "stage-1"
+
+
+@pytest.mark.asyncio
+async def test_retry_question_generation_forwards_server_target_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-retry-questions"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.RECOVERABLE_FAILURE,
+            state_version=1,
+            title="SOP",
+            stages=[Stage(stage_id="stage-1", name="确认范围")],
+            current_stage_id="stage-1",
+            current_run_id="run-failed-questions",
+            resume_state=SessionState.GENERATING_QUESTIONS,
+            last_error={
+                "error_code": "question_generation_failed",
+                "summary": "生成问题失败",
+                "failed_operation": "confirm_stage_queue",
+                "failed_run_id": "run-failed-questions",
+            },
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-create-retry-questions",
+            command="test_setup",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+        run_attempt=RunAttempt(
+            run_id="run-failed-questions",
+            attempt_id="attempt-failed-questions",
+            command_request_id="cmd-failed-questions",
+            command="confirm_stage_queue",
+            status=RunStatus.FAILED,
+        ),
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_start(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    await _send(
+        service,
+        session_id,
+        "retry_current_turn",
+        request_id="cmd-retry-questions",
+    )
+
+    assert captured["target_state"] == "GeneratingQuestions"
+    assert captured["payload"] == {
+        "target_state": "GeneratingQuestions",
+        "retry_of_run_id": "run-failed-questions",
+        "current_stage_id": "stage-1",
+    }
+
+
+def test_wrong_event_reports_allowed_events_for_generating_questions(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    _create_generation_run(
+        service,
+        session_id="sop-question-event-contract",
+        created_at=datetime.now(timezone.utc),
+        state=SessionState.GENERATING_QUESTIONS,
+    )
+    before = service.get_session("sop-question-event-contract")
+
+    with pytest.raises(
+        WPlusCommandError,
+        match=(
+            "allowed agent events: lifecycle_progress, question_batch, "
+            "recoverable_failure"
+        ),
+    ):
+        service.append_agent_event(
+            kind="stage_queue_confirmed",
+            payload={
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "name": "确认范围",
+                        "status": "clarifying",
+                    },
+                    {"stage_id": "stage-2", "name": "生成结果"},
+                ],
+            },
+            event_key="wrong-stage-queue-confirmed",
+            trusted_sop_session_id="sop-question-event-contract",
+            trusted_run_id="run-sop-question-event-contract",
+            trusted_attempt_id="attempt-sop-question-event-contract",
+        )
+
+    assert service.get_session("sop-question-event-contract") == before
+
+
+def test_question_batch_rejects_stage_id_mismatch_without_side_effects(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-question-stage-mismatch"
+    _create_question_generation_run(service, session_id=session_id)
+    before = service.get_session(session_id)
+    outbox_before = service.store.pending_outbox()
+
+    with pytest.raises(WPlusCommandError, match="current_stage_id=stage-1"):
+        service.append_agent_event(
+            kind="question_batch",
+            payload=_question_payload("stage-2", "mismatch"),
+            event_key="mismatched-question-batch",
+            trusted_sop_session_id=session_id,
+            trusted_run_id=f"run-{session_id}",
+            trusted_attempt_id=f"attempt-{session_id}",
+        )
+
+    assert service.get_session(session_id) == before
+    assert service.store.pending_outbox() == outbox_before
+
+
+def test_failed_event_can_be_corrected_within_the_same_run_attempt(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-correct-question-event"
+    _create_question_generation_run(service, session_id=session_id)
+    trusted_identity = {
+        "trusted_sop_session_id": session_id,
+        "trusted_run_id": f"run-{session_id}",
+        "trusted_attempt_id": f"attempt-{session_id}",
+    }
+    baseline = service.get_session(session_id)
+    baseline_event_ids = {event.event_id for event in baseline.events}
+    baseline_outbox_ids = {
+        item.projection_event_id for item in service.store.pending_outbox()
+    }
+
+    with pytest.raises(WPlusCommandError, match="allowed agent events"):
+        service.append_agent_event(
+            kind="stage_queue_confirmed",
+            payload={
+                "stages": [
+                    {
+                        "stage_id": "stage-1",
+                        "name": "确认范围",
+                        "status": "clarifying",
+                    },
+                    {"stage_id": "stage-2", "name": "生成结果"},
+                ],
+            },
+            event_key="question-boundary",
+            **trusted_identity,
+        )
+
+    accepted = service.append_agent_event(
+        kind="question_batch",
+        payload=_question_payload("stage-1", "corrected"),
+        event_key="question-boundary",
+        **trusted_identity,
+    )
+
+    assert accepted.record.projection.state is SessionState.AWAITING_ANSWER
+    assert [
+        event.kind.value
+        for event in accepted.record.events
+        if event.event_id not in baseline_event_ids
+    ] == [
+        "question_batch",
+    ]
+    assert [
+        item.kind
+        for item in service.store.pending_outbox()
+        if item.projection_event_id not in baseline_outbox_ids
+    ] == [
+        "question_batch",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_historical_question_event_is_not_duplicate_in_next_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    proposal = service.create_entry_proposal(
+        original_text="创建两环节 SOP",
+        mode="explicit",
+    )
+    confirmed = await service.confirm_entry(
+        proposal_id=proposal.proposal_id,
+        command_request_id="cmd-entry-historical-question",
+        skill_snapshot_id="sha256:miner",
+    )
+    session_id = confirmed.record.projection.sop_session_id
+    service.append_agent_event(
+        kind="stage_proposal",
+        payload={
+            "stages": [
+                {"stage_id": "stage-1", "name": "确认范围"},
+                {"stage_id": "stage-2", "name": "生成结果"},
+            ],
+        },
+        event_key="historical-question-stages",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage_queue",
+        {
+            "stages": [
+                {"stage_id": "stage-1", "name": "确认范围"},
+                {"stage_id": "stage-2", "name": "生成结果"},
+            ],
+        },
+        request_id="cmd-historical-question-queue",
+    )
+    stage_one_payload = _question_payload("stage-1", "historical")
+    first = service.append_agent_event(
+        kind="question_batch",
+        payload=stage_one_payload,
+        event_key="historical-question-key",
+    )
+    awaiting_answer_replay = service.append_agent_event(
+        kind="question_batch",
+        payload=stage_one_payload,
+        event_key="historical-question-key",
+    )
+
+    assert first.duplicate is False
+    assert awaiting_answer_replay.duplicate is True
+    assert len(awaiting_answer_replay.record.events) == len(first.record.events)
+
+    await _send(
+        service,
+        session_id,
+        "submit_answers",
+        {"answers": {"q-historical": "yes"}},
+        request_id="cmd-historical-question-answers",
+    )
+    service.append_agent_event(
+        kind="trial_plan",
+        payload=_trial_plan_payload("historical-question"),
+        event_key="historical-question-trial-plan",
+    )
+    service.append_agent_event(
+        kind="trial_execution_completed",
+        payload=_trial_result_payload("historical-question"),
+        event_key="historical-question-trial-result",
+    )
+    await _send(
+        service,
+        session_id,
+        "accept_trial",
+        request_id="cmd-historical-question-accept",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="cmd-historical-question-next-stage",
+    )
+    before = service.get_session(session_id)
+    outbox_before = service.store.pending_outbox()
+
+    with pytest.raises(WPlusCommandError, match="current_stage_id=stage-2"):
+        service.append_agent_event(
+            kind="question_batch",
+            payload=stage_one_payload,
+            event_key="historical-question-key",
+        )
+
+    assert service.get_session(session_id) == before
+    assert service.store.pending_outbox() == outbox_before
 
 
 @pytest.mark.asyncio
@@ -792,9 +1934,13 @@ async def test_revise_answer_invalidates_downstream_and_starts_new_run(
         },
         request_id="cmd-revision-queue",
     )
+    revision_questions = _question_payload("stage-1", "revision")
+    revision_questions["questions"][0]["options"][1][
+        "requires_custom_input"
+    ] = True
     service.append_agent_event(
         kind="question_batch",
-        payload=_question_payload("stage-1", "revision"),
+        payload=revision_questions,
         event_key="revision-questions",
     )
     await _send(
@@ -817,13 +1963,40 @@ async def test_revise_answer_invalidates_downstream_and_starts_new_run(
         event_key="revision-result",
     )
 
+    before_revision = service.get_session(session_id).projection.state_version
+    with pytest.raises(WPlusCommandError, match="custom input"):
+        await _send(
+            service,
+            session_id,
+            "revise_answer",
+            {
+                "revised_round": 1,
+                "answers": {
+                    "q-revision": {
+                        "selected_option_ids": ["no"],
+                        "text": "   ",
+                    },
+                },
+            },
+            request_id="cmd-invalid-custom-revision",
+        )
+    assert (
+        service.get_session(session_id).projection.state_version
+        == before_revision
+    )
+
     revised = await _send(
         service,
         session_id,
         "revise_answer",
         {
             "revised_round": 1,
-            "answers": {"q-revision": "no"},
+            "answers": {
+                "q-revision": {
+                    "selected_option_ids": ["no"],
+                    "text": "改为人工复核",
+                },
+            },
             "reason": "范围发生变化",
         },
         request_id="cmd-revise-answer",
@@ -834,6 +2007,7 @@ async def test_revise_answer_invalidates_downstream_and_starts_new_run(
     assert projection.revision == 2
     assert projection.round == 1
     assert projection.answers[0].answers[0].selected_option_ids == ["no"]
+    assert projection.answers[0].answers[0].text == "改为人工复核"
     assert projection.trial_result_lists == []
     assert projection.invalidated_history[0]["revised_round"] == 1
     assert starts[-1]["command"] == "revise_answer"
@@ -978,6 +2152,122 @@ async def test_runtime_start_failure_can_retry_from_server_owned_state(
         "target_state": "GeneratingStageProposal",
         "retry_of_run_id": failed.runs[0].run_id,
     }
+
+
+@pytest.mark.asyncio
+async def test_retry_current_turn_allows_source_id_to_differ_from_chat_channel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    service.ownership = _ownership().model_copy(
+        update={"source_id": "external-source-1"},
+    )
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+
+    async def fail_start(**_kwargs):
+        raise RuntimeError("runtime unavailable")
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fail_start)
+    with pytest.raises(WPlusRuntimeStartError, match="runtime unavailable"):
+        await service.confirm_entry(
+            proposal_id=proposal.proposal_id,
+            command_request_id="cmd-entry-external-source-retry",
+            skill_snapshot_id="sha256:miner",
+        )
+
+    failed = service.get_active_session()
+    assert failed is not None
+    assert failed.projection.state is SessionState.RECOVERABLE_FAILURE
+    assert service.workspace.chat_manager.chat.channel == "console"
+    failed_run = failed.runs[0]
+    captured: dict[str, object] = {}
+
+    async def succeed_start(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(
+        service_module,
+        "start_wplus_chat_turn",
+        succeed_start,
+    )
+    retried = await _send(
+        service,
+        failed.projection.sop_session_id,
+        "retry_current_turn",
+        request_id="cmd-retry-external-source",
+    )
+
+    assert captured["source_id"] == "external-source-1"
+    assert captured["command"] == "retry_current_turn"
+    assert captured["payload"] == {
+        "target_state": "GeneratingStageProposal",
+        "retry_of_run_id": failed_run.run_id,
+    }
+    assert (
+        retried.record.projection.state
+        is SessionState.GENERATING_STAGE_PROPOSAL
+    )
+    assert len(retried.record.runs) == 2
+    assert retried.record.runs[0].status is RunStatus.FAILED
+    assert retried.record.runs[1].retry_of_run_id == failed_run.run_id
+    assert retried.record.runs[1].run_id == captured["run_id"]
+
+
+@pytest.mark.asyncio
+async def test_confirm_retry_replays_runtime_failure_without_duplicate_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    proposal = service.create_entry_proposal(
+        original_text="创建 SOP",
+        mode="explicit",
+    )
+    starts: list[dict[str, object]] = []
+
+    async def fail_start(**kwargs):
+        starts.append(kwargs)
+        raise RuntimeError("runtime unavailable")
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fail_start)
+    command_request_id = "cmd-entry-idempotent-runtime-failure"
+    with pytest.raises(WPlusRuntimeStartError, match="runtime unavailable"):
+        await service.confirm_entry(
+            proposal_id=proposal.proposal_id,
+            command_request_id=command_request_id,
+            skill_snapshot_id="sha256:miner",
+        )
+
+    failed = service.get_active_session()
+    assert failed is not None
+    original_receipt = failed.command_receipts[command_request_id]
+    original_outbox = service.store.pending_outbox()
+
+    replayed = await service.confirm_entry(
+        proposal_id=proposal.proposal_id,
+        command_request_id=command_request_id,
+        skill_snapshot_id="sha256:miner",
+    )
+
+    assert replayed.duplicate is True
+    assert replayed.receipt == original_receipt
+    assert (
+        replayed.record.projection.sop_session_id
+        == failed.projection.sop_session_id
+    )
+    assert len(starts) == 1
+    sessions = service.store.list_sessions()
+    assert len(sessions) == 1
+    assert len(sessions[0].runs) == 1
+    assert service.store.pending_outbox() == original_outbox
+    assert len(
+        {item.projection_event_id for item in original_outbox},
+    ) == len(original_outbox)
 
 
 @pytest.mark.asyncio

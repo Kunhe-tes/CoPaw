@@ -42,6 +42,11 @@ function makeSession(
     state_version: 4,
     revision: 1,
     round: 1,
+    runtime_status: {
+      status: "ready",
+      runtime_ready: true,
+      blocking_run_id: null,
+    },
     current_stage_id: "stage-1",
     stages: [
       {
@@ -154,7 +159,140 @@ describe("WPlusSopWorkspace", () => {
     vi.restoreAllMocks();
   });
 
-  it("edits and atomically confirms a valid 2–4 stage queue", async () => {
+  it("names the loading state and explains what is loading", () => {
+    apiMock.getSession.mockReturnValue(new Promise(() => {}));
+    renderPage();
+
+    expect(
+      screen.getByRole("status", { name: "正在加载 W+ SOP 工作台" }),
+    ).toHaveAttribute("aria-live", "polite");
+    expect(
+      screen.getByText("正在同步环节、回答和预跑状态，请稍候。"),
+    ).toBeInTheDocument();
+  });
+
+  it("announces generation and labels both progress indicators", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "GeneratingQuestions",
+        state_version: 5,
+      }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByRole("status", { name: "正在生成问题" }),
+    ).toHaveAttribute("aria-live", "polite");
+    expect(
+      screen.getByRole("progressbar", { name: "SOP 总体进度" }),
+    ).toHaveAttribute("aria-valuenow", "12");
+    expect(
+      screen.getByRole("progressbar", { name: "当前运行进度" }),
+    ).toHaveAttribute("aria-valuenow", "12");
+  });
+
+  it("gives the pre-run result table a caption and scoped headers", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingTrialFeedback",
+        state_version: 10,
+        trial: {
+          run_id: "run-1",
+          status: "completed",
+          steps: [],
+          result_columns: [
+            { field: "product", label: "产品" },
+            { field: "due_at", label: "到期日" },
+          ],
+          result_rows: [{ product: "稳健理财", due_at: "2026-08-01" }],
+        },
+      }),
+    );
+    renderPage();
+
+    const table = await screen.findByRole("table", {
+      name: "系统预跑结果明细",
+    });
+    const caption = table.querySelector("caption");
+    const headers = table.querySelectorAll("th");
+
+    expect(caption).toHaveTextContent("系统预跑结果明细");
+    expect(headers).toHaveLength(2);
+    expect(Array.from(headers)).toEqual([
+      expect.objectContaining({ scope: "col" }),
+      expect.objectContaining({ scope: "col" }),
+    ]);
+  });
+
+  it("exposes the complete value of a long stage title", async () => {
+    const longStageTitle =
+      "核验跨区域重点客户近十二个月到期资产与当前持仓的完整覆盖范围";
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        stages: [
+          {
+            stage_id: "stage-1",
+            title: longStageTitle,
+            description: "确定产品和时间窗口",
+            status: "current",
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText(longStageTitle, { selector: "strong" }),
+    ).toHaveAttribute("title", longStageTitle);
+  });
+
+  it("opens and closes the named evidence drawer from the narrow-shell entry", async () => {
+    renderPage();
+
+    const trigger = await screen.findByRole("button", {
+      name: "查看本次 SOP 证据",
+      hidden: true,
+    });
+    fireEvent.click(trigger);
+
+    expect(
+      await screen.findByRole("dialog", { name: "本次 SOP 证据" }),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "关闭本次 SOP 证据" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "本次 SOP 证据" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("closes the evidence drawer when navigating to another SOP session", async () => {
+    renderPage({ withSessionSwitcher: true });
+
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: "查看本次 SOP 证据",
+        hidden: true,
+      }),
+    );
+    expect(
+      await screen.findByRole("dialog", { name: "本次 SOP 证据" }),
+    ).toBeInTheDocument();
+
+    apiMock.getSession.mockResolvedValue(
+      makeSession({ session_id: "sop-2", state_version: 1 }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "切换测试 Session" }));
+
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "本次 SOP 证据" }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("edits and atomically confirms a valid stage queue", async () => {
     renderPage();
 
     const firstStage = await screen.findByDisplayValue("确认名单范围");
@@ -173,6 +311,50 @@ describe("WPlusSopWorkspace", () => {
       }),
     ]);
   });
+
+  it("adds and confirms a fifth stage without imposing a manual upper limit", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        stages: [
+          ...makeSession().stages,
+          {
+            stage_id: "stage-3",
+            title: "核验客户资料",
+            description: "确认资料是否完整",
+            status: "pending",
+          },
+          {
+            stage_id: "stage-4",
+            title: "安排跟进计划",
+            description: "确认后续负责人",
+            status: "pending",
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    const addButton = await screen.findByRole("button", { name: "增加环节" });
+    expect(
+      screen.getByText("自动候选 2–4 个 · 手动新增不限"),
+    ).toBeInTheDocument();
+    expect(addButton).toBeEnabled();
+    fireEvent.click(addButton);
+    fireEvent.click(screen.getByRole("button", { name: "确认这 5 个环节" }));
+
+    await waitFor(() => expect(apiMock.sendCommand).toHaveBeenCalledTimes(1));
+    expect(apiMock.sendCommand.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        command: "confirm_stage_queue",
+        payload: {
+          stages: expect.arrayContaining([
+            expect.objectContaining({ title: "新环节 5" }),
+          ]),
+        },
+      }),
+    );
+    expect(apiMock.sendCommand.mock.calls[0][1].payload.stages).toHaveLength(5);
+  }, 15_000);
 
   it("uses native radio semantics and submits the whole question batch once", async () => {
     apiMock.getSession.mockResolvedValue(
@@ -226,6 +408,417 @@ describe("WPlusSopWorkspace", () => {
           },
         },
       }),
+    );
+  });
+
+  it("keeps answers editable but blocks submission while the owning Chat is finalizing", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        state_version: 7,
+        runtime_status: {
+          status: "finalizing",
+          runtime_ready: false,
+          blocking_run_id: "run-question-batch",
+        },
+        question_batch: {
+          batch_id: "batch-waiting",
+          stage_id: "stage-1",
+          questions: [
+            {
+              question_id: "q-waiting",
+              kind: "free_text",
+              prompt: "补充客户范围",
+              required: true,
+            },
+          ],
+        },
+      } as Partial<WPlusSopSession>),
+    );
+    renderPage();
+
+    const answer = await screen.findByLabelText("补充客户范围");
+    fireEvent.change(answer, { target: { value: "重点客户" } });
+
+    expect(answer).toHaveValue("重点客户");
+    expect(
+      screen.getByRole("button", { name: "正在完成上一轮处理" }),
+    ).toBeDisabled();
+    expect(screen.getAllByText("正在完成上一轮处理")).toHaveLength(2);
+    expect(apiMock.sendCommand).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when an AwaitingAnswer snapshot has no runtime readiness", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        state_version: 7,
+        runtime_status: undefined,
+        question_batch: {
+          batch_id: "batch-legacy",
+          stage_id: "stage-1",
+          questions: [
+            {
+              question_id: "q-legacy",
+              kind: "free_text",
+              prompt: "补充名单",
+              required: true,
+            },
+          ],
+        },
+      } as Partial<WPlusSopSession>),
+    );
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText("补充名单"), {
+      target: { value: "已补充" },
+    });
+    expect(
+      screen.getByRole("button", { name: "正在完成上一轮处理" }),
+    ).toBeDisabled();
+  });
+
+  it("enables answer submission from a same-version runtime_status SSE event", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        state_version: 7,
+        runtime_status: {
+          status: "finalizing",
+          runtime_ready: false,
+          blocking_run_id: "run-question-batch",
+        },
+        question_batch: {
+          batch_id: "batch-runtime-ready",
+          stage_id: "stage-1",
+          questions: [
+            {
+              question_id: "q-runtime-ready",
+              kind: "free_text",
+              prompt: "补充触达规则",
+              required: true,
+            },
+          ],
+        },
+      } as Partial<WPlusSopSession>),
+    );
+    renderPage();
+
+    fireEvent.change(await screen.findByLabelText("补充触达规则"), {
+      target: { value: "仅工作日" },
+    });
+    await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
+    expect(
+      screen.getByRole("button", { name: "正在完成上一轮处理" }),
+    ).toBeDisabled();
+
+    act(() => {
+      subscriptionCallbacks[0].onEvent({
+        event_id: "runtime-ready:sop-1",
+        session_id: "sop-1",
+        state_version: 7,
+        kind: "runtime_status",
+        runtime_status: {
+          status: "ready",
+          runtime_ready: true,
+          blocking_run_id: null,
+        },
+      });
+    });
+
+    const submit = screen.getByRole("button", {
+      name: "提交本轮 1 个回答",
+    });
+    expect(submit).toBeEnabled();
+    fireEvent.click(submit);
+    await waitFor(() => expect(apiMock.sendCommand).toHaveBeenCalledTimes(1));
+  });
+
+  it("preserves answer drafts and explains an owning_chat_finalizing 409", async () => {
+    const session = makeSession({
+      state: "AwaitingAnswer",
+      state_version: 7,
+      runtime_status: {
+        status: "ready",
+        runtime_ready: true,
+        blocking_run_id: null,
+      },
+      question_batch: {
+        batch_id: "batch-race",
+        stage_id: "stage-1",
+        questions: [
+          {
+            question_id: "q-race",
+            kind: "free_text",
+            prompt: "填写执行范围",
+            required: true,
+          },
+        ],
+      },
+    } as Partial<WPlusSopSession>);
+    apiMock.getSession.mockResolvedValue(session);
+    let rejectCommand: ((reason?: unknown) => void) | undefined;
+    apiMock.sendCommand.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectCommand = reject;
+        }),
+    );
+    const finalizingError = Object.assign(
+      new Error("owning Chat is finalizing"),
+      {
+        status: 409,
+        data: {
+          detail: {
+            code: "owning_chat_finalizing",
+            message: "上一轮 Agent 正在收尾",
+            retry_after_ms: 1000,
+          },
+        },
+      },
+    );
+    renderPage();
+
+    const answer = await screen.findByLabelText("填写执行范围");
+    fireEvent.change(answer, { target: { value: "保留这份回答" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交本轮 1 个回答" }));
+    await waitFor(() => expect(rejectCommand).toBeDefined());
+    await act(async () => rejectCommand?.(finalizingError));
+
+    expect(
+      await screen.findByText(
+        "上一轮处理仍在结束中，回答已保留，请稍候再提交。",
+      ),
+    ).toBeInTheDocument();
+    expect(answer).toHaveValue("保留这份回答");
+    expect(apiMock.getSession).toHaveBeenCalledTimes(2);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: /提交本轮 1 个回答/ }),
+      ).toBeEnabled(),
+    );
+    expect(screen.queryByText(/页面状态已变化/)).not.toBeInTheDocument();
+  });
+
+  it("ignores a late command 409 after navigating to another SOP session", async () => {
+    const questionBatch = {
+      batch_id: "batch-route-race",
+      stage_id: "stage-1",
+      questions: [
+        {
+          question_id: "q-route-race",
+          kind: "free_text" as const,
+          prompt: "填写范围",
+          required: true,
+        },
+      ],
+    };
+    apiMock.getSession
+      .mockResolvedValueOnce(
+        makeSession({
+          state: "AwaitingAnswer",
+          state_version: 7,
+          question_batch: questionBatch,
+        }),
+      )
+      .mockResolvedValueOnce(
+        makeSession({
+          session_id: "sop-2",
+          title: "新会话",
+          state: "AwaitingAnswer",
+          state_version: 3,
+          question_batch: questionBatch,
+        }),
+      );
+    let rejectCommand: ((reason?: unknown) => void) | undefined;
+    apiMock.sendCommand.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectCommand = reject;
+        }),
+    );
+    renderPage({ withSessionSwitcher: true });
+
+    fireEvent.change(await screen.findByLabelText("填写范围"), {
+      target: { value: "旧会话回答" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交本轮 1 个回答" }));
+    await waitFor(() => expect(rejectCommand).toBeDefined());
+    fireEvent.click(screen.getByRole("button", { name: "切换测试 Session" }));
+    expect(
+      await screen.findByRole("heading", { name: "新会话" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      rejectCommand?.(
+        Object.assign(new Error("owning Chat is finalizing"), {
+          status: 409,
+          data: { detail: { code: "owning_chat_finalizing" } },
+        }),
+      );
+    });
+    expect(screen.getByRole("heading", { name: "新会话" })).toBeInTheDocument();
+    expect(screen.queryByText(/上一轮处理仍在结束中/)).not.toBeInTheDocument();
+    expect(apiMock.getSession).toHaveBeenCalledTimes(2);
+  });
+
+  it("submits single- and multi-select custom answers as structured values", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        state_version: 7,
+        question_batch: {
+          batch_id: "batch-custom",
+          stage_id: "stage-1",
+          questions: [
+            {
+              question_id: "q-single",
+              kind: "single_select",
+              prompt: "选择触达渠道",
+              required: true,
+              options: [
+                { option_id: "phone", label: "电话" },
+                {
+                  option_id: "single-other",
+                  label: "其他渠道",
+                  requires_custom_input: true,
+                },
+              ],
+            },
+            {
+              question_id: "q-multi",
+              kind: "multi_select",
+              prompt: "选择跟进动作",
+              required: true,
+              options: [
+                { option_id: "call", label: "致电" },
+                {
+                  option_id: "multi-other-1",
+                  label: "其他动作一",
+                  requires_custom_input: true,
+                },
+                {
+                  option_id: "multi-other-2",
+                  label: "其他动作二",
+                  requires_custom_input: true,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("radio", { name: "其他渠道" }));
+    const singleCustomInput = screen.getByLabelText("选择触达渠道 自定义补充");
+    expect(singleCustomInput).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "提交本轮 2 个回答" }),
+    ).toBeDisabled();
+    fireEvent.change(singleCustomInput, { target: { value: "企业微信" } });
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "致电" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "其他动作一" }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "其他动作二" }));
+    const multiCustomInput = screen.getByLabelText("选择跟进动作 自定义补充");
+    expect(multiCustomInput).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "提交本轮 2 个回答" }),
+    ).toBeDisabled();
+    fireEvent.change(multiCustomInput, { target: { value: "寄送纸质资料" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "提交本轮 2 个回答" }));
+
+    await waitFor(() => expect(apiMock.sendCommand).toHaveBeenCalledTimes(1));
+    expect(apiMock.sendCommand.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        command: "submit_answers",
+        payload: {
+          batch_id: "batch-custom",
+          answers: {
+            "q-single": {
+              selected_option_ids: ["single-other"],
+              text: "企业微信",
+            },
+            "q-multi": {
+              selected_option_ids: ["call", "multi-other-1", "multi-other-2"],
+              text: "寄送纸质资料",
+            },
+          },
+        },
+      }),
+    );
+  }, 15_000);
+
+  it("hides a custom input after switching to a normal option", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        state_version: 7,
+        question_batch: {
+          batch_id: "batch-custom-toggle",
+          stage_id: "stage-1",
+          questions: [
+            {
+              question_id: "q-single",
+              kind: "single_select",
+              prompt: "选择触达渠道",
+              required: true,
+              options: [
+                { option_id: "phone", label: "电话" },
+                {
+                  option_id: "other",
+                  label: "其他渠道",
+                  requires_custom_input: true,
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("radio", { name: "其他渠道" }));
+    expect(
+      screen.getByLabelText("选择触达渠道 自定义补充"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("radio", { name: "电话" }));
+    expect(
+      screen.queryByLabelText("选择触达渠道 自定义补充"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("navigates back to the receipt Chat after saving and exiting", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        state_version: 7,
+        question_batch: {
+          batch_id: "batch-1",
+          stage_id: "stage-1",
+          questions: [],
+        },
+      }),
+    );
+    apiMock.sendCommand.mockResolvedValue({
+      command_request_id: "save-1",
+      accepted: true,
+      session: makeSession({
+        chat_id: "chat-from-receipt",
+        state: "Paused",
+        state_version: 8,
+      }),
+    });
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("button", { name: "保存并退出" }));
+
+    expect(await screen.findByText("所属 Chat")).toBeInTheDocument();
+    expect(apiMock.sendCommand).toHaveBeenCalledWith(
+      "sop-1",
+      expect.objectContaining({ command: "save_and_exit" }),
     );
   });
 
@@ -459,6 +1052,76 @@ describe("WPlusSopWorkspace", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("ignores a recovery snapshot after navigating to another SOP session", async () => {
+    let resolveOldRecovery: ((session: WPlusSopSession) => void) | undefined;
+    apiMock.getSession
+      .mockResolvedValueOnce(makeSession({ title: "旧会话" }))
+      .mockImplementationOnce(
+        () =>
+          new Promise<WPlusSopSession>((resolve) => {
+            resolveOldRecovery = resolve;
+          }),
+      )
+      .mockResolvedValueOnce(
+        makeSession({ session_id: "sop-2", title: "新会话" }),
+      );
+    renderPage({ withSessionSwitcher: true });
+
+    await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
+    act(() => subscriptionCallbacks[0].onError(new Error("stream ended")));
+    await waitFor(() => expect(apiMock.getSession).toHaveBeenCalledTimes(2));
+    fireEvent.click(screen.getByRole("button", { name: "切换测试 Session" }));
+    expect(
+      await screen.findByRole("heading", { name: "新会话" }),
+    ).toBeInTheDocument();
+
+    await act(async () => {
+      resolveOldRecovery?.(makeSession({ title: "旧会话覆盖" }));
+    });
+    expect(screen.getByRole("heading", { name: "新会话" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "旧会话覆盖" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("removes old-session controls while the destination session loads", async () => {
+    apiMock.getSession
+      .mockResolvedValueOnce(
+        makeSession({
+          state: "AwaitingAnswer",
+          state_version: 7,
+          question_batch: {
+            batch_id: "batch-old-controls",
+            stage_id: "stage-1",
+            questions: [
+              {
+                question_id: "q-old-controls",
+                kind: "free_text",
+                prompt: "旧会话输入",
+                required: true,
+              },
+            ],
+          },
+        }),
+      )
+      .mockImplementationOnce(() => new Promise<WPlusSopSession>(() => {}));
+    renderPage({ withSessionSwitcher: true });
+
+    fireEvent.change(await screen.findByLabelText("旧会话输入"), {
+      target: { value: "完整回答" },
+    });
+    const oldSubmit = screen.getByRole("button", {
+      name: "提交本轮 1 个回答",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "切换测试 Session" }));
+
+    await waitFor(() =>
+      expect(screen.queryByLabelText("旧会话输入")).not.toBeInTheDocument(),
+    );
+    fireEvent.click(oldSubmit);
+    expect(apiMock.sendCommand).not.toHaveBeenCalled();
+  });
+
   it("shows the active run trace without applying it as Session state", async () => {
     apiMock.getSession.mockResolvedValue(
       makeSession({
@@ -470,7 +1133,7 @@ describe("WPlusSopWorkspace", () => {
     renderPage();
 
     const trigger = await screen.findByRole("button", {
-      name: "查看实时流追踪（调试）",
+      name: "查看实时返回内容（调试）",
     });
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
 
@@ -513,7 +1176,7 @@ describe("WPlusSopWorkspace", () => {
     expect(
       screen.queryByText(/content_chars=8 hidden=true/),
     ).not.toBeInTheDocument();
-    expect(await screen.findByText("等待流追踪摘要…")).toBeInTheDocument();
+    expect(await screen.findByText("等待返回内容…")).toBeInTheDocument();
 
     act(() => {
       subscriptionCallbacks[0].onEvent({
@@ -531,7 +1194,7 @@ describe("WPlusSopWorkspace", () => {
     });
 
     expect(
-      screen.queryByRole("button", { name: "查看实时流追踪（调试）" }),
+      screen.queryByRole("button", { name: "查看实时返回内容（调试）" }),
     ).not.toBeInTheDocument();
   });
 
@@ -545,7 +1208,7 @@ describe("WPlusSopWorkspace", () => {
     );
     renderPage();
     return screen.findByRole("button", {
-      name: "查看实时流追踪（调试）",
+      name: "查看实时返回内容（调试）",
     });
   }
 
@@ -581,7 +1244,7 @@ describe("WPlusSopWorkspace", () => {
     await waitFor(() =>
       expect(trigger).toHaveAttribute("aria-expanded", "true"),
     );
-    expect(await screen.findByText("等待流追踪摘要…")).toBeInTheDocument();
+    expect(await screen.findByText("等待返回内容…")).toBeInTheDocument();
 
     vi.useFakeTimers();
     try {
@@ -601,7 +1264,7 @@ describe("WPlusSopWorkspace", () => {
     );
     expect(
       await screen.findByText(
-        /仅展示帧类型、状态和长度，正文、工具输出和结构化业务数据已隐藏/,
+        /仅展示普通回复文本；思考过程、工具调用、参数、工具输出和非文本内容均已隐藏/,
       ),
     ).toBeInTheDocument();
 
@@ -636,7 +1299,7 @@ describe("WPlusSopWorkspace", () => {
     renderPage();
 
     const trigger = await screen.findByRole("button", {
-      name: "查看实时流追踪（调试）",
+      name: "查看实时返回内容（调试）",
     });
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
     fireEvent.focus(trigger);
@@ -671,14 +1334,14 @@ describe("WPlusSopWorkspace", () => {
     });
 
     expect(screen.queryByText("sequence=2")).not.toBeInTheDocument();
-    expect(await screen.findByText("等待流追踪摘要…")).toBeInTheDocument();
+    expect(await screen.findByText("等待返回内容…")).toBeInTheDocument();
     emitSafeStreamTrace({
       runId: "run-1",
       sequence: 3,
       summaryText: "late-old-run",
     });
     expect(screen.queryByText("late-old-run")).not.toBeInTheDocument();
-    expect(screen.getByText("等待流追踪摘要…")).toBeInTheDocument();
+    expect(screen.getByText("等待返回内容…")).toBeInTheDocument();
   });
 
   it("follows new trace lines only while the viewer stays near the bottom", async () => {
@@ -691,7 +1354,7 @@ describe("WPlusSopWorkspace", () => {
     );
     renderPage();
     const trigger = await screen.findByRole("button", {
-      name: "查看实时流追踪（调试）",
+      name: "查看实时返回内容（调试）",
     });
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
 
@@ -746,7 +1409,7 @@ describe("WPlusSopWorkspace", () => {
     renderPage({ withSessionSwitcher: true });
 
     const trigger = await screen.findByRole("button", {
-      name: "查看实时流追踪（调试）",
+      name: "查看实时返回内容（调试）",
     });
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
     emitSafeStreamTrace({
@@ -766,7 +1429,7 @@ describe("WPlusSopWorkspace", () => {
       ),
     );
     const currentTrigger = screen.getByRole("button", {
-      name: "查看实时流追踪（调试）",
+      name: "查看实时返回内容（调试）",
     });
     await waitFor(() =>
       expect(currentTrigger).toHaveAttribute("aria-expanded", "false"),

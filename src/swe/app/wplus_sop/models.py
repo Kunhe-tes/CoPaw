@@ -189,7 +189,7 @@ class Stage(_IdentifiedModel):
 
 
 class StageQueue(StrictModel):
-    stages: list[Stage] = Field(min_length=2, max_length=4)
+    stages: list[Stage] = Field(min_length=2)
 
     @model_validator(mode="after")
     def _unique_stages(self) -> "StageQueue":
@@ -206,6 +206,13 @@ class QuestionOption(_IdentifiedModel):
     option_id: str
     label: str
     description: str | None = None
+    requires_custom_input: bool = Field(
+        default=False,
+        description=(
+            "Whether selecting this option requires non-empty custom text "
+            "from the user."
+        ),
+    )
 
     _id_fields = ("option_id",)
 
@@ -592,7 +599,7 @@ class FinalSopResult(StrictModel):
 
 
 class StageProposalPayload(StageQueue):
-    pass
+    stages: list[Stage] = Field(min_length=2, max_length=4)
 
 
 class StageQueueConfirmedPayload(StageQueue):

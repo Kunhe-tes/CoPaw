@@ -2,6 +2,7 @@ import {
   Alert,
   Button,
   Checkbox,
+  Drawer,
   Empty,
   Input,
   Popover,
@@ -30,12 +31,13 @@ import {
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { wplusSopApi } from "@/api/modules/wplusSop";
 import type {
   WPlusSopAnswerValue,
   WPlusSopCommandType,
+  WPlusSopCustomAnswerValue,
   WPlusSopQuestion,
   WPlusSopSafeStreamTrace,
   WPlusSopSession,
@@ -54,6 +56,8 @@ type LoadState = "loading" | "ready" | "unavailable" | "error";
 
 const STREAM_MAX_RECONNECTS = 3;
 const STREAM_RECONNECT_BASE_DELAY_MS = 250;
+const PROGRESS_STROKE_COLOR = "var(--console-conversation-primary, #3769FC)";
+const PROGRESS_TRAIL_COLOR = "var(--console-management-border, #E5E7EB)";
 
 interface LoadSessionOptions {
   background?: boolean;
@@ -75,6 +79,22 @@ function errorStatus(error: unknown): number | undefined {
     return undefined;
   }
   return Number((error as { status?: unknown }).status);
+}
+
+function commandErrorCode(error: unknown): string | undefined {
+  if (typeof error !== "object" || error === null || !("data" in error)) {
+    return undefined;
+  }
+  const data = (error as { data?: unknown }).data;
+  if (typeof data !== "object" || data === null || !("detail" in data)) {
+    return undefined;
+  }
+  const detail = (data as { detail?: unknown }).detail;
+  if (typeof detail !== "object" || detail === null || !("code" in detail)) {
+    return undefined;
+  }
+  const code = (detail as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
 }
 
 function isGenerating(session: WPlusSopSession): boolean {
@@ -122,7 +142,6 @@ function StageQueueEditor({
     onChange(next);
   };
   const add = () => {
-    if (stages.length >= 4) return;
     const suffix = createCommandRequestId().slice(-6);
     onChange([
       ...stages,
@@ -143,7 +162,7 @@ function StageQueueEditor({
           <h2 id="stage-queue-title">确认 SOP 环节</h2>
           <p>可重命名、增删或调整顺序；确认时会一次性保存整个队列。</p>
         </div>
-        <Tag color="cyan">限制 2–4 个</Tag>
+        <Tag color="cyan">自动候选 2–4 个 · 手动新增不限</Tag>
       </div>
 
       <ol className={styles.stageEditor}>
@@ -228,11 +247,7 @@ function StageQueueEditor({
         />
       )}
       <div className={styles.sectionActions}>
-        <Button
-          icon={<Plus size={16} />}
-          disabled={stages.length >= 4}
-          onClick={add}
-        >
+        <Button icon={<Plus size={16} />} onClick={add}>
           增加环节
         </Button>
         <Button
@@ -260,39 +275,107 @@ function QuestionField({
   value: WPlusSopAnswerValue | undefined;
   onChange: (value: WPlusSopAnswerValue) => void;
 }) {
+  const structuredValue = isStructuredAnswerValue(value) ? value : null;
+  const selectedOptionIds =
+    typeof value === "string"
+      ? [value]
+      : Array.isArray(value)
+      ? value
+      : structuredValue?.selected_option_ids || [];
+  const selectedRequiresCustomInput = selectedOptionIds.some(
+    (optionId) =>
+      question.options?.some(
+        (option) =>
+          option.option_id === optionId && option.requires_custom_input,
+      ),
+  );
+  const customInput = selectedRequiresCustomInput ? (
+    <Input.TextArea
+      className={styles.customAnswerInput}
+      aria-label={`${question.prompt} 自定义补充`}
+      autoSize={{ minRows: 2, maxRows: 6 }}
+      value={structuredValue?.text || ""}
+      onChange={(event) =>
+        onChange({
+          selected_option_ids: selectedOptionIds,
+          text: event.target.value,
+        })
+      }
+      placeholder="输入自定义补充"
+    />
+  ) : null;
+
   if (question.kind === "single_select") {
     return (
-      <Radio.Group
-        className={styles.optionList}
-        value={typeof value === "string" ? value : undefined}
-        onChange={(event) => onChange(event.target.value)}
-      >
-        {(question.options || []).map((option) => (
-          <Radio key={option.option_id} value={option.option_id}>
-            <span>{option.label}</span>
-            {option.description && (
-              <small className={styles.optionDescription}>
-                {option.description}
-              </small>
-            )}
-          </Radio>
-        ))}
-      </Radio.Group>
+      <>
+        <Radio.Group
+          className={styles.optionList}
+          value={selectedOptionIds[0]}
+          onChange={(event) => {
+            const optionId = String(event.target.value);
+            const requiresCustomInput = question.options?.some(
+              (option) =>
+                option.option_id === optionId && option.requires_custom_input,
+            );
+            onChange(
+              requiresCustomInput
+                ? {
+                    selected_option_ids: [optionId],
+                    text: structuredValue?.text || "",
+                  }
+                : optionId,
+            );
+          }}
+        >
+          {(question.options || []).map((option) => (
+            <Radio key={option.option_id} value={option.option_id}>
+              <span>{option.label}</span>
+              {option.description && (
+                <small className={styles.optionDescription}>
+                  {option.description}
+                </small>
+              )}
+            </Radio>
+          ))}
+        </Radio.Group>
+        {customInput}
+      </>
     );
   }
   if (question.kind === "multi_select") {
     return (
-      <Checkbox.Group
-        className={styles.optionList}
-        value={Array.isArray(value) ? value : []}
-        onChange={(values) => onChange(values.map(String))}
-      >
-        {(question.options || []).map((option) => (
-          <Checkbox key={option.option_id} value={option.option_id}>
-            {option.label}
-          </Checkbox>
-        ))}
-      </Checkbox.Group>
+      <>
+        <Checkbox.Group
+          className={styles.optionList}
+          value={selectedOptionIds}
+          onChange={(values) => {
+            const optionIds = values.map(String);
+            const requiresCustomInput = optionIds.some(
+              (optionId) =>
+                question.options?.some(
+                  (option) =>
+                    option.option_id === optionId &&
+                    option.requires_custom_input,
+                ),
+            );
+            onChange(
+              requiresCustomInput
+                ? {
+                    selected_option_ids: optionIds,
+                    text: structuredValue?.text || "",
+                  }
+                : optionIds,
+            );
+          }}
+        >
+          {(question.options || []).map((option) => (
+            <Checkbox key={option.option_id} value={option.option_id}>
+              {option.label}
+            </Checkbox>
+          ))}
+        </Checkbox.Group>
+        {customInput}
+      </>
     );
   }
   return (
@@ -306,27 +389,44 @@ function QuestionField({
   );
 }
 
+function isStructuredAnswerValue(
+  value: WPlusSopAnswerValue | undefined,
+): value is WPlusSopCustomAnswerValue {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      Array.isArray(value.selected_option_ids),
+  );
+}
+
 function QuestionBatchPanel({
   session,
   answers,
   busy,
+  runtimeReady,
   onAnswer,
   onSubmit,
 }: {
   session: WPlusSopSession;
   answers: Record<string, WPlusSopAnswerValue>;
   busy: boolean;
+  runtimeReady: boolean;
   onAnswer: (questionId: string, value: WPlusSopAnswerValue) => void;
   onSubmit: () => void;
 }) {
   const batch = session.question_batch;
   if (!batch) return null;
   const complete = batch.questions.every((question) => {
-    if (!question.required) return true;
     const value = answers[question.question_id];
+    if (isStructuredAnswerValue(value)) {
+      if (!value.text?.trim()) return false;
+      return !question.required || value.selected_option_ids.length > 0;
+    }
+    if (!question.required) return true;
     return Array.isArray(value)
       ? value.length > 0
-      : Boolean(value && value.trim());
+      : Boolean(typeof value === "string" && value.trim());
   });
 
   return (
@@ -358,15 +458,21 @@ function QuestionBatchPanel({
       </div>
       <div className={styles.sectionActions}>
         <span className={styles.actionHint}>
-          {complete ? "回答已齐全" : "请先完成所有必填项"}
+          {!runtimeReady
+            ? "正在完成上一轮处理"
+            : complete
+            ? "回答已齐全"
+            : "请先完成所有必填项"}
         </span>
         <Button
           type="primary"
           loading={busy}
-          disabled={!complete}
+          disabled={!complete || !runtimeReady}
           onClick={onSubmit}
         >
-          提交本轮 {batch.questions.length} 个回答
+          {runtimeReady
+            ? `提交本轮 ${batch.questions.length} 个回答`
+            : "正在完成上一轮处理"}
         </Button>
       </div>
     </section>
@@ -397,7 +503,7 @@ function TrialPanel({
         <div>
           <span className={styles.eyebrow}>流程 03</span>
           <h2 id="trial-title">系统预跑结果</h2>
-          <p>CoPaw 已代你调用真实能力；检查结果后可反馈并重新预跑。</p>
+          <p>系统已调用真实能力；检查结果后可反馈并重新预跑。</p>
         </div>
         <Tag
           color={
@@ -440,10 +546,15 @@ function TrialPanel({
       {table.columns.length > 0 && (
         <div className={styles.tableWrap}>
           <table>
+            <caption className={styles.visuallyHidden}>
+              系统预跑结果明细
+            </caption>
             <thead>
               <tr>
                 {table.columns.map((column) => (
-                  <th key={column.field}>{column.label}</th>
+                  <th key={column.field} scope="col">
+                    {column.label}
+                  </th>
                 ))}
               </tr>
             </thead>
@@ -504,7 +615,7 @@ function EvidenceRail({ session }: { session: WPlusSopSession }) {
             {session.facts.map((fact) => (
               <li key={fact}>
                 <Check size={14} />
-                <span>{fact}</span>
+                <span title={fact}>{fact}</span>
               </li>
             ))}
           </ul>
@@ -519,7 +630,7 @@ function EvidenceRail({ session }: { session: WPlusSopSession }) {
             {session.unknowns.map((unknown) => (
               <li key={unknown}>
                 <Clock3 size={14} />
-                <span>{unknown}</span>
+                <span title={unknown}>{unknown}</span>
               </li>
             ))}
           </ul>
@@ -533,7 +644,7 @@ function EvidenceRail({ session }: { session: WPlusSopSession }) {
           <ul className={styles.capabilityList}>
             {session.capabilities.map((capability) => (
               <li key={capability.capability_id}>
-                <span>{capability.name}</span>
+                <span title={capability.name}>{capability.name}</span>
                 <Tag
                   color={
                     capability.verification_status === "verified"
@@ -558,6 +669,7 @@ function EvidenceRail({ session }: { session: WPlusSopSession }) {
 
 export default function WPlusSopWorkspace() {
   const { sessionId = "" } = useParams();
+  const navigate = useNavigate();
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [session, setSession] = useState<WPlusSopSession | null>(null);
   const sessionRef = useRef<WPlusSopSession | null>(null);
@@ -569,6 +681,7 @@ export default function WPlusSopWorkspace() {
   const [feedback, setFeedback] = useState("");
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [evidenceDrawerOpen, setEvidenceDrawerOpen] = useState(false);
   const [safeStreamTrace, setSafeStreamTrace] =
     useState<ActiveSafeStreamTrace | null>(null);
   const [debugPopoverOpen, setDebugPopoverOpen] = useState(false);
@@ -579,6 +692,8 @@ export default function WPlusSopWorkspace() {
   const [downloadingArtifactId, setDownloadingArtifactId] = useState<
     string | null
   >(null);
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   const commitSession = useCallback(
     (
@@ -605,7 +720,12 @@ export default function WPlusSopWorkspace() {
   const loadSession = useCallback(
     async (signal?: AbortSignal, options: LoadSessionOptions = {}) => {
       try {
-        const snapshot = await wplusSopApi.getSession(sessionId, signal);
+        const requestedSessionId = sessionId;
+        const snapshot = await wplusSopApi.getSession(
+          requestedSessionId,
+          signal,
+        );
+        if (sessionIdRef.current !== requestedSessionId) return null;
         commitSession(snapshot, options);
         setLoadState("ready");
         return snapshot;
@@ -624,9 +744,15 @@ export default function WPlusSopWorkspace() {
 
   useEffect(() => {
     const controller = new AbortController();
+    if (sessionRef.current?.session_id !== sessionId) {
+      sessionRef.current = null;
+      setSession(null);
+      setLoadState("loading");
+      setNotice(null);
+    }
     void loadSession(controller.signal);
     return () => controller.abort();
-  }, [loadSession]);
+  }, [loadSession, sessionId]);
 
   useEffect(() => {
     const subscribedSession = sessionRef.current;
@@ -686,7 +812,26 @@ export default function WPlusSopWorkspace() {
         afterStateVersion,
         (event) => {
           const current = sessionRef.current;
-          if (!current) return;
+          if (
+            !current ||
+            event.session_id !== subscribedSessionId ||
+            current.session_id !== subscribedSessionId
+          ) {
+            return;
+          }
+          reconnectAttempts = 0;
+          if (event.kind === "runtime_status") {
+            if (
+              event.state_version === current.state_version &&
+              event.runtime_status
+            ) {
+              commitSession(
+                { ...current, runtime_status: event.runtime_status },
+                { preserveStageDraft: true },
+              );
+            }
+            return;
+          }
           if (event.kind === "safe_stream_trace") {
             const trace = event.safe_stream_trace;
             const currentRunId = current.trial?.run_id;
@@ -783,7 +928,8 @@ export default function WPlusSopWorkspace() {
     debugShouldFollowRef.current = true;
     setSafeStreamTrace(null);
     setDebugPopoverOpen(false);
-  }, [clearDebugPopoverCloseTimer, session?.session_id]);
+    setEvidenceDrawerOpen(false);
+  }, [clearDebugPopoverCloseTimer, session?.session_id, sessionId]);
 
   useEffect(() => {
     if (!sessionIsGenerating) {
@@ -890,7 +1036,7 @@ export default function WPlusSopWorkspace() {
       command: WPlusSopCommandType,
       payload: Record<string, unknown> = {},
     ) => {
-      if (!session) return null;
+      if (!session || session.session_id !== sessionIdRef.current) return null;
       setBusy(true);
       setNotice(null);
       try {
@@ -900,11 +1046,39 @@ export default function WPlusSopWorkspace() {
           expected_state_version: session.state_version,
           payload,
         });
+        if (sessionIdRef.current !== session.session_id) return null;
         commitSession(receipt.session);
+        if (command === "save_and_exit") {
+          navigate(`/chat/${encodeURIComponent(receipt.session.chat_id)}`);
+        }
         return receipt.session;
       } catch (error) {
+        if (sessionIdRef.current !== session.session_id) return null;
         const status = errorStatus(error);
-        if (status === 409) {
+        if (
+          status === 409 &&
+          commandErrorCode(error) === "owning_chat_finalizing"
+        ) {
+          const refreshed = await loadSession(undefined, {
+            background: true,
+            preserveStageDraft: true,
+          });
+          if (!refreshed) {
+            const current = sessionRef.current;
+            if (current) {
+              commitSession({
+                ...current,
+                runtime_status: {
+                  status: "finalizing",
+                  runtime_ready: false,
+                  blocking_run_id:
+                    current.runtime_status?.blocking_run_id ?? null,
+                },
+              });
+            }
+          }
+          setNotice("上一轮处理仍在结束中，回答已保留，请稍候再提交。");
+        } else if (status === 409) {
           await loadSession(undefined, {
             background: true,
             preserveStageDraft: command === "confirm_stage_queue",
@@ -920,7 +1094,7 @@ export default function WPlusSopWorkspace() {
         setBusy(false);
       }
     },
-    [commitSession, loadSession, session],
+    [commitSession, loadSession, navigate, session],
   );
 
   const submitAnswers = useCallback(async () => {
@@ -953,6 +1127,7 @@ export default function WPlusSopWorkspace() {
           session={session}
           answers={answers}
           busy={busy}
+          runtimeReady={session.runtime_status?.runtime_ready === true}
           onAnswer={(questionId, value) => {
             setAnswerDraft((current) => ({
               scope: answerScope,
@@ -1138,12 +1313,13 @@ export default function WPlusSopWorkspace() {
                 type="text"
                 disabled={!artifact.download_url}
                 loading={downloadingArtifactId === artifact.artifact_id}
+                title={artifact.name}
                 onClick={() =>
                   void downloadArtifact(artifact.artifact_id, artifact.name)
                 }
               >
                 <FileCheck2 size={16} />
-                {artifact.name}
+                <span className={styles.artifactName}>{artifact.name}</span>
               </Button>
             ))}
           </div>
@@ -1161,17 +1337,24 @@ export default function WPlusSopWorkspace() {
       );
     }
     return (
-      <section className={styles.runningPanel}>
+      <section
+        className={styles.runningPanel}
+        role="status"
+        aria-live="polite"
+        aria-labelledby="wplus-running-title"
+      >
         <div className={styles.runPulse}>
           <RefreshCw size={22} />
         </div>
-        <span className={styles.eyebrow}>CoPaw 正在处理</span>
-        <h2>{getSessionStateLabel(session)}</h2>
+        <span className={styles.eyebrow}>正在处理</span>
+        <h2 id="wplus-running-title">{getSessionStateLabel(session)}</h2>
         <p>本轮由系统在后台完成。你可以离开页面，运行不会中断。</p>
         <Progress
+          aria-label="当前运行进度"
           percent={stateProgress(session)}
           showInfo={false}
-          strokeColor="#13786f"
+          strokeColor={PROGRESS_STROKE_COLOR}
+          trailColor={PROGRESS_TRAIL_COLOR}
         />
         <Popover
           key={session.session_id}
@@ -1190,7 +1373,7 @@ export default function WPlusSopWorkspace() {
                 className={styles.debugStreamTitle}
                 data-testid="wplus-debug-stream-title"
               >
-                实时流追踪（调试）
+                实时返回内容（调试）
               </div>
               {activeSafeStreamTrace?.summary_text ? (
                 <pre
@@ -1201,7 +1384,7 @@ export default function WPlusSopWorkspace() {
                   {activeSafeStreamTrace.summary_text}
                 </pre>
               ) : (
-                <p className={styles.debugStreamEmpty}>等待流追踪摘要…</p>
+                <p className={styles.debugStreamEmpty}>等待返回内容…</p>
               )}
               {activeSafeStreamTrace?.truncated ? (
                 <p className={styles.debugStreamTruncated}>
@@ -1209,7 +1392,7 @@ export default function WPlusSopWorkspace() {
                 </p>
               ) : null}
               <p className={styles.debugStreamNote}>
-                仅展示帧类型、状态和长度，正文、工具输出和结构化业务数据已隐藏。
+                仅展示普通回复文本；思考过程、工具调用、参数、工具输出和非文本内容均已隐藏。
               </p>
             </div>
           }
@@ -1217,7 +1400,7 @@ export default function WPlusSopWorkspace() {
           <Button
             className={styles.debugStreamTrigger}
             size="small"
-            aria-label="查看实时流追踪（调试）"
+            aria-label="查看实时返回内容（调试）"
             aria-expanded={debugPopoverOpen}
             onMouseEnter={() => {
               clearDebugPopoverCloseTimer();
@@ -1253,7 +1436,7 @@ export default function WPlusSopWorkspace() {
               setDebugPopoverOpen(true);
             }}
           >
-            实时流追踪
+            实时返回内容
           </Button>
         </Popover>
       </section>
@@ -1279,7 +1462,18 @@ export default function WPlusSopWorkspace() {
   if (loadState === "loading") {
     return (
       <main className={styles.statePage}>
-        <Skeleton active paragraph={{ rows: 8 }} />
+        <section
+          className={styles.loadingStatus}
+          role="status"
+          aria-live="polite"
+          aria-labelledby="wplus-loading-title"
+        >
+          <h1 id="wplus-loading-title">正在加载 W+ SOP 工作台</h1>
+          <p>正在同步环节、回答和预跑状态，请稍候。</p>
+          <div className={styles.loadingSkeleton} aria-hidden="true">
+            <Skeleton active paragraph={{ rows: 5 }} />
+          </div>
+        </section>
       </main>
     );
   }
@@ -1308,7 +1502,7 @@ export default function WPlusSopWorkspace() {
   }
 
   return (
-    <main className={styles.workspace}>
+    <main className={styles.workspace} aria-labelledby="wplus-workspace-title">
       <header className={styles.topbar}>
         <div>
           <Link to={`/chat/${session.chat_id}`} className={styles.backLink}>
@@ -1318,7 +1512,9 @@ export default function WPlusSopWorkspace() {
           <div className={styles.titleRow}>
             <div className={styles.productMark}>W+</div>
             <div>
-              <h1>{session.title}</h1>
+              <h1 id="wplus-workspace-title" title={session.title}>
+                {session.title}
+              </h1>
               <p>
                 状态版本 {session.state_version} · 修订 {session.revision}
               </p>
@@ -1370,10 +1566,11 @@ export default function WPlusSopWorkspace() {
           <strong>{stateProgress(session)}%</strong>
         </div>
         <Progress
+          aria-label="SOP 总体进度"
           percent={stateProgress(session)}
           showInfo={false}
-          strokeColor="#13786f"
-          trailColor="#dfe8e7"
+          strokeColor={PROGRESS_STROKE_COLOR}
+          trailColor={PROGRESS_TRAIL_COLOR}
         />
         <ol>
           {session.stages.length ? (
@@ -1381,7 +1578,7 @@ export default function WPlusSopWorkspace() {
               <li key={stage.stage_id} data-status={stage.status}>
                 <span>{String(index + 1).padStart(2, "0")}</span>
                 <div>
-                  <strong>{stage.title}</strong>
+                  <strong title={stage.title}>{stage.title}</strong>
                   <small>
                     {stage.status === "confirmed"
                       ? "已确认"
@@ -1404,10 +1601,34 @@ export default function WPlusSopWorkspace() {
         </ol>
       </section>
 
+      <div className={styles.evidenceDrawerEntry}>
+        <Button
+          icon={<FileCheck2 size={16} />}
+          onClick={() => setEvidenceDrawerOpen(true)}
+        >
+          查看本次 SOP 证据
+        </Button>
+      </div>
+
       <div className={styles.workspaceGrid}>
         <div className={styles.primaryColumn}>{mainPanel}</div>
         <EvidenceRail session={session} />
       </div>
+
+      <Drawer
+        rootClassName={styles.evidenceDrawer}
+        title="本次 SOP 证据"
+        placement="right"
+        width="min(92vw, 380px)"
+        open={evidenceDrawerOpen}
+        destroyOnHidden
+        closable={{ "aria-label": "关闭本次 SOP 证据" }}
+        onClose={() => setEvidenceDrawerOpen(false)}
+      >
+        <div className={styles.evidenceDrawerBody}>
+          <EvidenceRail session={session} />
+        </div>
+      </Drawer>
     </main>
   );
 }

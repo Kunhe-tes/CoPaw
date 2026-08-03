@@ -19,6 +19,7 @@ from swe.app.wplus_sop.models import (
     Stage,
     StageProposalPayload,
     StageQueue,
+    StageQueueConfirmedPayload,
     StructuredInteractionEnvelope,
     TrialExecutionCompletedPayload,
     assert_legal_transition,
@@ -69,6 +70,67 @@ def test_stage_proposal_requires_two_to_four_stable_unique_stages() -> None:
                 Stage(stage_id="two", name="重复"),
             ],
         )
+
+
+def test_confirmed_stage_queue_accepts_five_stages() -> None:
+    stages = [
+        Stage(stage_id=f"stage-{index}", name=f"环节 {index}")
+        for index in range(1, 6)
+    ]
+
+    persisted = StageQueue(stages=stages)
+    confirmed = StageQueueConfirmedPayload(stages=stages)
+
+    assert len(persisted.stages) == 5
+    assert len(confirmed.stages) == 5
+    assert "maxItems" not in StageQueue.model_json_schema()["properties"][
+        "stages"
+    ]
+
+
+def test_confirmed_stage_queue_preserves_a_large_manual_queue() -> None:
+    confirmed = StageQueueConfirmedPayload(
+        stages=[
+            Stage(stage_id=f"stage-{index}", name=f"环节 {index}")
+            for index in range(1, 51)
+        ],
+    )
+
+    assert [stage.stage_id for stage in confirmed.stages] == [
+        f"stage-{index}" for index in range(1, 51)
+    ]
+
+
+def test_agent_stage_proposal_rejects_five_candidates() -> None:
+    stages = [
+        Stage(stage_id=f"stage-{index}", name=f"候选环节 {index}")
+        for index in range(1, 6)
+    ]
+
+    with pytest.raises(ValidationError):
+        StageProposalPayload(stages=stages)
+
+    stages_schema = StageProposalPayload.model_json_schema()["properties"][
+        "stages"
+    ]
+    assert stages_schema["minItems"] == 2
+    assert stages_schema["maxItems"] == 4
+
+
+def test_question_option_serializes_custom_input_requirement() -> None:
+    ordinary = QuestionOption(option_id="fixed", label="固定选项")
+    custom = QuestionOption(
+        option_id="other",
+        label="其他",
+        requires_custom_input=True,
+    )
+
+    assert ordinary.model_dump(mode="json")["requires_custom_input"] is False
+    assert custom.model_dump(mode="json")["requires_custom_input"] is True
+    description = QuestionOption.model_json_schema()["properties"][
+        "requires_custom_input"
+    ]["description"]
+    assert "custom" in description.casefold()
 
 
 def test_question_batch_is_atomic_and_uses_stable_option_ids() -> None:

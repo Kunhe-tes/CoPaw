@@ -34,8 +34,8 @@ export function createCommandRequestId(): string {
 export function validateStageQueue(
   stages: WPlusSopStage[],
 ): StageQueueValidation {
-  if (stages.length < 2 || stages.length > 4) {
-    return { valid: false, message: "环节数量必须保持在 2–4 个。" };
+  if (stages.length < 2) {
+    return { valid: false, message: "至少需要 2 个环节。" };
   }
 
   const ids = new Set<string>();

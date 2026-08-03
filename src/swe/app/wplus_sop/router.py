@@ -8,6 +8,7 @@ import hashlib
 import json
 from pathlib import Path
 from typing import Any, AsyncGenerator
+from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -19,6 +20,7 @@ from .models import OwnershipTuple
 from .runtime import get_wplus_safe_stream_trace_registry
 from .service import (
     WPlusCommandError,
+    WPlusOwningChatFinalizingError,
     WPlusOwnershipError,
     WPlusRuntimeStartError,
     WPlusSopService,
@@ -159,6 +161,15 @@ def _raise_http(exc: Exception) -> None:
         ) from exc
     if isinstance(exc, StaleStateVersionError):
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if isinstance(exc, WPlusOwningChatFinalizingError):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": exc.code,
+                "message": str(exc),
+                "retry_after_ms": exc.retry_after_ms,
+            },
+        ) from exc
     if isinstance(
         exc,
         (
@@ -178,6 +189,29 @@ def _raise_http(exc: Exception) -> None:
     raise exc
 
 
+async def _session_snapshot(
+    service: WPlusSopService,
+    record: Any,
+    *,
+    sop_session_id: str | None = None,
+    runtime_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    snapshot = serialize_session(record)
+    if runtime_status is not None:
+        snapshot["runtime_status"] = runtime_status
+        return snapshot
+    get_runtime_status = getattr(service, "get_runtime_status", None)
+    if not callable(get_runtime_status):
+        return snapshot
+    resolved_session_id = sop_session_id or str(
+        record.projection.sop_session_id,
+    )
+    snapshot["runtime_status"] = await get_runtime_status(
+        resolved_session_id,
+    )
+    return snapshot
+
+
 @router.get("/sessions/{sop_session_id}")
 async def get_wplus_sop_session(
     sop_session_id: str,
@@ -186,7 +220,11 @@ async def get_wplus_sop_session(
     service = await _service_for_session(request, sop_session_id)
     await service.recover_orphaned_generation_run(sop_session_id)
     await service.flush_chat_projection_outbox()
-    return serialize_session(service.get_session(sop_session_id))
+    return await _session_snapshot(
+        service,
+        service.get_session(sop_session_id),
+        sop_session_id=sop_session_id,
+    )
 
 
 @router.get("/sessions/{sop_session_id}/artifacts/{artifact_id}")
@@ -241,7 +279,7 @@ async def get_active_wplus_sop_session(
     if record is None:
         raise HTTPException(status_code=404, detail="W+ SOP Session not found")
     await service.flush_chat_projection_outbox()
-    return serialize_session(record)
+    return await _session_snapshot(service, record)
 
 
 @router.post("/entry-proposals/{proposal_id}/confirm")
@@ -262,14 +300,11 @@ async def confirm_wplus_sop_entry(
     except Exception as exc:  # translated into the public error contract
         _raise_http(exc)
         raise
-    proposal = service.store.get_entry_proposal(proposal_id)
-    if proposal is not None:
-        await service.project_entry_proposal(proposal)
     await service.flush_chat_projection_outbox()
     return {
         "command_request_id": body.command_request_id,
         "accepted": True,
-        "session": serialize_session(mutation.record),
+        "session": await _session_snapshot(service, mutation.record),
         "run_id": mutation.receipt.run_id if mutation.receipt else None,
         "attempt_id": (
             mutation.receipt.attempt_id if mutation.receipt else None
@@ -324,7 +359,7 @@ async def post_wplus_sop_command(
     return {
         "command_request_id": body.command_request_id,
         "accepted": True,
-        "session": serialize_session(mutation.record),
+        "session": await _session_snapshot(service, mutation.record),
         "run_id": mutation.receipt.run_id if mutation.receipt else None,
         "attempt_id": (
             mutation.receipt.attempt_id if mutation.receipt else None
@@ -344,14 +379,37 @@ async def stream_wplus_sop_events(
         cursor = after_state_version
         idle_ticks = 0
         last_safe_trace: tuple[str, int] | None = None
+        last_runtime_status: dict[str, Any] | None = None
         while not await request.is_disconnected():
             await service.recover_orphaned_generation_run(sop_session_id)
             record = service.get_session(sop_session_id)
             emitted = False
+            current_runtime_status: dict[str, Any] | None = None
+            get_runtime_status = getattr(service, "get_runtime_status", None)
+            if callable(get_runtime_status):
+                runtime_status = await get_runtime_status(sop_session_id)
+                current_runtime_status = runtime_status
+                if runtime_status != last_runtime_status:
+                    data = {
+                        "event_id": f"runtime:{sop_session_id}:{uuid4().hex}",
+                        "session_id": sop_session_id,
+                        "state_version": record.projection.state_version,
+                        "kind": "runtime_status",
+                        "run_id": record.projection.current_run_id,
+                        "runtime_status": runtime_status,
+                    }
+                    yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+                    last_runtime_status = runtime_status
+                    emitted = True
             for event in record.events:
                 if event.state_version <= cursor:
                     continue
-                snapshot = serialize_session(record)
+                snapshot = await _session_snapshot(
+                    service,
+                    record,
+                    sop_session_id=sop_session_id,
+                    runtime_status=current_runtime_status,
+                )
                 data = {
                     "event_id": event.event_id,
                     "session_id": sop_session_id,

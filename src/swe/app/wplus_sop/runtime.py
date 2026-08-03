@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 import uuid
-from collections import OrderedDict, deque
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
@@ -16,50 +16,6 @@ from .runtime_context import WPlusRuntimeContext, bind_wplus_runtime
 
 WPLUS_SOP_SKILL_NAME = "wplus-sop-miner"
 logger = logging.getLogger(__name__)
-
-_SAFE_TRACE_ROLE_LABELS = frozenset(
-    {"assistant", "user", "system", "developer", "tool"},
-)
-_SAFE_TRACE_MESSAGE_TYPE_LABELS = frozenset(
-    {
-        "message",
-        "reasoning",
-        "plugin_call",
-        "plugin_call_output",
-        "function_call",
-        "function_call_output",
-        "component_call",
-        "component_call_output",
-        "mcp_list_tools",
-        "mcp_approval_request",
-        "mcp_approval_response",
-        "mcp_call",
-        "mcp_call_output",
-        "heartbeat",
-        "error",
-    },
-)
-_SAFE_TRACE_STATUS_LABELS = frozenset(
-    {
-        "created",
-        "queued",
-        "in_progress",
-        "completed",
-        "failed",
-        "canceled",
-        "cancelled",
-        "incomplete",
-        "rejected",
-        "unknown",
-    },
-)
-_SAFE_TRACE_CONTENT_TYPE_LABELS = frozenset(
-    {"text", "data", "image", "audio", "video", "file", "refusal"},
-)
-_SAFE_TRACE_TOOL_SOURCE_LABELS = frozenset(
-    {"stdout", "stderr", "message"},
-)
-_SAFE_TRACE_LINE_MAX_CHARS = 160
 
 _STAGE_PROPOSAL_EXAMPLE = {
     "stages": [
@@ -74,6 +30,32 @@ _STAGE_PROPOSAL_EXAMPLE = {
             "name": "验证交付结果",
             "description": "预跑已确认流程并核对输出。",
             "status": "pending",
+        },
+    ],
+}
+
+_QUESTION_BATCH_EXAMPLE = {
+    "batch_id": "question-batch-stage-1-v1",
+    "stage_id": "stage-1",
+    "questions": [
+        {
+            "question_id": "confirm-scope",
+            "prompt": "请确认当前环节的适用范围。",
+            "type": "single_select",
+            "required": True,
+            "options": [
+                {
+                    "option_id": "confirmed",
+                    "label": "范围正确",
+                    "requires_custom_input": False,
+                },
+                {
+                    "option_id": "custom",
+                    "label": "需要调整",
+                    "requires_custom_input": True,
+                },
+            ],
+            "help_text": "选择“需要调整”时请补充具体范围。",
         },
     ],
 }
@@ -104,15 +86,31 @@ class WPlusSafeStreamTraceSnapshot:
 
 
 @dataclass
+class _WPlusSafeTextPart:
+    text: str
+    delta: bool
+
+
+@dataclass
+class _WPlusSafeAssistantMessage:
+    parts: list[_WPlusSafeTextPart] = field(default_factory=list)
+
+    @property
+    def text(self) -> str:
+        return "".join(part.text for part in self.parts)
+
+
+@dataclass
 class _WPlusSafeStreamTraceRun:
     sequence: int = 0
-    lines: deque[str] = field(default_factory=deque)
-    char_count: int = 0
+    messages: OrderedDict[str, _WPlusSafeAssistantMessage] = field(
+        default_factory=OrderedDict,
+    )
     truncated: bool = False
 
 
 class WPlusSafeStreamTraceRegistry:
-    """Collect only bounded, allowlisted metadata about Agent stream frames."""
+    """Collect bounded plain text from ordinary assistant messages only."""
 
     def __init__(
         self,
@@ -145,7 +143,7 @@ class WPlusSafeStreamTraceRegistry:
         self._runs.pop((session_id, run_id), None)
 
     def ingest(self, session_id: str, run_id: str, sse_chunk: str) -> None:
-        """Replace raw frames with fixed-label, numeric-only trace lines."""
+        """Apply allowlisted text frames with Chat Builder merge semantics."""
         run = self._runs.get((session_id, run_id))
         if run is None or not isinstance(sse_chunk, str):
             return
@@ -155,9 +153,8 @@ class WPlusSafeStreamTraceRegistry:
             try:
                 frame = json.loads(line.removeprefix("data:").strip())
             except (json.JSONDecodeError, TypeError):
-                self._append_line(run, "frame object=unknown hidden=true")
                 continue
-            self._append_line(run, self._summarize_frame(frame))
+            self._ingest_frame(run, frame)
 
     def snapshot(
         self,
@@ -169,101 +166,130 @@ class WPlusSafeStreamTraceRegistry:
             return None
         return WPlusSafeStreamTraceSnapshot(
             sequence=run.sequence,
-            summary_text="\n".join(run.lines),
+            summary_text=self._render(run),
             truncated=run.truncated,
         )
 
-    def _summarize_frame(self, frame: Any) -> str:
+    def _ingest_frame(
+        self,
+        run: _WPlusSafeStreamTraceRun,
+        frame: Any,
+    ) -> None:
         if not isinstance(frame, dict):
-            return "frame object=unknown hidden=true"
-        obj = frame.get("object")
-        if obj == "response":
-            return (
-                "response status="
-                f"{self._safe_label(frame.get('status'), _SAFE_TRACE_STATUS_LABELS)}"
-            )
-        if obj == "message":
-            content_types, content_chars = self._content_summary(
-                frame.get("content"),
-            )
-            return (
-                "message "
-                "role="
-                f"{self._safe_label(frame.get('role'), _SAFE_TRACE_ROLE_LABELS)} "
-                "type="
-                f"{self._safe_label(frame.get('type'), _SAFE_TRACE_MESSAGE_TYPE_LABELS)} "
-                "status="
-                f"{self._safe_label(frame.get('status'), _SAFE_TRACE_STATUS_LABELS)} "
-                f"content_types={content_types} "
-                f"content_chars={content_chars} hidden=true"
-            )
-        if obj == "content":
-            text = frame.get("text")
-            chars = len(text) if isinstance(text, str) else 0
-            return (
-                "content "
-                "type="
-                f"{self._safe_label(frame.get('type'), _SAFE_TRACE_CONTENT_TYPE_LABELS)} "
-                "status="
-                f"{self._safe_label(frame.get('status'), _SAFE_TRACE_STATUS_LABELS)} "
-                f"chars={chars} hidden=true"
-            )
-        if obj == "tool_output_frame":
-            text = frame.get("text")
-            chars = len(text) if isinstance(text, str) else 0
-            return (
-                "tool_output_frame "
-                "source="
-                f"{self._safe_label(frame.get('source'), _SAFE_TRACE_TOOL_SOURCE_LABELS)} "
-                f"chars={chars} hidden=true"
-            )
-        return "frame object=unknown hidden=true"
+            return
+        if frame.get("object") == "message":
+            self._ingest_message(run, frame)
+        elif frame.get("object") == "content":
+            self._ingest_content(run, frame)
 
-    def _content_summary(self, content: Any) -> tuple[str, int]:
-        if not isinstance(content, list):
-            return "none", 0
-        labels: list[str] = []
-        chars = 0
-        for item in content:
-            if not isinstance(item, dict):
-                label = "unknown"
-            else:
-                label = self._safe_label(
-                    item.get("type"),
-                    _SAFE_TRACE_CONTENT_TYPE_LABELS,
+    def _ingest_message(
+        self,
+        run: _WPlusSafeStreamTraceRun,
+        frame: dict[str, Any],
+    ) -> None:
+        if frame.get("role") != "assistant" or frame.get("type") != "message":
+            return
+        message_id = frame.get("id")
+        if not isinstance(message_id, str) or not message_id:
+            return
+        message = run.messages.setdefault(
+            message_id,
+            _WPlusSafeAssistantMessage(),
+        )
+        content = frame.get("content")
+        if isinstance(content, list) and content:
+            parts = [
+                _WPlusSafeTextPart(
+                    text=item["text"],
+                    delta=item.get("delta") is True,
                 )
-                text = item.get("text")
-                if isinstance(text, str):
-                    chars += len(text)
-            if label not in labels:
-                labels.append(label)
-        return "+".join(labels) if labels else "none", chars
+                for item in content
+                if isinstance(item, dict)
+                and item.get("type") == "text"
+                and isinstance(item.get("text"), str)
+            ]
+            message.parts = parts
+            if parts:
+                run.sequence += 1
+        self._enforce_limits(run)
+
+    def _ingest_content(
+        self,
+        run: _WPlusSafeStreamTraceRun,
+        frame: dict[str, Any],
+    ) -> None:
+        if frame.get("type") != "text" or not isinstance(
+            frame.get("text"),
+            str,
+        ):
+            return
+        message_id = frame.get("msg_id")
+        if not isinstance(message_id, str):
+            return
+        message = run.messages.get(message_id)
+        if message is None:
+            return
+        text = frame["text"]
+        is_delta = frame.get("delta") is True
+        if is_delta:
+            if message.parts and message.parts[-1].delta:
+                message.parts[-1].text += text
+            else:
+                message.parts.append(
+                    _WPlusSafeTextPart(text=text, delta=True),
+                )
+        elif message.parts:
+            message.parts[-1] = _WPlusSafeTextPart(
+                text=text,
+                delta=False,
+            )
+        else:
+            message.parts.append(
+                _WPlusSafeTextPart(text=text, delta=False),
+            )
+        run.sequence += 1
+        self._enforce_limits(run)
 
     @staticmethod
-    def _safe_label(value: Any, allowed: frozenset[str]) -> str:
-        if isinstance(value, str) and value in allowed:
-            return value
-        return "unknown"
+    def _render(run: _WPlusSafeStreamTraceRun) -> str:
+        return "\n".join(
+            text
+            for message in run.messages.values()
+            if (text := message.text)
+        )
 
-    def _append_line(self, run: _WPlusSafeStreamTraceRun, line: str) -> None:
-        line = line[:_SAFE_TRACE_LINE_MAX_CHARS]
-        if len(line) > self._max_chars:
-            line = line[: self._max_chars]
+    def _enforce_limits(self, run: _WPlusSafeStreamTraceRun) -> None:
+        while len(run.messages) > self._max_lines:
+            _, removed = run.messages.popitem(last=False)
+            if removed.text:
+                run.truncated = True
+
+        while len(self._render(run).splitlines()) > self._max_lines:
+            if len(run.messages) > 1:
+                run.messages.popitem(last=False)
+            else:
+                message = next(iter(run.messages.values()))
+                lines = message.text.splitlines()
+                message.parts = [
+                    _WPlusSafeTextPart(
+                        text="\n".join(lines[-self._max_lines :]),
+                        delta=(message.parts[-1].delta if message.parts else False),
+                    ),
+                ]
             run.truncated = True
-        separator_chars = 1 if run.lines else 0
-        while run.lines and (
-            len(run.lines) >= self._max_lines
-            or run.char_count + separator_chars + len(line) > self._max_chars
-        ):
-            removed = run.lines.popleft()
-            run.char_count -= len(removed)
-            if run.lines:
-                run.char_count -= 1
+
+        while len(self._render(run)) > self._max_chars:
+            if len(run.messages) > 1:
+                run.messages.popitem(last=False)
+            else:
+                message = next(iter(run.messages.values()))
+                message.parts = [
+                    _WPlusSafeTextPart(
+                        text=message.text[-self._max_chars :],
+                        delta=(message.parts[-1].delta if message.parts else False),
+                    ),
+                ]
             run.truncated = True
-            separator_chars = 1 if run.lines else 0
-        run.lines.append(line)
-        run.char_count += separator_chars + len(line)
-        run.sequence += 1
 
 
 def get_wplus_safe_stream_trace_registry(
@@ -278,6 +304,38 @@ def get_wplus_safe_stream_trace_registry(
     return registry
 
 
+def _build_trial_command_contract(
+    *,
+    run_id: str,
+    attempt_id: str,
+    requires_plan: bool,
+) -> str:
+    plan_step = (
+        "1. 先提交 trial_plan，冻结本轮步骤与脱敏输出契约；\n"
+        if requires_plan
+        else "1. 这是执行态重试，沿用已持久化的预跑计划，不要重复提交 trial_plan；\n"
+    )
+    return (
+        "\n本命令必须在同一个后台 Agent 回合内完成预跑闭环，不得在提交 "
+        "trial_plan 后停止或等待另一个后台任务。按以下顺序执行：\n"
+        + plan_step
+        + "2. 提交 trial_execution_started；\n"
+        "3. 业务执行只能直接执行 references 中已确认的 opencli 命令，"
+        "不得调用其他业务工具，也不得让用户自行执行；\n"
+        "4. 可提交 trial_execution_progress；\n"
+        "5. OpenCLI 成功后提交且只提交一个 trial_execution_completed；"
+        "失败、拒绝、超时或权限不足时提交且只提交一个 "
+        "trial_execution_failed。终态事件成功持久化前不得结束本回合。\n"
+        "所有预跑事件的 run_id 必须严格等于命令中的 run_id="
+        + json.dumps(run_id, ensure_ascii=False)
+        + "；trial_execution_started 的 attempt_id 必须严格等于命令中的 "
+        "attempt_id="
+        + json.dumps(attempt_id, ensure_ascii=False)
+        + "。结果只保留脱敏摘要、计数、schema 校验、警告和失败位置；"
+        "不得把原始客户响应、账户值或自由文本备注写入事件。"
+    )
+
+
 def build_wplus_command_text(
     *,
     command: str,
@@ -285,8 +343,24 @@ def build_wplus_command_text(
     run_id: str,
     attempt_id: str,
     payload: dict[str, Any],
+    target_state: str | None = None,
 ) -> str:
     """Build a deterministic instruction without putting ownership in user data."""
+    effective_target_state = target_state
+    if effective_target_state is None and command == "propose_stage_queue":
+        effective_target_state = "GeneratingStageProposal"
+    elif effective_target_state is None and command == "retry_current_turn":
+        retry_target = payload.get("target_state")
+        if isinstance(retry_target, str):
+            effective_target_state = retry_target
+    expected_event_kind = {
+        "GeneratingStageProposal": "stage_proposal",
+        "GeneratingQuestions": "question_batch",
+    }.get(effective_target_state)
+    is_trial_turn = effective_target_state in {
+        "GeneratingTrial",
+        "ExecutingTrial",
+    }
     body = {
         "protocol": "wplus-sop-command-v1",
         "command": command,
@@ -295,15 +369,29 @@ def build_wplus_command_text(
         "attempt_id": attempt_id,
         "payload": payload,
     }
+    if effective_target_state is not None:
+        body["target_state"] = effective_target_state
+    if expected_event_kind is not None:
+        body["expected_event_kind"] = expected_event_kind
+    if is_trial_turn:
+        body["expected_event_sequence"] = [
+            *(
+                ["trial_plan"]
+                if effective_target_state == "GeneratingTrial"
+                else []
+            ),
+            "trial_execution_started",
+            "trial_execution_progress?",
+            "trial_execution_completed|trial_execution_failed",
+        ]
     command_contract = ""
-    requires_stage_proposal = command == "propose_stage_queue" or (
-        command == "retry_current_turn"
-        and payload.get("target_state") == "GeneratingStageProposal"
-    )
-    if requires_stage_proposal:
+    if expected_event_kind == "stage_proposal":
         command_contract = (
-            "\n本回合只调用一次 emit_wplus_sop_event，不得调用其他 W+ SOP "
-            "事件。调用参数必须满足 kind='stage_proposal'、"
+            "\n本回合只允许成功持久化一个业务边界事件。若 "
+            "emit_wplus_sop_event 工具返回 ok=false，可根据返回的 allowed "
+            "agent events 与 current_stage_id 修正参数后重试；失败调用不计入"
+            "已持久化事件。不得成功持久化其他 W+ SOP 事件。调用参数必须满足 "
+            "kind='stage_proposal'、"
             "event_key='stage-proposal-v1'，payload 必须是按下方 schema "
             "新生成的候选环节对象，不得把命令输入中的 payload 原样提交。"
             "不得只输出 Markdown；Markdown "
@@ -317,8 +405,46 @@ def build_wplus_command_text(
                 sort_keys=True,
             )
         )
+    elif expected_event_kind == "question_batch":
+        current_stage_id = payload.get("current_stage_id")
+        question_batch_example = {
+            **_QUESTION_BATCH_EXAMPLE,
+            **(
+                {"stage_id": current_stage_id}
+                if isinstance(current_stage_id, str) and current_stage_id
+                else {}
+            ),
+        }
+        command_contract = (
+            "\n本回合只允许成功持久化一个业务边界事件。若 "
+            "emit_wplus_sop_event 工具返回 ok=false，可根据返回的 allowed "
+            "agent events 与 current_stage_id 修正参数后重试；失败调用不计入"
+            "已持久化事件。不得成功持久化其他 W+ SOP 事件。调用参数必须满足 "
+            "kind='question_batch'；"
+            "不得提交 kind='stage_queue_confirmed'，该确认事件已由工作流服务端"
+            "持久化。event_key 必须根据当前 stage_id 保持稳定。payload 必须根据"
+            "已确认环节队列和当前环节新生成，不得把命令输入中的 payload 原样提交。"
+            "question_batch.stage_id 必须严格等于命令 payload.current_stage_id="
+            + json.dumps(current_stage_id, ensure_ascii=False)
+            + "。"
+            "不得只输出 Markdown；Markdown 只能作为工具提交成功后的可读摘要。"
+            "payload 顶层必须且只能包含 batch_id、stage_id、questions；questions "
+            "必须包含 1 到 3 个符合 schema 的问题。\n"
+            "question_batch payload 示例：\n"
+            + json.dumps(
+                question_batch_example,
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    elif is_trial_turn:
+        command_contract = _build_trial_command_contract(
+            run_id=run_id,
+            attempt_id=attempt_id,
+            requires_plan=effective_target_state == "GeneratingTrial",
+        )
     return (
-        "执行下面由 CoPaw W+ SOP 工作台提交的结构化命令。"
+        "执行下面由专用 W+ SOP 工作流界面提交的结构化命令。"
         "严格遵守 wplus-sop-miner，并在每个业务边界调用 "
         "emit_wplus_sop_event；不要从 Markdown 生成交互状态。\n"
         + json.dumps(body, ensure_ascii=False, sort_keys=True)
@@ -337,6 +463,7 @@ async def start_wplus_chat_turn(
     payload: dict[str, Any],
     run_id: str,
     attempt_id: str,
+    target_state: str | None = None,
     on_complete: Callable[[], Awaitable[None]] | None = None,
     before_start: Callable[[], None] | None = None,
 ) -> WPlusTurnStart:
@@ -358,6 +485,7 @@ async def start_wplus_chat_turn(
                     run_id=run_id,
                     attempt_id=attempt_id,
                     payload=payload,
+                    target_state=target_state,
                 ),
             ),
         ],
@@ -373,6 +501,8 @@ async def start_wplus_chat_turn(
             "wplus_sop_command": command,
         },
     }
+    if target_state is not None:
+        native_payload["meta"]["wplus_sop_target_state"] = target_state
 
     trusted_runtime = WPlusRuntimeContext(
         sop_session_id=sop_session_id,

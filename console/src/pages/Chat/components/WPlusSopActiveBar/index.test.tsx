@@ -178,4 +178,38 @@ describe("WPlusSopActiveBar", () => {
       expect(onLocksChatInputChange).toHaveBeenLastCalledWith(false),
     );
   });
+
+  it("shows and navigates the resume entry from an active-session paused response", async () => {
+    apiMock.getActiveSession.mockResolvedValue({
+      session_id: "sop-paused",
+      chat_id: "chat-1",
+      title: "客户经营 SOP",
+      state: "Paused",
+      state_version: 6,
+      revision: 1,
+      round: 1,
+      stages: [],
+      current_stage_id: null,
+      updated_at: "2026-07-29T00:01:00Z",
+    });
+    render(
+      <MemoryRouter initialEntries={["/chat/chat-1"]}>
+        <Routes>
+          <Route
+            path="/chat/:chatId"
+            element={<WPlusSopActiveBar chatId="chat-1" />}
+          />
+          <Route path="/wplus-sop/:sessionId" element={<h1>继续工作页</h1>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    expect(
+      await screen.findByText("这个 Chat 的 W+ SOP 已暂停"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "继续工作" }));
+    expect(
+      await screen.findByRole("heading", { name: "继续工作页" }),
+    ).toBeInTheDocument();
+  });
 });
