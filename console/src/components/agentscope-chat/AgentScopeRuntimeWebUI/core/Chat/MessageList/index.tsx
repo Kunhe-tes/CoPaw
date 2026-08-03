@@ -18,6 +18,10 @@ import sessionApi, {
 } from "@/pages/Chat/sessionApi";
 import type { IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
 import useChatAnywhereEventEmitter from "../../Context/useChatAnywhereEventEmitter";
+import useTopOverscroll, {
+  TOP_PULL_THRESHOLD,
+} from "@/components/agentscope-chat/Bubble/hooks/useTopOverscroll";
+import { getScrollTopAfterPrepend } from "@/components/agentscope-chat/Bubble/hooks/scrollAnchor";
 
 const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
 
@@ -57,6 +61,8 @@ export default function MessageList(props: {
     scrollToBottom: () => void;
     getScrollElement: () => HTMLDivElement | null;
   } | null>(null);
+  const [historyScrollElement, setHistoryScrollElement] =
+    React.useState<HTMLDivElement | null>(null);
   const prevMessagesLengthRef = React.useRef(safeMessages.length);
   const historyCursorRef = React.useRef<string | null>(null);
   const historyLoadingRef = React.useRef(false);
@@ -65,6 +71,12 @@ export default function MessageList(props: {
   const compactionRefreshRef = React.useRef(0);
   const activeSessionRef = React.useRef(currentSessionId);
   const isPrependingHistoryRef = React.useRef(false);
+  const pendingHistoryAnchorRef = React.useRef<{
+    clientHeight: number;
+    oldScrollHeight: number;
+    oldScrollTop: number;
+  } | null>(null);
+  const [historyExhausted, setHistoryExhausted] = React.useState(false);
   const backendChatId = sessionApi.getChatIdForSession(currentSessionId || "");
 
   React.useLayoutEffect(() => {
@@ -77,6 +89,7 @@ export default function MessageList(props: {
     historyLoadingRef.current = false;
     historyDoneRef.current = false;
     historyGenerationRef.current += 1;
+    setHistoryExhausted(false);
   }, [backendChatId]);
 
   const loadOlderHistory = React.useCallback(async () => {
@@ -85,8 +98,6 @@ export default function MessageList(props: {
     }
     historyLoadingRef.current = true;
     const generation = historyGenerationRef.current;
-    const scrollElement = listRef.current?.getScrollElement();
-    const oldTop = scrollElement?.scrollTop ?? 0;
     try {
       const page = await chatApi.getChatHistory(
         backendChatId,
@@ -95,20 +106,30 @@ export default function MessageList(props: {
       if (generation !== historyGenerationRef.current) return;
       historyCursorRef.current = page.next_cursor || null;
       historyDoneRef.current = !page.has_more;
+      setHistoryExhausted(!page.has_more);
       const older: IAgentScopeRuntimeWebUIMessage[] = convertArchivedPage(
         page.messages || [],
         page.boundaries || [],
       );
-      isPrependingHistoryRef.current = older.length > 0;
-      // @ts-ignore
+      const knownMessageIds = new Set(
+        (messages || []).map((message) => message.id),
+      );
+      const uniqueOlder = older.filter(
+        (message) => !knownMessageIds.has(message.id),
+      );
+      const scrollElement = listRef.current?.getScrollElement();
+      if (uniqueOlder.length > 0 && scrollElement) {
+        pendingHistoryAnchorRef.current = {
+          clientHeight: scrollElement.clientHeight,
+          oldScrollHeight: scrollElement.scrollHeight,
+          oldScrollTop: scrollElement.scrollTop,
+        };
+      }
+      isPrependingHistoryRef.current = uniqueOlder.length > 0;
+      // @ts-expect-error Context exposes a React-style updater at runtime but omits it from its public type.
       setMessages((current) => {
         const known = new Set(current.map((message) => message.id));
         return [...older.filter((message) => !known.has(message.id)), ...current];
-      });
-      requestAnimationFrame(() => {
-        if (scrollElement && generation === historyGenerationRef.current) {
-          scrollElement.scrollTop = oldTop;
-        }
       });
     } catch {
       // The next upward scroll remains a retry; no persistent UI is needed.
@@ -117,7 +138,39 @@ export default function MessageList(props: {
         historyLoadingRef.current = false;
       }
     }
-  }, [backendChatId, setMessages]);
+  }, [backendChatId, messages, setMessages]);
+
+  React.useLayoutEffect(() => {
+    const nextScrollElement = listRef.current?.getScrollElement() ?? null;
+    setHistoryScrollElement((current) =>
+      current === nextScrollElement ? current : nextScrollElement,
+    );
+  }, [currentSessionId, safeMessages.length]);
+
+  React.useLayoutEffect(() => {
+    const anchor = pendingHistoryAnchorRef.current;
+    const scrollElement = listRef.current?.getScrollElement();
+    if (!anchor || !scrollElement) return;
+
+    scrollElement.scrollTop = getScrollTopAfterPrepend({
+      clientHeight: anchor.clientHeight,
+      newScrollHeight: scrollElement.scrollHeight,
+      oldScrollHeight: anchor.oldScrollHeight,
+      oldScrollTop: anchor.oldScrollTop,
+      order: "desc",
+    });
+    pendingHistoryAnchorRef.current = null;
+  }, [safeMessages]);
+
+  const loadOlderHistoryFromPull = React.useCallback(
+    async () => loadOlderHistory(),
+    [loadOlderHistory],
+  );
+  const historyPull = useTopOverscroll({
+    scrollElement: historyScrollElement,
+    onTriggered: loadOlderHistoryFromPull,
+    disabled: !backendChatId || historyExhausted,
+  });
 
   useChatAnywhereEventEmitter(
     {
@@ -134,6 +187,7 @@ export default function MessageList(props: {
         historyCursorRef.current = null;
         historyDoneRef.current = false;
         historyGenerationRef.current += 1;
+        setHistoryExhausted(false);
         const refresh = ++compactionRefreshRef.current;
         const requestedSessionId = currentSessionId;
         const requestedChatId = detail.chat_id;
@@ -196,17 +250,60 @@ export default function MessageList(props: {
     );
   }
 
+  const historyPullLabel = {
+    pulling: "加载更早历史",
+    ready: "松开加载更早历史",
+    loading: "正在加载更早历史",
+  }[historyPull.state];
+
   return (
-    <Bubble.List
-      ref={listRef}
-      pagination={bubbleListOptions?.pagination ?? true}
-      order="desc"
-      key={currentSessionId}
-      classNames={{
-        wrapper: prefixCls,
-      }}
-      items={safeMessages}
-      onReachStart={() => void loadOlderHistory()}
-    />
+    <div style={{ height: "100%", position: "relative" }}>
+      <Bubble.List
+        ref={listRef}
+        pagination={bubbleListOptions?.pagination ?? true}
+        order="desc"
+        key={currentSessionId}
+        classNames={{
+          wrapper: prefixCls,
+        }}
+        items={safeMessages}
+        preserveScrollPosition={isPrependingHistoryRef.current}
+      />
+      {historyPullLabel && (
+        <div
+          aria-live="polite"
+          role="status"
+          style={{
+            alignItems: "center",
+            color: "#8A94A6",
+            display: "flex",
+            flexDirection: "column",
+            fontSize: 13,
+            gap: 4,
+            left: 0,
+            pointerEvents: "none",
+            position: "absolute",
+            right: 0,
+            top: 8,
+            transform: `translateY(${historyPull.visualOffset}px)`,
+            transition:
+              historyPull.state === "loading"
+                ? "none"
+                : "transform 80ms ease-out",
+          }}
+        >
+          <span>{historyPullLabel}</span>
+          <progress
+            aria-label="加载更早历史进度"
+            max={TOP_PULL_THRESHOLD}
+            value={
+              historyPull.state === "loading"
+                ? TOP_PULL_THRESHOLD
+                : historyPull.visualOffset
+            }
+          />
+        </div>
+      )}
+    </div>
   );
 }

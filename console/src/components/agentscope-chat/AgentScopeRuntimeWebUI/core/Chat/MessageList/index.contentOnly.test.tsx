@@ -1,4 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { forwardRef, useImperativeHandle, useRef } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import MessageList from ".";
@@ -48,16 +55,44 @@ vi.mock("../../Context/ChatAnywhereSessionsContext", () => ({
 
 vi.mock("@/components/agentscope-chat", () => ({
   Bubble: {
-    List: ({
-      items,
-      onReachStart,
-    }: {
-      items: unknown[];
-      onReachStart?: () => void;
-    }) => (
-      <button data-testid="bubble-list" onClick={onReachStart}>
-        {items.length}
-      </button>
+    List: forwardRef(
+      (
+        {
+          items,
+          onReachStart,
+        }: {
+          items: unknown[];
+          onReachStart?: () => void;
+        },
+        ref,
+      ) => {
+        const scrollRef = useRef<HTMLDivElement | null>(null);
+        useImperativeHandle(ref, () => ({
+          getScrollElement: () => scrollRef.current,
+          scrollToBottom: vi.fn(),
+        }));
+        return (
+          <div
+            data-testid="bubble-list"
+            onPointerMove={onReachStart}
+            ref={(element) => {
+              scrollRef.current = element;
+              if (!element) return;
+              Object.defineProperties(element, {
+                clientHeight: { configurable: true, value: 400 },
+                scrollHeight: { configurable: true, value: 1000 },
+                scrollTop: {
+                  configurable: true,
+                  value: -600,
+                  writable: true,
+                },
+              });
+            }}
+          >
+            {items.length}
+          </div>
+        );
+      },
     ),
   },
   useProviderContext: () => ({
@@ -192,7 +227,27 @@ describe("MessageList content-only composition", () => {
     expect(screen.getByTestId("bubble-list")).toHaveTextContent("1");
   });
 
-  it("loads archived history with the resolved backend chat ID", async () => {
+  it("does not request archived history before the pull threshold", async () => {
+    mocks.messages = [{ id: "online-message" }];
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    const bubbleList = screen.getByTestId("bubble-list");
+    fireEvent.pointerDown(bubbleList, {
+      button: 0,
+      clientY: 100,
+      pointerId: 1,
+    });
+    fireEvent.pointerMove(bubbleList, { clientY: 240, pointerId: 1 });
+    fireEvent.pointerUp(bubbleList, { clientY: 240, pointerId: 1 });
+
+    expect(apiMocks.getChatHistory).not.toHaveBeenCalled();
+  });
+
+  it("loads archived history with the resolved backend chat ID after an armed pull", async () => {
     mocks.messages = [{ id: "online-message" }];
     apiMocks.getChatHistory.mockResolvedValue({
       messages: [{ id: "archived-message" }],
@@ -207,7 +262,19 @@ describe("MessageList content-only composition", () => {
       </ChatContentOnlyProvider>,
     );
 
-    fireEvent.click(screen.getByTestId("bubble-list"));
+    const bubbleList = screen.getByTestId("bubble-list");
+    fireEvent.pointerDown(bubbleList, {
+      button: 0,
+      clientY: 100,
+      pointerId: 1,
+    });
+    fireEvent.pointerMove(bubbleList, { clientY: 260, pointerId: 1 });
+
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "松开加载更早历史",
+    );
+
+    fireEvent.pointerUp(bubbleList, { clientY: 260, pointerId: 1 });
 
     await waitFor(() => {
       expect(apiMocks.getChatHistory).toHaveBeenCalledWith(

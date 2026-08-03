@@ -5,12 +5,13 @@ export default function ConversationCompactionBoundary({
 }: {
   data: ChatCompactionBoundary;
 }) {
-  const label = `会话已压缩 · ${data.archived_message_count} 条消息已归档`;
+  const label = "会话已压缩 · 上滚查看历史内容";
 
   return (
     <div
       role="separator"
       aria-label={label}
+      data-conversation-compaction-boundary-id={data.id}
       style={{
         display: "flex",
         alignItems: "center",

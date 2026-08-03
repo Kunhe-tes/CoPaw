@@ -1,10 +1,14 @@
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import Cards from "@/components/agentscope-chat/Bubble/Cards";
+import type { ChatCompactionBoundary } from "@/api/types/chat";
 import ConversationCompactionBoundary from "./ConversationCompactionBoundary";
 
 const cardConfigState = vi.hoisted(() => ({
-  current: {} as Record<string, (props: any) => JSX.Element>,
+  current: {} as Record<
+    string,
+    (props: { data: ChatCompactionBoundary }) => JSX.Element
+  >,
 }));
 
 vi.mock("@/components/agentscope-chat", () => ({
@@ -13,7 +17,7 @@ vi.mock("@/components/agentscope-chat", () => ({
 }));
 
 describe("ConversationCompactionBoundary", () => {
-  it("renders the archived count from card data in a full-width separator", () => {
+  it("directs users to scroll upward for archived history", () => {
     cardConfigState.current = {
       ConversationCompactionBoundary,
     };
@@ -37,10 +41,11 @@ describe("ConversationCompactionBoundary", () => {
     );
 
     const separator = screen.getByRole("separator");
-    expect(separator).toHaveTextContent("会话已压缩 · 3 条消息已归档");
+    expect(separator).toHaveTextContent("会话已压缩 · 上滚查看历史内容");
+    expect(separator).not.toHaveTextContent("条消息已归档");
     expect(separator).toHaveAttribute(
       "aria-label",
-      "会话已压缩 · 3 条消息已归档",
+      "会话已压缩 · 上滚查看历史内容",
     );
     expect(separator.firstElementChild).toHaveStyle({ flex: "1 1 0%" });
     expect(separator.lastElementChild).toHaveStyle({ flex: "1 1 0%" });

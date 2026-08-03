@@ -5,7 +5,7 @@ import Style from "./style/list";
 import { useProviderContext } from "@/components/agentscope-chat";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import cls from "classnames";
-import { useInViewport, useMount, usePrevious } from "ahooks";
+import { useInViewport, usePrevious } from "ahooks";
 import { usePaginationItems } from "./hooks/usePaginationItemsData";
 import { Spin } from "antd";
 
@@ -46,6 +46,7 @@ export interface BubbleListProps extends React.HTMLAttributes<HTMLDivElement> {
   pagination?: boolean;
   order?: "asc" | "desc";
   onReachStart?: () => void;
+  preserveScrollPosition?: boolean;
 }
 
 interface BubbleListContentProps {
@@ -124,7 +125,7 @@ const BubbleList: React.ForwardRefRenderFunction<
   BubbleListRef,
   BubbleListProps
 > = (props, ref) => {
-  const { items = [], order = "asc" } = props;
+  const { items = [], order = "asc", onReachStart } = props;
 
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const scrollRef = React.useRef<HTMLDivElement | null>(null);
@@ -182,12 +183,12 @@ const BubbleList: React.ForwardRefRenderFunction<
     const reachedStart =
       scrollEl && (isDesc ? scrollEl.scrollTop <= -24 : scrollEl.scrollTop <= 24);
     if (reachedStart) {
-      props.onReachStart?.();
+      onReachStart?.();
     }
     const isAtBottom = checkIsAtBottom();
     isAtBottomRef.current = isAtBottom;
     setShowScrollToBottom(checkShowScrollToBottom());
-  }, [checkIsAtBottom, checkShowScrollToBottom, isDesc, props.onReachStart]);
+  }, [checkIsAtBottom, checkShowScrollToBottom, isDesc, onReachStart]);
 
   React.useImperativeHandle(
     ref,
@@ -210,8 +211,10 @@ const BubbleList: React.ForwardRefRenderFunction<
   });
 
   useEffect(() => {
-    scrollToBottom("auto");
-  }, [items.length, scrollToBottom]);
+    if (!props.preserveScrollPosition) {
+      scrollToBottom("auto");
+    }
+  }, [items.length, props.preserveScrollPosition, scrollToBottom]);
 
   useEffect(() => {
     const scrollEl = scrollRef.current;
