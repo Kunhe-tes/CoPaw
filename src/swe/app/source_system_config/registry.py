@@ -346,6 +346,7 @@ _MODEL_CALL_POLICY_SETTINGS = (
 _DEPRECATED_SYSTEM_SECTION_KEYS = frozenset(
     {
         "external_tool_output_truncation",
+        "file_read_truncation",
     },
 )
 _PRESERVED_DEFAULT_SETTING_PATHS = frozenset(

@@ -132,6 +132,25 @@ class TestSourceSystemConfigModels:
             "feature_switches": {"experimental_tooling": True},
         }
 
+    def test_deprecated_file_read_truncation_is_dropped_from_model_and_merge(
+        self,
+    ):
+        """废弃文件读取配置不能回流，其他未注册配置仍应保留。"""
+        config = SourceSystemConfig.model_validate(
+            {
+                "provider_policy": {"default_model": "qwen-max"},
+                "file_read_truncation": {"enabled": False, "max_bytes": 1},
+            },
+        )
+
+        assert config.as_dict() == {
+            "provider_policy": {"default_model": "qwen-max"},
+        }
+        assert config.merged_with_defaults().as_dict() == {
+            **DEFAULT_EXPECTED_SOURCE_CONFIG,
+            "provider_policy": {"default_model": "qwen-max"},
+        }
+
     def test_non_object_config_is_rejected(self):
         """数组或标量不能作为 source 系统配置根对象。"""
         with pytest.raises(ValueError, match="JSON object"):
@@ -1956,6 +1975,10 @@ class TestSourceSystemConfigApi:
                 "config": {
                     "feature_switches": {
                         "chat_task_progress_enabled": False,
+                    },
+                    "file_read_truncation": {
+                        "enabled": False,
+                        "max_bytes": 1,
                     },
                 },
             },
