@@ -1,0 +1,73 @@
+.library {
+  margin-top: 20px;
+}
+
+.loading {
+  display: flex;
+  justify-content: center;
+  padding: 32px;
+}
+
+.sections {
+  display: grid;
+  gap: 20px;
+  margin-top: 16px;
+}
+
+.sectionHeading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.rows {
+  display: grid;
+  gap: 8px;
+}
+
+.row,
+.historyRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--console-border, #e5e7eb);
+  border-radius: 8px;
+  background: var(--console-surface-subtle, #f7f9fc);
+}
+
+.copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.copy span,
+.copy code,
+.historyRow span {
+  overflow: hidden;
+  color: var(--console-text-secondary, #4b5563);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.script {
+  max-height: 55vh;
+  margin: 0;
+  overflow: auto;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f7f9fc;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inputLabel {
+  display: block;
+  margin: 16px 0 8px;
+  color: var(--console-text-secondary, #4b5563);
+  font-weight: 500;
+}

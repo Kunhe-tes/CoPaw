@@ -56,6 +56,7 @@ interface SessionOptions {
 interface LoadSessionMessagesOptions {
   requestedSessionId: string | undefined;
   clearBeforeLoad: boolean;
+  finishLoadingWithoutSession?: boolean;
   options: SessionOptions;
   setMessages: (messages: IAgentScopeRuntimeWebUIMessage[]) => void;
   getCurrentSessionId: () => string | undefined;
@@ -68,6 +69,7 @@ interface LoadSessionMessagesOptions {
 export async function loadSessionMessages({
   requestedSessionId,
   clearBeforeLoad,
+  finishLoadingWithoutSession = false,
   options,
   setMessages,
   getCurrentSessionId,
@@ -77,8 +79,13 @@ export async function loadSessionMessages({
   if (!requestedSessionId || !options.api) {
     if (clearBeforeLoad) {
       ReactDOM.flushSync(() => {
+        if (finishLoadingWithoutSession) {
+          setSessionLoading?.(false);
+        }
         setMessages([]);
       });
+    } else if (finishLoadingWithoutSession) {
+      setSessionLoading?.(false);
     }
     return false;
   }
@@ -331,7 +338,11 @@ export function ChatAnywhereSessionsContextProvider(props: {
 /**
  * 会话切换时加载消息和判断重连的 hook，必须保证只挂载一次
  */
-export const useChatAnywhereSessionLoader = () => {
+export const useChatAnywhereSessionLoader = ({
+  finishLoadingWithoutSession = false,
+}: {
+  finishLoadingWithoutSession?: boolean;
+} = {}) => {
   const currentSessionId = useContextSelector(
     ChatAnywhereSessionsContext,
     (v) => v.currentSessionId,
@@ -358,13 +369,14 @@ export const useChatAnywhereSessionLoader = () => {
     await loadSessionMessages({
       requestedSessionId: currentSessionId,
       clearBeforeLoad: true,
+      finishLoadingWithoutSession,
       options,
       setMessages,
       getCurrentSessionId,
       setSessionLoading,
       setSessionNotFound,
     });
-  }, [currentSessionId]);
+  }, [currentSessionId, finishLoadingWithoutSession]);
 };
 
 /**

@@ -71,6 +71,7 @@ import ConversationQuickNav from "@/components/ConversationQuickNav";
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
 import ChatSidebar from "./components/ChatSidebar";
 import { createWelcomeSkillMentions } from "./welcomeSkillMentions";
+import { selectContextReferences } from "./contextReferenceDefaults";
 // ==================== 首页改版结束 ====================
 // ==================== 自定义工具渲染器 (customToolRenderConfig) ====================
 import CopyFileToStatic from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic";
@@ -117,7 +118,7 @@ import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
-import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
+import FileManager from "./components/FileManager";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
@@ -572,11 +573,12 @@ export default function ChatPage() {
       .discover(query)
       .then((response) => {
         if (requestId !== contextReferencesRequestIdRef.current) return;
-        setContextReferences([
-          ...response.skills,
-          ...response.mcp_tools,
-          ...response.files,
-        ]);
+        setContextReferences(
+          selectContextReferences(
+            [...response.skills, ...response.mcp_tools, ...response.files],
+            query,
+          ),
+        );
       })
       .catch(() => {
         if (requestId !== contextReferencesRequestIdRef.current) return;
@@ -1628,7 +1630,7 @@ export default function ChatPage() {
             <RuntimeLoadingBridge bridgeRef={runtimeLoadingBridgeRef} />
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
-            {!isContentOnly && <GeneratedFilesDrawer />}
+            {!isContentOnly && <FileManager />}
             {!isContentOnly && <ModelSelector />}
             {/* <ChatActionGroup /> */}
           </>
@@ -1828,6 +1830,7 @@ export default function ChatPage() {
             onConsumed={() => setAutoPreviewTriggerKey(0)}
           >
             <div
+              data-chat-shell
               style={{
                 height: "100%",
                 width: "100%",
@@ -1853,6 +1856,7 @@ export default function ChatPage() {
               {/* ==================== 首页改版结束 ==================== */}
               <div
                 className={styles.chatMessagesArea}
+                data-chat-messages-area
                 style={{ flex: 1, minWidth: 0, position: "relative" }}
                 onDragEnter={isContentOnly ? undefined : handleDragEnter}
                 onDragLeave={isContentOnly ? undefined : handleDragLeave}

@@ -962,6 +962,7 @@ async def _build_and_connect_mcp_clients(
     mcp_config: MCPConfig | None,
     passthrough_headers: dict[str, str] | None = None,
     session_id: str | None = None,
+    chat_id: str | None = None,
     trace_id: str | None = None,
 ) -> list[Any]:
     """Build and connect MCP clients from config for single request use.
@@ -970,6 +971,7 @@ async def _build_and_connect_mcp_clients(
         mcp_config: MCP configuration from agent_config.mcp
         passthrough_headers: Headers to merge for HTTP transport clients
         session_id: Request-scoped session identifier for reserved headers
+        chat_id: Persistent chat UUID for reserved transport claims
         trace_id: Request-scoped trace identifier for reserved headers
 
     Returns:
@@ -993,6 +995,7 @@ async def _build_and_connect_mcp_clients(
                 client_config,
                 passthrough_headers,
                 session_id=session_id,
+                chat_id=chat_id,
                 trace_id=trace_id,
             )
             if client is not None:
@@ -1022,6 +1025,7 @@ async def _create_mcp_client_with_headers(
     client_config: MCPClientConfig,
     passthrough_headers: dict[str, str] | None = None,
     session_id: str | None = None,
+    chat_id: str | None = None,
     trace_id: str | None = None,
 ) -> Any:
     """Create a single MCP client with optional header passthrough.
@@ -1033,6 +1037,7 @@ async def _create_mcp_client_with_headers(
         client_config: Single MCP client configuration
         passthrough_headers: Headers to merge for HTTP transport
         session_id: Request-scoped session identifier for reserved headers
+        chat_id: Persistent chat UUID for reserved transport claims
         trace_id: Request-scoped trace identifier for reserved headers
 
     Returns:
@@ -1045,6 +1050,7 @@ async def _create_mcp_client_with_headers(
         "headers": client_config.headers or None,
         "passthrough_headers": dict(passthrough_headers or {}) or None,
         "session_id": session_id,
+        "chat_id": chat_id,
         "trace_id": trace_id,
         "timeout": _MCP_HTTP_TIMEOUT_SECONDS,
         "sse_read_timeout": _MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
@@ -1060,6 +1066,7 @@ async def _create_mcp_client_with_headers(
             client_config.args,
             client_config.env,
             client_config.cwd or None,
+            chat_id=chat_id,
         )
         client = StdIOStatefulClient(
             name=client_config.name,
@@ -1086,6 +1093,7 @@ async def _create_mcp_client_with_headers(
         client_config.headers,
         passthrough_headers=passthrough_headers,
         session_id=session_id,
+        chat_id=chat_id,
         trace_id=trace_id,
     )
 
@@ -2640,6 +2648,19 @@ class AgentRunner(Runner):
                 approved_tool_call,
                 ensure_ascii=False,
             )
+        from ..source_tools.service import get_source_tool_service
+
+        source_tool_versions = ()
+        source_tool_service = get_source_tool_service()
+        if source_tool_service is not None and request_context["source_id"]:
+            try:
+                source_tool_versions = source_tool_service.get_active_catalog(
+                    request_context["source_id"],
+                )
+            except Exception:  # noqa: BLE001
+                logger.exception(
+                    "Source tool catalogue unavailable; source tools fail closed",
+                )
         return SWEAgent(
             agent_config=agent_config,
             env_context=env_context,
@@ -2648,6 +2669,7 @@ class AgentRunner(Runner):
             request_context=request_context,
             workspace_dir=self.workspace_dir,
             task_tracker=self._task_tracker,
+            source_tool_versions=source_tool_versions,
         )
 
     def _attach_session_skill_detector(
@@ -3022,11 +3044,6 @@ class AgentRunner(Runner):
         from ..source_system_config.runtime import (
             get_system_prompt_injections,
         )
-        from .context_references import build_context_reference_directives
-        from .skill_selection import (
-            SkillUseDirective,
-            build_skill_use_directives,
-        )
 
         agent_config = (
             preflight.agent_config
@@ -3035,28 +3052,6 @@ class AgentRunner(Runner):
                 self.agent_id,
                 tenant_id=self.tenant_id,
             )
-        )
-        context_reference_directives = (
-            await build_context_reference_directives(
-                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                channel=channel,
-                agent_config=agent_config,
-                references=_request_context_references(request),
-            )
-        )
-        selected_context_skill_names = {
-            directive.name
-            for directive in context_reference_directives
-            if isinstance(directive, SkillUseDirective)
-        }
-        selected_skill_directives = build_skill_use_directives(
-            workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-            channel=channel,
-            selected_skill_names=[
-                name
-                for name in _request_selected_skill_names(request)
-                if name not in selected_context_skill_names
-            ],
         )
         passthrough_headers = dict[str, str](
             get_current_passthrough_headers() or {},
@@ -3088,13 +3083,7 @@ class AgentRunner(Runner):
                     _request_system_prompt_injections(request),
                 ),
             ),
-            selected_context_directives=[
-                directive.render()
-                for directive in [
-                    *selected_skill_directives,
-                    *context_reference_directives,
-                ]
-            ],
+            selected_context_directives=[],
             auth_token=getattr(request, "auth_token", None),
             passthrough_headers=passthrough_headers,
         )
@@ -3108,14 +3097,6 @@ class AgentRunner(Runner):
         mcp_clients: list[Any],
     ) -> tuple[_QueryRuntimeResources, _RuntimeStartResult | None]:
         """Connect request resources and run the session-start hook."""
-        mcp_clients.extend(
-            await _build_and_connect_mcp_clients(
-                inputs.agent_config.mcp,
-                passthrough_headers=inputs.passthrough_headers or None,
-                session_id=inputs.session_id,
-                trace_id=getattr(request, "trace_id", None),
-            ),
-        )
         turn_id = f"turn-{uuid4().hex}"
         chat = await self._get_or_create_chat(
             session_id=inputs.session_id,
@@ -3124,6 +3105,53 @@ class AgentRunner(Runner):
             name=_chat_name_from_messages(msgs),
             request=request,
             turn_id=turn_id,
+        )
+        with runtime_invocation_claims_context(
+            chat_id=chat.id if chat is not None else None,
+        ):
+            from .context_references import build_context_reference_directives
+            from .skill_selection import (
+                SkillUseDirective,
+                build_skill_use_directives,
+            )
+
+            context_reference_directives = (
+                await build_context_reference_directives(
+                    workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                    channel=inputs.channel,
+                    agent_config=inputs.agent_config,
+                    references=_request_context_references(request),
+                )
+            )
+            selected_context_skill_names = {
+                directive.name
+                for directive in context_reference_directives
+                if isinstance(directive, SkillUseDirective)
+            }
+            selected_skill_directives = build_skill_use_directives(
+                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                channel=inputs.channel,
+                selected_skill_names=[
+                    name
+                    for name in _request_selected_skill_names(request)
+                    if name not in selected_context_skill_names
+                ],
+            )
+            inputs.selected_context_directives = [
+                directive.render()
+                for directive in [
+                    *selected_skill_directives,
+                    *context_reference_directives,
+                ]
+            ]
+        mcp_clients.extend(
+            await _build_and_connect_mcp_clients(
+                inputs.agent_config.mcp,
+                passthrough_headers=inputs.passthrough_headers or None,
+                session_id=inputs.session_id,
+                chat_id=chat.id if chat is not None else None,
+                trace_id=getattr(request, "trace_id", None),
+            ),
         )
         await self._generate_session_title_before_stream(
             request=request,
@@ -3448,7 +3476,7 @@ class AgentRunner(Runner):
         ):
             return None
 
-        stop_hook_result = await _emit_runner_hook(
+        await _emit_runner_hook(
             HookEventName.STOP,
             request=request,
             runner=self,
@@ -3459,22 +3487,6 @@ class AgentRunner(Runner):
             assistant_response=outcome.assistant_response,
             agent=runtime.agent,
         )
-        stop_context = _format_hook_additional_context(stop_hook_result)
-        if stop_context:
-            await runtime.agent.memory.add(
-                Msg(
-                    name="system",
-                    role="system",
-                    content=("[Hook additional context]\n" f"{stop_context}"),
-                ),
-            )
-        if stop_hook_result.decision in {
-            HookDecision.BLOCK,
-            HookDecision.DENY,
-            HookDecision.STOP,
-        }:
-            outcome.task_completed = False
-            return _hook_block_message(stop_hook_result)
         return None
 
     async def _generate_backend_suggestions_if_needed(
@@ -4333,75 +4345,87 @@ class AgentRunner(Runner):
             attempt_state.should_return = True
             return
 
-        self._rebind_trace_skill_detector_if_needed(
-            runtime=runtime,
-            trace_id=attempt_input.trace_id,
-        )
-        if attempt_input.trace_id and runtime.session_skill_detector is None:
-            await runtime.agent.setup_skill_detector(attempt_input.trace_id)
-
-        logger.debug(f"Agent Query msgs {attempt_input.msgs}")
-        attempt_state.session_state_loaded = await self.get_state_loaded(
-            runtime.agent,
-            runtime.session_id,
-            attempt_state.session_state_loaded,
-            runtime.skip_history,
-            runtime.user_id,
-        )
-        retry_state.agent = runtime.agent
-        retry_state.session_state_loaded = attempt_state.session_state_loaded
-
-        skill_freshness_refresh = await self._refresh_session_skill_freshness(
-            runtime=runtime,
-        )
-
-        # 会话状态可能保存了旧提示词，执行前强制刷新文件态上下文。
-        runtime.agent.rebuild_sys_prompt()
-
-        plan = await self._build_turn_plan(
-            runtime=runtime,
-            request=attempt_input.request,
-            msgs=attempt_input.msgs,
-            query=attempt_input.query,
-        )
-        if skill_freshness_refresh.notice_text:
-            notice_msg = _build_skill_freshness_notice_msg(
-                skill_freshness_refresh.notice_text,
-            )
-            plan.turn_msgs.insert(0, notice_msg)
-
-        async for msg, last in self._stream_completion_lifecycle(
-            request=attempt_input.request,
-            runtime=runtime,
-            plan=plan,
-            outcome=outcome,
+        with runtime_invocation_claims_context(
+            chat_id=runtime.chat.id if runtime.chat is not None else None,
         ):
-            yield msg, last
-
-        skill_snapshot_to_persist = (
-            await self._build_skill_snapshot_to_persist(
+            self._rebind_trace_skill_detector_if_needed(
                 runtime=runtime,
-                refresh_result=skill_freshness_refresh,
+                trace_id=attempt_input.trace_id,
             )
-        )
+            if (
+                attempt_input.trace_id
+                and runtime.session_skill_detector is None
+            ):
+                await runtime.agent.setup_skill_detector(
+                    attempt_input.trace_id,
+                )
 
-        if outcome.completion_blocked:
-            await self._finish_blocked_query_attempt(
+            logger.debug(f"Agent Query msgs {attempt_input.msgs}")
+            attempt_state.session_state_loaded = await self.get_state_loaded(
+                runtime.agent,
+                runtime.session_id,
+                attempt_state.session_state_loaded,
+                runtime.skip_history,
+                runtime.user_id,
+            )
+            retry_state.agent = runtime.agent
+            retry_state.session_state_loaded = (
+                attempt_state.session_state_loaded
+            )
+
+            skill_freshness_refresh = (
+                await self._refresh_session_skill_freshness(
+                    runtime=runtime,
+                )
+            )
+
+            # 会话状态可能保存了旧提示词，执行前强制刷新文件态上下文。
+            runtime.agent.rebuild_sys_prompt()
+
+            plan = await self._build_turn_plan(
                 runtime=runtime,
+                request=attempt_input.request,
+                msgs=attempt_input.msgs,
+                query=attempt_input.query,
+            )
+            if skill_freshness_refresh.notice_text:
+                notice_msg = _build_skill_freshness_notice_msg(
+                    skill_freshness_refresh.notice_text,
+                )
+                plan.turn_msgs.insert(0, notice_msg)
+
+            async for msg, last in self._stream_completion_lifecycle(
+                request=attempt_input.request,
+                runtime=runtime,
+                plan=plan,
+                outcome=outcome,
+            ):
+                yield msg, last
+
+            skill_snapshot_to_persist = (
+                await self._build_skill_snapshot_to_persist(
+                    runtime=runtime,
+                    refresh_result=skill_freshness_refresh,
+                )
+            )
+
+            if outcome.completion_blocked:
+                await self._finish_blocked_query_attempt(
+                    runtime=runtime,
+                    outcome=outcome,
+                    trace_id=attempt_input.trace_id,
+                    skill_snapshot_to_persist=skill_snapshot_to_persist,
+                )
+                attempt_state.should_return = True
+                return
+
+            await self._complete_successful_query_attempt(
+                runtime=runtime,
+                plan=plan,
                 outcome=outcome,
                 trace_id=attempt_input.trace_id,
                 skill_snapshot_to_persist=skill_snapshot_to_persist,
             )
-            attempt_state.should_return = True
-            return
-
-        await self._complete_successful_query_attempt(
-            runtime=runtime,
-            plan=plan,
-            outcome=outcome,
-            trace_id=attempt_input.trace_id,
-            skill_snapshot_to_persist=skill_snapshot_to_persist,
-        )
         retry_state.task_completed = outcome.task_completed
         attempt_state.succeeded = True
 

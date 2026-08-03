@@ -2224,3 +2224,33 @@ class TestMcpErrorTracing:
         assert len(emitted_events) == 1
         event = emitted_events[0]
         assert event["error"] == "Tool execution failed"
+
+
+@pytest.mark.asyncio
+async def test_guard_decision_failure_denies_instead_of_executing_tool(
+    tmp_path,
+):
+    agent = _FakeAgent(tmp_path)
+    tool_call = {
+        "id": "guard-error",
+        "name": "source_echo",
+        "input": {"value": "untrusted"},
+    }
+    agent._resolve_mcp_server = lambda _name: None
+    agent._apply_pre_tool_hook = AsyncMock(
+        return_value=(tool_call, tool_call["input"], False, None),
+    )
+    agent._notify_skill_detector_tool_call = AsyncMock()
+    agent._emit_tool_trace_start = AsyncMock(return_value="trace-1")
+    agent._decide_guard_action = AsyncMock(
+        side_effect=RuntimeError("guard down"),
+    )
+    agent._acting_hook_denied = AsyncMock(return_value={"denied": True})
+    agent._emit_tool_trace_end = AsyncMock()
+    agent._run_guarded_tool_call = AsyncMock()
+
+    result = await agent._acting_impl(tool_call)
+
+    assert result == {"denied": True}
+    agent._acting_hook_denied.assert_awaited_once()
+    agent._run_guarded_tool_call.assert_not_awaited()

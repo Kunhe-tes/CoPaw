@@ -99,6 +99,12 @@ CRON_JOBS_EXTRA_COLUMNS: dict[str, str] = {
         "COMMENT '绑定技能ID，逗号分隔' "
         "AFTER subscription_key"
     ),
+    "broadcast_source_job_id": (
+        "ALTER TABLE swe_cron_jobs "
+        "ADD COLUMN broadcast_source_job_id VARCHAR(64) DEFAULT '' "
+        "COMMENT '分发源定时任务ID' "
+        "AFTER skill_ids"
+    ),
 }
 
 CRON_JOBS_EXTRA_INDEXES: dict[str, str] = {

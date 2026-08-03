@@ -9,6 +9,7 @@ from .tracing import router as tracing_router
 from .warmup import router as warmup_router
 from .subtask import router as subtask_router
 from .async_tasks import router as async_tasks_router
+from .high_frequency_question import router as high_frequency_question_router
 
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
@@ -20,3 +21,7 @@ api_router.include_router(tracing_router, tags=["tracing"])
 api_router.include_router(warmup_router, tags=["warmup"])
 api_router.include_router(subtask_router, tags=["subtask"])
 api_router.include_router(async_tasks_router, tags=["async-tasks"])
+api_router.include_router(
+    high_frequency_question_router,
+    tags=["high-frequency-question"],
+)

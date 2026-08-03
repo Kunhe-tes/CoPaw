@@ -33,6 +33,7 @@ def build_mcp_http_headers(
     *,
     passthrough_headers: Mapping[str, str] | None = None,
     session_id: str | None = None,
+    chat_id: str | None = None,
     trace_id: str | None = None,
 ) -> dict[str, str] | None:
     """Build final HTTP MCP headers with reserved Swe runtime headers."""
@@ -44,6 +45,7 @@ def build_mcp_http_headers(
         merged_headers,
         include_aliases=True,
         session_id=session_id,
+        chat_id=chat_id,
         trace_id=trace_id,
     )
 

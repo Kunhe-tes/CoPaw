@@ -130,7 +130,6 @@ export function SkillMentionMenu({
         boxShadow: "0 14px 36px rgba(35, 31, 27, 0.12)",
         gap: 4,
         maxHeight: 300,
-        minHeight: 64,
         overflowX: "hidden",
         overflowY: "auto",
         padding: 6,

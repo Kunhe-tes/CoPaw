@@ -113,7 +113,11 @@ describe("SkillMentions", () => {
     expect(screen.getByText("MCP 工具")).toBeInTheDocument();
     expect(screen.getByText("文件")).toBeInTheDocument();
     expect(screen.getByText("输入以搜索工具和文件")).toBeInTheDocument();
-    expect(screen.getByRole("listbox")).toHaveStyle({ overflowX: "hidden" });
+    expect(screen.getByRole("listbox")).toHaveStyle({
+      maxHeight: "300px",
+      overflowX: "hidden",
+      overflowY: "auto",
+    });
   });
 
   it("selects a typed item once and preserves atomic display text", () => {

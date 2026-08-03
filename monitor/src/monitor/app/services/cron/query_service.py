@@ -240,39 +240,6 @@ def _to_float(value: Any) -> float:
 class QueryService:
     """Service for querying cron data."""
 
-    # 分行综合排行仅展示的 11 项技能（同时匹配英文标识和中文名称）
-    _ALLOWED_BRANCH_SKILLS: set[str] = {
-        "insurance_mkt",
-        "保险营销客户分析技能",
-        "deposit_scale_growth_skill",
-        "存款规模增长与产品配置技能",
-        "fund_redeem_monitor",
-        "基金赎回实时监控技能",
-        "lc_breaking",
-        "单一持仓理财/定期客户破冰方案",
-        "global-market-report",
-        "全球市场复盘报告",
-        "存款到期客户经营方案技能",
-        "高AUM理财低收益客户调仓技能",
-        "基金亏损客户关怀陪伴文案",
-        "智能推荐保险计划书",
-        "黄金持仓客户陪伴技能",
-        "query-fund-plus-cust",
-        "固收+基金营销技能",
-        "query-insu-expand-cust",
-        "分行保险潜客技能",
-        "market-movement",
-        "市场异动",
-        "ncfh-report-review",
-        "如影随影-市场复盘",
-        "query-high-value-transactions",
-        "高价值动账商机盘户",
-        "query-sorted-cust",
-        "Claw精选名单",
-        "global-market-review",
-        "全球市场复盘报告-V2",
-    }
-
     @staticmethod
     def _skill_display_expr(skill_alias: str = "s") -> str:
         """构建技能展示名表达式。"""
@@ -288,8 +255,23 @@ class QueryService:
     ) -> str:
         """构建定时任务与技能表的关联条件。"""
         return (
-            f"JOIN swe_skills {skill_alias} "
-            f"ON FIND_IN_SET({skill_alias}.skill_id, {job_alias}.skill_ids)"
+            f"JOIN swe_marketplace_skills {skill_alias} "
+            f"ON FIND_IN_SET({skill_alias}.skill_id, {job_alias}.skill_ids) "
+            f"AND {skill_alias}.include_in_statistics = 1"
+        )
+
+    @staticmethod
+    def _statistics_skill_exists(
+        job_alias: str = "j",
+        skill_alias: str = "stat_skill",
+    ) -> str:
+        """判断任务绑定技能中是否存在统计技能。"""
+        return (
+            "EXISTS ("
+            f"SELECT 1 FROM swe_marketplace_skills {skill_alias} "
+            f"WHERE FIND_IN_SET({skill_alias}.skill_id, {job_alias}.skill_ids) "
+            f"AND {skill_alias}.include_in_statistics = 1"
+            ")"
         )
 
     def __init__(self) -> None:
@@ -705,19 +687,14 @@ class QueryService:
             runtime_dispatch_enabled=runtime_dispatch_enabled,
         )
         bucket_width = timedelta(minutes=bucket_minutes)
-        bucket_count = (
-            int(
-                (normalized_end - normalized_start).total_seconds()
-                // bucket_width.total_seconds(),
-            )
-            + (
-                1
-                if (
-                    normalized_end - normalized_start
-                ).total_seconds()
-                % bucket_width.total_seconds()
-                else 0
-            )
+        bucket_count = int(
+            (normalized_end - normalized_start).total_seconds()
+            // bucket_width.total_seconds(),
+        ) + (
+            1
+            if (normalized_end - normalized_start).total_seconds()
+            % bucket_width.total_seconds()
+            else 0
         )
         buckets = [
             CronScheduleDistributionBucket(
@@ -1428,6 +1405,63 @@ class QueryService:
             page=params.page,
             page_size=params.page_size,
         )
+
+    async def query_jobs_by_broadcast_source(
+        self,
+        tenant_id: Optional[str] = None,
+        bbk_id: Optional[str] = None,
+        source_id: Optional[str] = None,
+        broadcast_source_job_id: Optional[str] = None,
+    ) -> List[CronJobModel]:
+        """Query cron jobs by broadcast source job ID.
+
+        Args:
+            tenant_id: 租户ID筛选
+            bbk_id: 二级分行号（会转换为一级分行号）
+            source_id: 来源标识筛选
+            broadcast_source_job_id: 分发源定时任务ID
+
+        Returns:
+            List of cron jobs matching the criteria
+        """
+        from ....utils.bbk import normalize_bbk_id_to_primary
+
+        db = get_db_connection()
+        conditions = ["deleted_at IS NULL"]
+        sql_params: List = []
+
+        if tenant_id:
+            conditions.append("tenant_id = %s")
+            sql_params.append(tenant_id)
+
+        if bbk_id:
+            # 将二级分行号转换为一级分行号
+            primary_bbk_id = normalize_bbk_id_to_primary(bbk_id)
+            if primary_bbk_id:
+                conditions.append("bbk_id = %s")
+                sql_params.append(primary_bbk_id)
+
+        if source_id:
+            conditions.append("source_id = %s")
+            sql_params.append(source_id)
+
+        if broadcast_source_job_id:
+            conditions.append("broadcast_source_job_id = %s")
+            sql_params.append(broadcast_source_job_id)
+
+        query_sql = f"""
+            SELECT * FROM swe_cron_jobs
+            WHERE {' AND '.join(conditions)}
+            ORDER BY created_at DESC
+        """
+        rows = await db.fetch_all(query_sql, tuple(sql_params))
+
+        return [
+            CronJobModel.model_validate(
+                convert_row_times_direct(row, JOB_TIME_FIELDS),
+            )
+            for row in rows
+        ]
 
     async def get_job(
         self,
@@ -3394,7 +3428,7 @@ class QueryService:
         source_filter_sql: str,
         source_filter_params: List[Any],
     ) -> List[str]:
-        """获取分行ID列表（任务视角，不使用白名单过滤）。"""
+        """获取分行ID列表（任务视角，不使用统计技能过滤）。"""
         branch_list_sql = f"""
             SELECT DISTINCT j.bbk_id
             FROM swe_cron_executions e
@@ -3423,41 +3457,24 @@ class QueryService:
         source_filter_sql: str,
         source_filter_params: List[Any],
     ) -> List[str]:
-        """获取使用白名单技能的分行ID列表（技能视角）。
-
-        关联 traces 表，筛选 skills_used 包含白名单技能的执行记录。
-        """
-        # 构建白名单技能过滤条件
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        """获取使用统计技能的分行ID列表（技能视角）。"""
+        skill_exists = self._statistics_skill_exists("j")
 
         branch_list_sql = f"""
             SELECT DISTINCT j.bbk_id
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
             WHERE e.actual_time >= %s AND e.actual_time <= %s
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND j.bbk_id IS NOT NULL
               AND j.bbk_id != ''
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) IN ({allowed_placeholders})
+              AND {skill_exists}
               {bbk_filter_sql}
               {source_filter_sql}
         """
         params = (
-            [start_time, end_time]
-            + allowed_skills
-            + bbk_filter_params
-            + source_filter_params
+            [start_time, end_time] + bbk_filter_params + source_filter_params
         )
         rows = await db.fetch_all(branch_list_sql, tuple(params))
         return [row.get("bbk_id") for row in rows if row.get("bbk_id")]
@@ -3468,7 +3485,7 @@ class QueryService:
         bbk_id: str,
         source_id: Optional[str],
     ) -> int:
-        """统计分行任务数量（任务视角，不使用白名单过滤）。"""
+        """统计分行任务数量（任务视角，不使用统计技能过滤）。"""
         source_where = " AND source_id = %s" if source_id else ""
         task_count_sql = f"""
             SELECT COUNT(*) AS count
@@ -3490,35 +3507,22 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> int:
-        """统计分行使用白名单技能的任务数量（技能视角）。
-
-        通过执行记录关联 traces 表，筛选 skills_used 包含白名单技能的任务。
-        """
+        """统计分行使用统计技能的任务数量（技能视角）。"""
         source_where = " AND j.source_id = %s" if source_id else ""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        skill_exists = self._statistics_skill_exists("j")
 
         task_count_sql = f"""
             SELECT COUNT(DISTINCT j.id) AS count
             FROM swe_cron_jobs j
             JOIN swe_cron_executions e ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
             WHERE j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) IN ({allowed_placeholders})
+              AND {skill_exists}
               {source_where}
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         row = await db.fetch_one(task_count_sql, tuple(params))
@@ -3530,7 +3534,7 @@ class QueryService:
         bbk_id: str,
         source_id: Optional[str],
     ) -> list[str]:
-        """获取指定分行的所有 job_id（任务视角，不使用白名单过滤）。"""
+        """获取指定分行的所有 job_id（任务视角，不使用统计技能过滤）。"""
         source_where = " AND source_id = %s" if source_id else ""
         job_ids_sql = f"""
             SELECT id
@@ -3552,35 +3556,22 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> list[str]:
-        """获取指定分行使用白名单技能的所有 job_id（技能视角）。
-
-        通过执行记录关联 traces 表，筛选 skills_used 包含白名单技能的任务。
-        """
+        """获取指定分行使用统计技能的所有 job_id（技能视角）。"""
         source_where = " AND j.source_id = %s" if source_id else ""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        skill_exists = self._statistics_skill_exists("j")
 
         job_ids_sql = f"""
             SELECT DISTINCT j.id
             FROM swe_cron_jobs j
             JOIN swe_cron_executions e ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
             WHERE j.deleted_at IS NULL
               AND j.status != 'deleted'
               AND j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) IN ({allowed_placeholders})
+              AND {skill_exists}
               {source_where}
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         rows = await db.fetch_all(job_ids_sql, tuple(params))
@@ -3700,41 +3691,24 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> int:
-        """统计分行白名单内技能去重数量。
+        """统计分行统计技能去重数量。
 
-        从 swe_tracing_traces.skills_used 字段展开JSON数组，
-        过滤白名单内的技能后去重计数。
+        从任务绑定技能中按市场表统计开关过滤后去重计数。
         """
         source_where = " AND j.source_id = %s" if source_id else ""
-        # 构建白名单SQL条件
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
 
         sql = f"""
-            SELECT COUNT(DISTINCT skill_name) AS skill_count
-            FROM (
-                SELECT JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) AS skill_name
-                FROM swe_cron_executions e
-                JOIN swe_cron_jobs j ON e.job_id = j.id
-                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-                CROSS JOIN (
-                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-                ) idx
-                WHERE j.bbk_id = %s
-                  AND e.actual_time >= %s AND e.actual_time <= %s
-                  AND t.skills_used IS NOT NULL
-                  AND t.session_id LIKE 'cron-task%%'
-                  AND JSON_LENGTH(t.skills_used) > idx.i
-                  {source_where}
-            ) expanded
-            WHERE skill_name IN ({allowed_placeholders})
+            SELECT COUNT(DISTINCT s.skill_id) AS skill_count
+            FROM swe_cron_executions e
+            JOIN swe_cron_jobs j ON e.job_id = j.id
+            {self._skill_binding_join("j", "s")}
+            WHERE j.bbk_id = %s
+              AND e.actual_time >= %s AND e.actual_time <= %s
+              {source_where}
         """
         params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
-        params.extend(allowed_skills)
         row = await db.fetch_one(sql, tuple(params))
         return self._row_int(row, "skill_count")
 
@@ -3746,7 +3720,7 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> dict[str, int]:
-        """统计分行客户经理点击行为（任务视角，不使用白名单过滤）。
+        """统计分行客户经理点击行为（任务视角，不使用统计技能过滤）。
 
         按button_type去重user_id。
         """
@@ -3778,35 +3752,27 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> dict[str, int]:
-        """统计分行使用白名单技能的客户经理点击行为（技能视角）。
+        """统计分行使用统计技能的客户经理点击行为（技能视角）。
 
         与任务视角口径一致：按点击时间范围筛选，通过 cron_task_id 关联获取技能信息。
         """
         source_where = " AND c.source_id = %s" if source_id else ""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
             SELECT c.button_type, COUNT(DISTINCT c.user_id) AS manager_count
             FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
+            JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND c.button_type IN ('plan', 'insight', 'phone')
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) IN ({allowed_placeholders})
+              AND j.deleted_at IS NULL
+              AND j.status != 'deleted'
+              AND {skill_exists}
               {source_where}
             GROUP BY c.button_type
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         rows = await db.fetch_all(sql, tuple(params))
@@ -3824,7 +3790,7 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> dict[str, int]:
-        """统计分行客户点击行为（任务视角，不使用白名单过滤）。
+        """统计分行客户点击行为（任务视角，不使用统计技能过滤）。
 
         按button_type去重customer_id。
         """
@@ -3857,36 +3823,28 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> dict[str, int]:
-        """统计分行使用白名单技能的客户点击行为（技能视角）。
+        """统计分行使用统计技能的客户点击行为（技能视角）。
 
         与任务视角口径一致：按点击时间范围筛选，通过 cron_task_id 关联获取技能信息。
         """
         source_where = " AND c.source_id = %s" if source_id else ""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
             SELECT c.button_type, COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
+            JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND c.button_type IN ('plan', 'insight', 'phone')
               AND c.customer_id IS NOT NULL
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) IN ({allowed_placeholders})
+              AND j.deleted_at IS NULL
+              AND j.status != 'deleted'
+              AND {skill_exists}
               {source_where}
             GROUP BY c.button_type
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         rows = await db.fetch_all(sql, tuple(params))
@@ -3907,8 +3865,7 @@ class QueryService:
         source_filter_params: List[Any],
     ) -> dict[str, dict[str, Any]]:
         """统计技能视角下各分行的接触客户数和客户接触率."""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        skill_exists = self._statistics_skill_exists("j")
         contact_sql = f"""
             SELECT
                 a.bbk_id,
@@ -3939,19 +3896,11 @@ class QueryService:
               {source_filter_sql.replace('j.source_id', 'a.source_id')}
               AND EXISTS (
                 SELECT 1
-                FROM swe_cron_executions e
-                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-                CROSS JOIN (
-                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-                ) idx
-                WHERE e.job_id = a.cron_task_id
-                  AND t.skills_used IS NOT NULL
-                  AND t.session_id LIKE 'cron-task%%'
-                  AND JSON_LENGTH(t.skills_used) > idx.i
-                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                    IN ({allowed_placeholders})
+                FROM swe_cron_jobs j
+                WHERE j.id = a.cron_task_id
+                  AND j.deleted_at IS NULL
+                  AND j.status != 'deleted'
+                  AND {skill_exists}
               )
             GROUP BY a.bbk_id
         """
@@ -3959,7 +3908,6 @@ class QueryService:
             [start_time, end_time, start_time, end_time]
             + bbk_filter_params
             + source_filter_params
-            + allowed_skills
         )
         logger.info(
             f"[_fetch_branch_contact_stats] SQL: {contact_sql}, params: {params}",
@@ -3986,7 +3934,7 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> int:
-        """统计分行推荐的客户数（任务视角，不使用白名单过滤）。
+        """统计分行推荐的客户数（任务视角，不使用统计技能过滤）。
 
         从subtasks表custuid去重。
         """
@@ -4015,35 +3963,22 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> int:
-        """统计分行使用白名单技能的推荐客户数（技能视角）。
-
-        通过执行记录关联 traces 表，筛选 skills_used 包含白名单技能的推荐客户。
-        """
+        """统计分行使用统计技能的推荐客户数（技能视角）。"""
         source_where = " AND j.source_id = %s" if source_id else ""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
             SELECT COUNT(DISTINCT s.custuid) AS customer_count
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
             JOIN swe_cron_subtasks s ON e.trace_id = s.trace_id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
             WHERE j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
               AND s.custuid IS NOT NULL
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) IN ({allowed_placeholders})
+              AND {skill_exists}
               {source_where}
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         row = await db.fetch_one(sql, tuple(params))
@@ -4055,7 +3990,7 @@ class QueryService:
         bbk_id: str,
         source_id: Optional[str],
     ) -> int:
-        """统计分行涉及客户经理数（任务视角，不使用白名单过滤）。
+        """统计分行涉及客户经理数（任务视角，不使用统计技能过滤）。
 
         生效中任务的tenant_id去重。
         """
@@ -4081,35 +4016,24 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> int:
-        """统计分行使用白名单技能的涉及客户经理数（技能视角）。
+        """统计分行使用统计技能的涉及客户经理数（技能视角）。
 
-        通过执行记录关联 traces 表，筛选 skills_used 包含白名单技能的 tenant_id。
-        统计时间范围内执行过白名单技能任务的客户经理数。
+        统计时间范围内执行过统计技能任务的客户经理数。
         """
         source_where = " AND j.source_id = %s" if source_id else ""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
             SELECT COUNT(DISTINCT j.tenant_id) AS manager_count
             FROM swe_cron_jobs j
             JOIN swe_cron_executions e ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
             WHERE j.bbk_id = %s
               AND j.deleted_at IS NULL
               AND e.actual_time >= %s AND e.actual_time <= %s
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) IN ({allowed_placeholders})
+              AND {skill_exists}
               {source_where}
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         row = await db.fetch_one(sql, tuple(params))
@@ -4123,7 +4047,7 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> int:
-        """统计分行查看结果的客户经理数（任务视角，不使用白名单过滤）。
+        """统计分行查看结果的客户经理数（任务视角，不使用统计技能过滤）。
 
         is_read=1的tenant_id去重。
         """
@@ -4151,34 +4075,21 @@ class QueryService:
         end_time: datetime,
         source_id: Optional[str],
     ) -> int:
-        """统计分行使用白名单技能的查看结果客户经理数（技能视角）。
-
-        通过执行记录关联 traces 表，筛选 skills_used 包含白名单技能且 is_read=1 的 tenant_id。
-        """
+        """统计分行使用统计技能的查看结果客户经理数（技能视角）。"""
         source_where = " AND j.source_id = %s" if source_id else ""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        allowed_placeholders = ", ".join(["%s"] * len(allowed_skills))
+        skill_exists = self._statistics_skill_exists("j")
 
         sql = f"""
             SELECT COUNT(DISTINCT j.tenant_id) AS manager_count
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
             WHERE j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
               AND e.is_read = 1
-              AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']'))) IN ({allowed_placeholders})
+              AND {skill_exists}
               {source_where}
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         row = await db.fetch_one(sql, tuple(params))
@@ -4837,21 +4748,6 @@ class QueryService:
         skill_error[sk] = 0
 
     @staticmethod
-    def _parse_skills_used(value: Any) -> Optional[list]:
-        """Parse skills_used field into a list of skill name strings.
-
-        Returns None if the value cannot be parsed into a valid list.
-        """
-        if isinstance(value, str):
-            try:
-                value = json.loads(value)
-            except (TypeError, ValueError):
-                return None
-        if not isinstance(value, list):
-            return None
-        return value
-
-    @staticmethod
     def _count_skill_execution(
         skill_jobs: dict,
         skill_total: dict,
@@ -4954,8 +4850,6 @@ class QueryService:
         status = (row["status"] or "").lower()
         async_status = (row["async_status"] or "").lower()
         is_read = bool(row["is_read"])
-        if skill_name not in self._ALLOWED_BRANCH_SKILLS:
-            return
         if skill_name not in skill_jobs:
             self._init_skill_dicts(
                 skill_jobs,
@@ -5014,8 +4908,8 @@ class QueryService:
     ) -> BranchSkillResponse:
         """获取分行技能维度数据。
 
-        从 swe_cron_executions + swe_tracing_traces 链路，
-        提取 skills_used JSON 数组并聚合统计每项技能的执行情况。
+        从 swe_cron_executions + swe_cron_jobs 绑定技能链路，
+        关联市场技能统计开关并聚合统计每项技能的执行情况。
         """
         db = get_db_connection()
         start_time, end_time = self._parse_date_range(start_date, end_date)
@@ -5048,12 +4942,6 @@ class QueryService:
             items=items,
         )
 
-    def _build_allowed_skill_filter(self) -> tuple[str, list[str]]:
-        """构建白名单技能过滤条件."""
-        allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-        placeholders = ", ".join(["%s"] * len(allowed_skills))
-        return placeholders, allowed_skills
-
     async def _fetch_manager_base_info(
         self,
         db: DatabaseConnection,
@@ -5063,8 +4951,8 @@ class QueryService:
         source_id: Optional[str],
     ) -> list[dict]:
         """查询客户经理基础信息."""
-        placeholders, allowed_skills = self._build_allowed_skill_filter()
         source_where = " AND j.source_id = %s" if source_id else ""
+        skill_exists = self._statistics_skill_exists("j")
         sql = f"""
             SELECT
                 j.tenant_id AS user_id,
@@ -5076,21 +4964,12 @@ class QueryService:
             FROM swe_cron_jobs j
             JOIN swe_cron_executions e ON j.id = e.job_id
                 AND e.actual_time >= %s AND e.actual_time <= %s
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
             WHERE j.bbk_id = %s AND j.deleted_at IS NULL AND j.status != 'deleted'
-              AND t.skills_used IS NOT NULL AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                IN ({placeholders})
+              AND {skill_exists}
               {source_where}
             GROUP BY j.tenant_id
         """
-        params: list = [start_time, end_time, bbk_id] + allowed_skills
+        params: list = [start_time, end_time, bbk_id]
         if source_id:
             params.append(source_id)
         return await db.fetch_all(sql, tuple(params))
@@ -5104,29 +4983,18 @@ class QueryService:
         source_id: Optional[str],
     ) -> dict[str, int]:
         """查询客户经理技能数量."""
-        placeholders, allowed_skills = self._build_allowed_skill_filter()
         source_where = " AND j.source_id = %s" if source_id else ""
         sql = f"""
             SELECT j.tenant_id AS user_id,
-                COUNT(DISTINCT JSON_UNQUOTE(JSON_EXTRACT(t.skills_used,
-                    CONCAT('$[', idx.i, ']')))) AS skill_count
+                COUNT(DISTINCT s.skill_id) AS skill_count
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
+            {self._skill_binding_join("j", "s")}
             WHERE j.bbk_id = %s AND e.actual_time >= %s AND e.actual_time <= %s
-              AND t.skills_used IS NOT NULL AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                IN ({placeholders})
               {source_where}
             GROUP BY j.tenant_id
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         rows = await db.fetch_all(sql, tuple(params))
@@ -5141,30 +5009,21 @@ class QueryService:
         source_id: Optional[str],
     ) -> dict[str, int]:
         """查询推荐客户数."""
-        placeholders, allowed_skills = self._build_allowed_skill_filter()
         source_where = " AND j.source_id = %s" if source_id else ""
+        skill_exists = self._statistics_skill_exists("j")
         sql = f"""
             SELECT j.tenant_id AS user_id,
                 COUNT(DISTINCT s.custuid) AS recommended_customers
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
             JOIN swe_cron_subtasks s ON e.trace_id = s.trace_id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
             WHERE j.bbk_id = %s AND e.actual_time >= %s AND e.actual_time <= %s
-              AND s.custuid IS NOT NULL AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                IN ({placeholders})
+              AND s.custuid IS NOT NULL
+              AND {skill_exists}
               {source_where}
             GROUP BY j.tenant_id
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         rows = await db.fetch_all(sql, tuple(params))
@@ -5179,30 +5038,23 @@ class QueryService:
         source_id: Optional[str],
     ) -> dict[str, dict[str, int]]:
         """查询客户点击统计."""
-        placeholders, allowed_skills = self._build_allowed_skill_filter()
         source_where = " AND c.source_id = %s" if source_id else ""
+        skill_exists = self._statistics_skill_exists("j")
         sql = f"""
             SELECT c.user_id, c.button_type,
                 COUNT(DISTINCT c.customer_id) AS customer_count
             FROM swe_html_preview_click_events c
-            JOIN swe_cron_executions e ON c.cron_task_id = e.job_id
-            JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            CROSS JOIN (
-                SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-            ) idx
+            JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND c.button_type IN ('plan', 'insight', 'phone')
-              AND c.customer_id IS NOT NULL AND t.skills_used IS NOT NULL
-              AND t.session_id LIKE 'cron-task%%'
-              AND JSON_LENGTH(t.skills_used) > idx.i
-              AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                IN ({placeholders})
+              AND c.customer_id IS NOT NULL
+              AND j.deleted_at IS NULL
+              AND j.status != 'deleted'
+              AND {skill_exists}
               {source_where}
             GROUP BY c.user_id, c.button_type
         """
-        params: list = [bbk_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         rows = await db.fetch_all(sql, tuple(params))
@@ -5223,8 +5075,8 @@ class QueryService:
         source_id: Optional[str],
     ) -> dict[str, dict[str, Any]]:
         """查询客户经理维度的接触客户数和客户接触率."""
-        placeholders, allowed_skills = self._build_allowed_skill_filter()
         source_where = " AND a.source_id = %s" if source_id else ""
+        skill_exists = self._statistics_skill_exists("j")
         sql = f"""
             SELECT
                 a.user_id,
@@ -5253,78 +5105,20 @@ class QueryService:
               {source_where}
               AND EXISTS (
                 SELECT 1
-                FROM swe_cron_executions e
-                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-                CROSS JOIN (
-                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-                ) idx
-                WHERE e.job_id = a.cron_task_id
-                  AND t.skills_used IS NOT NULL
-                  AND t.session_id LIKE 'cron-task%%'
-                  AND JSON_LENGTH(t.skills_used) > idx.i
-                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                    IN ({placeholders})
+                FROM swe_cron_jobs j
+                WHERE j.id = a.cron_task_id
+                  AND j.deleted_at IS NULL
+                  AND j.status != 'deleted'
+                  AND {skill_exists}
               )
             GROUP BY a.user_id
         """
         params: list = [bbk_id, start_time, end_time, start_time, end_time]
         if source_id:
             params.append(source_id)
-        params.extend(allowed_skills)
         logger.info(
             f"[_fetch_manager_contact_stats] SQL: {sql}, params: {params}",
         )
-        # 调试：查EXISTS子查询是否能匹配
-        debug_sql3 = """
-            SELECT COUNT(DISTINCT a.id) as matched_cnt
-            FROM swe_html_preview_click_events a
-            WHERE a.bbk_id = %s AND a.customer_id IS NOT NULL
-            AND a.clicked_at >= %s AND a.clicked_at <= %s
-            AND EXISTS (
-                SELECT 1
-                FROM swe_cron_executions e
-                JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-                CROSS JOIN (
-                    SELECT 0 AS i UNION SELECT 1 UNION SELECT 2 UNION SELECT 3
-                    UNION SELECT 4 UNION SELECT 5 UNION SELECT 6 UNION SELECT 7
-                    UNION SELECT 8 UNION SELECT 9 UNION SELECT 10 UNION SELECT 11
-                ) idx
-                WHERE e.job_id = a.cron_task_id
-                  AND t.skills_used IS NOT NULL
-                  AND t.session_id LIKE 'cron-task%%'
-                  AND JSON_LENGTH(t.skills_used) > idx.i
-                  AND JSON_UNQUOTE(JSON_EXTRACT(t.skills_used, CONCAT('$[', idx.i, ']')))
-                    IN ({placeholders})
-            )
-        """
-        debug_row3 = await db.fetch_one(
-            debug_sql3.format(placeholders=placeholders),
-            (bbk_id, start_time, end_time) + tuple(allowed_skills),
-        )
-        logger.info(
-            f"[_fetch_manager_contact_stats] Debug EXISTS match: {debug_row3}",
-        )
-
-        # 调试：查cron_task_id是否匹配
-        debug_sql4 = """
-            SELECT a.id, a.cron_task_id, e.job_id, t.skills_used
-            FROM swe_html_preview_click_events a
-            LEFT JOIN swe_cron_executions e ON e.job_id = a.cron_task_id
-            LEFT JOIN swe_tracing_traces t ON e.trace_id = t.trace_id
-            WHERE a.bbk_id = %s AND a.customer_id IS NOT NULL
-            AND a.clicked_at >= %s AND a.clicked_at <= %s
-            LIMIT 5
-        """
-        debug_rows4 = await db.fetch_all(
-            debug_sql4,
-            (bbk_id, start_time, end_time),
-        )
-        logger.info(
-            f"[_fetch_manager_contact_stats] Debug cron_task mapping: {debug_rows4}",
-        )
-
         rows = await db.fetch_all(sql, tuple(params))
         logger.info(f"[_fetch_manager_contact_stats] Result rows: {len(rows)}")
         return {
@@ -5382,9 +5176,9 @@ class QueryService:
         end_date: Optional[str] = None,
         source_id: Optional[str] = None,
     ) -> BranchManagerSummaryResponse:
-        """获取分行客户经理汇总数据（技能视角，使用白名单过滤）。
+        """获取分行客户经理汇总数据（技能视角，使用市场表统计开关过滤）。
 
-        只统计使用白名单技能的客户经理，各项指标都基于白名单技能过滤。
+        只统计使用统计技能的客户经理，各项指标都基于市场表统计开关过滤。
         """
         db = get_db_connection()
         start_time, end_time = self._parse_date_range(start_date, end_date)
@@ -5642,7 +5436,6 @@ class QueryService:
         source_id: Optional[str],
     ) -> list[dict]:
         """查询客户经理技能统计."""
-        placeholders, allowed_skills = self._build_allowed_skill_filter()
         source_where = " AND j.source_id = %s" if source_id else ""
         skill_expr = self._skill_display_expr("s")
         sql = f"""
@@ -5660,12 +5453,11 @@ class QueryService:
             {self._skill_binding_join("j", "s")}
             WHERE j.bbk_id = %s AND j.tenant_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
-              AND {skill_expr} IN ({placeholders})
               {source_where}
             GROUP BY skill_name
             ORDER BY success_count DESC
         """
-        params: list = [bbk_id, user_id, start_time, end_time] + allowed_skills
+        params: list = [bbk_id, user_id, start_time, end_time]
         if source_id:
             params.append(source_id)
         return await db.fetch_all(sql, tuple(params))
@@ -5674,7 +5466,7 @@ class QueryService:
         self,
         rows: list[dict],
     ) -> list[ManagerSkillItem]:
-        """构建客户经理技能统计结果（SQL已过滤白名单技能）."""
+        """构建客户经理技能统计结果（SQL已按市场表统计开关过滤技能）."""
         items: list[ManagerSkillItem] = []
         for row in rows:
             skill_name = row["skill_name"]
@@ -5746,9 +5538,9 @@ class QueryService:
         end_date: Optional[str] = None,
         source_id: Optional[str] = None,
     ) -> ManagerCustomerResponse:
-        """获取客户经理客户维度数据（技能视角，使用白名单过滤）。
+        """获取客户经理客户维度数据（技能视角，使用市场表统计开关过滤）。
 
-        从 click_events 获取该客户经理点击过的客户，但只统计白名单技能任务的点击。
+        从 click_events 获取该客户经理点击过的客户，但只统计命中市场表统计开关技能任务的点击。
         如果指定了 skill_name，则只返回该技能下的客户点击情况。
         """
         db = get_db_connection()
@@ -5758,15 +5550,15 @@ class QueryService:
         end_str = end_date or end_time.strftime("%Y-%m-%d")
 
         source_where = " AND c.source_id = %s" if source_id else ""
+        skill_expr = self._skill_display_expr("s")
 
-        # 如果指定了 skill_name，只用该技能过滤；否则使用白名单
+        # 未指定技能时只依赖市场表统计开关过滤。
         if skill_name:
-            skill_filter = "= %s"
+            skill_filter = f"AND {skill_expr} = %s"
             skill_params = [skill_name]
         else:
-            allowed_skills = list(self._ALLOWED_BRANCH_SKILLS)
-            skill_filter = f"IN ({', '.join(['%s'] * len(allowed_skills))})"
-            skill_params = allowed_skills
+            skill_filter = ""
+            skill_params = []
 
         # 查询客户经理姓名（不需要表别名）
         user_source_where = " AND source_id = %s" if source_id else ""
@@ -5785,7 +5577,6 @@ class QueryService:
 
         # 查询客户点击统计（技能过滤）
         # 只通过 cron_task_id 关联，不限制点击时间必须在执行期间
-        skill_expr = self._skill_display_expr("s")
         sql = f"""
             SELECT
                 c.customer_id,
@@ -5801,7 +5592,7 @@ class QueryService:
               AND c.user_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND c.customer_id IS NOT NULL
-              AND {skill_expr} {skill_filter}
+              {skill_filter}
               {source_where}
             GROUP BY c.customer_id, c.customer_name
             ORDER BY click_time DESC

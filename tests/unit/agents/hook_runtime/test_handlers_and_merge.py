@@ -435,6 +435,7 @@ async def test_command_handler_env_injects_runtime_claims(
     context = _context().model_copy(
         update={
             "effective_tenant_id": encode_scope_id("tenant-a", "source-a"),
+            "chat_id": "chat-uuid-1",
             "trace_id": "trace-1",
         },
     )
@@ -453,6 +454,7 @@ async def test_command_handler_env_injects_runtime_claims(
         "source-a",
     )
     assert observed["SWE_SESSION_ID"] == "session-1"
+    assert observed["SWE_CHAT_ID"] == "chat-uuid-1"
     assert observed["SWE_TRACE_ID"] == "trace-1"
 
 
@@ -583,6 +585,7 @@ async def test_http_handler_injects_canonical_runtime_claim_headers(
     context = _context().model_copy(
         update={
             "effective_tenant_id": encode_scope_id("tenant-a", "source-a"),
+            "chat_id": "chat-uuid-1",
             "trace_id": "trace-1",
         },
     )
@@ -608,6 +611,7 @@ async def test_http_handler_injects_canonical_runtime_claim_headers(
         "x-swe-source-id": "source-a",
         "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-session-id": "session-1",
+        "x-swe-chat-id": "chat-uuid-1",
         "x-swe-trace-id": "trace-1",
     }
 
@@ -1093,6 +1097,76 @@ async def test_runtime_emits_prompt_command_and_http_handlers_concurrently(
         ("start", "prompt"),
     ]
     assert events[-3:] == [("end", "cmd"), ("end", "http"), ("end", "prompt")]
+
+
+@pytest.mark.asyncio
+async def test_runtime_stop_executes_handlers_but_discards_all_effects(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    executed_handler_ids: list[str] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del context, workspace_dir
+        executed_handler_ids.append(handler.id)
+        return HookHandlerResult(
+            handler_id=handler.id,
+            order=0,
+            output=HookOutput(
+                continue_=False,
+                stop_reason="ignored stop request",
+                system_message="ignored system message",
+                suppress_output=True,
+                hook_specific_output={
+                    "additionalContext": "ignored context",
+                    "updatedInput": {"command": "ignored"},
+                    "sessionTitle": "ignored title",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": "ignored denial",
+                },
+            ),
+            decision=HookDecision.STOP,
+            reason="ignored stop request",
+        )
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="stop-observer",
+                                command="echo",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    result = await runtime.emit(
+        _context(HookEventName.STOP),
+        workspace_dir=Path("/tmp"),
+    )
+
+    assert executed_handler_ids == ["stop-observer"]
+    assert result.decision == HookDecision.NONE
+    assert result.reason == ""
+    assert result.additional_context == []
+    assert result.hook_specific_outputs == {}
+    assert result.permission_decisions == []
+    assert result.updated_input is None
+    assert result.session_title is None
+    assert result.suppress_output is False
+    assert result.system_messages == []
 
 
 @pytest.mark.asyncio

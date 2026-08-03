@@ -6,12 +6,14 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
 import re
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Union, Any, Optional, Dict
+from urllib.parse import quote
 
 from fastapi import (
     APIRouter,
@@ -28,10 +30,25 @@ from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from ..agent_context import (
     get_agent_and_config_for_request,
     get_agent_for_request,
+    resolve_file_manager_workspace_dir,
 )
 from ..context_references import (
     ContextReferencesResponse,
     context_reference_directory,
+)
+from ..file_manager import (
+    FileManagerConflictError,
+    FileManagerDirectoryListing,
+    FileManagerItem,
+    FileManagerNotFoundError,
+    FileManagerPathError,
+    FileManagerTextPreview,
+    FileManagerUploadTooLargeError,
+    get_file_manager_service,
+)
+from ..file_manager_execution import (
+    run_file_manager_mutation,
+    run_file_manager_read,
 )
 from ...config.context import resolve_request_effective_tenant_id
 
@@ -216,6 +233,159 @@ class GeneratedFilesResponse(BaseModel):
     """聊天相关文件列表响应。"""
 
     files: list[GeneratedFileItem] = Field(default_factory=list)
+
+
+def _file_manager_http_error(error: FileManagerPathError) -> HTTPException:
+    """Map controlled filesystem errors without revealing host paths."""
+
+    if isinstance(error, FileManagerNotFoundError):
+        return HTTPException(
+            status_code=404,
+            detail="File manager item not found",
+        )
+    if isinstance(error, FileManagerConflictError):
+        return HTTPException(status_code=409, detail=str(error))
+    return HTTPException(status_code=403, detail=str(error))
+
+
+class FileManagerTextSaveRequest(BaseModel):
+    root: str
+    path: str
+    content: str
+    revision: str
+
+
+def _file_manager_actor(request: Request) -> str:
+    """Return a bounded audit actor without depending on one auth scheme."""
+
+    for candidate in (
+        request.headers.get("X-Actor"),
+        request.headers.get("X-User-Id"),
+        getattr(request.state, "actor", None),
+        getattr(request.state, "user_id", None),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()[:256]
+    return "unknown"
+
+
+def _audit_file_manager_mutation(
+    request: Request,
+    *,
+    action: str,
+    path: str,
+    outcome: str,
+) -> None:
+    """Best-effort mutation audit; never include or log file contents."""
+
+    try:
+        logger.info(
+            "file_manager.audit",
+            extra={
+                "actor": _file_manager_actor(request),
+                "time": datetime.now(timezone.utc).isoformat(),
+                "action": action,
+                "path": path,
+                "outcome": outcome,
+            },
+        )
+    except Exception:
+        # Audit delivery must not turn a successful filesystem mutation into a
+        # request failure.
+        pass
+
+
+def _file_manager_upload_audit_path(directory: str, filename: str) -> str:
+    """Keep early upload-rejection audit paths bounded and path-shaped."""
+
+    safe_filename = _safe_filename(filename or "file")
+    safe_parts = [
+        part
+        for part in directory.split("/")
+        if part not in {"", ".", ".."}
+        and "\\" not in part
+        and "\x00" not in part
+    ]
+    return "/".join([*safe_parts, safe_filename])
+
+
+def _file_manager_download_disposition(filename: str) -> str:
+    """Create a header-safe attachment filename without leaking a path."""
+
+    if (
+        filename.isascii()
+        and all(32 <= ord(character) <= 126 for character in filename)
+        and '"' not in filename
+        and "\\" not in filename
+    ):
+        return f'attachment; filename="{filename}"'
+    return f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+class _FileManagerDownloadStream:
+    """A bounded, idempotently-closeable streaming download descriptor."""
+
+    def __init__(self, file_descriptor: int, size_bytes: int) -> None:
+        self._file_descriptor: int | None = file_descriptor
+        self._remaining = size_bytes
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        if self._file_descriptor is None or self._remaining <= 0:
+            self.close()
+            raise StopIteration
+        try:
+            chunk = os.read(
+                self._file_descriptor,
+                min(64 * 1024, self._remaining),
+            )
+        except OSError:
+            self.close()
+            raise
+        if not chunk:
+            self.close()
+            raise StopIteration
+        self._remaining -= len(chunk)
+        if self._remaining == 0:
+            self.close()
+        return chunk
+
+    def close(self) -> None:
+        """Release the descriptor even when a response never starts streaming."""
+
+        file_descriptor, self._file_descriptor = self._file_descriptor, None
+        if file_descriptor is None:
+            return
+        try:
+            os.close(file_descriptor)
+        except OSError:
+            # A cancelled stream or a completed iterator may already close it.
+            pass
+
+
+class _FileManagerDownloadResponse(StreamingResponse):
+    """A download response that closes its descriptor on every exit path."""
+
+    def __init__(
+        self,
+        stream: _FileManagerDownloadStream,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self._file_manager_stream = stream
+        super().__init__(
+            stream,
+            media_type="application/octet-stream",
+            headers=headers,
+        )
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._file_manager_stream.close()
 
 
 def _looks_like_text_file(path: Path) -> bool:
@@ -855,6 +1025,313 @@ async def get_console_generated_files(
     return GeneratedFilesResponse(
         files=items[:_CHAT_FILE_LIST_LIMIT],
     )
+
+
+@router.get(
+    "/file-manager/directories",
+    response_model=FileManagerDirectoryListing,
+    summary="List a controlled chat file-manager directory",
+)
+async def get_file_manager_directory(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query("", description="Relative POSIX directory path"),
+    cursor: str | None = Query(None, description="Signed directory cursor"),
+    q: str = Query("", max_length=512, description="Direct-child name filter"),
+) -> FileManagerDirectoryListing:
+    """List direct children for the workspace bound to this request only."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
+    try:
+        return await run_file_manager_read(
+            service.list_directory,
+            root,
+            path,
+            cursor=cursor,
+            query=q or None,
+        )
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+
+
+@router.get(
+    "/file-manager/files/read",
+    response_model=FileManagerTextPreview,
+    summary="Read a bounded controlled text-file preview",
+)
+async def get_file_manager_file_preview(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative POSIX file path"),
+) -> FileManagerTextPreview:
+    """Return at most one MiB of UTF-8 text without auditing reads."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
+    try:
+        return await run_file_manager_read(
+            service.read_text_preview,
+            root,
+            path,
+        )
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+
+
+@router.get(
+    "/file-manager/files/download",
+    summary="Download one controlled regular file as an attachment",
+)
+async def get_file_manager_file_download(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative POSIX file path"),
+) -> StreamingResponse:
+    """Stream a single regular file from a no-follow descriptor, unaudited."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
+    try:
+        download = await run_file_manager_read(
+            service.open_file_for_download,
+            root,
+            path,
+        )
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+    stream = _FileManagerDownloadStream(
+        download.file_descriptor,
+        download.size_bytes,
+    )
+    return _FileManagerDownloadResponse(
+        stream,
+        headers={
+            "Content-Disposition": _file_manager_download_disposition(
+                download.filename,
+            ),
+            "Content-Length": str(download.size_bytes),
+        },
+    )
+
+
+@router.put(
+    "/file-manager/files/text",
+    response_model=FileManagerTextPreview,
+    summary="Save one revision-checked controlled text file",
+)
+async def put_file_manager_text_file(
+    request: Request,
+    body: FileManagerTextSaveRequest,
+) -> FileManagerTextPreview:
+    """Save small UTF-8 text only, rejecting stale revisions instead of overwrite."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
+    try:
+        result = await run_file_manager_mutation(
+            service.save_text,
+            body.root,
+            body.path,
+            body.content,
+            body.revision,
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="save",
+            path=body.path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="save",
+        path=body.path,
+        outcome="success",
+    )
+    return result
+
+
+@router.post(
+    "/file-manager/files/upload",
+    response_model=FileManagerItem,
+    summary="Upload a new controlled file without replacing an existing name",
+)
+async def post_file_manager_upload(
+    request: Request,
+    file: UploadFile = File(..., description="File to upload"),
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(
+        "",
+        description="Existing relative destination directory",
+    ),
+) -> FileManagerItem:
+    """Upload to the currently browsed directory, never renaming or replacing."""
+
+    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=_file_manager_upload_audit_path(path, file.filename or ""),
+            outcome="failure",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"
+            ),
+        )
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
+    filename = file.filename or ""
+    try:
+        item = await run_file_manager_mutation(
+            service.upload_stream,
+            root,
+            path,
+            filename,
+            file.file,
+        )
+    except FileManagerUploadTooLargeError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=_file_manager_upload_audit_path(path, filename),
+            outcome="failure",
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="upload",
+        path=item.path,
+        outcome="success",
+    )
+    return item
+
+
+@router.delete(
+    "/file-manager/files",
+    summary="Recoverably archive one controlled regular file",
+)
+async def delete_file_manager_file(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative regular file path"),
+) -> dict[str, str]:
+    """Move a file-manager file into the governance recycle-bin archive."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
+    try:
+        archived = await run_file_manager_mutation(
+            service.archive_file,
+            root,
+            path,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="archive",
+            path=path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="archive",
+        path=archived.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": archived.archive_item_id,
+        "original_path": archived.original_path,
+    }
+
+
+@router.post(
+    "/file-manager/recycle/{archive_item_id}/restore",
+    summary="Restore one recycle item to its original path without overwrite",
+)
+async def post_file_manager_recycle_restore(
+    request: Request,
+    archive_item_id: str,
+) -> dict[str, str]:
+    """Restore one archive item; a collision leaves the archive untouched."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
+    try:
+        restored = await run_file_manager_mutation(
+            service.restore_recycle_item,
+            archive_item_id,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="restore",
+            path=archive_item_id,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="restore",
+        path=restored.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": restored.archive_item_id,
+        "original_path": restored.original_path,
+    }
+
+
+@router.delete(
+    "/file-manager/recycle/{archive_item_id}",
+    summary="Permanently delete one recycle item",
+)
+async def delete_file_manager_recycle_item(
+    request: Request,
+    archive_item_id: str,
+) -> dict[str, str]:
+    """Remove archived bytes and index entry after the UI confirmation."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    service = get_file_manager_service(workspace_dir)
+    try:
+        purged = await run_file_manager_mutation(
+            service.purge_recycle_item,
+            archive_item_id,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="purge",
+            path=archive_item_id,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="purge",
+        path=purged.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": purged.archive_item_id,
+        "original_path": purged.original_path,
+    }
 
 
 @router.get(

@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from pydantic import BaseModel
 from swe.config.context import encode_scope_id
 
@@ -663,6 +664,199 @@ def test_get_agent_for_request_uses_effective_tenant_for_source_scoped_default(
         == f"/tmp/{effective_tenant_id}/workspaces/default"
     )
     assert request.state.tenant_id == "default"
+
+
+def test_file_manager_workspace_resolver_uses_path_agent_without_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_root = tmp_path / "default_ruice"
+    selected = tenant_root / "workspaces" / "writer"
+    selected.mkdir(parents=True)
+    (tenant_root / "workspaces" / "reader").mkdir()
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="default",
+            source_id="ruice",
+            workspace=agent_context.TenantWorkspaceContext(
+                "default_ruice",
+                tenant_root,
+            ),
+            agent_id="writer",
+        ),
+        headers={"X-Agent-Id": "reader"},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                multi_agent_manager=SimpleNamespace(
+                    get_agent=lambda *_args, **_kwargs: pytest.fail(
+                        "File Manager must not start an Agent runtime",
+                    ),
+                ),
+            ),
+        ),
+    )
+    config = SimpleNamespace(
+        agents=SimpleNamespace(
+            active_agent="reader",
+            profiles={
+                "writer": SimpleNamespace(
+                    workspace_dir=str(selected),
+                    enabled=True,
+                ),
+                "reader": SimpleNamespace(
+                    workspace_dir=str(
+                        tenant_root / "workspaces" / "reader",
+                    ),
+                    enabled=True,
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "_get_tenant_aware_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    resolved = asyncio.run(
+        agent_context.resolve_file_manager_workspace_dir(request),
+    )
+
+    assert resolved == selected.resolve()
+
+
+def test_file_manager_workspace_resolver_falls_back_to_active_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_root = tmp_path / "tenant-a"
+    selected = tenant_root / "workspaces" / "active"
+    selected.mkdir(parents=True)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="tenant-a",
+            workspace=agent_context.TenantWorkspaceContext(
+                "tenant-a",
+                tenant_root,
+            ),
+        ),
+        headers={},
+        app=SimpleNamespace(state=SimpleNamespace()),
+    )
+    config = SimpleNamespace(
+        agents=SimpleNamespace(
+            active_agent="active",
+            profiles={
+                "active": SimpleNamespace(
+                    workspace_dir=str(selected),
+                    enabled=True,
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "_get_tenant_aware_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    resolved = asyncio.run(
+        agent_context.resolve_file_manager_workspace_dir(request),
+    )
+
+    assert resolved == selected.resolve()
+
+
+@pytest.mark.parametrize(
+    ("profile", "exists", "expected_status"),
+    [
+        (None, False, 404),
+        (SimpleNamespace(enabled=False), False, 403),
+        (SimpleNamespace(enabled=True), False, 404),
+    ],
+)
+def test_file_manager_workspace_resolver_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: SimpleNamespace | None,
+    exists: bool,
+    expected_status: int,
+) -> None:
+    tenant_root = tmp_path / "tenant-a"
+    candidate = tenant_root / "workspaces" / "writer"
+    if exists:
+        candidate.mkdir(parents=True)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="tenant-a",
+            workspace=agent_context.TenantWorkspaceContext(
+                "tenant-a",
+                tenant_root,
+            ),
+        ),
+        headers={"X-Agent-Id": "writer"},
+        app=SimpleNamespace(state=SimpleNamespace()),
+    )
+    profiles = {}
+    if profile is not None:
+        profile.workspace_dir = str(candidate)
+        profiles["writer"] = profile
+    config = SimpleNamespace(
+        agents=SimpleNamespace(active_agent="writer", profiles=profiles),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "_get_tenant_aware_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(agent_context.resolve_file_manager_workspace_dir(request))
+
+    assert raised.value.status_code == expected_status
+    assert str(candidate) not in str(raised.value.detail)
+
+
+def test_file_manager_workspace_resolver_rejects_path_outside_tenant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_root = tmp_path / "tenant-a"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="tenant-a",
+            workspace=agent_context.TenantWorkspaceContext(
+                "tenant-a",
+                tenant_root,
+            ),
+        ),
+        headers={"X-Agent-Id": "writer"},
+        app=SimpleNamespace(state=SimpleNamespace()),
+    )
+    config = SimpleNamespace(
+        agents=SimpleNamespace(
+            active_agent="writer",
+            profiles={
+                "writer": SimpleNamespace(
+                    workspace_dir=str(outside),
+                    enabled=True,
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "_get_tenant_aware_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(agent_context.resolve_file_manager_workspace_dir(request))
+
+    assert raised.value.status_code == 403
+    assert str(outside) not in str(raised.value.detail)
 
 
 def test_multi_agent_manager_uses_tenant_config_when_tenant_id_provided(
