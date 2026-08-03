@@ -12,6 +12,7 @@ from agentscope.message import Msg
 from swe.app.source_system_config.runtime import (
     resolve_tool_result_compact_config,
 )
+from swe.constant import WORKING_DIR
 
 from .utils.tool_output_compaction import compact_tool_result_messages
 
@@ -38,11 +39,11 @@ class ToolOutputBudgetMixin:
             tool_result_compact = resolve_tool_result_compact_config(
                 self._agent_config.running.tool_result_compact,
             )
-            workspace_dir = self._workspace_dir
+            workspace_dir = Path(self._workspace_dir or WORKING_DIR)
 
             async for chunk in tool_res:
                 output: Any = chunk.content
-                if tool_result_compact.enabled and workspace_dir is not None:
+                if tool_result_compact.enabled:
                     compacted_chunk_msg = Msg(
                         "system",
                         [
@@ -60,8 +61,8 @@ class ToolOutputBudgetMixin:
                         old_max_bytes=tool_result_compact.recent_max_bytes,
                         recent_max_bytes=tool_result_compact.recent_max_bytes,
                         recent_n=1,
-                        artifact_dir=Path(workspace_dir) / "tool_result",
-                        workspace_dir=Path(workspace_dir),
+                        artifact_dir=workspace_dir / "tool_result",
+                        workspace_dir=workspace_dir,
                     )
                     output = compacted_chunk_msg.content[0]["output"]
 

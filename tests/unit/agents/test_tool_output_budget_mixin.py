@@ -123,6 +123,39 @@ async def test_compacts_source_resolved_tool_result_before_print_and_memory(
 
 
 @pytest.mark.asyncio
+async def test_compacts_with_fallback_workspace_when_workspace_is_none(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "swe.agents.tool_output_budget_mixin.WORKING_DIR",
+        tmp_path,
+    )
+    agent = _AgentScopeLikeAgent(
+        config=ToolResultCompactConfig(
+            enabled=True,
+            old_max_bytes=128,
+            recent_max_bytes=1000,
+            recent_n=1,
+            retention_days=1,
+        ),
+        workspace_dir=None,
+        chunks=[_chunk("x" * 4096)],
+    )
+
+    await agent._acting(
+        {"id": "tool-1", "name": "read_file", "input": {}},
+    )
+
+    output = agent.memory.messages[0].content[0]["output"][0]["text"]
+    assert len(output.encode("utf-8")) <= 1000
+    assert "<<<TRUNCATED>>>" in output
+    artifacts = list((tmp_path / "tool_result").glob("*.txt"))
+    assert len(artifacts) == 1
+    assert artifacts[0].read_text(encoding="utf-8") == "x" * 4096
+
+
+@pytest.mark.asyncio
 async def test_disabled_source_configuration_leaves_tool_output_unchanged(
     tmp_path: Path,
 ) -> None:
