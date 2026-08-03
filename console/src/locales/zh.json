@@ -1400,8 +1400,12 @@
       "scanAlerts": {
         "title": "扫描告警",
         "empty": "暂无安全告警",
+        "loadFailed": "扫描告警加载失败，数据库暂时不可用",
+        "retry": "重试",
         "clearAll": "清除全部",
         "clearConfirm": "确定清除所有扫描告警吗？",
+        "clearSuccess": "扫描告警已清除",
+        "clearFailed": "清除扫描告警失败",
         "skillName": "技能",
         "action": "动作",
         "actionBlocked": "已拦截",
@@ -1410,6 +1414,8 @@
         "actions": "操作",
         "allowSkill": "加入白名单",
         "remove": "删除",
+        "removeSuccess": "扫描告警已删除",
+        "removeFailed": "删除扫描告警失败",
         "viewFindings": "查看详情"
       },
       "whitelist": {
