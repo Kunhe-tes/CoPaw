@@ -1376,6 +1376,32 @@ def _find_tenant_dirs_for_source_id(
                 tenant_dirs.append(tenant_dir)
         return tenant_dirs
 
+    # 未指定 user_ids，查找所有匹配 source_id 的用户目录
+    # 直接匹配 default_<source_id>
+    default_dir = swe_root / f"default_{source_id}"
+    if default_dir.exists() and default_dir.is_dir():
+        tenant_dirs.append(default_dir)
+
+    # 遍历目录查找 encode_scope_id 格式的用户目录
+    for user_dir in swe_root.iterdir():
+        if not user_dir.is_dir():
+            continue
+        dir_name = user_dir.name
+        if dir_name.startswith("default_"):
+            continue
+        if "." not in dir_name:
+            continue
+        try:
+            from ...runtime.context import decode_scope_id
+
+            _, decoded_source = decode_scope_id(dir_name)
+            if decoded_source == source_id:
+                tenant_dirs.append(user_dir)
+        except ValueError:
+            pass
+
+    return tenant_dirs
+
 
 @router.post(
     "/market/admin/skills/init-swe-skills",
@@ -1466,32 +1492,6 @@ async def init_swe_skills(
     )
 
     return results
-
-    # 未指定 user_ids，查找所有匹配 source_id 的用户目录
-    # 直接匹配 default_<source_id>
-    default_dir = swe_root / f"default_{source_id}"
-    if default_dir.exists() and default_dir.is_dir():
-        tenant_dirs.append(default_dir)
-
-    # 遍历目录查找 encode_scope_id 格式的用户目录
-    for user_dir in swe_root.iterdir():
-        if not user_dir.is_dir():
-            continue
-        dir_name = user_dir.name
-        if dir_name.startswith("default_"):
-            continue
-        if "." not in dir_name:
-            continue
-        try:
-            from ...runtime.context import decode_scope_id
-
-            _, decoded_source = decode_scope_id(dir_name)
-            if decoded_source == source_id:
-                tenant_dirs.append(user_dir)
-        except ValueError:
-            pass
-
-    return tenant_dirs
 
 
 def _resolve_tenant_dir(swe_root: Path, tenant_id: str) -> Path | None:
