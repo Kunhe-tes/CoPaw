@@ -6,26 +6,25 @@
 """
 
 import logging
-import os
 
 import httpx
+
+from ...constant import MARKET_INTERNAL_TOKEN, MARKET_INTERNAL_URL
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_TIMEOUT = 5.0
-_MARKET_URL_ENV = "SWE_MARKET_INTERNAL_URL"
-_MARKET_TOKEN_ENV = "SWE_MARKET_INTERNAL_TOKEN"
 
 
 def _market_url() -> str:
-    """从环境变量读取 market 内部端点的 base URL。"""
-    return os.environ.get(_MARKET_URL_ENV, "http://market:8080").rstrip("/")
+    """market 内部端点的 base URL（去掉尾部斜杠）。"""
+    return MARKET_INTERNAL_URL.rstrip("/")
 
 
 def _build_headers() -> dict[str, str]:
     """构造请求头，包含可选的内部 token。"""
     headers: dict[str, str] = {}
-    token = os.environ.get(_MARKET_TOKEN_ENV, "").strip()
+    token = MARKET_INTERNAL_TOKEN.strip()
     if token:
         headers["X-Internal-Token"] = token
     return headers
