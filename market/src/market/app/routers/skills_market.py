@@ -1292,7 +1292,7 @@ class _InitSweSkillsRequest(BaseModel):
     )
     dry_run: bool = Field(
         default=False,
-        description="试运行模式，仅统计不实际写入",
+        description="试运行模式，true=仅统计不实际写入",
     )
 
 
