@@ -74,8 +74,9 @@ async def test_process_workspace_skills_writes_workspace_manifest_path(
         "user1",
         "source_a",
         object(),
-        False,
-        False,
+        False,  # force
+        False,  # dry_run
+        True,  # write_manifest_back
         {
             "tenant_id": "user1",
             "total_workspaces": 1,

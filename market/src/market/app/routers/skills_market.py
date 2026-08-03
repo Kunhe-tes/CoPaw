@@ -1455,6 +1455,13 @@ async def init_swe_skills(
         results["total_users"] += len(tenant_dirs)
 
         for tenant_dir in tenant_dirs:
+            manifest_before = _dump_workspace_manifests(tenant_dir)
+            logger.info(
+                "manifest 之前: tenant=%s, source_id=%s, content=%s",
+                tenant_dir.name,
+                source_id,
+                manifest_before,
+            )
             try:
                 result = await process_tenant_skills(
                     tenant_dir,
@@ -1481,6 +1488,14 @@ async def init_swe_skills(
                         "error": str(exc),
                     },
                 )
+            else:
+                manifest_after = _dump_workspace_manifests(tenant_dir)
+                logger.info(
+                    "manifest 之后: tenant=%s, source_id=%s, content=%s",
+                    tenant_dir.name,
+                    source_id,
+                    manifest_after,
+                )
 
     logger.info(
         "初始化完成: total_users=%d, total_skills=%d, processed=%d, inserted=%d, errors=%d",
@@ -1492,6 +1507,32 @@ async def init_swe_skills(
     )
 
     return results
+
+
+def _dump_workspace_manifests(tenant_dir: Path) -> dict[str, object]:
+    """读取 tenant_dir 下所有 workspace 的 skill.json 内容.
+
+    给 init_swe_skills 在调 process_tenant_skills 前后做对比用：
+    返回 {workspace_name: manifest_dict_or_error}，
+    workspace 不存在 / manifest 缺失则不计入。
+    """
+    manifests: dict[str, object] = {}
+    workspaces = tenant_dir / "workspaces"
+    if not workspaces.exists():
+        return manifests
+    for ws_dir in workspaces.iterdir():
+        if not ws_dir.is_dir():
+            continue
+        manifest_path = get_workspace_skill_manifest_path(ws_dir)
+        if not manifest_path.exists():
+            continue
+        try:
+            manifests[ws_dir.name] = json.loads(
+                manifest_path.read_text(encoding="utf-8"),
+            )
+        except json.JSONDecodeError as exc:
+            manifests[ws_dir.name] = {"_error": f"manifest 解析失败: {exc}"}
+    return manifests
 
 
 def _resolve_tenant_dir(swe_root: Path, tenant_id: str) -> Path | None:
