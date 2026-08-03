@@ -42,6 +42,7 @@ from .skills_manager import (
 )
 from .tool_failure import normalize_tool_function_errors
 from .tool_guard_mixin import ToolGuardMixin
+from .tool_output_budget_mixin import ToolOutputBudgetMixin
 from .tools import (
     edit_file,
     execute_shell_command,
@@ -101,7 +102,7 @@ class AgentPhaseState:
     reason: str | None = None
 
 
-class SWEAgent(ToolGuardMixin, ReActAgent):
+class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     """SWE Agent with integrated tools, skills, and memory management.
 
     This agent extends ReActAgent with:
@@ -115,7 +116,8 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
     MRO note
     ~~~~~~~~
     ``ToolGuardMixin`` overrides ``_acting`` and ``_reasoning`` via
-    Python's MRO: SWEAgent → ToolGuardMixin → ReActAgent.  If you
+    Python's MRO: SWEAgent → ToolGuardMixin → ToolOutputBudgetMixin →
+    ReActAgent.  If you
     add a ``_acting`` or ``_reasoning`` override in this class, you
     **must** call ``super()._acting(...)`` / ``super()._reasoning(...)``
     so the guard interception remains active.
