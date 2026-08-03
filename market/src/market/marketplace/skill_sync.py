@@ -70,6 +70,7 @@ async def process_tenant_skills(
     registry,
     force: bool,
     dry_run: bool = False,
+    write_manifest_back: bool = True,
 ) -> SyncResult:
     """处理单个租户目录下的所有技能.
 
@@ -81,6 +82,10 @@ async def process_tenant_skills(
         registry: SkillRegistry
         force: 是否强制重新生成 skill_id / cn_name
         dry_run: 试运行模式，仅统计不写库
+        write_manifest_back: 是否把生成的 metadata.skill_id / cn_name 回写到
+            用户 skill.json。admin 端点补救老数据时需要，src/swe 主动触发的
+            内部同步禁止（src/swe 自己负责写 skill.json，避免与 src/swe
+            已写入的字段竞争并污染 per-user skill_id）。
 
     Returns:
         SyncResult 统计
@@ -120,11 +125,13 @@ async def process_tenant_skills(
     }
 
     logger.info(
-        "处理租户目录: dir_name=%s, user_id=%s, source_id=%s, dry_run=%s",
+        "处理租户目录: dir_name=%s, user_id=%s, source_id=%s, "
+        "dry_run=%s, write_manifest_back=%s",
         dir_name,
         user_id,
         source_id,
         dry_run,
+        write_manifest_back,
     )
 
     for workspace_dir in workspace_base.iterdir():
@@ -138,6 +145,7 @@ async def process_tenant_skills(
             registry,
             force,
             dry_run,
+            write_manifest_back,
             result,
         )
 
@@ -151,6 +159,7 @@ async def _process_workspace_skills(
     registry,
     force: bool,
     dry_run: bool,
+    write_manifest_back: bool,
     result: SyncResult,
 ) -> None:
     """处理单个 workspace 下的所有技能."""
@@ -193,8 +202,8 @@ async def _process_workspace_skills(
             result,
         )
 
-    # 保存 manifest（保持与原 init-swe-skills 行为兼容）
-    if not dry_run and skills_dict:
+    # 保存 manifest（admin 端点补救老数据时需要；内部同步显式传 False 跳过）
+    if not dry_run and write_manifest_back and skills_dict:
         manifest["skills"] = skills_dict
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(

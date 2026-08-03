@@ -1613,6 +1613,9 @@ async def internal_sync_skills(
             registry=registry,
             force=False,
             dry_run=False,
+            # src/swe 自己负责写 skill.json，禁止回写避免污染
+            # per-user skill_id（参见 skill_sync.write_manifest_back 说明）
+            write_manifest_back=False,
         )
     except Exception as exc:
         logger.exception(
