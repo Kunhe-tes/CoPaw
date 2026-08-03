@@ -30,6 +30,7 @@ def test_message_query_requires_valid_time_range():
 def test_result_save_rejects_invalid_scope_bbk_pair():
     with pytest.raises(ValidationError):
         HighFrequencyQuestionResultSaveRequest(
+            source_id="RMASSIST",
             batch_id="HFQ_20260730_030000",
             stat_start_time="2026-07-23 00:00:00",
             stat_end_time="2026-07-30 00:00:00",
@@ -40,7 +41,6 @@ def test_result_save_rejects_invalid_scope_bbk_pair():
                     "rank_no": 1,
                     "topic_name": "查询客户保险持仓",
                     "message_count": 10,
-                    "user_count": 5,
                     "valid_message_count": 20,
                     "sample_questions": [],
                 },
@@ -51,6 +51,7 @@ def test_result_save_rejects_invalid_scope_bbk_pair():
 def test_result_save_rejects_duplicate_rank_key():
     with pytest.raises(ValidationError):
         HighFrequencyQuestionResultSaveRequest(
+            source_id="RMASSIST",
             batch_id="HFQ_20260730_030000",
             stat_start_time="2026-07-23 00:00:00",
             stat_end_time="2026-07-30 00:00:00",
@@ -106,6 +107,7 @@ async def test_save_results_deletes_and_batch_inserts_in_transaction():
     db = _FakeDb()
     service = HighFrequencyQuestionService(db)
     request = HighFrequencyQuestionResultSaveRequest(
+        source_id="RMASSIST",
         batch_id="HFQ_20260730_030000",
         stat_start_time="2026-07-23 00:00:00",
         stat_end_time="2026-07-30 00:00:00",
@@ -119,8 +121,12 @@ async def test_save_results_deletes_and_batch_inserts_in_transaction():
     assert db.conn.committed is True
     assert db.conn.rolled_back is False
     assert "DELETE FROM swe_high_frequency_question_result" in db.cursor.executes[0][0]
+    assert db.cursor.executes[0][1] == ("RMASSIST", "HFQ_20260730_030000")
     assert "INSERT INTO swe_high_frequency_question_result" in db.cursor.many[0][0]
-    assert db.cursor.many[0][1][0][0] == "HFQ_20260730_030000"
+    assert "source_id" in db.cursor.many[0][0]
+    assert "user_count" not in db.cursor.many[0][0]
+    assert db.cursor.many[0][1][0][0] == "RMASSIST"
+    assert db.cursor.many[0][1][0][1] == "HFQ_20260730_030000"
 
 
 def _result_item() -> dict:
@@ -130,7 +136,6 @@ def _result_item() -> dict:
         "rank_no": 1,
         "topic_name": "查询客户保险持仓",
         "message_count": 10,
-        "user_count": 5,
         "valid_message_count": 20,
         "sample_questions": ["查保险"],
     }

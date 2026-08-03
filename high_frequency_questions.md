@@ -1,340 +1,342 @@
-请在当前 monitor 服务中新增一个“用户高频问题分析”模块，为后续 AI 智能工场工作流提供接口。
+请帮我在现有 Python Monitor 服务中补充“用户高频问题分析”的异步任务管理、缓存复用和结果查询逻辑。
 
-请先阅读项目现有目录结构、路由注册方式、数据库访问方式、请求/响应模型、统一返回格式和异常处理方式，严格复用现有项目规范，不要另起一套架构。
+请先阅读项目中现有的高频问题相关接口、Service、DAO/Repository、工作流调用代码，以及 swe_async_tasks 的已有使用方式。保持当前 Python 框架、分层结构、数据库访问方式、异步执行方式和编码风格，尽量做最小改动，不要按 Java 项目的方式实现。
 
-功能背景：
-1. AI 智能工场会先调用取数接口，从 swe_tracing_traces 查询指定日期范围内的有效用户消息。
-2. 工作流会调用大模型，对消息进行问题主题归纳并统计全机构、各 bbk_id 的 Top 10。
-3. 工作流完成后，再调用结果保存接口，将结果批量写入 swe_high_frequency_question_result。
-4. 本次只实现后端接口，不实现前端，也不在 monitor 服务中调用大模型。
+一、现有业务背景
 
-建议在 monitor 服务中新增独立模块，例如：
-- high_frequency_question
-或遵循项目现有模块命名方式。
+高频问题工作流的输入参数主要包括：
 
-需要实现两个接口：
+- source_id：前端传入的字符串，例如 RMASSIST、default
+- start_time
+- end_time
+- bbk_id：选填
 
-========================================
-一、查询高频问题分析源消息
-========================================
+source_id 是真实的数据来源标识，必须原样保存和使用，不能改造成筛选条件编码。
 
-接口建议：
+用户只能查询和查看自己当前 source_id 下的数据。
 
-POST /monitor/high-frequency-question/messages
+因此，无论查询缓存、查询历史结果，还是判断重复运行任务，都必须将 source_id 作为匹配条件。
 
-请求参数：
+不同 source_id 之间不能复用结果。例如：
+
+- source_id=RMASSIST
+- source_id=default
+
+即使日期和机构相同，也必须视为两组独立结果。
+
+机构规则：
+
+- bbk_id 为空时：
+  - scope_type = ALL
+  - bbk_id = ALL
+- bbk_id 非空时：
+  - scope_type = ORG
+  - bbk_id = 前端传入的真实机构 ID
+
+工作流是同步接口：
+
+1. 调用 /message 接口读取数据
+2. 完成高频问题分析
+3. 调用 /result 接口写入 swe_high_frequency_question_result
+4. 只有结果写库完成后，工作流接口才返回成功
+
+swe_async_tasks.task_id 与 swe_high_frequency_question_result.batch_id 使用同一个值。
+
+异步任务状态只使用：
+
+- RUNNING
+- SUCCEEDED
+- FAILED
+
+不需要 PENDING。
+
+二、日期处理
+
+数据库表中的 stat_start_time 和 stat_end_time 保持 DATETIME 类型，不修改表结构。
+
+业务上判断相同条件时，只比较日期，不比较具体时分秒。
+
+相同条件定义为：
+
+- source_id 相同
+- start_time 的日期相同
+- end_time 的日期相同
+- scope_type 相同
+- bbk_id 相同
+
+前端选择的日期范围最长不能超过 7 天。
+
+请优先在 Python 代码中将 datetime 转换为 date，或者计算对应自然日的时间边界进行范围查询，不建议在数据库字段上直接使用 DATE(column)，避免索引失效。
+
+例如前端选择：
+
+- start_date = 2026-07-28
+- end_date = 2026-08-03
+
+缓存匹配时只需要识别为同一组日期条件。
+
+实际读取消息时，请沿用项目当前的时间范围口径，不要擅自改变 /message 接口现有的包含关系。如果当前使用闭区间或左闭右开，请保持一致，并在代码注释中说明。
+
+三、提交任务接口
+
+新增或完善高频问题分析任务提交接口。
+
+收到请求后依次执行：
+
+1. 校验 source_id 不能为空。
+2. 校验开始时间和结束时间合法。
+3. 校验日期范围最长不超过 7 天。
+4. 规范化机构：
+   - bbk_id 为空：scope_type=ALL，bbk_id=ALL
+   - bbk_id 非空：scope_type=ORG，bbk_id=原始值
+5. 查询最近 24 小时内是否存在相同条件的成功结果。
+
+成功结果匹配条件：
+
+- source_id 相同
+- 开始日期相同
+- 结束日期相同
+- scope_type 相同
+- bbk_id 相同
+- 结果表 created_at 在最近 24 小时内
+
+如果存在，直接返回最新一批结果及 batch_id，不创建异步任务，也不重新调用工作流。
+
+6. 如果没有可复用结果，检查是否存在相同条件的 RUNNING 任务。
+
+RUNNING 任务匹配条件同样是：
+
+- source_id 相同
+- 开始日期相同
+- 结束日期相同
+- scope_type 相同
+- bbk_id 相同
+
+如果存在，直接返回已有 task_id，不能重复提交。
+
+7. 如果既没有可复用结果，也没有运行中任务：
+   - 生成 task_id
+   - 将 task_id 同时作为工作流 batch_id
+   - 插入 swe_async_tasks，状态为 RUNNING
+   - 将同步工作流调用放入项目已有的后台任务机制或线程池中执行
+   - 提交接口立即返回 task_id 和 RUNNING，不能让前端请求等待整个工作流执行完成
+工作流调用接口：curl --location --request POST 'http://aplus-gateway.paasuat.cmbchina.cn/openapi/runtime/app/07c1cda53/tag/dev/workflow/run/WF543tVbDE' \
+  --header 'API-Key: 22a74901e4d64da98847cbe8cdb7c528' \
+  --header 'Content-Type: application/json' \
+  --data-raw '{"inputParams":{"source_id":"","start_time":"","end_time":"","bbk_id":""，"batch_id":""},"openId":"8379AE437A0A3EAB9D610725B0725F21","responseMode":"noStreaming"}'工作流返回结果：{"message":"success"}目前还不知道怎么判断异常了是否会返回报错信息
+
+
+四、筛选条件如何与 async 任务关联
+
+swe_async_tasks 表没有独立的 start_time、end_time、scope_type、bbk_id 字段。
+
+source_id 字段必须保存前端传入的真实 source_id，例如 RMASSIST，不能用它拼接日期和机构。
+
+请先检查项目中 swe_async_tasks.result_json 或其他已有字段的使用约定。
+
+建议在任务创建时，把本次请求条件保存到 result_json 中，例如：
 
 {
-  "start_time": "2026-07-23 00:00:00",
-  "end_time": "2026-07-30 00:00:00",
-  "bbk_id": null
+  "request": {
+    "source_id": "RMASSIST",
+    "start_date": "2026-07-28",
+    "end_date": "2026-08-03",
+    "scope_type": "ORG",
+    "bbk_id": "110"
+  }
 }
 
-参数说明：
-- start_time：必填，查询开始时间，包含。
-- end_time：必填，查询结束时间，不包含。
-- bbk_id：选填；为空时查询全部机构，有值时只查询该 bbk_id。
-- 时间查询必须使用：
-  start_time <= 消息时间 < end_time
-- 校验 start_time < end_time。
-- 建议限制查询时间跨度最大为 31 天，避免误调用产生超大查询。
+任务成功后更新 result_json 时，应保留 request，并补充 result，例如：
 
-数据来源：
-swe_tracing_traces
+{
+  "request": {
+    "source_id": "RMASSIST",
+    "start_date": "2026-07-28",
+    "end_date": "2026-08-03",
+    "scope_type": "ORG",
+    "bbk_id": "110"
+  },
+  "result": {
+    "batch_id": "xxx",
+    "result_count": 10
+  }
+}
 
-请先检查 swe_tracing_traces 在当前项目中的 ORM Model、Mapper、DAO 或已有 SQL，确认以下字段的真实字段名，不要凭空创建字段：
-- 消息唯一 ID
-- 用户 ID
-- 会话 ID
+如果项目当前数据库版本不适合高效查询 JSON 字段，请结合现有代码给出最小改动方案，但不能篡改 source_id 的业务含义。
+
+不要通过解析 title 或 summary 判断相同条件。
+
+五、创建 swe_async_tasks
+
+创建任务时写入：
+
+- task_id：生成的任务 ID
+- service：monitor
+- task_type：monitor.high.freq.question
+- status：RUNNING
+- title：用户高频问题分析
+- summary：可读的日期范围和机构说明
+- source_id：前端原样传入的 source_id，例如 RMASSIST
+- actor_user_id：当前操作人 ID；定时任务使用 SYSTEM
+- actor_user_name：当前操作人名称；定时任务使用 系统定时任务
+- target_count：1
+- done_count：0
+- failed_count：0
+- error_message：NULL
+- result_json：保存规范化后的请求筛选条件
+- finished_at：NULL
+
+actor_user_id 仅用于审计，不能作为缓存复用或重复任务判断条件。
+
+同一 source_id 下的所有用户共享相同筛选条件的分析结果。
+
+六、后台调用工作流
+
+后台任务中同步调用工作流，并传入：
+
+- source_id
+- task_id
+- batch_id，值与 task_id 相同
+- start_time
+- end_time
 - bbk_id
-- 用户消息内容
-- 消息创建时间
-- 消息角色或消息类型
-- 定时任务标识、任务来源或能够排除定时任务消息的字段
 
-查询要求：
-1. 只查询用户发送的消息，不查询 assistant、system 等消息。
-2. 排除定时任务产生的消息。
-3. content 不能为 NULL，TRIM 后不能为空。
-4. 过滤明显无意义的过短消息。
-5. 优先使用项目中已经存在的定时任务识别逻辑；如果没有，请根据 swe_tracing_traces 的真实字段设计过滤条件，并在修改说明中明确说明。
-6. 不要把所有长度较短的内容直接过滤掉，类似“查保险”“看持仓”等短文本仍可能是有效问题。
-7. 可以过滤明确无意义的内容，例如“好的”“收到”“继续”“谢谢”等。
-8. 按消息时间升序返回，保证输出稳定。
-9. 当前约有 7 天 4000 条有效数据，MVP 可以一次返回，不需要分页；但请设置合理的最大返回数量，例如 10000 条，超过时返回明确错误，不要静默截断。
+调用成功的前提是：
 
-响应示例：
+- 工作流已完成分析
+- /result 接口调用成功
+- swe_high_frequency_question_result 已完成写库
 
-{
-  "total": 4000,
-  "data": [
-    {
-      "message_id": "msg_001",
-      "user_id": "136807",
-      "session_id": "session_001",
-      "bbk_id": "110",
-      "content": "帮我查询这个客户目前有哪些保险产品",
-      "message_time": "2026-07-29 10:20:00"
-    }
-  ]
-}
+成功后更新 swe_async_tasks：
 
-要求：
-- 返回格式必须遵循 monitor 服务已有统一响应结构。
-- 如果 user_id、session_id 或 bbk_id 在个别数据中允许为空，请按数据库实际情况处理，不要因为单条字段为空导致整个接口失败。
-- content 不得在日志中完整打印，避免日志记录用户输入和潜在敏感信息。
-- 日志只记录日期范围、bbk_id、查询数量和耗时。
+- status = SUCCEEDED
+- done_count = 1
+- failed_count = 0
+- error_message = NULL
+- finished_at = 当前时间
+- result_json 保留 request，并补充 batch_id、result_count 等结果信息
 
-========================================
-二、批量保存高频问题分析结果
-========================================
+调用异常时，不要立即无条件标记失败。
 
-接口建议：
+先根据 batch_id=task_id 查询 swe_high_frequency_question_result 是否已经存在结果：
 
-POST /monitor/high-frequency-question/results
+- 如果结果已存在，说明可能只是工作流返回阶段发生网络异常，将任务更新为 SUCCEEDED
+- 如果结果不存在，将任务更新为 FAILED
 
-请求示例：
+FAILED 状态字段：
 
-{
-  "batch_id": "HFQ_20260730_030000",
-  "stat_start_time": "2026-07-23 00:00:00",
-  "stat_end_time": "2026-07-30 00:00:00",
-  "results": [
-    {
-      "scope_type": "ALL",
-      "bbk_id": "ALL",
-      "rank_no": 1,
-      "topic_name": "查询客户保险持仓",
-      "message_count": 520,
-      "user_count": 210,
-      "valid_message_count": 4000,
-      "sample_questions": [
-        "查询客户目前有哪些保险产品",
-        "帮我看看客户买过什么保险"
-      ]
-    },
-    {
-      "scope_type": "ORG",
-      "bbk_id": "110",
-      "rank_no": 1,
-      "topic_name": "生成客户营销话术",
-      "message_count": 86,
-      "user_count": 41,
-      "valid_message_count": 525,
-      "sample_questions": [
-        "帮我给这个客户写一段营销话术"
-      ]
-    }
-  ]
-}
+- status = FAILED
+- done_count = 0
+- failed_count = 1
+- finished_at = 当前时间
+- error_message = 截断后的安全错误摘要
 
-校验要求：
-1. batch_id、stat_start_time、stat_end_time、results 必填。
-2. stat_start_time 必须小于 stat_end_time。
-3. results 不能为空。
-4. scope_type 只允许 ALL、ORG。
-5. scope_type=ALL 时，bbk_id 必须为 ALL。
-6. scope_type=ORG 时，bbk_id 必须有实际值，且不能为 ALL。
-7. rank_no 必须大于 0；MVP 建议限制在 1～10。
-8. topic_name 不能为空，去除首尾空格后保存。
-9. message_count、user_count、valid_message_count 不能小于 0。
-10. message_count 不能大于 valid_message_count。
-11. user_count 原则上不能大于 message_count。
-12. sample_questions 最多保留 3～5 条，每条设置合理长度限制，例如 1000 字符。
-13. 同一个 batch_id + scope_type + bbk_id + rank_no 不能出现重复数据。
-14. 一次请求中的全部结果必须使用同一事务批量保存，任意一条失败则整体回滚。
-15. 不要循环逐条提交数据库，使用项目现有批量插入方式。
-16. 接口需要支持幂等重试。
+不要把完整用户消息、Prompt、模型输出或敏感数据写入 error_message。
 
-幂等策略建议：
-- 以 batch_id 作为一次完整预跑批次标识。
-- 在同一个事务内，先删除该 batch_id 已有结果，再批量插入本次完整结果。
-- 这样工作流因网络问题重试时不会重复插入。
-- 不允许影响其他 batch_id 的历史数据。
+七、事务要求
 
-响应示例：
+不要使用一个长事务包住以下全过程：
 
-{
-  "batch_id": "HFQ_20260730_030000",
-  "saved_count": 120
-}
+- 插入 RUNNING
+- 调用工作流
+- 更新最终状态
 
-========================================
-三、测试环境已有结果表结构
-========================================
+工作流可能执行数分钟，不能长期占用数据库事务。
 
-表名：
+应拆分为短事务：
 
-swe_high_frequency_question_result
+1. 创建 RUNNING 任务
+2. 在事务外调用工作流
+3. 单独更新 SUCCEEDED 或 FAILED
 
-表结构如下，请基于真实数据库类型和项目 ORM 规范建立对应 Model/Entity/Mapper，不要重新建表：
+八、并发去重
 
-CREATE TABLE swe_high_frequency_question_result (
-    id BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+需要防止两个用户几乎同时提交相同条件时创建两个任务。
 
-    batch_id VARCHAR(64) NOT NULL COMMENT '分析批次号，例如 HFQ_20260730_030000',
+请结合当前数据库访问方式实现并发保护。
 
-    stat_start_time DATETIME NOT NULL COMMENT '统计开始时间，包含',
-    stat_end_time DATETIME NOT NULL COMMENT '统计结束时间，不包含',
+相同条件包括：
 
-    scope_type VARCHAR(16) NOT NULL COMMENT '统计范围：ALL-全部机构，ORG-单个机构',
-    bbk_id VARCHAR(64) NOT NULL COMMENT '分行机构ID，全部机构统一保存为ALL',
+- source_id
+- start_date
+- end_date
+- scope_type
+- bbk_id
 
-    rank_no INT NOT NULL COMMENT '当前统计范围内的高频问题排名',
+优先复用项目已有的锁、事务、唯一性控制或任务创建方法。
 
-    topic_name VARCHAR(255) NOT NULL COMMENT '归纳后的高频问题主题',
+如果现有表结构无法通过唯一索引保证，请在代码中实现二次检查，并明确说明仍然可能存在的极小并发窗口，不要修改数据库表结构。
 
-    message_count INT NOT NULL DEFAULT 0 COMMENT '归入该主题的消息数量',
-    user_count INT NOT NULL DEFAULT 0 COMMENT '归入该主题的去重用户数量',
-    valid_message_count INT NOT NULL DEFAULT 0 COMMENT '当前统计范围内参与分析的有效消息总数',
+九、默认凌晨预跑
 
-    sample_questions JSON DEFAULT NULL COMMENT '代表性原始问题列表，JSON数组',
+每天凌晨定时生成：
 
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '结果生成并写入时间',
+- source_id：由定时任务配置明确传入，不能默认跨 source_id 生成
+- 最近 7 天
+- scope_type = ALL
+- bbk_id = ALL
+- actor_user_id = SYSTEM
+- actor_user_name = 系统定时任务
 
-    PRIMARY KEY (id),
+不同 source_id 需要分别配置定时任务或分别调用提交方法。
 
-    UNIQUE KEY uk_batch_scope_rank (
-        batch_id,
-        scope_type,
-        bbk_id,
-        rank_no
-    ),
+凌晨预跑也复用同一套任务提交、缓存检查和状态更新逻辑，不维护第二套实现。
 
-    KEY idx_scope_latest (
-        scope_type,
-        bbk_id,
-        created_at
-    ),
+十、结果查询接口
 
-    KEY idx_batch_id (
-        batch_id
-    ),
+前端查询时必须传入 source_id，并且只能返回该 source_id 下的数据。
 
-    KEY idx_stat_time (
-        stat_start_time,
-        stat_end_time
-    )
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_unicode_ci
-  COMMENT = '用户高频问题预跑结果表';
+按以下优先级返回：
 
-sample_questions 是 JSON 数组。请根据项目当前数据库框架选择正确处理方式：
-- 如果 ORM 已支持 JSON 类型，直接映射为 List<String> 或项目常用 JSON 类型。
-- 如果当前项目通常使用字符串保存 JSON，则实体中按 String 处理，并在接口 DTO 与数据库 Entity 之间进行序列化和反序列化。
-- 不要为了该字段额外引入重量级依赖。
--- rmassistdata.swe_tracing_traces definition
+1. 最近 24 小时内，相同 source_id、日期和机构条件的最新成功结果
+2. 相同条件正在运行的 RUNNING 任务
+3. 最新任务失败，但存在更早成功结果时：
+   - 返回更早成功结果
+   - state = AVAILABLE_STALE
+   - message = 最近一次更新失败，当前展示历史结果
+4. 没有结果也没有任务时：
+   - state = EMPTY
 
-CREATE TABLE `swe_tracing_traces` (
-  `trace_id` varchar(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '追踪唯一标识，UUID格式',
-  `b3_trace_id` varchar(64) DEFAULT NULL,
-  `source_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '数据源标识，用于多租户数据隔离',
-  `user_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '用户标识，发起请求的用户ID',
-  `user_name` varchar(20) DEFAULT NULL COMMENT '用户姓名',
-  `bbk_id` varchar(10) DEFAULT NULL COMMENT '分行编号',
-  `session_id` varchar(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '会话标识，同一会话的多次请求共享此ID',
-  `session_name` varchar(100) DEFAULT NULL COMMENT '会话名称',
-  `channel` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '通道来源，如 console/webhook/api 等',
-  `start_time` datetime(3) NOT NULL COMMENT '追踪开始时间，用户请求发起时刻',
-  `end_time` datetime(3) DEFAULT NULL COMMENT '追踪结束时间，请求完成时刻',
-  `duration_ms` int DEFAULT NULL COMMENT '总耗时（毫秒），从开始到结束的时长',
-  `model_name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT NULL COMMENT '主要使用的模型名称，如 gpt-4/claude-3',
-  `total_input_tokens` int DEFAULT '0' COMMENT '输入Token总数，所有LLM调用的输入累计',
-  `total_output_tokens` int DEFAULT '0' COMMENT '输出Token总数，所有LLM调用的输出累计',
-  `total_tokens` int DEFAULT '0' COMMENT 'Token总数，等于输入+输出',
-  `tools_used` json DEFAULT NULL COMMENT '使用的工具列表，JSON数组格式',
-  `skills_used` json DEFAULT NULL COMMENT '使用的技能列表，JSON数组格式',
-  `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT 'running' COMMENT '追踪状态：running/completed/error/cancelled',
-  `error` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci COMMENT '错误信息，失败时记录的错误描述',
-  `user_message` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci COMMENT '用户输入消息，截断后的摘要内容',
-  `created_at` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  `start_date` varchar(20) DEFAULT NULL COMMENT '数据日期',
-  PRIMARY KEY (`trace_id`),
-  KEY `idx_user_id` (`user_id`),
-  KEY `idx_model_name` (`model_name`),
-  KEY `idx_session_id` (`session_id`),
-  KEY `idx_source_start_time` (`source_id`,`start_time`),
-  KEY `idx_source_user` (`source_id`,`user_id`),
-  KEY `idx_source_session` (`source_id`,`session_id`),
-  KEY `idx_user_name` (`user_name`),
-  KEY `idx_bbk_id` (`bbk_id`),
-  KEY `idx_user_source_time_name` (`user_id`,`source_id`,`start_time` DESC,`user_name`),
-  KEY `idx_source_start_date` (`start_date`),
-  KEY `idx_source_start_user` (`source_id`,`start_time`,`user_id`,`session_id`),
-  KEY `idx_source_date_user` (`source_id`,`start_date`,`user_id`,`session_id`),
-  KEY `idx_source_id` (`source_id`),
-  KEY `idx_start_time` (`start_time`),
-  KEY `idx_source_b3_trace` (`source_id`,`b3_trace_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-========================================
-四、代码结构要求
-========================================
+成功结果返回：
 
-请根据 monitor 服务现有架构增加完整代码，包括但不限于：
+- task_id
+- batch_id
+- status/state
+- source_id
+- stat_start_time
+- stat_end_time
+- scope_type
+- bbk_id
+- result_updated_at
+- topics
 
-1. 路由或 Controller
-2. 请求 DTO
-3. 响应 DTO
-4. Service 接口及实现
-5. Repository、Mapper 或 DAO
-6. swe_high_frequency_question_result 对应 Entity/Model
-7. 从 swe_tracing_traces 查询消息所需的 SQL 或 Mapper 方法
-8. 批量删除同 batch_id 旧数据的方法
-9. 批量插入结果的方法
-10. 参数校验
-11. 事务控制
-12. 必要日志
-13. 单元测试或至少提供可执行的接口测试样例
+result_updated_at 取同一 batch_id 下：
 
-命名建议：
-- HighFrequencyQuestionController
-- HighFrequencyQuestionService
-- HighFrequencyQuestionServiceImpl
-- HighFrequencyQuestionResult
-- HighFrequencyQuestionMessageQueryRequest
-- HighFrequencyQuestionMessageResponse
-- HighFrequencyQuestionResultSaveRequest
+MAX(swe_high_frequency_question_result.created_at)
 
-但必须优先遵循当前项目已有命名风格。
+前端用于显示：
 
-========================================
-五、实现边界
-========================================
+本结果更新于 yyyy-MM-dd HH:mm
 
-本次不要实现：
-- 前端页面
-- 定时任务
-- 大模型调用
-- Prompt
-- 高频主题归类
-- Top 10 计算
-- 查询前端展示结果的接口
-- 长期主题库
+十一、请重点检查
 
-monitor 服务本次只负责：
-1. 从 swe_tracing_traces 提供干净的源消息。
-2. 接收 AI 工作流生成的结果并写入结果表。
+1. 当前 Python 项目使用的是 FastAPI、Flask 还是其他框架，并沿用现有写法。
+2. 当前数据库访问使用 SQLAlchemy、原生 SQL、MyBatis 风格封装或其他方式，并沿用现有实现。
+3. 当前项目是否已经有通用的 swe_async_tasks Model、Repository、Service。
+4. 当前是否已有后台线程池、asyncio task、Celery 或其他异步任务机制，优先复用。
+5. /result 接口是否能保证写库成功后才返回。
+6. 工作流返回值中如何判断真正成功，不能仅以 HTTP 200 判断。
+7. source_id 必须始终保留为前端传入的真实值，不能编码日期或机构。
 
-========================================
-六、代码质量要求
-========================================
+修改完成后请输出：
 
-1. 不要修改无关代码。
-3. 优先复用已有 Trace Model、Mapper 和查询逻辑。
-4. SQL 参数必须使用参数绑定，禁止字符串拼接，避免 SQL 注入。
-5. 时间字段使用项目统一的时间类型和序列化格式。
-6. 写入接口必须有 @Transactional 或项目等价事务机制。
-7. 批量保存失败时必须回滚。
-8. 对重复 batch_id 支持安全重试。
-9. 日志不要输出完整消息正文和 sample_questions。
-10. 请在完成后列出：
-   - 新增和修改了哪些文件
-   - 两个接口的路径
-   - swe_tracing_traces 实际使用了哪些字段
-   - 定时任务消息的具体过滤条件
-   - 幂等和事务如何实现
-   - curl 或 Postman 测试示例
-   - 当前仍需人工确认的字段或业务规则
-
-请先分析代码，再直接完成实现，不要只给方案或伪代码。
+- 修改的文件列表
+- 每个文件的修改内容
+- 新增或修改的接口
+- Python 异步执行方式
+- 24 小时缓存命中逻辑
+- source_id 隔离逻辑
+- RUNNING 任务去重逻辑
+- SUCCEEDED/FAILED 状态流转
+- result_updated_at 的返回方式
+- 仍需确认的业务或技术问题
