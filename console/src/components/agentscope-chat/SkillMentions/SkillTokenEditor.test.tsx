@@ -74,6 +74,33 @@ function SelectedTokenEditor() {
   );
 }
 
+function ContainerAnchoredTokenEditor({
+  placement = "top",
+}: {
+  placement?: "top" | "bottom";
+}) {
+  const [menuContainer, setMenuContainer] = useState<HTMLDivElement | null>(
+    null,
+  );
+  return (
+    <div data-testid="menu-container" ref={setMenuContainer}>
+      <SkillTokenEditor
+        aria-label="消息"
+        mentionMenuContainer={menuContainer}
+        mentionMenuPlacement={placement}
+        value="@"
+        skillMentions={{
+          items,
+          selected: [],
+          onChange: vi.fn(),
+          onOpen: vi.fn(),
+        }}
+        onValueChange={vi.fn()}
+      />
+    </div>
+  );
+}
+
 describe("SkillTokenEditor", () => {
   afterEach(cleanup);
   it("renders typed references as atomic tokens", () => {
@@ -230,17 +257,17 @@ describe("SkillTokenEditor", () => {
     expect(document.activeElement).toBe(editor);
     expect(screen.getByText("@browser")).toBeInTheDocument();
   });
-  it("positions the context-reference menu 3px above the editor", () => {
+  it("positions the context-reference menu 8px above the editor", () => {
     render(<ControlledTokenEditor />);
     const editor = screen.getByRole("textbox", { name: "消息" });
     editor.textContent = "@";
     fireEvent.input(editor);
 
     expect(document.getElementById("context-reference-menu")).toHaveStyle({
-      bottom: "calc(100% + 3px)",
+      bottom: "calc(100% + 8px)",
     });
   });
-  it("positions the context-reference menu below the editor when requested", () => {
+  it("positions the context-reference menu 8px below the editor when requested", () => {
     render(
       <SkillTokenEditor
         aria-label="消息"
@@ -256,12 +283,25 @@ describe("SkillTokenEditor", () => {
       />,
     );
 
+    fireEvent.input(screen.getByRole("textbox", { name: "消息" }));
+
     expect(document.getElementById("context-reference-menu")).toHaveStyle({
-      top: "calc(100% + 3px)",
+      top: "calc(100% + 8px)",
     });
     expect(document.getElementById("context-reference-menu")).not.toHaveStyle({
-      bottom: "calc(100% + 3px)",
+      bottom: "calc(100% + 8px)",
     });
+  });
+  it("anchors the menu to the supplied full input card", () => {
+    render(<ContainerAnchoredTokenEditor placement="bottom" />);
+
+    fireEvent.input(screen.getByRole("textbox", { name: "消息" }));
+
+    const container = screen.getByTestId("menu-container");
+    const menu = document.getElementById("context-reference-menu");
+
+    expect(menu?.parentElement).toBe(container);
+    expect(menu).toHaveStyle({ top: "calc(100% + 8px)" });
   });
   it("restores editor focus after a clicked option took focus", () => {
     render(<ControlledTokenEditor />);

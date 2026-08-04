@@ -135,7 +135,7 @@ describe("WelcomeCenterLayout", () => {
     expect(input.textContent).toBe("请用 @browser ");
   });
 
-  it("positions the context-reference menu below the new conversation input", () => {
+  it("anchors the context-reference menu below the complete new-conversation card", () => {
     render(
       <WelcomeCenterLayout
         greeting="你好"
@@ -149,13 +149,18 @@ describe("WelcomeCenterLayout", () => {
       />,
     );
 
-    setTokenEditorValue(screen.getByRole("textbox"), "@");
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "@");
+    const menu = document.getElementById("context-reference-menu");
 
-    expect(document.getElementById("context-reference-menu")).toHaveStyle({
-      top: "calc(100% + 3px)",
+    expect(menu?.parentElement).toBe(
+      input.closest(".welcome-input-card"),
+    );
+    expect(menu).toHaveStyle({
+      top: "calc(100% + 8px)",
     });
-    expect(document.getElementById("context-reference-menu")).not.toHaveStyle({
-      bottom: "calc(100% + 3px)",
+    expect(menu).not.toHaveStyle({
+      bottom: "calc(100% + 8px)",
     });
   });
 
