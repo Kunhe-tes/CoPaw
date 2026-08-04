@@ -735,7 +735,8 @@ class TestTraceManager:
             span_id
         ]  # pylint: disable=protected-access
         assert span.skill_name is None
-        assert span.skill_description == "desc:hook-http-demo"
+        # skill_description 字段已从 Span 模型移除，不再写入 span
+        assert not hasattr(span, "skill_description")
 
         await manager.close()
 
@@ -785,7 +786,8 @@ class TestTraceManager:
             span_id
         ]  # pylint: disable=protected-access
         assert span.skill_name == "weather"
-        assert span.skill_description == "desc:weather"
+        # skill_description 字段已从 Span 模型移除
+        assert not hasattr(span, "skill_description")
 
         await manager.close()
 
@@ -840,7 +842,8 @@ class TestTraceManager:
             span_id
         ]  # pylint: disable=protected-access
         assert span.skill_name == "fill-metadata"
-        assert span.skill_description == "desc:fill-metadata"
+        # skill_description 字段已从 Span 模型移除
+        assert not hasattr(span, "skill_description")
 
         await manager.close()
 

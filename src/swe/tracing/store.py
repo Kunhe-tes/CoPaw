@@ -359,9 +359,9 @@ class TraceStore:
                 span_id, trace_id, source_id, name, event_type,
                 start_time, end_time, duration_ms, user_id, session_id, channel,
                 model_name, input_tokens, output_tokens, tool_name, skill_name,
-                skill_id, skill_cn_name, skill_description, mcp_server,
+                skill_id, mcp_server,
                 tool_input, tool_output, error, user_name, bbk_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             span.span_id,
@@ -385,8 +385,6 @@ class TraceStore:
             span.tool_name,
             span.skill_name,
             span.skill_id,
-            span.skill_cn_name,
-            span.skill_description,
             span.mcp_server,
             json.dumps(span.tool_input) if span.tool_input else None,
             span.tool_output,
@@ -470,9 +468,9 @@ class TraceStore:
                 span_id, trace_id, source_id, name, event_type,
                 start_time, end_time, duration_ms, user_id, session_id, channel,
                 model_name, input_tokens, output_tokens, tool_name, skill_name,
-                skill_id, skill_cn_name, skill_description, mcp_server,
+                skill_id, mcp_server,
                 tool_input, tool_output, error, user_name, bbk_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params_list = []
         for span in spans:
@@ -499,8 +497,6 @@ class TraceStore:
                     span.tool_name,
                     span.skill_name,
                     span.skill_id,
-                    span.skill_cn_name,
-                    span.skill_description,
                     span.mcp_server,
                     json.dumps(span.tool_input) if span.tool_input else None,
                     span.tool_output,
@@ -2952,8 +2948,6 @@ class TraceStore:
             tool_name=row["tool_name"],
             skill_name=row["skill_name"],
             skill_id=row.get("skill_id"),
-            skill_cn_name=row.get("skill_cn_name"),
-            skill_description=row.get("skill_description"),
             mcp_server=row.get("mcp_server"),
             tool_input=(
                 json.loads(row["tool_input"]) if row["tool_input"] else None

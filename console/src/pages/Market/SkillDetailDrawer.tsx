@@ -7,7 +7,7 @@ import {
   UserOutlined,
   DownloadOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
+import { Button, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle, BarChart3 } from "lucide-react";
@@ -46,9 +46,6 @@ const HEADER_STYLE = {
   padding: "12px 20px",
   backgroundColor: "#fff",
   borderBottom: "1px solid #f0f0f0",
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
 } as const;
 
 // 元数据项样式 - 淡色小字
@@ -337,14 +334,12 @@ export function SkillDetailDrawer(
   const [isSaving, setIsSaving] = useState(false);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [distributions, setDistributions] = useState<DistributionRecord[]>([]);
-  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
-  const [syncToUsers, setSyncToUsers] = useState(true);
   const [usagePage, setUsagePage] = useState(1);
   const [usagePageSize, setUsagePageSize] = useState(DEFAULT_USAGE_PAGE_SIZE);
 
   // 统计配置相关状态
   const [includeInStatistics, setIncludeInStatistics] = useState<boolean>(false);
-  const [isUpdatingStatistics, setIsUpdatingStatistics] = useState(false);
+  const [, setIsUpdatingStatistics] = useState(false);
 
   const triggerBrowserDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -373,7 +368,7 @@ export function SkillDetailDrawer(
     return Array.from(userMap.values());
   }, [distributions]);
 
-  // 按机构分组分发记录
+  // 按机构分组分发记录，只读展示同步影响范围
   const groupedDistributions = useMemo(() => {
     const groups: Record<string, DistributionRecord[]> = {};
     for (const dist of uniqueDistributions) {
@@ -463,9 +458,7 @@ export function SkillDetailDrawer(
     try {
       const dists = await marketApi.getSkillDistributions(sourceId, skill.item_id);
       setDistributions(dists);
-      // 默认选中去重后的用户ID
       const uniqueIds = Array.from(new Set(dists.map((d) => d.target_user_id)));
-      setSelectedUserIds(uniqueIds);
       if (uniqueIds.length > 0) {
         setSyncModalOpen(true);
       } else {
@@ -480,8 +473,8 @@ export function SkillDetailDrawer(
 
   // 同步确认弹窗确认
   const handleSyncConfirm = useCallback(() => {
-    handleSave(syncToUsers, syncToUsers ? selectedUserIds : []);
-  }, [handleSave, syncToUsers, selectedUserIds]);
+    handleSave(true, uniqueDistributions.map((dist) => dist.target_user_id));
+  }, [handleSave, uniqueDistributions]);
 
   // 初始化统计配置状态
   useEffect(() => {
@@ -649,10 +642,6 @@ export function SkillDetailDrawer(
   const chineseName = skill.chinese_name?.trim() || "";
   const skillName = skill.name;
 
-  // 状态颜色和文字
-  const statusColor = skill.status === "active" ? "#52c41a" : "#ff4d4f";
-  const statusText = skill.status === "active" ? "已发布" : "已下架";
-
   // 简介
   const description = skill.description || "暂无描述";
 
@@ -660,18 +649,11 @@ export function SkillDetailDrawer(
     <>
       <div style={{ height: "100%", display: "flex", flexDirection: "column", backgroundColor: "#fafafa" }}>
         {/* 顶栏：固定 */}
-        <div style={{
-          position: "sticky",
-          top: 0,
-          zIndex: 10,
-          padding: "12px 20px",
-          backgroundColor: "#fff",
-          borderBottom: "1px solid #f0f0f0",
-        }}>
+        <div style={HEADER_STYLE}>
           {/* 单行：状态图标 + 名称 + 元数据 + 操作按钮 */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
             {/* 左侧：状态图标 + 名称 */}
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
               {/* 发布状态图标（仅已发布时显示） */}
               {skill.status === "active" && (
                 <Tooltip title="已发布">
@@ -794,7 +776,7 @@ export function SkillDetailDrawer(
             </div>
 
             {/* 右侧：操作按钮 */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, marginLeft: "auto" }}>
             <Button
               onClick={handleDownloadCurrentVersion}
               loading={downloadingCurrentVersion}
@@ -993,55 +975,20 @@ export function SkillDetailDrawer(
         okButtonProps={{ loading: isSaving }}
         width={520}
       >
-        {/* 同步选项 - 主选项 */}
-        <div style={{ marginBottom: 12 }}>
-          <Checkbox
-            checked={syncToUsers}
-            onChange={(e) => {
-              setSyncToUsers(e.target.checked);
-              if (e.target.checked && selectedUserIds.length === 0) {
-                // 开启同步时，默认全选
-                setSelectedUserIds(uniqueDistributions.map((d) => d.target_user_id));
-              }
-            }}
-          >
-            同步更新已分发用户的技能名称（共 {uniqueDistributions.length} 位用户）
-          </Checkbox>
+        <div style={{ marginBottom: 12, color: "#333", fontSize: 14 }}>
+          将同步更新全部已分发目标的技能名称（共 {uniqueDistributions.length} 位用户）。
         </div>
 
-        {/* 提示 */}
-        {syncToUsers && (
-          <div style={{ color: "#666", fontSize: 12, marginBottom: 12 }}>
-            同步更新后，用户下次会话将看到新名称
-          </div>
-        )}
+        <div style={{ color: "#666", fontSize: 12 }}>
+          同步更新后，用户下次会话将看到新名称。
+        </div>
 
-        {/* 用户列表 - 仅在同步开启时显示 */}
-        {syncToUsers && uniqueDistributions.length > 0 && (
-          <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        {uniqueDistributions.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
               <div style={{ fontWeight: 500 }}>已分发用户</div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <Checkbox
-                  checked={selectedUserIds.length === uniqueDistributions.length}
-                  indeterminate={selectedUserIds.length > 0 && selectedUserIds.length < uniqueDistributions.length}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setSelectedUserIds(uniqueDistributions.map((d) => d.target_user_id));
-                    } else {
-                      setSelectedUserIds([]);
-                    }
-                  }}
-                >
-                  全选
-                </Checkbox>
-                <a onClick={() => setSelectedUserIds([])} style={{ fontSize: 12 }}>
-                  清空
-                </a>
-              </div>
             </div>
 
-            {/* 按机构分组展示 */}
             <Collapse
               size="small"
               style={{ maxHeight: 280, overflow: "auto" }}
@@ -1068,25 +1015,16 @@ export function SkillDetailDrawer(
                       const displayName = dist.target_user_name
                         ? `${dist.target_user_name} (${dist.target_user_id})`
                         : dist.target_user_id;
-                      const selected = selectedUserIds.includes(dist.target_user_id);
                       return (
                         <div
                           key={dist.target_user_id}
-                          onClick={() => {
-                            if (selected) {
-                              setSelectedUserIds((prev) => prev.filter((id) => id !== dist.target_user_id));
-                            } else {
-                              setSelectedUserIds((prev) => [...prev, dist.target_user_id]);
-                            }
-                          }}
                           style={{
                             fontSize: 12,
                             color: "#333",
                             padding: "4px 8px",
                             borderRadius: 4,
-                            cursor: "pointer",
-                            backgroundColor: selected ? "#e6f4ff" : "transparent",
-                            border: selected ? "1px solid #1890ff" : "1px solid transparent",
+                            backgroundColor: "#f5f5f5",
+                            border: "1px solid #e5e7eb",
                             overflow: "hidden",
                             textOverflow: "ellipsis",
                             whiteSpace: "nowrap",
@@ -1101,12 +1039,7 @@ export function SkillDetailDrawer(
                 ),
               }))}
             />
-
-            {/* 选择汇总 */}
-            <div style={{ color: "#666", fontSize: 12, marginTop: 8 }}>
-              已选择 {selectedUserIds.length} 位用户
-            </div>
-          </>
+          </div>
         )}
       </Modal>
     </>

@@ -36,7 +36,7 @@ async def test_process_workspace_skills_writes_workspace_manifest_path(
     tmp_path,
     monkeypatch,
 ):
-    from market.app.routers import skills_market
+    from market.marketplace import skill_sync
     from market.marketplace.fs import get_workspace_skill_manifest_path
 
     workspace_dir = tmp_path / "workspace"
@@ -50,7 +50,7 @@ async def test_process_workspace_skills_writes_workspace_manifest_path(
         registry,
         force,
         dry_run,
-        results,
+        result,
     ):
         del (
             skill_dir,
@@ -59,24 +59,32 @@ async def test_process_workspace_skills_writes_workspace_manifest_path(
             registry,
             force,
             dry_run,
-            results,
+            result,
         )
         skills_dict["demo"] = {"enabled": True}
 
     monkeypatch.setattr(
-        skills_market,
+        skill_sync,
         "_process_single_skill",
         _record_skill,
     )
 
-    await skills_market._process_workspace_skills_async(
+    await skill_sync._process_workspace_skills(
         workspace_dir,
         "user1",
         "source_a",
         object(),
-        False,
-        False,
-        {"errors": []},
+        False,  # force
+        False,  # dry_run
+        True,  # write_manifest_back
+        {
+            "tenant_id": "user1",
+            "total_workspaces": 1,
+            "total_skills": 0,
+            "synced": 0,
+            "errors": [],
+            "details": [],
+        },
     )
 
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
