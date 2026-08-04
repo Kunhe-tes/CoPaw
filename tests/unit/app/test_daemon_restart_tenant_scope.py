@@ -4,12 +4,45 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 import uuid
 
 import pytest
 from agentscope.message import Msg, TextBlock
 
 from swe.app.runner import command_dispatch, daemon_commands
+
+
+@pytest.mark.asyncio
+async def test_resolve_command_context_finds_chat_from_session() -> None:
+    chat_manager = SimpleNamespace(
+        get_chat_id_by_session=AsyncMock(return_value="chat-1"),
+    )
+    runner = SimpleNamespace(_chat_manager=chat_manager)
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+
+    context = await command_dispatch._resolve_command_context(request, runner)
+
+    assert context.chat_id == "chat-1"
+    assert context.session_id == "session-1"
+    assert context.channel == "console"
+
+
+@pytest.mark.asyncio
+async def test_resolve_command_context_preserves_missing_request_channel() -> (
+    None
+):
+    context = await command_dispatch._resolve_command_context(
+        SimpleNamespace(session_id="", user_id="", channel_meta={}),
+        SimpleNamespace(_chat_manager=None),
+    )
+
+    assert context.channel == ""
 
 
 @pytest.mark.asyncio

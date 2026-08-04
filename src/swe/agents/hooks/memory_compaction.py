@@ -99,6 +99,48 @@ class MemoryCompactionHook:
         remeasure_projected_tokens: Callable[[], Awaitable[int]] | None = None,
     ) -> bool:
         """Apply staged checkpoint policy; return whether legacy flow stops."""
+        context = self._checkpoint_budget_context(
+            agent,
+            running_config,
+            projected_tokens,
+        )
+        if context is None:
+            return False
+        chat_id, compact_config, decision, watermark_key = context
+        if decision.stage == "normal":
+            return True
+        if decision.stage == "governance":
+            return self._schedule_governance_precompaction(
+                agent,
+                messages,
+                chat_id,
+                decision,
+                watermark_key,
+            )
+        return await self._install_checkpoint_stage(
+            agent,
+            running_config,
+            messages,
+            chat_id,
+            decision,
+            remeasure_projected_tokens,
+        )
+
+    @staticmethod
+    def _checkpoint_budget_context(
+        agent: ReActAgent,
+        running_config: Any,
+        projected_tokens: int,
+    ) -> (
+        tuple[
+            str,
+            Any,
+            ContextBudgetDecision,
+            tuple[str, int],
+        ]
+        | None
+    ):
+        """Return the stable checkpoint routing inputs for this request."""
         compact_config = getattr(running_config, "context_compact", None)
         required = (
             "lightweight_governance_ratio",
@@ -109,12 +151,12 @@ class MemoryCompactionHook:
         if compact_config is None or not all(
             hasattr(compact_config, name) for name in required
         ):
-            return False
+            return None
         chat_id = str(
             getattr(agent, "_request_context", {}).get("chat_id") or "",
         )
         if not chat_id:
-            return False
+            return None
         decision = decide_context_budget(
             projected_tokens,
             running_config.max_input_length,
@@ -127,88 +169,117 @@ class MemoryCompactionHook:
                 1,
             ),
         )
-        watermark_key = (chat_id, epoch)
-        if decision.stage == "normal":
+        return chat_id, compact_config, decision, (chat_id, epoch)
+
+    def _schedule_governance_precompaction(
+        self,
+        agent: ReActAgent,
+        messages: list[Msg],
+        chat_id: str,
+        decision: ContextBudgetDecision,
+        watermark_key: tuple[str, int],
+    ) -> bool:
+        """Start one new non-blocking precompaction task for a watermark."""
+        watermark = decision.precompaction_watermark
+        if watermark is None:
             return True
-        if decision.stage == "governance":
-            watermark = decision.precompaction_watermark
-            if watermark is None:
-                return True
-            if watermark <= self._precompaction_watermarks.get(
+        if watermark <= self._precompaction_watermarks.get(
+            watermark_key,
+            -1,
+        ):
+            return True
+        task = self._precompaction_tasks.get(watermark_key)
+        if task is not None and not task.done():
+            return True
+        task = asyncio.create_task(
+            self.memory_manager.schedule_precompaction(
+                chat_id=chat_id,
+                watermark=watermark,
+                messages=messages,
+                chat_model=agent.model,
+                formatter=agent.formatter,
+            ),
+        )
+        self._precompaction_tasks[watermark_key] = task
+        self._precompaction_watermarks[watermark_key] = watermark
+        task.add_done_callback(
+            lambda completed: self._record_precompaction_result(
+                completed,
                 watermark_key,
-                -1,
-            ):
-                return True
-            task = self._precompaction_tasks.get(watermark_key)
-            if task is not None and not task.done():
-                return True
+                watermark,
+            ),
+        )
+        return True
 
-            async def schedule() -> bool:
-                return await self.memory_manager.schedule_precompaction(
-                    chat_id=chat_id,
-                    watermark=watermark,
-                    messages=messages,
-                    chat_model=agent.model,
-                    formatter=agent.formatter,
-                )
+    def _record_precompaction_result(
+        self,
+        completed: asyncio.Task,
+        watermark_key: tuple[str, int],
+        watermark: int,
+    ) -> None:
+        """Clear a failed watermark while leaving newer schedules intact."""
+        if completed.cancelled():
+            return
+        try:
+            if completed.result():
+                return
+        except Exception:
+            logger.exception("Checkpoint precompaction failed")
+        if self._precompaction_watermarks.get(watermark_key) == watermark:
+            self._precompaction_watermarks.pop(watermark_key, None)
 
-            task = asyncio.create_task(schedule())
-            self._precompaction_tasks[watermark_key] = task
-            self._precompaction_watermarks[watermark_key] = watermark
-
-            def record_result(completed: asyncio.Task) -> None:
-                if completed.cancelled():
-                    return
-                try:
-                    if completed.result():
-                        return
-                    if (
-                        self._precompaction_watermarks.get(watermark_key)
-                        == watermark
-                    ):
-                        self._precompaction_watermarks.pop(watermark_key, None)
-                except Exception:
-                    if (
-                        self._precompaction_watermarks.get(watermark_key)
-                        == watermark
-                    ):
-                        self._precompaction_watermarks.pop(watermark_key, None)
-                    logger.exception("Checkpoint precompaction failed")
-
-            task.add_done_callback(record_result)
-            return True
+    async def _install_checkpoint_stage(
+        self,
+        _agent: ReActAgent,
+        running_config: Any,
+        messages: list[Msg],
+        chat_id: str,
+        decision: ContextBudgetDecision,
+        remeasure_projected_tokens: Callable[[], Awaitable[int]] | None,
+    ) -> bool:
+        """Install ready or degraded state and decide whether legacy flow stops."""
         installed = await self.memory_manager.install_ready_precompaction(
             chat_id=chat_id,
             messages=messages,
         )
         if installed:
-            # A candidate changes both the checkpoint projection and online
-            # history. Re-measure before deciding whether one ReMe fallback is
-            # still required; direct unit callers may omit this callback.
-            if remeasure_projected_tokens is None:
-                return True
-            remeasured = await remeasure_projected_tokens()
-            return decide_context_budget(
-                remeasured,
-                running_config.max_input_length,
-                compact_config,
-            ).stage in ("normal", "governance")
-        if decision.stage == "emergency":
-            install_degraded = getattr(
-                self.memory_manager,
-                "install_degraded_checkpoint",
-                None,
+            return await self._is_legacy_fallback_avoided(
+                running_config,
+                remeasure_projected_tokens,
             )
-            if install_degraded is not None:
-                await install_degraded(chat_id=chat_id, messages=messages)
-                if remeasure_projected_tokens is not None:
-                    remeasured = await remeasure_projected_tokens()
-                    return decide_context_budget(
-                        remeasured,
-                        running_config.max_input_length,
-                        compact_config,
-                    ).stage in ("normal", "governance")
-        return False
+        if decision.stage != "emergency":
+            return False
+        install_degraded = getattr(
+            self.memory_manager,
+            "install_degraded_checkpoint",
+            None,
+        )
+        if install_degraded is None:
+            return False
+        await install_degraded(chat_id=chat_id, messages=messages)
+        return await self._is_legacy_fallback_avoided(
+            running_config,
+            remeasure_projected_tokens,
+            default_result=False,
+        )
+
+    @staticmethod
+    async def _is_legacy_fallback_avoided(
+        running_config: Any,
+        remeasure_projected_tokens: Callable[[], Awaitable[int]] | None,
+        *,
+        default_result: bool = True,
+    ) -> bool:
+        """Return whether a checkpoint install brought usage below fallback."""
+        if remeasure_projected_tokens is None:
+            return default_result
+        remeasured = await remeasure_projected_tokens()
+        compact_config = running_config.context_compact
+        return decide_context_budget(
+            remeasured,
+            running_config.max_input_length,
+            compact_config,
+        ).stage in ("normal", "governance")
 
     @staticmethod
     async def _print_status_message(
