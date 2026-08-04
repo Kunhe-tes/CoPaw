@@ -3677,7 +3677,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             base_where = f"""
                 s.start_time >= %s AND s.start_time <= %s
-                AND (s.skill_id = %s OR (s.skill_id IS NULL AND s.skill_name = %s))
+                AND s.skill_name = %s
                 AND s.source_id NOT IN ({exclude_placeholders})
                 AND s.user_id != 'default'
             """
@@ -3685,21 +3685,19 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 start_date,
                 end_date,
                 skill_name,
-                skill_name,
                 *EXCLUDED_SOURCE_IDS,
             ]
         else:
             base_where = """
                 s.source_id = %s
                 AND s.start_time >= %s AND s.start_time <= %s
-                AND (s.skill_id = %s OR (s.skill_id IS NULL AND s.skill_name = %s))
+                AND s.skill_name = %s
                 AND s.user_id != 'default'
             """
             count_params = [
                 source_id,
                 start_date,
                 end_date,
-                skill_name,
                 skill_name,
             ]
 
