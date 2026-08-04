@@ -14,7 +14,7 @@ import os
 import shutil
 import tempfile
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
@@ -29,9 +29,22 @@ from swe.app.runner.hidden_context_injection import (
     redact_hidden_context_for_display,
 )
 
+from .chat_checkpoint import (
+    CheckpointEvent,
+    CheckpointRecord,
+    PrecompactionCandidate,
+    validate_checkpoint_record,
+    validate_precompaction_candidate,
+)
+
 logger = logging.getLogger(__name__)
 
 _MANIFEST_NAME = "manifest.json"
+_CHECKPOINT_NAME = "checkpoint.json"
+_CHECKPOINT_EVENTS_NAME = "events.jsonl"
+_CHECKPOINT_EPOCHS_NAME = "epochs.json"
+_CHECKPOINT_EVIDENCE_EPOCHS_NAME = "evidence-epochs.json"
+_CHECKPOINT_CANDIDATES_DIR = "candidates"
 _MAX_PAGE_SIZE = 50
 _CURSOR_SIGNATURE_SIZE = hashlib.sha256().digest_size
 _CURSOR_SECRET_ENV_VAR = "SWE_CONVERSATION_ARCHIVE_CURSOR_SECRET"
@@ -187,6 +200,23 @@ class ConversationArchivePage:
     next_cursor: str | None
 
 
+@dataclass(frozen=True)
+class CheckpointArchiveState:
+    """Current checkpoint and the recoverable event delta for one Chat."""
+
+    record: CheckpointRecord
+    events: tuple[CheckpointEvent, ...]
+    current_epoch: int
+
+
+@dataclass(frozen=True)
+class CheckpointCommitResult:
+    """The visible archive boundary and checkpoint installed together."""
+
+    boundary: ConversationArchiveBoundary
+    record: CheckpointRecord
+
+
 class ConversationArchiveStore:
     """Persist and page compacted messages without cross-chat visibility."""
 
@@ -228,27 +258,362 @@ class ConversationArchiveStore:
 
         chat_dir = self.path_for(canonical_chat_id)
         with self._chat_lock(canonical_chat_id):
+            return self._commit_locked(canonical_chat_id, archived_messages)
+
+    def _commit_locked(
+        self,
+        canonical_chat_id: str,
+        messages: Sequence[Msg],
+        *,
+        checkpoint: CheckpointRecord | None = None,
+    ) -> ConversationArchiveBoundary:
+        """Archive under an already-held Chat lock.
+
+        If a checkpoint is supplied, write it after the durable batch and before
+        the manifest makes that batch visible to archive readers.
+        """
+        if self._tombstone_path(canonical_chat_id).exists():
+            raise ValueError("Conversation archive has been deleted")
+        chat_dir = self.path_for(canonical_chat_id)
+        chat_dir.mkdir(parents=True, exist_ok=True)
+        boundary = ConversationArchiveBoundary(
+            id=str(uuid.uuid4()),
+            chat_id=canonical_chat_id,
+            created_at=datetime.now(timezone.utc).isoformat(),
+            archived_message_count=len(messages),
+            first_message_id=messages[0].id,
+            last_message_id=messages[-1].id,
+            first_timestamp=messages[0].timestamp,
+            last_timestamp=messages[-1].timestamp,
+        )
+        self._write_batch(chat_dir / f"{boundary.id}.jsonl", messages)
+        self._write_evidence_epochs(
+            chat_dir,
+            messages,
+            self._read_current_epoch(chat_dir),
+        )
+        if checkpoint is not None:
+            self._write_checkpoint_locked(
+                canonical_chat_id,
+                replace(checkpoint, archived_through=boundary.id),
+            )
+        manifest_path = chat_dir / _MANIFEST_NAME
+        manifest = self._read_manifest(manifest_path)
+        manifest["boundaries"].append(boundary.to_dict())
+        self._replace_manifest(manifest_path, manifest)
+        return boundary
+
+    async def read_checkpoint_state(
+        self,
+        chat_id: str,
+    ) -> CheckpointArchiveState:
+        """Read the active record and only events not yet incorporated by it."""
+        return await asyncio.to_thread(self._read_checkpoint_state, chat_id)
+
+    def _read_checkpoint_state(self, chat_id: str) -> CheckpointArchiveState:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
+            return self._read_checkpoint_state_locked(canonical_chat_id)
+
+    def _read_checkpoint_state_locked(
+        self,
+        canonical_chat_id: str,
+    ) -> CheckpointArchiveState:
+        chat_dir = self.path_for(canonical_chat_id)
+        current_epoch = self._read_current_epoch(chat_dir)
+        record = self._read_checkpoint_locked(
+            canonical_chat_id,
+            current_epoch,
+        )
+        events = tuple(
+            event
+            for event in self._read_checkpoint_events(chat_dir)
+            if event.epoch == current_epoch
+            and event.sequence > record.applied_event_sequence
+        )
+        return CheckpointArchiveState(record, events, current_epoch)
+
+    async def append_checkpoint_event(
+        self,
+        chat_id: str,
+        event: CheckpointEvent,
+    ) -> None:
+        """Durably append the next deterministic event under the Chat lock."""
+        await asyncio.to_thread(self._append_checkpoint_event, chat_id, event)
+
+    def _append_checkpoint_event(
+        self,
+        chat_id: str,
+        event: CheckpointEvent,
+    ) -> None:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
             if self._tombstone_path(canonical_chat_id).exists():
                 raise ValueError("Conversation archive has been deleted")
-            chat_dir.mkdir(parents=True, exist_ok=True)
-            boundary = ConversationArchiveBoundary(
-                id=str(uuid.uuid4()),
-                chat_id=canonical_chat_id,
-                created_at=datetime.now(timezone.utc).isoformat(),
-                archived_message_count=len(archived_messages),
-                first_message_id=archived_messages[0].id,
-                last_message_id=archived_messages[-1].id,
-                first_timestamp=archived_messages[0].timestamp,
-                last_timestamp=archived_messages[-1].timestamp,
+            state = self._read_checkpoint_state_locked(canonical_chat_id)
+            if event.epoch != state.current_epoch:
+                raise ValueError("Checkpoint event epoch is not current")
+            last_sequence = max(
+                (item.sequence for item in state.events),
+                default=state.record.applied_event_sequence,
             )
-            batch_path = chat_dir / f"{boundary.id}.jsonl"
-            self._write_batch(batch_path, archived_messages)
+            if event.sequence != last_sequence + 1:
+                raise ValueError(
+                    "Checkpoint event sequence must be contiguous",
+                )
+            validation = validate_checkpoint_record(state.record, (event,))
+            if not validation.is_valid:
+                raise ValueError(
+                    "Invalid checkpoint event: "
+                    + "; ".join(validation.errors),
+                )
+            chat_dir = self.path_for(canonical_chat_id)
+            events = [*self._read_checkpoint_events(chat_dir), event]
+            self._write_checkpoint_events(chat_dir, events)
 
-            manifest_path = chat_dir / _MANIFEST_NAME
-            manifest = self._read_manifest(manifest_path)
-            manifest["boundaries"].append(boundary.to_dict())
-            self._replace_manifest(manifest_path, manifest)
-        return boundary
+    async def write_active_checkpoint(
+        self,
+        chat_id: str,
+        record: CheckpointRecord,
+    ) -> None:
+        """Write a validated active record without archiving messages."""
+        await asyncio.to_thread(self._write_active_checkpoint, chat_id, record)
+
+    def _write_active_checkpoint(
+        self,
+        chat_id: str,
+        record: CheckpointRecord,
+    ) -> None:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
+            self._write_checkpoint_locked(canonical_chat_id, record)
+
+    async def write_pending_candidate(
+        self,
+        chat_id: str,
+        candidate: PrecompactionCandidate,
+    ) -> None:
+        """Persist an inactive candidate for later validation and installation."""
+        await asyncio.to_thread(
+            self._write_pending_candidate,
+            chat_id,
+            candidate,
+        )
+
+    def _write_pending_candidate(
+        self,
+        chat_id: str,
+        candidate: PrecompactionCandidate,
+    ) -> None:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
+            state = self._read_checkpoint_state_locked(canonical_chat_id)
+            if candidate.chat_id != canonical_chat_id:
+                raise ValueError("Candidate chat_id does not match archive")
+            if candidate.epoch != state.current_epoch:
+                raise ValueError("Candidate epoch is not current")
+            validation = validate_checkpoint_record(candidate.record)
+            if not validation.is_valid:
+                raise ValueError(
+                    "Invalid checkpoint candidate: "
+                    + "; ".join(validation.errors),
+                )
+            path = self._candidate_path(canonical_chat_id, candidate.id)
+            self._atomic_write(
+                path,
+                json.dumps(
+                    candidate.to_dict(),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            )
+
+    async def install_ready_candidate(
+        self,
+        chat_id: str,
+    ) -> CheckpointRecord | None:
+        """Install the newest still-valid pending candidate, if any."""
+        return await asyncio.to_thread(self._install_ready_candidate, chat_id)
+
+    def _install_ready_candidate(
+        self,
+        chat_id: str,
+    ) -> CheckpointRecord | None:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
+            state = self._read_checkpoint_state_locked(canonical_chat_id)
+            candidates = self._read_candidates(canonical_chat_id)
+            current_sequence = max(
+                (event.sequence for event in state.events),
+                default=state.record.applied_event_sequence,
+            )
+            for candidate in sorted(
+                candidates,
+                key=lambda item: item.created_at,
+                reverse=True,
+            ):
+                validation = validate_precompaction_candidate(
+                    candidate,
+                    state.record,
+                    current_sequence,
+                )
+                if not validation.is_valid:
+                    continue
+                self._write_checkpoint_locked(
+                    canonical_chat_id,
+                    candidate.record,
+                )
+                self._candidate_path(canonical_chat_id, candidate.id).unlink(
+                    missing_ok=True,
+                )
+                return candidate.record
+            return None
+
+    async def commit_checkpoint(
+        self,
+        chat_id: str,
+        messages: Sequence[Msg],
+        candidate_id: str,
+    ) -> CheckpointCommitResult:
+        """Archive source messages and activate one validated candidate."""
+        return await asyncio.to_thread(
+            self._commit_checkpoint,
+            chat_id,
+            messages,
+            candidate_id,
+        )
+
+    def _commit_checkpoint(
+        self,
+        chat_id: str,
+        messages: Sequence[Msg],
+        candidate_id: str,
+    ) -> CheckpointCommitResult:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        archived_messages = list(messages)
+        if not archived_messages or not all(
+            isinstance(message, Msg) for message in archived_messages
+        ):
+            raise ValueError(
+                "Checkpoint commit requires non-empty Msg messages",
+            )
+        with self._chat_lock(canonical_chat_id):
+            state = self._read_checkpoint_state_locked(canonical_chat_id)
+            candidate = self._read_candidate(canonical_chat_id, candidate_id)
+            if candidate is None:
+                raise ValueError("Checkpoint candidate does not exist")
+            current_sequence = max(
+                (event.sequence for event in state.events),
+                default=state.record.applied_event_sequence,
+            )
+            validation = validate_precompaction_candidate(
+                candidate,
+                state.record,
+                current_sequence,
+            )
+            if not validation.is_valid:
+                raise ValueError(
+                    "Checkpoint candidate is not ready: "
+                    + "; ".join(validation.errors),
+                )
+            record = replace(candidate.record, archived_through=None)
+            boundary = self._commit_locked(
+                canonical_chat_id,
+                archived_messages,
+                checkpoint=record,
+            )
+            record = replace(record, archived_through=boundary.id)
+            self._candidate_path(canonical_chat_id, candidate.id).unlink(
+                missing_ok=True,
+            )
+            return CheckpointCommitResult(boundary, record)
+
+    async def reset_checkpoint_epoch(
+        self,
+        chat_id: str,
+        *,
+        reason: str,
+    ) -> CheckpointArchiveState:
+        """Start a new default-context epoch without deleting Chat evidence."""
+        return await asyncio.to_thread(
+            self._reset_checkpoint_epoch,
+            chat_id,
+            reason,
+        )
+
+    def _reset_checkpoint_epoch(
+        self,
+        chat_id: str,
+        reason: str,
+    ) -> CheckpointArchiveState:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
+            chat_dir = self.path_for(canonical_chat_id)
+            prior_epoch = self._read_current_epoch(chat_dir)
+            next_epoch = prior_epoch + 1
+            self._write_epochs(chat_dir, next_epoch, reason)
+            record = CheckpointRecord.new(
+                chat_id=canonical_chat_id,
+                epoch=next_epoch,
+            )
+            self._write_checkpoint_locked(canonical_chat_id, record)
+            candidates_dir = chat_dir / _CHECKPOINT_CANDIDATES_DIR
+            if candidates_dir.exists():
+                shutil.rmtree(candidates_dir)
+                self._fsync_directory(chat_dir)
+            return CheckpointArchiveState(record, (), next_epoch)
+
+    async def recover_evidence(
+        self,
+        chat_id: str,
+        *,
+        epoch: int,
+        refs: Sequence[str],
+    ) -> list[Msg]:
+        """Recover exact archived evidence only for the current Context Epoch."""
+        return await asyncio.to_thread(
+            self._recover_evidence,
+            chat_id,
+            epoch,
+            refs,
+        )
+
+    def _recover_evidence(
+        self,
+        chat_id: str,
+        epoch: int,
+        refs: Sequence[str],
+    ) -> list[Msg]:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
+            state = self._read_checkpoint_state_locked(canonical_chat_id)
+            if epoch != state.current_epoch:
+                return []
+            requested = set(refs)
+            if not requested:
+                return []
+            chat_dir = self.path_for(canonical_chat_id)
+            recovered: list[Msg] = []
+            manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
+            evidence_epochs = self._read_evidence_epochs(chat_dir)
+            for boundary in self._visible_boundaries(
+                manifest,
+                canonical_chat_id,
+            ):
+                for message in self._read_batch(
+                    chat_dir / f"{boundary.id}.jsonl",
+                ):
+                    if message is None:
+                        continue
+                    if evidence_epochs.get(message.id) != epoch:
+                        continue
+                    if any(
+                        message.id in (ref, ref.partition(":")[2])
+                        for ref in requested
+                    ):
+                        recovered.append(message)
+            return recovered
 
     async def read_page(
         self,
@@ -336,6 +701,243 @@ class ConversationArchiveStore:
 
     def _tombstone_path(self, canonical_chat_id: str) -> Path:
         return self._dialog_root / ".deleted" / canonical_chat_id
+
+    def _checkpoint_path(self, canonical_chat_id: str) -> Path:
+        return self.path_for(canonical_chat_id) / _CHECKPOINT_NAME
+
+    def _events_path(self, canonical_chat_id: str) -> Path:
+        return self.path_for(canonical_chat_id) / _CHECKPOINT_EVENTS_NAME
+
+    def _epochs_path(self, canonical_chat_id: str) -> Path:
+        return self.path_for(canonical_chat_id) / _CHECKPOINT_EPOCHS_NAME
+
+    @staticmethod
+    def _evidence_epochs_path(chat_dir: Path) -> Path:
+        return chat_dir / _CHECKPOINT_EVIDENCE_EPOCHS_NAME
+
+    def _candidate_path(
+        self,
+        canonical_chat_id: str,
+        candidate_id: str,
+    ) -> Path:
+        canonical_candidate_id = ConversationArchiveBoundary._canonical_uuid(
+            candidate_id,
+            "candidate_id",
+        )
+        return (
+            self.path_for(canonical_chat_id)
+            / _CHECKPOINT_CANDIDATES_DIR
+            / f"{canonical_candidate_id}.json"
+        )
+
+    @staticmethod
+    def _read_current_epoch(chat_dir: Path) -> int:
+        path = chat_dir / _CHECKPOINT_EPOCHS_NAME
+        if not path.exists():
+            return 1
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            epoch = value["current_epoch"]
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Checkpoint epoch state is invalid") from exc
+        if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:
+            raise ValueError("Checkpoint epoch state is invalid")
+        return epoch
+
+    def _write_epochs(self, chat_dir: Path, epoch: int, reason: str) -> None:
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("Checkpoint epoch reset reason must not be empty")
+        history: list[dict[str, Any]] = []
+        path = chat_dir / _CHECKPOINT_EPOCHS_NAME
+        if path.exists():
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                existing = value.get("history", [])
+                if isinstance(existing, list):
+                    history = existing
+            except (TypeError, ValueError, json.JSONDecodeError):
+                history = []
+        history.append(
+            {
+                "epoch": epoch,
+                "reason": reason,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+        self._atomic_write(
+            path,
+            json.dumps(
+                {"current_epoch": epoch, "history": history},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+    def _read_evidence_epochs(self, chat_dir: Path) -> dict[str, int]:
+        path = self._evidence_epochs_path(chat_dir)
+        if not path.exists():
+            return {}
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("Checkpoint evidence epochs are invalid") from exc
+        if not isinstance(value, dict):
+            raise ValueError("Checkpoint evidence epochs are invalid")
+        result: dict[str, int] = {}
+        for message_id, epoch in value.items():
+            if (
+                not isinstance(message_id, str)
+                or not isinstance(epoch, int)
+                or isinstance(epoch, bool)
+                or epoch < 1
+            ):
+                raise ValueError("Checkpoint evidence epochs are invalid")
+            result[message_id] = epoch
+        return result
+
+    def _write_evidence_epochs(
+        self,
+        chat_dir: Path,
+        messages: Sequence[Msg],
+        epoch: int,
+    ) -> None:
+        evidence_epochs = self._read_evidence_epochs(chat_dir)
+        evidence_epochs.update({message.id: epoch for message in messages})
+        self._atomic_write(
+            self._evidence_epochs_path(chat_dir),
+            json.dumps(
+                evidence_epochs,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
+
+    def _read_checkpoint_locked(
+        self,
+        canonical_chat_id: str,
+        current_epoch: int,
+    ) -> CheckpointRecord:
+        path = self._checkpoint_path(canonical_chat_id)
+        if not path.exists():
+            return CheckpointRecord.new(
+                chat_id=canonical_chat_id,
+                epoch=current_epoch,
+            )
+        try:
+            record = CheckpointRecord.from_dict(
+                json.loads(path.read_text(encoding="utf-8")),
+            )
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            raise ValueError("Checkpoint record is invalid") from exc
+        validation = validate_checkpoint_record(record)
+        if not validation.is_valid:
+            raise ValueError("Checkpoint record is invalid")
+        if (
+            record.chat_id != canonical_chat_id
+            or record.epoch != current_epoch
+        ):
+            raise ValueError(
+                "Checkpoint record does not match current Chat epoch",
+            )
+        return record
+
+    def _write_checkpoint_locked(
+        self,
+        canonical_chat_id: str,
+        record: CheckpointRecord,
+    ) -> None:
+        if record.chat_id != canonical_chat_id:
+            raise ValueError("Checkpoint chat_id does not match archive")
+        chat_dir = self.path_for(canonical_chat_id)
+        current_epoch = self._read_current_epoch(chat_dir)
+        if record.epoch != current_epoch:
+            raise ValueError("Checkpoint epoch is not current")
+        validation = validate_checkpoint_record(record)
+        if not validation.is_valid:
+            raise ValueError(
+                "Invalid checkpoint record: " + "; ".join(validation.errors),
+            )
+        self._atomic_write(
+            self._checkpoint_path(canonical_chat_id),
+            record.to_json(),
+        )
+
+    @staticmethod
+    def _read_checkpoint_events(chat_dir: Path) -> list[CheckpointEvent]:
+        path = chat_dir / _CHECKPOINT_EVENTS_NAME
+        if not path.exists():
+            return []
+        events: list[CheckpointEvent] = []
+        with path.open("r", encoding="utf-8") as file_handle:
+            for line_number, line in enumerate(file_handle, start=1):
+                try:
+                    events.append(CheckpointEvent.from_dict(json.loads(line)))
+                except (
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    logger.warning(
+                        "Skipping malformed checkpoint event %s:%d: %s",
+                        path,
+                        line_number,
+                        exc,
+                    )
+        return events
+
+    def _write_checkpoint_events(
+        self,
+        chat_dir: Path,
+        events: Sequence[CheckpointEvent],
+    ) -> None:
+        payload = "".join(
+            json.dumps(
+                event.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+            for event in events
+        )
+        self._atomic_write(chat_dir / _CHECKPOINT_EVENTS_NAME, payload)
+
+    def _read_candidate(
+        self,
+        canonical_chat_id: str,
+        candidate_id: str,
+    ) -> PrecompactionCandidate | None:
+        path = self._candidate_path(canonical_chat_id, candidate_id)
+        if not path.exists():
+            return None
+        try:
+            return PrecompactionCandidate.from_dict(
+                json.loads(path.read_text(encoding="utf-8")),
+            )
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError) as exc:
+            logger.warning(
+                "Skipping malformed checkpoint candidate %s: %s",
+                path,
+                exc,
+            )
+            return None
+
+    def _read_candidates(
+        self,
+        canonical_chat_id: str,
+    ) -> list[PrecompactionCandidate]:
+        candidates_dir = (
+            self.path_for(canonical_chat_id) / _CHECKPOINT_CANDIDATES_DIR
+        )
+        if not candidates_dir.exists():
+            return []
+        candidates: list[PrecompactionCandidate] = []
+        for path in candidates_dir.glob("*.json"):
+            candidate = self._read_candidate(canonical_chat_id, path.stem)
+            if candidate is not None:
+                candidates.append(candidate)
+        return candidates
 
     def path_for(self, chat_id: str) -> Path:
         """Return the validated archive directory for one chat record."""

@@ -144,6 +144,46 @@ def _valid_ref(value: str) -> bool:
     return bool(prefix and separator and suffix)
 
 
+def _mapping(value: Any, field_name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return value
+
+
+def _string_tuple(value: Any, field_name: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
+        raise ValueError(f"{field_name} must be an array of strings")
+    return tuple(value)
+
+
+def _evidence_item_from_dict(value: Any, field_name: str) -> "EvidenceItem":
+    data = _mapping(value, field_name)
+    text = data.get("text")
+    if not isinstance(text, str):
+        raise ValueError(f"{field_name}.text must be a string")
+    return EvidenceItem(
+        text=text,
+        evidence_refs=_string_tuple(
+            data.get("evidence_refs", []),
+            f"{field_name}.evidence_refs",
+        ),
+    )
+
+
+def _evidence_items_from_dict(
+    value: Any,
+    field_name: str,
+) -> tuple["EvidenceItem", ...]:
+    if not isinstance(value, list):
+        raise ValueError(f"{field_name} must be an array")
+    return tuple(
+        _evidence_item_from_dict(item, f"{field_name}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+
 @dataclass(frozen=True)
 class EvidenceItem:
     """One rendered claim and the durable references that support it."""
@@ -264,6 +304,22 @@ class CheckpointEvent:
             "source_refs": list(self.source_refs),
         }
 
+    @classmethod
+    def from_dict(cls, value: Any) -> "CheckpointEvent":
+        data = _mapping(value, "checkpoint event")
+        return cls(
+            id=str(data["id"]),
+            sequence=int(data["sequence"]),
+            epoch=int(data["epoch"]),
+            occurred_at=str(data["occurred_at"]),
+            type=str(data["type"]),
+            facts=_mapping(data["facts"], "checkpoint event facts"),
+            source_refs=_string_tuple(
+                data.get("source_refs", []),
+                "checkpoint event source_refs",
+            ),
+        )
+
 
 @dataclass(frozen=True)
 class CheckpointRecord:
@@ -372,6 +428,139 @@ class CheckpointRecord:
             separators=(",", ":"),
         )
 
+    @classmethod
+    def from_dict(cls, value: Any) -> "CheckpointRecord":
+        """Rebuild a record previously emitted by :meth:`to_dict`."""
+        data = _mapping(value, "checkpoint")
+        current_task_data = _mapping(
+            data["current_task"],
+            "checkpoint.current_task",
+        )
+        progress_data = _mapping(data["progress"], "checkpoint.progress")
+
+        def progress_items(bucket: ProgressBucket) -> tuple[ProgressItem, ...]:
+            values = progress_data.get(bucket, [])
+            if not isinstance(values, list):
+                raise ValueError(
+                    f"checkpoint.progress.{bucket} must be an array",
+                )
+            return tuple(
+                ProgressItem(
+                    text=str(_mapping(item, f"progress.{bucket}")["text"]),
+                    status=str(
+                        _mapping(item, f"progress.{bucket}")["status"],
+                    ),  # type: ignore[arg-type]
+                    evidence_refs=_string_tuple(
+                        _mapping(item, f"progress.{bucket}").get(
+                            "evidence_refs",
+                            [],
+                        ),
+                        f"progress.{bucket}.evidence_refs",
+                    ),
+                )
+                for item in values
+            )
+
+        def decisions() -> tuple[Decision, ...]:
+            values = data.get("key_decisions", [])
+            if not isinstance(values, list):
+                raise ValueError("checkpoint.key_decisions must be an array")
+            return tuple(
+                Decision(
+                    text=str(_mapping(item, "key_decision")["text"]),
+                    evidence_refs=_string_tuple(
+                        _mapping(item, "key_decision").get(
+                            "evidence_refs",
+                            [],
+                        ),
+                        "key_decision.evidence_refs",
+                    ),
+                )
+                for item in values
+            )
+
+        def next_steps() -> tuple[NextStep, ...]:
+            values = data.get("next_steps", [])
+            if not isinstance(values, list):
+                raise ValueError("checkpoint.next_steps must be an array")
+            return tuple(
+                NextStep(
+                    text=str(_mapping(item, "next_step")["text"]),
+                    evidence_refs=_string_tuple(
+                        _mapping(item, "next_step").get("evidence_refs", []),
+                        "next_step.evidence_refs",
+                    ),
+                )
+                for item in values
+            )
+
+        completed_values = data.get("completed_task_index", [])
+        if not isinstance(completed_values, list):
+            raise ValueError(
+                "checkpoint.completed_task_index must be an array",
+            )
+        return cls(
+            schema_version=int(data["schema_version"]),
+            checkpoint_id=str(data["checkpoint_id"]),
+            chat_id=str(data["chat_id"]),
+            epoch=int(data["epoch"]),
+            revision=int(data["revision"]),
+            updated_at=str(data["updated_at"]),
+            confidence=str(data["confidence"]),  # type: ignore[arg-type]
+            current_task=TaskState(
+                id=current_task_data.get("id"),
+                title=current_task_data.get("title"),
+                status=str(current_task_data["status"]),  # type: ignore[arg-type]
+                goal=_evidence_items_from_dict(
+                    current_task_data.get("goal", []),
+                    "checkpoint.current_task.goal",
+                ),
+                acceptance_criteria=_evidence_items_from_dict(
+                    current_task_data.get("acceptance_criteria", []),
+                    "checkpoint.current_task.acceptance_criteria",
+                ),
+            ),
+            constraints_and_preferences=_evidence_items_from_dict(
+                data.get("constraints_and_preferences", []),
+                "checkpoint.constraints_and_preferences",
+            ),
+            progress=ProgressState(
+                done=progress_items("done"),
+                in_progress=progress_items("in_progress"),
+                blocked=progress_items("blocked"),
+            ),
+            key_decisions=decisions(),
+            next_steps=next_steps(),
+            critical_context=_evidence_items_from_dict(
+                data.get("critical_context", []),
+                "checkpoint.critical_context",
+            ),
+            risks_and_unverified=_evidence_items_from_dict(
+                data.get("risks_and_unverified", []),
+                "checkpoint.risks_and_unverified",
+            ),
+            completed_task_index=tuple(
+                CompletedTask(
+                    id=str(_mapping(item, "completed_task")["id"]),
+                    title=str(_mapping(item, "completed_task")["title"]),
+                    completed_at=str(
+                        _mapping(item, "completed_task")["completed_at"],
+                    ),
+                    evidence_refs=_string_tuple(
+                        _mapping(item, "completed_task").get(
+                            "evidence_refs",
+                            [],
+                        ),
+                        "completed_task.evidence_refs",
+                    ),
+                )
+                for item in completed_values
+            ),
+            archived_through=data.get("archived_through"),
+            source_revision=int(data["source_revision"]),
+            applied_event_sequence=int(data["applied_event_sequence"]),
+        )
+
 
 @dataclass(frozen=True)
 class PrecompactionCandidate:
@@ -401,6 +590,30 @@ class PrecompactionCandidate:
             applied_event_sequence=applied_event_sequence,
             record=record,
             created_at=_utc_now(),
+        )
+
+    def to_dict(self) -> dict[str, JSONValue]:
+        return {
+            "id": self.id,
+            "chat_id": self.chat_id,
+            "epoch": self.epoch,
+            "base_revision": self.base_revision,
+            "applied_event_sequence": self.applied_event_sequence,
+            "record": self.record.to_dict(),
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> "PrecompactionCandidate":
+        data = _mapping(value, "precompaction candidate")
+        return cls(
+            id=str(data["id"]),
+            chat_id=str(data["chat_id"]),
+            epoch=int(data["epoch"]),
+            base_revision=int(data["base_revision"]),
+            applied_event_sequence=int(data["applied_event_sequence"]),
+            record=CheckpointRecord.from_dict(data["record"]),
+            created_at=str(data["created_at"]),
         )
 
 

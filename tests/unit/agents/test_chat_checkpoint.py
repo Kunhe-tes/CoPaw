@@ -2,6 +2,7 @@
 """Tests for the pure, recoverable Chat Checkpoint model."""
 
 from dataclasses import replace
+import json
 from uuid import uuid4
 
 import pytest
@@ -191,3 +192,21 @@ def test_whole_interaction_selection_never_splits_a_tool_transaction() -> None:
     selected = select_whole_interaction_units(units, token_budget=6)
 
     assert selected == (units[0],)
+
+
+def test_checkpoint_and_candidate_round_trip_through_durable_json() -> None:
+    active = CheckpointRecord.new(chat_id=CHAT_ID, epoch=1)
+    candidate_record = replace(
+        active,
+        revision=1,
+        source_revision=0,
+        applied_event_sequence=1,
+    )
+    candidate = PrecompactionCandidate.new(
+        record=candidate_record,
+        base_revision=0,
+        applied_event_sequence=1,
+    )
+
+    assert CheckpointRecord.from_dict(json.loads(active.to_json())) == active
+    assert PrecompactionCandidate.from_dict(candidate.to_dict()) == candidate
