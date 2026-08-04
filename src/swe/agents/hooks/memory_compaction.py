@@ -136,6 +136,7 @@ class MemoryCompactionHook:
             return True
         installed = await self.memory_manager.install_ready_precompaction(
             chat_id=chat_id,
+            messages=messages,
         )
         # A valid candidate replaces the online compaction work. If none is
         # ready, continue to the established ReMe fallback below.
@@ -367,6 +368,15 @@ class MemoryCompactionHook:
                 running_config,
             )
 
+            messages_to_compact = await self._get_messages_to_compact(
+                messages,
+                running_config,
+                token_counter,
+                left_compact_threshold,
+            )
+            if not messages_to_compact:
+                return None
+
             projected_tokens = await token_counter.count(
                 messages=messages,
                 text=(agent.sys_prompt or "")
@@ -375,18 +385,9 @@ class MemoryCompactionHook:
             if await self._apply_checkpoint_budget_stage(
                 agent,
                 running_config,
-                messages,
+                messages_to_compact,
                 projected_tokens,
             ):
-                return None
-
-            messages_to_compact = await self._get_messages_to_compact(
-                messages,
-                running_config,
-                token_counter,
-                left_compact_threshold,
-            )
-            if not messages_to_compact:
                 return None
 
             self._add_summary_task_if_enabled(

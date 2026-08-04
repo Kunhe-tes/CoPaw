@@ -136,7 +136,12 @@ class BaseMemoryManager(ABC):
         """Schedule a non-blocking candidate for a stable Chat snapshot."""
 
     @abstractmethod
-    async def install_ready_precompaction(self, *, chat_id: str) -> bool:
+    async def install_ready_precompaction(
+        self,
+        *,
+        chat_id: str,
+        messages: list[Msg] | None = None,
+    ) -> bool:
         """Install the newest valid candidate for a Chat, if available."""
 
     @abstractmethod

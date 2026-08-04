@@ -637,11 +637,18 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         )
         return True
 
-    async def install_ready_precompaction(self, *, chat_id: str) -> bool:
+    async def install_ready_precompaction(
+        self,
+        *,
+        chat_id: str,
+        messages: list[Msg] | None = None,
+    ) -> bool:
         """Install a still-valid candidate and refresh its Markdown projection."""
         memory = self.get_in_memory_memory(chat_id=chat_id)
         if memory is None:
             return False
+        if messages:
+            return await memory.commit_ready_precompaction(messages)
         return await memory.install_ready_precompaction()
 
     async def recover_evidence(

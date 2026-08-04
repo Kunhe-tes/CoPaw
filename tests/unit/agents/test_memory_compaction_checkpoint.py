@@ -83,6 +83,7 @@ async def test_active_stage_installs_ready_candidate_before_reme() -> None:
     assert await hook._apply_checkpoint_budget_stage(agent, running, [], 80)
     manager.install_ready_precompaction.assert_awaited_once_with(
         chat_id="chat-1",
+        messages=[],
     )
 
 

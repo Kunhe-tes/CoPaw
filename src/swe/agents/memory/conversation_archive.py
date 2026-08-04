@@ -487,6 +487,50 @@ class ConversationArchiveStore:
             candidate_id,
         )
 
+    async def commit_ready_checkpoint(
+        self,
+        chat_id: str,
+        messages: Sequence[Msg],
+    ) -> CheckpointCommitResult | None:
+        """Atomically archive messages with the newest still-valid candidate."""
+        return await asyncio.to_thread(
+            self._commit_ready_checkpoint,
+            chat_id,
+            messages,
+        )
+
+    def _commit_ready_checkpoint(
+        self,
+        chat_id: str,
+        messages: Sequence[Msg],
+    ) -> CheckpointCommitResult | None:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        with self._chat_lock(canonical_chat_id):
+            state = self._read_checkpoint_state_locked(canonical_chat_id)
+            current_sequence = max(
+                (event.sequence for event in state.events),
+                default=state.record.applied_event_sequence,
+            )
+            for candidate in sorted(
+                self._read_candidates(canonical_chat_id),
+                key=lambda item: item.created_at,
+                reverse=True,
+            ):
+                if validate_precompaction_candidate(
+                    candidate,
+                    state.record,
+                    current_sequence,
+                ).is_valid:
+                    candidate_id = candidate.id
+                    break
+            else:
+                return None
+        return self._commit_checkpoint(
+            canonical_chat_id,
+            messages,
+            candidate_id,
+        )
+
     def _commit_checkpoint(
         self,
         chat_id: str,
@@ -1436,6 +1480,24 @@ def attach_conversation_archive(
         await install_checkpoint_projection()
         return True
 
+    async def commit_ready_precompaction(
+        messages: Sequence[Msg],
+    ) -> bool:
+        result = await archive_store.commit_ready_checkpoint(
+            canonical_chat_id,
+            messages,
+        )
+        if result is None:
+            return False
+        archived_ids = {message.id for message in messages}
+        memory.content = [
+            (message, marks)
+            for message, marks in memory.content
+            if message.id not in archived_ids
+        ]
+        await install_checkpoint_projection()
+        return True
+
     async def recover_evidence(
         *,
         epoch: int,
@@ -1489,6 +1551,7 @@ def attach_conversation_archive(
     memory.archive_checkpoint_messages = archive_checkpoint_messages
     memory.install_checkpoint_projection = install_checkpoint_projection
     memory.install_ready_precompaction = install_ready_precompaction
+    memory.commit_ready_precompaction = commit_ready_precompaction
     memory.recover_evidence = recover_evidence
     memory.reset_context_epoch = reset_context_epoch
     memory.clear_content = clear_content
