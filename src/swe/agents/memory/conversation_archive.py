@@ -33,6 +33,7 @@ from swe.app.runner.hidden_context_injection import (
 from .chat_checkpoint import (
     CheckpointEvent,
     CheckpointRecord,
+    CompletedTask,
     PrecompactionCandidate,
     render_checkpoint_projection,
     validate_checkpoint_record,
@@ -623,6 +624,10 @@ class ConversationArchiveStore:
         with self._chat_lock(canonical_chat_id):
             chat_dir = self.path_for(canonical_chat_id)
             prior_epoch = self._read_current_epoch(chat_dir)
+            prior_record = self._read_checkpoint_locked(
+                canonical_chat_id,
+                prior_epoch,
+            )
             next_epoch = prior_epoch + 1
             epochs_before = self._snapshot_file(
                 self._epochs_path(canonical_chat_id),
@@ -632,6 +637,34 @@ class ConversationArchiveStore:
                 chat_id=canonical_chat_id,
                 epoch=next_epoch,
             )
+            if reason == "new" and prior_record.current_task.title:
+                task_refs = tuple(
+                    sorted(
+                        {
+                            ref
+                            for item in (
+                                *prior_record.current_task.goal,
+                                *prior_record.current_task.acceptance_criteria,
+                            )
+                            for ref in item.evidence_refs
+                        },
+                    ),
+                )
+                record = replace(
+                    record,
+                    completed_task_index=(
+                        *prior_record.completed_task_index,
+                        CompletedTask(
+                            id=prior_record.current_task.id
+                            or prior_record.checkpoint_id,
+                            title=prior_record.current_task.title,
+                            completed_at=datetime.now(
+                                timezone.utc,
+                            ).isoformat(),
+                            evidence_refs=task_refs,
+                        ),
+                    ),
+                )
             try:
                 self._write_checkpoint_locked(canonical_chat_id, record)
             except Exception:

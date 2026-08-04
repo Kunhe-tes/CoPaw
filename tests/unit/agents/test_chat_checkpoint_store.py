@@ -137,6 +137,25 @@ async def test_reset_blocks_default_recovery_and_delete_removes_checkpoint_files
 
 
 @pytest.mark.asyncio
+async def test_new_epoch_closes_current_task_into_completed_index(
+    tmp_path: Path,
+) -> None:
+    chat_id = _chat_id()
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    record = CheckpointRecord.new(chat_id=chat_id, epoch=1).with_current_task(
+        "finish compaction",
+        (),
+        evidence_refs=("message:1",),
+    )
+    await store.write_active_checkpoint(chat_id, record)
+
+    state = await store.reset_checkpoint_epoch(chat_id, reason="new")
+
+    assert state.record.completed_task_index[0].title == "finish compaction"
+    assert state.record.completed_task_index[0].evidence_refs == ("message:1",)
+
+
+@pytest.mark.asyncio
 async def test_checkpoint_commit_rolls_back_activation_when_manifest_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
