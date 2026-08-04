@@ -653,6 +653,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             record=candidate_record,
             base_revision=state.record.revision,
             applied_event_sequence=applied_event_sequence,
+            source_message_ids=[message.id for message in messages],
         )
         await memory.chat_checkpoint_store.write_pending_candidate(
             chat_id,

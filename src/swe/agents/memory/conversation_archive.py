@@ -516,6 +516,10 @@ class ConversationArchiveStore:
                 key=lambda item: item.created_at,
                 reverse=True,
             ):
+                if tuple(message.id for message in messages) != (
+                    candidate.source_message_ids
+                ):
+                    continue
                 if validate_precompaction_candidate(
                     candidate,
                     state.record,

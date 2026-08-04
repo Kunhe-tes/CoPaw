@@ -125,6 +125,7 @@ async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
     assert candidate.base_revision == 0
     assert candidate.record.revision == 1
     assert candidate.record.applied_event_sequence == 1
+    assert candidate.source_message_ids == ("message-1",)
     assert candidate.record.critical_context[0].evidence_refs == (
         "message:message-1",
     )

@@ -653,6 +653,7 @@ class PrecompactionCandidate:
     epoch: int
     base_revision: int
     applied_event_sequence: int
+    source_message_ids: tuple[str, ...]
     record: CheckpointRecord
     created_at: str
 
@@ -663,6 +664,7 @@ class PrecompactionCandidate:
         record: CheckpointRecord,
         base_revision: int,
         applied_event_sequence: int,
+        source_message_ids: Sequence[str] = (),
     ) -> "PrecompactionCandidate":
         return cls(
             id=_new_id(),
@@ -670,6 +672,7 @@ class PrecompactionCandidate:
             epoch=record.epoch,
             base_revision=base_revision,
             applied_event_sequence=applied_event_sequence,
+            source_message_ids=_as_tuple(source_message_ids),
             record=record,
             created_at=_utc_now(),
         )
@@ -681,6 +684,7 @@ class PrecompactionCandidate:
             "epoch": self.epoch,
             "base_revision": self.base_revision,
             "applied_event_sequence": self.applied_event_sequence,
+            "source_message_ids": list(self.source_message_ids),
             "record": self.record.to_dict(),
             "created_at": self.created_at,
         }
@@ -702,6 +706,10 @@ class PrecompactionCandidate:
             applied_event_sequence=_strict_int(
                 data["applied_event_sequence"],
                 "precompaction candidate.applied_event_sequence",
+            ),
+            source_message_ids=_string_tuple(
+                data.get("source_message_ids", []),
+                "precompaction candidate.source_message_ids",
             ),
             record=CheckpointRecord.from_dict(data["record"]),
             created_at=_strict_string(

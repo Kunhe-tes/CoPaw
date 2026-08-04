@@ -392,6 +392,12 @@ class MemoryCompactionHook:
                     : max(len(messages) - MEMORY_COMPACT_KEEP_RECENT, 0)
                 ]
             )
+            while candidate_messages and not check_valid_messages(
+                candidate_messages,
+            ):
+                # Preserve the oldest complete interaction prefix; never split
+                # a tool_use/tool_result transaction at the candidate edge.
+                candidate_messages = candidate_messages[:-1]
 
             projected_tokens = await token_counter.count(
                 messages=messages,
