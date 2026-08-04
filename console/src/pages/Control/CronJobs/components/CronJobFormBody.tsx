@@ -47,6 +47,7 @@ export function CronJobFormBody({
       );
     }
   };
+  const skillOptionsKey = skillOptions.map((option) => option.value).join("|");
 
   return (
     <>
@@ -271,6 +272,7 @@ export function CronJobFormBody({
         rules={[{ validator: validateSkillIds }]}
       >
         <Select
+          key={skillOptionsKey}
           mode="multiple"
           allowClear
           showSearch
