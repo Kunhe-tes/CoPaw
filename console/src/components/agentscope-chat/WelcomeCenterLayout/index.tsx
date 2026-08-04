@@ -41,6 +41,8 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const [selectedCase, setSelectedCase] = useState<FeaturedCase | null>(null);
   const [randomPlaceholder, setRandomPlaceholder] = useState("");
   const [loadingCase, setLoadingCase] = useState(false);
+  const [mentionMenuContainer, setMentionMenuContainer] =
+    useState<HTMLDivElement | null>(null);
   const uploadRef = useRef<GetRef<typeof Upload>>(null);
   const inputValueRef = useRef(inputValue);
   const fileListRef = useRef(fileList);
@@ -226,7 +228,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         <div className="welcome-greeting">{greeting}</div>
 
         {/* Input Card with upload */}
-        <div className="welcome-input-card">
+        <div className="welcome-input-card" ref={setMentionMenuContainer}>
           {/* Attachment preview area */}
           {fileList.length > 0 && (
             <div style={{ marginBottom: -8, marginTop: -8, marginLeft: -20 }}>
@@ -242,6 +244,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
               aria-label="消息"
               className="welcome-input-placeholder welcome-skill-editor"
               disabled={isSubmitting}
+              mentionMenuContainer={mentionMenuContainer}
               mentionMenuPlacement="bottom"
               onKeyDown={handleKeyDown}
               onValueChange={setCurrentInputValue}
