@@ -93,6 +93,36 @@ async def test_active_stage_installs_ready_candidate_before_reme() -> None:
 
 
 @pytest.mark.asyncio
+async def test_emergency_stage_installs_degraded_reference_checkpoint_once() -> (
+    None
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    manager = SimpleNamespace(
+        install_ready_precompaction=AsyncMock(return_value=False),
+        install_degraded_checkpoint=AsyncMock(),
+    )
+    hook = MemoryCompactionHook(manager)
+    agent = SimpleNamespace(_request_context={"chat_id": "chat-1"})
+    running = SimpleNamespace(
+        max_input_length=100,
+        context_compact=ContextCompactConfig(),
+    )
+
+    assert not await hook._apply_checkpoint_budget_stage(
+        agent,
+        running,
+        [],
+        90,
+    )
+    manager.install_degraded_checkpoint.assert_awaited_once_with(
+        chat_id="chat-1",
+        messages=[],
+    )
+
+
+@pytest.mark.asyncio
 async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
     None
 ):

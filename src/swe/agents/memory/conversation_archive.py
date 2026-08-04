@@ -34,6 +34,7 @@ from .chat_checkpoint import (
     CheckpointEvent,
     CheckpointRecord,
     CompletedTask,
+    EvidenceItem,
     PrecompactionCandidate,
     render_checkpoint_projection,
     validate_checkpoint_record,
@@ -1535,6 +1536,32 @@ def attach_conversation_archive(
         await install_checkpoint_projection()
         return True
 
+    async def install_degraded_checkpoint(
+        messages: Sequence[Msg],
+    ) -> CheckpointRecord:
+        """Persist a deterministic, reference-only emergency checkpoint."""
+        state = await archive_store.read_checkpoint_state(canonical_chat_id)
+        refs = tuple(f"message:{message.id}" for message in messages)
+        record = replace(
+            state.record,
+            revision=state.record.revision + 1,
+            source_revision=state.record.revision,
+            confidence="degraded",
+            critical_context=(
+                (
+                    *state.record.critical_context,
+                    EvidenceItem(
+                        text="Emergency compaction fallback retained message references",
+                        evidence_refs=refs,
+                    ),
+                )
+                if refs
+                else state.record.critical_context
+            ),
+        )
+        await archive_store.write_active_checkpoint(canonical_chat_id, record)
+        return await install_checkpoint_projection()
+
     async def recover_evidence(
         *,
         epoch: int,
@@ -1591,6 +1618,7 @@ def attach_conversation_archive(
     memory.install_checkpoint_projection = install_checkpoint_projection
     memory.install_ready_precompaction = install_ready_precompaction
     memory.commit_ready_precompaction = commit_ready_precompaction
+    memory.install_degraded_checkpoint = install_degraded_checkpoint
     memory.recover_evidence = recover_evidence
     memory.reset_context_epoch = reset_context_epoch
     memory.clear_content = clear_content

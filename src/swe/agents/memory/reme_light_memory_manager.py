@@ -677,6 +677,19 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             return False
         return await memory.commit_ready_precompaction(messages)
 
+    async def install_degraded_checkpoint(
+        self,
+        *,
+        chat_id: str,
+        messages: list[Msg],
+    ) -> bool:
+        """Install a reference-only record before one emergency retry."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            return False
+        await memory.install_degraded_checkpoint(messages)
+        return True
+
     async def recover_evidence(
         self,
         *,

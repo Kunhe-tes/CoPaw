@@ -182,7 +182,17 @@ class MemoryCompactionHook:
         )
         # A valid candidate replaces the online compaction work. If none is
         # ready, continue to the established ReMe fallback below.
-        return installed
+        if installed:
+            return True
+        if decision.stage == "emergency":
+            install_degraded = getattr(
+                self.memory_manager,
+                "install_degraded_checkpoint",
+                None,
+            )
+            if install_degraded is not None:
+                await install_degraded(chat_id=chat_id, messages=messages)
+        return False
 
     @staticmethod
     async def _print_status_message(
