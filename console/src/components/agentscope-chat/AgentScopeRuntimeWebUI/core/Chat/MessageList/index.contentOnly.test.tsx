@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -18,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   isSessionLoading: false,
   sessionNotFound: false,
   currentSessionId: "chat-1",
+  anchorTop: 100,
+  animationFrame: undefined as FrameRequestCallback | undefined,
 }));
 
 const apiMocks = vi.hoisted(() => ({
@@ -59,13 +62,13 @@ vi.mock("@/components/agentscope-chat", () => ({
     List: forwardRef(
       (
         {
-          items,
+          items = [],
           onReachStart,
           onBottomStateChange,
           pagination,
           topContent,
         }: {
-          items: unknown[];
+          items?: Array<{ id?: string }>;
           onReachStart?: () => void;
           onBottomStateChange?: (isAtBottom: boolean) => void;
           pagination?: boolean;
@@ -86,6 +89,8 @@ vi.mock("@/components/agentscope-chat", () => ({
             ref={(element) => {
               scrollRef.current = element;
               if (!element) return;
+              if (element.dataset.scrollGeometryReady === "true") return;
+              element.dataset.scrollGeometryReady = "true";
               Object.defineProperties(element, {
                 clientHeight: { configurable: true, value: 400 },
                 scrollHeight: { configurable: true, value: 1000 },
@@ -94,11 +99,53 @@ vi.mock("@/components/agentscope-chat", () => ({
                   value: 0,
                   writable: true,
                 },
+                getBoundingClientRect: {
+                  configurable: true,
+                  value: () => ({
+                    bottom: 400,
+                    height: 400,
+                    left: 0,
+                    right: 400,
+                    toJSON: () => ({}),
+                    top: 0,
+                    width: 400,
+                    x: 0,
+                    y: 0,
+                  }),
+                },
               });
             }}
           >
             {topContent}
             {items.length}
+            {items.map((item, index) => (
+              <div
+                data-role="assistant"
+                id={item.id}
+                key={item.id || index}
+                ref={(element) => {
+                  if (!element) return;
+                  Object.defineProperty(element, "getBoundingClientRect", {
+                    configurable: true,
+                    value: () => ({
+                      bottom: (item.id === "online-message"
+                        ? mocks.anchorTop
+                        : 16) + 48,
+                      height: 48,
+                      left: 0,
+                      right: 400,
+                      toJSON: () => ({}),
+                      top:
+                        item.id === "online-message" ? mocks.anchorTop : 16,
+                      width: 400,
+                      x: 0,
+                      y:
+                        item.id === "online-message" ? mocks.anchorTop : 16,
+                    }),
+                  });
+                }}
+              />
+            ))}
             <button
               onClick={() => onBottomStateChange?.(false)}
               type="button"
@@ -174,9 +221,16 @@ describe("MessageList content-only composition", () => {
     mocks.isSessionLoading = false;
     mocks.sessionNotFound = false;
     mocks.currentSessionId = "chat-1";
+    mocks.anchorTop = 100;
+    mocks.animationFrame = undefined;
+    vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => {
+      mocks.animationFrame = callback;
+      return 1;
+    });
   });
 
   afterEach(() => {
+    vi.unstubAllGlobals();
     cleanup();
   });
 
@@ -287,7 +341,7 @@ describe("MessageList content-only composition", () => {
       messages: Array<{ id: string }>;
       boundaries: never[];
       has_more: boolean;
-      next_cursor: null;
+      next_cursor: string | null;
     }) => void;
     apiMocks.getChatHistory.mockReturnValue(
       new Promise((resolve) => {
@@ -335,6 +389,55 @@ describe("MessageList content-only composition", () => {
       { id: "archived-message", history: true },
       { id: "online-message", history: true },
     ]);
+  });
+
+  it("restores the visible anchor after a post-commit history layout shift", async () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+    let resolveHistory!: (page: {
+      messages: Array<{ id: string }>;
+      boundaries: never[];
+      has_more: boolean;
+      next_cursor: string | null;
+    }) => void;
+    apiMocks.getChatHistory.mockReturnValue(
+      new Promise((resolve) => {
+        resolveHistory = resolve;
+      }),
+    );
+    const rendered = render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    const bubbleList = screen.getByTestId("bubble-list");
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => {
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1);
+    });
+
+    resolveHistory({
+      messages: [{ id: "archived-message" }],
+      boundaries: [],
+      has_more: true,
+      next_cursor: "next-page",
+    });
+    await waitFor(() => {
+      expect(mocks.messages).toHaveLength(2);
+    });
+    rendered.rerender(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    expect(mocks.animationFrame).toBeTypeOf("function");
+    mocks.anchorTop = 140;
+    act(() => {
+      mocks.animationFrame?.(0);
+    });
+    expect(bubbleList.scrollTop).toBe(-340);
   });
 
   it("only shows the start-of-conversation state when a terminal page adds no history", async () => {

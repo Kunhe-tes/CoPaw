@@ -49,6 +49,7 @@ export interface BubbleListProps extends React.HTMLAttributes<HTMLDivElement> {
   onBottomStateChange?: (isAtBottom: boolean) => void;
   autoScrollToBottom?: boolean | "initial";
   preserveScrollPosition?: boolean;
+  disableBrowserScrollAnchoring?: boolean;
   topContent?: React.ReactNode;
 }
 
@@ -271,6 +272,8 @@ const BubbleList: React.ForwardRefRenderFunction<
             `${prefixCls}-scroll`,
             `${prefixCls}`,
             `${prefixCls}-order-${order}`,
+            props.disableBrowserScrollAnchoring &&
+              `${prefixCls}-scroll-anchor-disabled`,
             props.classNames?.list,
           )}
           ref={scrollRef}

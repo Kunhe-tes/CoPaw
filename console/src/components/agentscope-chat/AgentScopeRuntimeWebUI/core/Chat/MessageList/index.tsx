@@ -19,6 +19,13 @@ import { getScrollTopAfterAnchorOffset } from "@/components/agentscope-chat/Bubb
 
 const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
 
+interface HistoryAnchorTransaction {
+  generation: number;
+  messageId: string;
+  offset: number;
+  sessionId: string | undefined;
+}
+
 function getVisibleMessageAnchor(scrollElement: HTMLElement) {
   const containerRect = scrollElement.getBoundingClientRect();
   const anchorElement = Array.from(
@@ -36,6 +43,15 @@ function getVisibleMessageAnchor(scrollElement: HTMLElement) {
     messageId: anchorElement.element.id,
     offset: anchorElement.rect.top - containerRect.top,
   };
+}
+
+function getHistoryAnchorElement(
+  scrollElement: HTMLElement,
+  messageId: string,
+) {
+  return Array.from(
+    scrollElement.querySelectorAll<HTMLElement>("[data-role][id]"),
+  ).find((element) => element.id === messageId);
 }
 
 export default function MessageList(props: {
@@ -86,11 +102,8 @@ export default function MessageList(props: {
   const activeSessionRef = React.useRef(currentSessionId);
   const isPrependingHistoryRef = React.useRef(false);
   const isAtLatestRef = React.useRef(true);
-  const pendingHistoryAnchorRef = React.useRef<{
-    messageId: string;
-    offset: number;
-    oldScrollTop: number;
-  } | null>(null);
+  const pendingHistoryAnchorRef =
+    React.useRef<HistoryAnchorTransaction | null>(null);
   const [historyExhausted, setHistoryExhausted] = React.useState(false);
   const [historyLoadState, setHistoryLoadState] = React.useState<
     "idle" | "loading" | "error" | "exhausted"
@@ -154,7 +167,11 @@ export default function MessageList(props: {
       if (uniqueOlder.length > 0 && scrollElement) {
         const anchor = getVisibleMessageAnchor(scrollElement);
         pendingHistoryAnchorRef.current = anchor
-          ? { ...anchor, oldScrollTop: scrollElement.scrollTop }
+          ? {
+              ...anchor,
+              generation,
+              sessionId: currentSessionId,
+            }
           : null;
       }
       isPrependingHistoryRef.current = uniqueOlder.length > 0;
@@ -178,7 +195,7 @@ export default function MessageList(props: {
         historyLoadingRef.current = false;
       }
     }
-  }, [backendChatId, messages, setMessages]);
+  }, [backendChatId, currentSessionId, messages, setMessages]);
 
   React.useLayoutEffect(() => {
     const nextScrollElement = listRef.current?.getScrollElement() ?? null;
@@ -188,23 +205,50 @@ export default function MessageList(props: {
   }, [currentSessionId, safeMessages.length]);
 
   React.useLayoutEffect(() => {
-    const anchor = pendingHistoryAnchorRef.current;
+    const transaction = pendingHistoryAnchorRef.current;
     const scrollElement = listRef.current?.getScrollElement();
-    if (!anchor || !scrollElement) return;
+    if (
+      !transaction ||
+      !scrollElement ||
+      transaction.generation !== historyGenerationRef.current ||
+      transaction.sessionId !== currentSessionId
+    ) {
+      pendingHistoryAnchorRef.current = null;
+      return;
+    }
 
-    const anchorElement = document.getElementById(anchor.messageId);
-    if (anchorElement && scrollElement.contains(anchorElement)) {
+    const restoreAnchor = (anchor: HistoryAnchorTransaction) => {
+      const anchorElement = getHistoryAnchorElement(
+        scrollElement,
+        anchor.messageId,
+      );
+      if (!anchorElement) return;
       const nextOffset =
         anchorElement.getBoundingClientRect().top -
         scrollElement.getBoundingClientRect().top;
       scrollElement.scrollTop = getScrollTopAfterAnchorOffset({
-        oldScrollTop: anchor.oldScrollTop,
+        oldScrollTop: scrollElement.scrollTop,
         previousOffset: anchor.offset,
         nextOffset,
       });
-    }
-    pendingHistoryAnchorRef.current = null;
-  }, [safeMessages]);
+    };
+
+    restoreAnchor(transaction);
+    const frameId = requestAnimationFrame(() => {
+      const pending = pendingHistoryAnchorRef.current;
+      if (
+        !pending ||
+        pending !== transaction ||
+        pending.generation !== historyGenerationRef.current ||
+        pending.sessionId !== currentSessionId
+      ) {
+        return;
+      }
+      restoreAnchor(pending);
+      pendingHistoryAnchorRef.current = null;
+    });
+    return () => cancelAnimationFrame(frameId);
+  }, [currentSessionId, safeMessages]);
 
   useHistoryPreload({
     scrollElement: historyScrollElement,
@@ -307,6 +351,7 @@ export default function MessageList(props: {
     <Bubble.List
       ref={listRef}
       pagination={false}
+      disableBrowserScrollAnchoring
       order="desc"
       key={currentSessionId}
       classNames={{
