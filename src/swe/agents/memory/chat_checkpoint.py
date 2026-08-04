@@ -9,9 +9,11 @@ validated representation without turning Markdown into the source of truth.
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
+from types import MappingProxyType
 from typing import Any, Literal, Mapping, Sequence, TypeAlias
 
 JSONScalar: TypeAlias = str | int | float | bool | None
@@ -26,6 +28,38 @@ _PROGRESS_BUCKETS: tuple[ProgressBucket, ...] = (
     "blocked",
 )
 _RAW_TOOL_OUTPUT_KEY = "raw_tool_output"
+_TOOL_RESULT_CONTENT_KEYS = frozenset(
+    {
+        "body",
+        "content",
+        "output",
+        "response",
+        "result",
+        "stderr",
+        "stdout",
+        "text",
+        "tool_output",
+    },
+)
+_SAFE_EVENT_FACT_KEYS = frozenset(
+    {
+        "artifact_ref",
+        "artifact_refs",
+        "boundary_id",
+        "checkpoint_id",
+        "command",
+        "error_type",
+        "exit_code",
+        "message_id",
+        "reason",
+        "role",
+        "source_revision",
+        "status",
+        "task_id",
+        "token_count",
+        "tool_name",
+    },
+)
 
 
 def _utc_now() -> str:
@@ -50,7 +84,26 @@ def _contains_raw_tool_output(value: Any) -> bool:
     return False
 
 
+def _contains_tool_result_content(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalised_key = str(key).lower()
+            if (
+                normalised_key in _TOOL_RESULT_CONTENT_KEYS
+                or normalised_key.endswith("_output")
+                or normalised_key not in _SAFE_EVENT_FACT_KEYS
+            ):
+                return True
+            if _contains_tool_result_content(item):
+                return True
+    if isinstance(value, (list, tuple)):
+        return any(_contains_tool_result_content(item) for item in value)
+    return False
+
+
 def _normalise_json(value: Any) -> JSONValue:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise TypeError("Checkpoint facts must use finite JSON numbers")
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     if isinstance(value, Mapping):
@@ -66,6 +119,24 @@ def _normalise_json(value: Any) -> JSONValue:
     raise TypeError(
         f"Checkpoint facts must be JSON values, got {type(value)!r}",
     )
+
+
+def _freeze_json(value: JSONValue) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_json(item) for key, item in value.items()},
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: Any) -> JSONValue:
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_json(item) for item in value]
+    return _normalise_json(value)
 
 
 def _valid_ref(value: str) -> bool:
@@ -151,8 +222,15 @@ class CheckpointEvent:
     epoch: int
     occurred_at: str
     type: str
-    facts: dict[str, JSONValue]
+    facts: Mapping[str, Any]
     source_refs: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        normalised_facts = _normalise_json(dict(self.facts))
+        if not isinstance(normalised_facts, dict):
+            raise TypeError("Checkpoint event facts must be a JSON object")
+        object.__setattr__(self, "facts", _freeze_json(normalised_facts))
+        object.__setattr__(self, "source_refs", _as_tuple(self.source_refs))
 
     @classmethod
     def new(
@@ -165,16 +243,13 @@ class CheckpointEvent:
         source_refs: Sequence[str] = (),
         occurred_at: str | None = None,
     ) -> "CheckpointEvent":
-        normalised_facts = _normalise_json(facts or {})
-        if not isinstance(normalised_facts, dict):  # Defensive narrowing.
-            raise TypeError("Checkpoint event facts must be a JSON object")
         return cls(
             id=_new_id(),
             sequence=sequence,
             epoch=epoch,
             occurred_at=occurred_at or _utc_now(),
             type=type,
-            facts=normalised_facts,
+            facts=dict(facts or {}),
             source_refs=_as_tuple(source_refs),
         )
 
@@ -185,7 +260,7 @@ class CheckpointEvent:
             "epoch": self.epoch,
             "occurred_at": self.occurred_at,
             "type": self.type,
-            "facts": self.facts,
+            "facts": _thaw_json(self.facts),
             "source_refs": list(self.source_refs),
         }
 
@@ -291,6 +366,7 @@ class CheckpointRecord:
         """Serialize the source of truth deterministically for durable writes."""
         return json.dumps(
             self.to_dict(),
+            allow_nan=False,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -326,6 +402,15 @@ class PrecompactionCandidate:
             record=record,
             created_at=_utc_now(),
         )
+
+
+@dataclass(frozen=True)
+class InteractionUnit:
+    """An indivisible interaction (including its paired tool transaction)."""
+
+    id: str
+    token_count: int
+    message_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -443,6 +528,16 @@ def validate_checkpoint_record(
             errors.append(
                 f"event[{index}].facts must not contain raw_tool_output",
             )
+        elif _contains_tool_result_content(event.facts):
+            errors.append(
+                f"event[{index}].facts must not contain tool result content",
+            )
+        try:
+            _normalise_json(event.facts)
+        except TypeError:
+            errors.append(
+                f"event[{index}].facts must contain strict JSON values",
+            )
 
     return CheckpointValidationResult(errors)
 
@@ -493,6 +588,17 @@ def validate_precompaction_candidate(
         errors.append("candidate epoch differs from active checkpoint")
     if candidate.base_revision != active_record.revision:
         errors.append("candidate base revision is stale")
+    if candidate.record.source_revision != candidate.base_revision:
+        errors.append(
+            "candidate record source revision must match base revision",
+        )
+    if candidate.record.revision != candidate.base_revision + 1:
+        errors.append("candidate record revision must follow base revision")
+    if (
+        candidate.record.applied_event_sequence
+        != candidate.applied_event_sequence
+    ):
+        errors.append("candidate record event sequence must match wrapper")
     if candidate.applied_event_sequence > current_event_sequence:
         errors.append("candidate event sequence is ahead of the journal")
     if candidate.applied_event_sequence < active_record.applied_event_sequence:
@@ -520,7 +626,7 @@ def render_recent_event_delta(
     for event in events[-max_items:]:
         refs = ", ".join(event.source_refs)
         facts = json.dumps(
-            event.facts,
+            _thaw_json(event.facts),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -531,6 +637,26 @@ def render_recent_event_delta(
         lines.append(line)
         used += len(line)
     return "\n".join(lines)
+
+
+def select_whole_interaction_units(
+    units: Sequence[InteractionUnit],
+    *,
+    token_budget: int,
+) -> tuple[InteractionUnit, ...]:
+    """Select the oldest fitting prefix without splitting an interaction."""
+    if token_budget < 0:
+        raise ValueError("token_budget must not be negative")
+    selected: list[InteractionUnit] = []
+    used = 0
+    for unit in units:
+        if unit.token_count <= 0:
+            raise ValueError("interaction unit token_count must be positive")
+        if used + unit.token_count > token_budget:
+            break
+        selected.append(unit)
+        used += unit.token_count
+    return tuple(selected)
 
 
 def render_checkpoint_projection(

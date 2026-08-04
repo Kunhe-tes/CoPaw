@@ -4,11 +4,15 @@
 from dataclasses import replace
 from uuid import uuid4
 
+import pytest
+
 from swe.agents.memory.chat_checkpoint import (
     CheckpointEvent,
     CheckpointRecord,
+    InteractionUnit,
     PrecompactionCandidate,
     render_checkpoint_projection,
+    select_whole_interaction_units,
     validate_precompaction_candidate,
     validate_checkpoint_record,
     validate_checkpoint_update,
@@ -126,3 +130,64 @@ def test_candidate_requires_the_current_record_revision() -> None:
             current_event_sequence=active.applied_event_sequence,
         ).errors
     )
+
+
+def test_candidate_record_cursor_must_match_its_wrapper_cursor() -> None:
+    active = CheckpointRecord.new(chat_id=CHAT_ID, epoch=1)
+    candidate = PrecompactionCandidate.new(
+        record=replace(
+            active,
+            revision=1,
+            source_revision=active.revision,
+            applied_event_sequence=99,
+        ),
+        base_revision=active.revision,
+        applied_event_sequence=active.applied_event_sequence,
+    )
+
+    assert "candidate record event sequence must match wrapper" in (
+        validate_precompaction_candidate(
+            candidate,
+            active,
+            current_event_sequence=active.applied_event_sequence,
+        ).errors
+    )
+
+
+def test_event_facts_are_immutable_and_reject_tool_result_content() -> None:
+    event = _event(2, stdout="secret raw output")
+
+    with pytest.raises(TypeError):
+        event.facts["stdout"] = "mutated"  # type: ignore[index]
+
+    assert validate_checkpoint_record(
+        CheckpointRecord.new(chat_id=CHAT_ID, epoch=1),
+        [event],
+    ).errors == ["event[0].facts must not contain tool result content"]
+
+
+def test_event_facts_require_strict_json_values() -> None:
+    with pytest.raises(TypeError, match="finite"):
+        CheckpointEvent.new(
+            sequence=1,
+            epoch=1,
+            type="tool_completed",
+            facts={"exit_code": float("nan")},
+            source_refs=("message:1",),
+        )
+
+
+def test_whole_interaction_selection_never_splits_a_tool_transaction() -> None:
+    units = (
+        InteractionUnit("turn-1", token_count=3, message_ids=("message:1",)),
+        InteractionUnit(
+            "tool-transaction",
+            token_count=5,
+            message_ids=("message:2", "tool:2", "message:3"),
+        ),
+        InteractionUnit("turn-3", token_count=2, message_ids=("message:4",)),
+    )
+
+    selected = select_whole_interaction_units(units, token_budget=6)
+
+    assert selected == (units[0],)
