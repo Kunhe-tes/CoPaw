@@ -5,6 +5,9 @@ import pytest
 
 from swe.agents.hooks.memory_compaction import decide_context_budget
 from swe.agents.hooks.memory_compaction import MemoryCompactionHook
+from swe.agents.memory.chat_checkpoint import CheckpointRecord
+from swe.agents.memory.conversation_archive import CheckpointArchiveState
+from swe.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
 from swe.config.config import ContextCompactConfig
 
 
@@ -81,3 +84,33 @@ async def test_active_stage_installs_ready_candidate_before_reme() -> None:
     manager.install_ready_precompaction.assert_awaited_once_with(
         chat_id="chat-1",
     )
+
+
+@pytest.mark.asyncio
+async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
+    None
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    chat_id = "e1574b04-2ca1-44c5-82a0-d9d5cc410f3d"
+    record = CheckpointRecord.new(chat_id=chat_id, epoch=1)
+    store = SimpleNamespace(
+        read_checkpoint_state=AsyncMock(
+            return_value=CheckpointArchiveState(record, (), 1),
+        ),
+        write_pending_candidate=AsyncMock(),
+    )
+    manager = object.__new__(ReMeLightMemoryManager)
+    manager.get_in_memory_memory = lambda **_kwargs: SimpleNamespace(
+        chat_checkpoint_store=store,
+    )
+
+    assert await manager.schedule_precompaction(
+        chat_id=chat_id,
+        watermark=0,
+        messages=[],
+    )
+    candidate = store.write_pending_candidate.await_args.args[1]
+    assert candidate.base_revision == 0
+    assert candidate.record.revision == 1

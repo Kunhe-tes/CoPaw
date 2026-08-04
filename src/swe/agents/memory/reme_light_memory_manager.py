@@ -13,6 +13,7 @@ import shutil
 import sys
 import types
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -605,9 +606,36 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         messages: list[Msg],
         **kwargs,
     ) -> bool:
-        """Candidate construction is installed by the staged budget hook."""
-        del chat_id, watermark, messages, kwargs
-        return False
+        """Persist a revision-bound candidate without changing live memory."""
+        del watermark, messages, kwargs
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            return False
+        from .chat_checkpoint import PrecompactionCandidate
+
+        state = await memory.chat_checkpoint_store.read_checkpoint_state(
+            chat_id,
+        )
+        applied_event_sequence = max(
+            (event.sequence for event in state.events),
+            default=state.record.applied_event_sequence,
+        )
+        candidate_record = replace(
+            state.record,
+            revision=state.record.revision + 1,
+            source_revision=state.record.revision,
+            applied_event_sequence=applied_event_sequence,
+        )
+        candidate = PrecompactionCandidate.new(
+            record=candidate_record,
+            base_revision=state.record.revision,
+            applied_event_sequence=applied_event_sequence,
+        )
+        await memory.chat_checkpoint_store.write_pending_candidate(
+            chat_id,
+            candidate,
+        )
+        return True
 
     async def install_ready_precompaction(self, *, chat_id: str) -> bool:
         """Install a still-valid candidate and refresh its Markdown projection."""
