@@ -454,6 +454,52 @@ class ContextCompactConfig(BaseModel):
         description="Whether to include thinking blocks when compacting",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_context_compact_stages(cls, data: Any) -> Any:
+        """Backfill valid stages for persisted pre-checkpoint configs.
+
+        Old configs contain only ``memory_compact_ratio``. Preserve that active
+        threshold when possible and place the lightweight stage below it, so an
+        existing agent can load before its configuration is next saved.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        stage_fields = (
+            "lightweight_governance_ratio",
+            "precompaction_step_ratio",
+            "emergency_compact_ratio",
+        )
+        if "memory_compact_ratio" not in data or any(
+            field in data for field in stage_fields
+        ):
+            return data
+
+        try:
+            legacy_active_ratio = float(data["memory_compact_ratio"])
+        except (TypeError, ValueError):
+            return data
+
+        active_ratio = min(max(legacy_active_ratio, 0.31), 0.89)
+        lightweight_ratio = max(0.30, min(0.65, active_ratio - 0.05))
+        step_ratio = round(
+            max(0.01, min(0.05, active_ratio - lightweight_ratio)),
+            2,
+        )
+        emergency_ratio = round(
+            max(0.90, min(0.95, active_ratio + 0.05)),
+            2,
+        )
+
+        return {
+            **data,
+            "lightweight_governance_ratio": lightweight_ratio,
+            "precompaction_step_ratio": step_ratio,
+            "memory_compact_ratio": active_ratio,
+            "emergency_compact_ratio": emergency_ratio,
+        }
+
     @model_validator(mode="after")
     def validate_context_compact_stages(self) -> "ContextCompactConfig":
         """Require the ordered lightweight, active, and emergency stages."""
