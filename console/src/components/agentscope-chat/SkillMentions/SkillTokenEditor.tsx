@@ -45,6 +45,7 @@ export interface SkillTokenEditorProps
     "children" | "contentEditable" | "onChange" | "onInput" | "value"
   > {
   disabled?: boolean;
+  mentionMenuPlacement?: "top" | "bottom";
   readOnly?: boolean;
   placeholder?: string;
   skillMentions: SkillMentionsData;
@@ -236,6 +237,7 @@ export const SkillTokenEditor = forwardRef<
     onCompositionStart,
     onValueChange,
     placeholder,
+    mentionMenuPlacement = "top",
     readOnly = false,
     skillMentions,
     style,
@@ -263,6 +265,10 @@ export const SkillTokenEditor = forwardRef<
   });
   const closeMentionMenu = mentions.close;
   const mentionMenuOpen = mentions.open;
+  const menuPlacementStyle =
+    mentionMenuPlacement === "bottom"
+      ? { top: "calc(100% + 3px)" }
+      : { bottom: "calc(100% + 3px)" };
 
   useLayoutEffect(() => {
     const editor = editorRef.current;
@@ -394,12 +400,12 @@ export const SkillTokenEditor = forwardRef<
       <div
         id="context-reference-menu"
         style={{
-          bottom: "calc(100% + 3px)",
           filter: "drop-shadow(0 5px 7px rgba(35, 31, 27, 0.06))",
           left: 0,
           position: "absolute",
           right: 0,
           zIndex: 10,
+          ...menuPlacementStyle,
         }}
       >
         <SkillMentionMenu
