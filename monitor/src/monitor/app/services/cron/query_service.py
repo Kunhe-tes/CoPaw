@@ -257,6 +257,7 @@ class QueryService:
         return (
             f"JOIN swe_marketplace_skills {skill_alias} "
             f"ON FIND_IN_SET({skill_alias}.skill_id, {job_alias}.skill_ids) "
+            f"AND {skill_alias}.source_id = {job_alias}.source_id "
             f"AND {skill_alias}.include_in_statistics = 1"
         )
 
@@ -270,6 +271,7 @@ class QueryService:
             "EXISTS ("
             f"SELECT 1 FROM swe_marketplace_skills {skill_alias} "
             f"WHERE FIND_IN_SET({skill_alias}.skill_id, {job_alias}.skill_ids) "
+            f"AND {skill_alias}.source_id = {job_alias}.source_id "
             f"AND {skill_alias}.include_in_statistics = 1"
             ")"
         )
@@ -5437,10 +5439,13 @@ class QueryService:
     ) -> list[dict]:
         """查询客户经理技能统计."""
         source_where = " AND j.source_id = %s" if source_id else ""
-        skill_expr = self._skill_display_expr("s")
         sql = f"""
             SELECT
-                {skill_expr} AS skill_name,
+                COALESCE(
+                    NULLIF(MIN(s.cn_name), ''),
+                    NULLIF(MIN(s.skill_name), ''),
+                    s.skill_id
+                ) AS skill_name,
                 COUNT(DISTINCT e.job_id) AS cron_task_count,
                 SUM(CASE WHEN e.status = 'success' AND e.async_status = 'success'
                     THEN 1 ELSE 0 END) AS success_count,
@@ -5454,7 +5459,7 @@ class QueryService:
             WHERE j.bbk_id = %s AND j.tenant_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
               {source_where}
-            GROUP BY skill_name
+            GROUP BY s.skill_id
             ORDER BY success_count DESC
         """
         params: list = [bbk_id, user_id, start_time, end_time]
