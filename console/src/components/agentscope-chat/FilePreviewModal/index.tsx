@@ -10,8 +10,6 @@ import { FullscreenOutlined } from "@ant-design/icons";
 import {
   SparkFalseLine,
   SparkDownloadLine,
-  // SparkCopyLine,
-  // SparkTrueLine,
 } from "@agentscope-ai/icons";
 import { IconButton } from "@agentscope-ai/design";
 import {
@@ -30,7 +28,10 @@ import {
   attachHtmlPreviewClickTracker,
   type NestedHtmlPreviewRequest,
 } from "./htmlPreviewClickTracking";
-import { dynamicRenderApi } from "@/api/modules/dynamicRender";
+import {
+  dynamicRenderApi,
+  RecordDataResponse,
+} from "@/api/modules/dynamicRender";
 
 export interface FilePreviewModalProps {
   open: boolean;
@@ -69,8 +70,9 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
   // 存储动态渲染的 HTML 内容（直接渲染到 div 时使用）
   const [renderedHtmlContent, setRenderedHtmlContent] = useState<string | null>(
-    null,
+    null
   );
+  const [templateResult, setTemplateResult] = useState<RecordDataResponse>();
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
   const cleanupClickTrackingRef = useRef<(() => void) | null>(null);
   const cleanupCaptureClickRef = useRef<(() => void) | null>(null);
@@ -88,13 +90,28 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const isHtmlPreview = useMemo(
     () =>
       fileType === "previewable" && getContentType(fileName) === "text/html",
-    [fileName, fileType],
+    [fileName, fileType]
   );
   // 判断是否为动态渲染类型
   const isDynamicRender = useMemo(
     () => isDynamicRenderHtmlLink(fileUrl),
-    [fileUrl],
+    [fileUrl]
   );
+  // 获取当前模板配置
+  const templateInfo = useMemo(() => {
+    if (fileUrl && isTemplateListLoaded) {
+      const templateId = extractTemplateIdFromUrl(fileUrl);
+      if (templateId) {
+        const templateIdNum = parseInt(templateId, 10);
+        return templateList.current.find(
+          (item) => item.templateId === templateIdNum
+        );
+      } else {
+        return null;
+      }
+    }
+    return null;
+  }, [isTemplateListLoaded, fileUrl]);
 
   // 获取动态渲染数据的函数（带轮询逻辑）
   // 对于静态模板（templateFlag === 'no_query'），跳过数据获取，直接渲染模板内容
@@ -139,8 +156,17 @@ function FilePreviewModal(props: FilePreviewModalProps) {
           clearTimeout(pollingTimerRef.current);
           pollingTimerRef.current = null;
         }
+        const { TRACE_ID, CRON_JOB_ID, custUid, custName, ...data } =
+          res.data as RecordDataResponse;
         const renderedHtml = await renderTemplate(templateIdNum, res.data);
         if (renderedHtml) {
+          setTemplateResult({
+            TRACE_ID,
+            CRON_JOB_ID,
+            custUid,
+            custName,
+            ...data,
+          });
           setRenderedHtmlContent(renderedHtml);
         } else {
           setError("模板渲染失败");
@@ -154,7 +180,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         setDynamicRenderLoading(false);
       }
     },
-    [renderTemplate, renderStaticTemplate, isStaticTemplate, isTemplateListLoaded],
+    [
+      renderTemplate,
+      renderStaticTemplate,
+      isStaticTemplate,
+      isTemplateListLoaded,
+    ]
   );
 
   // fetch 文件数据并创建 Blob URL 或动态渲染
@@ -270,6 +301,32 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     };
   }, []);
 
+  useEffect(() => {
+    if (
+      templateInfo?.templateFlag === "person-event" &&
+      templateResult?.custUid &&
+      templateResult?.custName
+    ) {
+      const payload = {
+        file_url: fileUrl,
+        file_name: fileName,
+        button_id: "plan",
+        button_name: "查看方案",
+        button_text: "📋 查看方案",
+        button_type: "plan",
+        customer_id: templateResult?.custUid,
+        customer_name: templateResult?.custName,
+        customer_info: {
+          customer_id: templateResult?.custUid,
+          name: templateResult?.custName,
+        },
+        clicked_at: new Date().toISOString(),
+        source_id: "RMASSIST",
+      };
+      htmlPreviewEventsApi.recordClick(payload);
+    }
+  }, [templateResult, templateInfo, htmlPreviewEventsApi]);
+
   const handleCopy = useCallback(async () => {
     try {
       await navigator.clipboard.writeText(fileUrl);
@@ -335,6 +392,15 @@ function FilePreviewModal(props: FilePreviewModalProps) {
         const renderData = (
           await dynamicRenderApi.getRecordData(resultId, templateId)
         ).data;
+        const { TRACE_ID, CRON_JOB_ID, custUid, custName, ...data } =
+          renderData as RecordDataResponse;
+        setTemplateResult({
+          TRACE_ID,
+          CRON_JOB_ID,
+          custUid,
+          custName,
+          ...data,
+        });
         const renderedHtml = await renderTemplate(templateIdNum, renderData);
 
         if (renderedHtml) {
@@ -382,20 +448,21 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     const shouldRecordHtmlPreviewEvents =
       !trackingContext.disableEventRecording;
 
-    // 直接使用 attachHtmlPreviewClickTracker，它已完整实现：
-    // 1. 点击事件上报（只读回放可禁用记录）
-    // 2. 嵌套预览检测（支持 data-preview-modal 属性和动态渲染链接）
     try {
       cleanupClickTrackingRef.current = attachHtmlPreviewClickTracker({
         iframe,
         metadata: {
-          cronTaskId: trackingContext.cronTaskId,
-          cronTaskName: trackingContext.cronTaskName,
+          cronTaskId:
+            trackingContext.cronTaskId ||
+            (templateResult?.CRON_JOB_ID as string),
+          cronTaskName:
+            trackingContext.cronTaskName || templateInfo?.cron_task_name,
           fileUrl,
           fileName,
           listKey: trackingListKey,
           listName: trackingListName,
           defaultCustomerInfo,
+          traceId: templateResult?.TRACE_ID as string,
         },
         reporter: shouldRecordHtmlPreviewEvents
           ? htmlPreviewEventsApi.recordClick
@@ -424,6 +491,8 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     trackingListName,
     trackingContext,
     templateList,
+    templateInfo,
+    templateResult,
   ]);
 
   const previewHeight = fullscreen ? "85vh" : "500px";
@@ -561,14 +630,6 @@ function FilePreviewModal(props: FilePreviewModalProps) {
 
   const headerActions = useMemo(() => {
     const actions = [
-      // <Tooltip key="copy" title="复制链接">
-      //   <IconButton
-      //     size="small"
-      //     icon={copied ? <SparkTrueLine style={{ color: "#52c41a" }} /> : <SparkCopyLine />}
-      //     onClick={handleCopy}
-      //     bordered={false}
-      //   />
-      // </Tooltip>,
       <Tooltip key="download" title="下载文件">
         <IconButton
           size="small"
@@ -588,7 +649,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
             onClick={handleFullscreen}
             bordered={false}
           />
-        </Tooltip>,
+        </Tooltip>
       );
     }
 

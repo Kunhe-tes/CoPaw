@@ -330,7 +330,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
               disabled={isSubmitting || !inputValue.trim()}
               type="button"
             >
-              <img src={sendIcon} alt="发送" width={28} height={28} />
+              <img src={sendIcon} alt="发送" width={24} height={24} />
             </button>
           </div>
         </div>
