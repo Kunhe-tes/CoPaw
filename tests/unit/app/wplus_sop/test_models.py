@@ -210,6 +210,27 @@ def test_trial_summary_rejects_known_raw_customer_payload_keys() -> None:
         )
 
 
+def test_trial_completion_accepts_sanitized_fact_snapshot() -> None:
+    payload = TrialExecutionCompletedPayload(
+        run_id="run_1",
+        summary="预跑完成",
+        confirmed_facts=["统计范围为未来 30 天"],
+        unknowns=["是否排除已冻结账户"],
+    )
+
+    assert payload.confirmed_facts == ["统计范围为未来 30 天"]
+    assert payload.unknowns == ["是否排除已冻结账户"]
+
+
+def test_trial_completion_rejects_contact_values_in_context_snapshot() -> None:
+    with pytest.raises(ValidationError, match="contact values"):
+        TrialExecutionCompletedPayload(
+            run_id="run_1",
+            summary="预跑完成",
+            confirmed_facts=["联系人为 13812345678"],
+        )
+
+
 @pytest.mark.parametrize(
     "field",
     [

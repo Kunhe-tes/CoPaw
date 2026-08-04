@@ -586,6 +586,14 @@ async def test_sse_emits_changed_safe_trace_without_persisting_an_event(
             "sequence": 1,
             "summary_text": "正在分析请求并整理关键事实。",
             "truncated": False,
+            "entries": [
+                {
+                    "entry_id": "assistant_text:msg-1",
+                    "kind": "assistant_text",
+                    "status": "running",
+                    "text": "正在分析请求并整理关键事实。",
+                },
+            ],
         },
     }
     assert persisted_events == []

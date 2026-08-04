@@ -275,9 +275,14 @@
   min-width: 0;
 }
 
+.primaryColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .workSection,
-.decisionPanel,
-.runningPanel {
+.decisionPanel {
   min-width: 0;
   padding: 20px;
   border: 1px solid var(--wplus-line);
@@ -412,21 +417,13 @@
     display: flex;
     max-width: 100%;
     align-items: center;
+    flex-wrap: wrap;
     gap: 8px;
     padding: 0;
     color: var(--wplus-ink);
     font-weight: 600;
-    overflow-wrap: anywhere;
-
-    span {
-      flex: 0 0 auto;
-      color: var(--wplus-accent);
-      font-size: 11px;
-    }
 
     em {
-      flex: 0 0 auto;
-      color: var(--wplus-error);
       font-size: 11px;
       font-style: normal;
       font-weight: 500;
@@ -440,6 +437,39 @@
     line-height: 18px;
     overflow-wrap: anywhere;
   }
+}
+
+.questionNumber {
+  width: 16px;
+  flex: 0 0 auto;
+  color: var(--wplus-accent);
+  font-size: 11px;
+}
+
+.questionPrompt {
+  min-width: 0;
+  flex: 1 1 320px;
+  overflow-wrap: anywhere;
+}
+
+.questionMeta {
+  display: inline-flex;
+  max-width: 100%;
+  flex: 0 0 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.questionType {
+  color: var(--wplus-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.requiredMark {
+  color: var(--wplus-error);
 }
 
 .optionList {
@@ -709,137 +739,165 @@
   }
 }
 
-.runningPanel {
+.liveRunTranscript {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--wplus-line);
+  border-radius: 12px;
+  background: var(--console-management-surface, #fff);
+  animation: wplus-enter 180ms ease-out both;
+}
+
+.liveRunHeader {
   display: grid;
-  grid-template-columns: 40px minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: 32px minmax(0, 1fr) auto 16px;
   align-items: center;
-  gap: 2px 12px;
-  text-align: left;
-
-  > .eyebrow,
-  > h2,
-  > p {
-    grid-column: 2;
-  }
-
-  > h2 {
-    margin: 0;
-    color: var(--wplus-ink);
-    font-size: 20px;
-    font-weight: 600;
-    line-height: 28px;
-    overflow-wrap: anywhere;
-  }
-
-  > p {
-    margin: 1px 0 0;
-    color: var(--wplus-muted);
-    font-size: 13px;
-    line-height: 20px;
-    overflow-wrap: anywhere;
-  }
-
-  :global(.ant-progress),
-  :global(.swe-progress) {
-    grid-column: 1 / -1;
-    width: 100%;
-    max-width: none;
-    margin-top: 10px;
-  }
-
-  :global(.ant-progress-inner),
-  :global(.ant-progress-bg),
-  :global(.swe-progress-inner),
-  :global(.swe-progress-bg) {
-    height: 6px !important;
-  }
-}
-
-.debugStreamTrigger {
-  grid-column: 2;
-  justify-self: start;
-  margin-top: 8px;
-  border-color: var(--wplus-line-strong);
-  color: var(--wplus-muted);
+  gap: 10px;
+  padding: 14px 16px;
+  border: 0;
+  color: var(--wplus-ink);
   background: #fff;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 
-  &:hover,
+  &:hover {
+    background: var(--wplus-surface);
+  }
+
   &:focus-visible {
-    border-color: var(--wplus-accent) !important;
-    color: var(--wplus-accent) !important;
-    background: var(--wplus-accent-soft) !important;
+    outline: 2px solid var(--wplus-accent);
+    outline-offset: -2px;
+  }
+
+  &[aria-expanded="true"] .liveRunChevron {
+    transform: rotate(180deg);
   }
 }
 
-.debugStreamPopover {
-  width: min(440px, calc(100vw - 40px));
+.liveRunState {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  place-items: center;
+  border-radius: 9px;
+  color: var(--wplus-accent);
+  background: var(--wplus-accent-soft);
+}
 
-  pre {
-    max-height: 280px;
+.liveRunTranscript[data-running="true"] .liveRunState svg,
+.liveRunEmpty svg {
+  animation: wplus-spin 1.7s linear infinite;
+}
+
+.liveRunHeading {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+
+  h2,
+  small {
+    overflow-wrap: anywhere;
+  }
+
+  h2 {
     margin: 0;
-    padding: 12px;
-    overflow: auto;
-    border: 1px solid var(--wplus-line);
-    border-radius: 7px;
-    color: var(--wplus-ink);
-    background: var(--wplus-surface);
-    font-family: var(
-      --console-font-mono,
-      SFMono-Regular,
-      Consolas,
-      "Liberation Mono",
-      monospace
-    );
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 22px;
+  }
+
+  small {
+    color: var(--wplus-muted);
     font-size: 12px;
-    line-height: 19px;
-    text-align: left;
+    line-height: 18px;
+  }
+}
+
+.liveRunToggleText {
+  color: var(--wplus-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.liveRunChevron {
+  color: var(--wplus-muted);
+  transition: transform 160ms ease;
+}
+
+.liveRunBody {
+  max-height: 440px;
+  padding: 6px 16px 16px 58px;
+  overflow-y: auto;
+  border-top: 1px solid var(--wplus-line);
+  scroll-behavior: smooth;
+}
+
+.liveAssistantEntry {
+  max-width: 780px;
+  padding: 11px 13px;
+  margin-top: 10px;
+  border-radius: 10px;
+  color: var(--wplus-ink);
+  background: var(--wplus-surface);
+
+  p {
+    margin: 0;
+    font-size: 14px;
+    line-height: 22px;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
 }
 
-.debugStreamTitle {
-  margin-bottom: 8px;
-  color: var(--wplus-ink);
-  font-weight: 600;
-}
-
-.debugStreamEmpty {
-  margin: 0;
-  padding: 16px 12px;
-  border: 1px dashed var(--wplus-line-strong);
-  border-radius: 7px;
+.liveToolEntry {
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  margin-top: 8px;
+  border: 1px solid var(--wplus-line);
+  border-radius: 8px;
   color: var(--wplus-muted);
-  background: var(--wplus-surface);
-  text-align: center;
+  background: #fff;
+  font-size: 13px;
+  line-height: 20px;
+
+  span {
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  small {
+    flex: 0 0 auto;
+    color: var(--wplus-muted);
+    font-size: 12px;
+  }
+
+  &[data-status="failed"] {
+    border-color: var(--wplus-error);
+    color: var(--wplus-error);
+  }
 }
 
-.debugStreamTruncated {
-  margin: 8px 0 0;
+.liveRunEmpty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  color: var(--wplus-muted);
+  font-size: 13px;
+}
+
+.liveRunTruncated {
+  margin: 10px 0 0;
   color: var(--wplus-warning);
   font-size: 12px;
-}
-
-.debugStreamNote {
-  margin: 8px 0 0;
-  color: var(--wplus-muted);
-  font-size: 12px;
-  line-height: 18px;
-}
-
-.runPulse {
-  display: grid;
-  width: 40px;
-  height: 40px;
-  grid-row: 1 / 4;
-  place-items: center;
-  border-radius: 10px;
-  color: var(--wplus-accent);
-  background: var(--wplus-accent-soft);
-
-  svg {
-    animation: wplus-spin 1.7s linear infinite;
-  }
 }
 
 .memoryList,
@@ -1096,7 +1154,6 @@
   .decisionPanel button,
   .memoryList button,
   .workSection > button,
-  .debugStreamTrigger,
   .artifactList button {
     min-height: 44px;
   }
@@ -1128,24 +1185,33 @@
     }
   }
 
+  .questionMeta {
+    max-width: calc(100% - 24px);
+    margin-right: auto;
+    margin-left: 24px;
+  }
+
   .workSection,
-  .decisionPanel,
-  .runningPanel {
+  .decisionPanel {
     padding: 16px;
   }
 
-  .runningPanel {
-    grid-template-columns: 36px minmax(0, 1fr);
-    gap-x: 10px;
+  .liveRunHeader {
+    grid-template-columns: 32px minmax(0, 1fr) 16px;
+    padding-inline: 12px;
   }
 
-  .runPulse {
-    width: 36px;
-    height: 36px;
+  .liveRunToggleText {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    white-space: nowrap;
   }
 
-  .debugStreamTrigger {
-    grid-column: 1 / -1;
+  .liveRunBody {
+    padding-inline: 12px;
   }
 }
 

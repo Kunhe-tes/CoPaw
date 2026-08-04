@@ -446,6 +446,10 @@ async def stream_wplus_sop_events(
                             "sequence": safe_trace_snapshot.sequence,
                             "summary_text": safe_trace_snapshot.summary_text,
                             "truncated": safe_trace_snapshot.truncated,
+                            "entries": [
+                                entry.to_dict()
+                                for entry in safe_trace_snapshot.entries
+                            ],
                         },
                     }
                     yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"

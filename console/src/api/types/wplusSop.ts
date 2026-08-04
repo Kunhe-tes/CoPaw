@@ -223,10 +223,26 @@ export interface WPlusSopEntryRejectReceipt {
   };
 }
 
+export type WPlusSopSafeStreamTraceEntry =
+  | {
+      entry_id: string;
+      kind: "assistant_text";
+      text: string;
+      status: "running" | "completed" | "failed";
+    }
+  | {
+      entry_id: string;
+      kind: "tool";
+      tool_name: string;
+      server_label?: string;
+      status: "running" | "completed" | "failed";
+    };
+
 export interface WPlusSopSafeStreamTrace {
   sequence: number;
   summary_text: string;
   truncated: boolean;
+  entries?: WPlusSopSafeStreamTraceEntry[];
 }
 
 export interface WPlusSopSessionEvent {

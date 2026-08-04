@@ -5,7 +5,6 @@ import {
   Drawer,
   Empty,
   Input,
-  Popover,
   Progress,
   Radio,
   Skeleton,
@@ -21,6 +20,7 @@ import {
   CircleAlert,
   CircleCheck,
   Clock3,
+  ChevronDown,
   FileCheck2,
   Pause,
   Play,
@@ -28,6 +28,7 @@ import {
   RefreshCw,
   RotateCcw,
   Trash2,
+  Wrench,
   X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -43,6 +44,7 @@ import type {
   WPlusSopSession,
   WPlusSopStage,
 } from "@/api/types/wplusSop";
+import { getToolDisplayName } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/ToolTitle";
 import {
   applySessionEvent,
   buildResultTable,
@@ -72,6 +74,140 @@ interface AnswerDraft {
 interface ActiveSafeStreamTrace extends WPlusSopSafeStreamTrace {
   session_id: string;
   run_id: string;
+}
+
+function LiveRunTranscript({
+  trace,
+  running,
+  title,
+}: {
+  trace: ActiveSafeStreamTrace | null;
+  running: boolean;
+  title: string;
+}) {
+  const [expanded, setExpanded] = useState(running);
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const shouldFollowRef = useRef(true);
+  const entries = useMemo(() => trace?.entries || [], [trace?.entries]);
+
+  useEffect(() => {
+    setExpanded(running);
+    shouldFollowRef.current = true;
+  }, [running, trace?.run_id]);
+
+  useEffect(() => {
+    if (running && expanded && shouldFollowRef.current && bodyRef.current) {
+      bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+    }
+  }, [entries, expanded, running, trace?.sequence, trace?.summary_text]);
+
+  const stepCount = entries.length || (trace?.summary_text ? 1 : 0);
+  const failedCount = entries.filter(
+    (entry) => entry.status === "failed",
+  ).length;
+  const toggleLabel = expanded ? "折叠运行过程" : "展开运行过程";
+
+  return (
+    <section
+      className={styles.liveRunTranscript}
+      role="region"
+      aria-label="实时运行过程"
+      data-running={running}
+    >
+      <button
+        type="button"
+        className={styles.liveRunHeader}
+        aria-expanded={expanded}
+        aria-controls="wplus-live-run-body"
+        onClick={() =>
+          setExpanded((current) => {
+            if (current) return false;
+            shouldFollowRef.current = true;
+            return true;
+          })
+        }
+      >
+        <span className={styles.liveRunState} aria-hidden="true">
+          {running ? <RefreshCw size={17} /> : <CircleCheck size={17} />}
+        </span>
+        <span className={styles.liveRunHeading}>
+          <h2>{running ? title : "本轮运行过程"}</h2>
+          <small>
+            {running
+              ? "正在实时接收回复与工具活动"
+              : `${stepCount} 条记录${
+                  failedCount ? ` · ${failedCount} 条失败` : ""
+                }`}
+          </small>
+        </span>
+        <span className={styles.liveRunToggleText}>{toggleLabel}</span>
+        <ChevronDown
+          className={styles.liveRunChevron}
+          size={16}
+          aria-hidden="true"
+        />
+      </button>
+
+      <div
+        id="wplus-live-run-body"
+        data-testid="wplus-live-run-body"
+        ref={bodyRef}
+        className={styles.liveRunBody}
+        hidden={!expanded}
+        role={running ? "status" : undefined}
+        aria-label={running ? title : undefined}
+        aria-live={running ? "polite" : "off"}
+        onScroll={() => {
+          const body = bodyRef.current;
+          if (!body) return;
+          shouldFollowRef.current =
+            body.scrollHeight - body.scrollTop - body.clientHeight <= 24;
+        }}
+      >
+        {entries.length ? (
+          entries.map((entry) =>
+            entry.kind === "tool" ? (
+              <div
+                key={entry.entry_id}
+                className={styles.liveToolEntry}
+                data-status={entry.status}
+              >
+                <Wrench size={15} aria-hidden="true" />
+                <span>
+                  {getToolDisplayName(entry.tool_name, entry.server_label)}
+                </span>
+                <small>
+                  {entry.status === "running"
+                    ? "执行中"
+                    : entry.status === "failed"
+                    ? "执行失败"
+                    : "已完成"}
+                </small>
+              </div>
+            ) : (
+              <div key={entry.entry_id} className={styles.liveAssistantEntry}>
+                <p>{entry.text}</p>
+              </div>
+            ),
+          )
+        ) : trace?.summary_text ? (
+          <div className={styles.liveAssistantEntry}>
+            <p>{trace.summary_text}</p>
+          </div>
+        ) : (
+          <div className={styles.liveRunEmpty}>
+            <RefreshCw size={16} aria-hidden="true" />
+            <span>等待返回内容…</span>
+          </div>
+        )}
+        {trace?.truncated ? (
+          <p className={styles.liveRunTruncated}>
+            较早内容已截断，仅显示最近片段。
+          </p>
+        ) : null}
+      </div>
+    </section>
+  );
 }
 
 function errorStatus(error: unknown): number | undefined {
@@ -269,10 +405,12 @@ function StageQueueEditor({
 function QuestionField({
   question,
   value,
+  disabled,
   onChange,
 }: {
   question: WPlusSopQuestion;
   value: WPlusSopAnswerValue | undefined;
+  disabled: boolean;
   onChange: (value: WPlusSopAnswerValue) => void;
 }) {
   const structuredValue = isStructuredAnswerValue(value) ? value : null;
@@ -294,6 +432,7 @@ function QuestionField({
       className={styles.customAnswerInput}
       aria-label={`${question.prompt} 自定义补充`}
       autoSize={{ minRows: 2, maxRows: 6 }}
+      disabled={disabled}
       value={structuredValue?.text || ""}
       onChange={(event) =>
         onChange({
@@ -310,6 +449,7 @@ function QuestionField({
       <>
         <Radio.Group
           className={styles.optionList}
+          disabled={disabled}
           value={selectedOptionIds[0]}
           onChange={(event) => {
             const optionId = String(event.target.value);
@@ -347,6 +487,7 @@ function QuestionField({
       <>
         <Checkbox.Group
           className={styles.optionList}
+          disabled={disabled}
           value={selectedOptionIds}
           onChange={(values) => {
             const optionIds = values.map(String);
@@ -370,7 +511,12 @@ function QuestionField({
         >
           {(question.options || []).map((option) => (
             <Checkbox key={option.option_id} value={option.option_id}>
-              {option.label}
+              <span>{option.label}</span>
+              {option.description && (
+                <small className={styles.optionDescription}>
+                  {option.description}
+                </small>
+              )}
             </Checkbox>
           ))}
         </Checkbox.Group>
@@ -382,6 +528,7 @@ function QuestionField({
     <Input.TextArea
       aria-label={question.prompt}
       autoSize={{ minRows: 3, maxRows: 8 }}
+      disabled={disabled}
       value={typeof value === "string" ? value : ""}
       onChange={(event) => onChange(event.target.value)}
       placeholder="输入你的补充说明"
@@ -443,14 +590,26 @@ function QuestionBatchPanel({
         {batch.questions.map((question, index) => (
           <fieldset key={question.question_id} className={styles.question}>
             <legend>
-              <span>{String(index + 1).padStart(2, "0")}</span>
-              {question.prompt}
-              {question.required && <em>必填</em>}
+              <span className={styles.questionNumber}>
+                {String(index + 1).padStart(2, "0")}
+              </span>
+              <span className={styles.questionPrompt}>{question.prompt}</span>
+              <span className={styles.questionMeta}>
+                {question.kind !== "free_text" && (
+                  <em className={styles.questionType}>
+                    {question.kind === "multi_select" ? "多选" : "单选"}
+                  </em>
+                )}
+                {question.required && (
+                  <em className={styles.requiredMark}>必填</em>
+                )}
+              </span>
             </legend>
             {question.help_text && <p>{question.help_text}</p>}
             <QuestionField
               question={question}
               value={answers[question.question_id]}
+              disabled={busy}
               onChange={(value) => onAnswer(question.question_id, value)}
             />
           </fieldset>
@@ -684,11 +843,6 @@ export default function WPlusSopWorkspace() {
   const [evidenceDrawerOpen, setEvidenceDrawerOpen] = useState(false);
   const [safeStreamTrace, setSafeStreamTrace] =
     useState<ActiveSafeStreamTrace | null>(null);
-  const [debugPopoverOpen, setDebugPopoverOpen] = useState(false);
-  const debugTraceRef = useRef<HTMLPreElement | null>(null);
-  const debugShouldFollowRef = useRef(true);
-  const debugPopoverPinnedRef = useRef(false);
-  const debugPopoverCloseTimerRef = useRef<number | null>(null);
   const [downloadingArtifactId, setDownloadingArtifactId] = useState<
     string | null
   >(null);
@@ -860,6 +1014,7 @@ export default function WPlusSopWorkspace() {
                 sequence: trace.sequence,
                 summary_text: trace.summary_text,
                 truncated: trace.truncated,
+                entries: trace.entries,
               };
             });
             return;
@@ -897,95 +1052,17 @@ export default function WPlusSopWorkspace() {
 
   const currentRunId = session?.trial?.run_id ?? null;
   const sessionIsGenerating = session ? isGenerating(session) : false;
-  const activeSafeStreamTrace =
-    sessionIsGenerating &&
-    safeStreamTrace?.session_id === session?.session_id &&
+  const visibleSafeStreamTrace =
+    safeStreamTrace &&
+    safeStreamTrace.session_id === session?.session_id &&
     safeStreamTrace.run_id === currentRunId
       ? safeStreamTrace
       : null;
 
-  const clearDebugPopoverCloseTimer = useCallback(() => {
-    if (debugPopoverCloseTimerRef.current !== null) {
-      window.clearTimeout(debugPopoverCloseTimerRef.current);
-      debugPopoverCloseTimerRef.current = null;
-    }
-  }, []);
-
-  const scheduleDebugPopoverClose = useCallback(() => {
-    clearDebugPopoverCloseTimer();
-    if (debugPopoverPinnedRef.current) return;
-    debugPopoverCloseTimerRef.current = window.setTimeout(() => {
-      debugPopoverCloseTimerRef.current = null;
-      if (!debugPopoverPinnedRef.current) {
-        setDebugPopoverOpen(false);
-      }
-    }, 120);
-  }, [clearDebugPopoverCloseTimer]);
-
   useEffect(() => {
-    clearDebugPopoverCloseTimer();
-    debugPopoverPinnedRef.current = false;
-    debugShouldFollowRef.current = true;
     setSafeStreamTrace(null);
-    setDebugPopoverOpen(false);
     setEvidenceDrawerOpen(false);
-  }, [clearDebugPopoverCloseTimer, session?.session_id, sessionId]);
-
-  useEffect(() => {
-    if (!sessionIsGenerating) {
-      clearDebugPopoverCloseTimer();
-      debugPopoverPinnedRef.current = false;
-      setDebugPopoverOpen(false);
-    }
-  }, [clearDebugPopoverCloseTimer, currentRunId, sessionIsGenerating]);
-
-  useEffect(() => {
-    debugShouldFollowRef.current = true;
-  }, [currentRunId, session?.session_id]);
-
-  useEffect(
-    () => () => {
-      clearDebugPopoverCloseTimer();
-    },
-    [clearDebugPopoverCloseTimer],
-  );
-
-  useEffect(() => {
-    if (!debugPopoverOpen) return;
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        clearDebugPopoverCloseTimer();
-        debugPopoverPinnedRef.current = false;
-        setDebugPopoverOpen(false);
-      }
-    };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [clearDebugPopoverCloseTimer, debugPopoverOpen]);
-
-  const handleDebugTraceScroll = useCallback(() => {
-    const trace = debugTraceRef.current;
-    if (!trace) return;
-    const distanceFromBottom =
-      trace.scrollHeight - trace.scrollTop - trace.clientHeight;
-    debugShouldFollowRef.current = distanceFromBottom <= 24;
-  }, []);
-
-  useEffect(() => {
-    const trace = debugTraceRef.current;
-    if (
-      debugPopoverOpen &&
-      trace &&
-      debugShouldFollowRef.current &&
-      activeSafeStreamTrace?.summary_text
-    ) {
-      trace.scrollTop = trace.scrollHeight;
-    }
-  }, [
-    activeSafeStreamTrace?.sequence,
-    activeSafeStreamTrace?.summary_text,
-    debugPopoverOpen,
-  ]);
+  }, [session?.session_id, sessionId]);
 
   const answerScope = session?.question_batch
     ? `${session.session_id}:${session.question_batch.batch_id}`
@@ -1336,122 +1413,13 @@ export default function WPlusSopWorkspace() {
         </section>
       );
     }
-    return (
-      <section
-        className={styles.runningPanel}
-        role="status"
-        aria-live="polite"
-        aria-labelledby="wplus-running-title"
-      >
-        <div className={styles.runPulse}>
-          <RefreshCw size={22} />
-        </div>
-        <span className={styles.eyebrow}>正在处理</span>
-        <h2 id="wplus-running-title">{getSessionStateLabel(session)}</h2>
-        <p>本轮由系统在后台完成。你可以离开页面，运行不会中断。</p>
-        <Progress
-          aria-label="当前运行进度"
-          percent={stateProgress(session)}
-          showInfo={false}
-          strokeColor={PROGRESS_STROKE_COLOR}
-          trailColor={PROGRESS_TRAIL_COLOR}
-        />
-        <Popover
-          key={session.session_id}
-          placement="bottom"
-          trigger={[]}
-          open={debugPopoverOpen}
-          destroyOnHidden
-          content={
-            <div
-              className={styles.debugStreamPopover}
-              data-testid="wplus-debug-stream-popover"
-              onMouseEnter={clearDebugPopoverCloseTimer}
-              onMouseLeave={scheduleDebugPopoverClose}
-            >
-              <div
-                className={styles.debugStreamTitle}
-                data-testid="wplus-debug-stream-title"
-              >
-                实时返回内容（调试）
-              </div>
-              {activeSafeStreamTrace?.summary_text ? (
-                <pre
-                  ref={debugTraceRef}
-                  data-testid="wplus-debug-stream-trace"
-                  onScroll={handleDebugTraceScroll}
-                >
-                  {activeSafeStreamTrace.summary_text}
-                </pre>
-              ) : (
-                <p className={styles.debugStreamEmpty}>等待返回内容…</p>
-              )}
-              {activeSafeStreamTrace?.truncated ? (
-                <p className={styles.debugStreamTruncated}>
-                  较早内容已截断，仅显示最近片段。
-                </p>
-              ) : null}
-              <p className={styles.debugStreamNote}>
-                仅展示普通回复文本；思考过程、工具调用、参数、工具输出和非文本内容均已隐藏。
-              </p>
-            </div>
-          }
-        >
-          <Button
-            className={styles.debugStreamTrigger}
-            size="small"
-            aria-label="查看实时返回内容（调试）"
-            aria-expanded={debugPopoverOpen}
-            onMouseEnter={() => {
-              clearDebugPopoverCloseTimer();
-              if (!debugPopoverOpen) {
-                debugShouldFollowRef.current = true;
-              }
-              setDebugPopoverOpen(true);
-            }}
-            onMouseLeave={(event) => {
-              if (
-                !debugPopoverPinnedRef.current &&
-                document.activeElement !== event.currentTarget
-              ) {
-                scheduleDebugPopoverClose();
-              }
-            }}
-            onFocus={() => {
-              clearDebugPopoverCloseTimer();
-              if (!debugPopoverOpen) {
-                debugShouldFollowRef.current = true;
-              }
-              setDebugPopoverOpen(true);
-            }}
-            onBlur={() => {
-              if (!debugPopoverPinnedRef.current) {
-                scheduleDebugPopoverClose();
-              }
-            }}
-            onClick={() => {
-              clearDebugPopoverCloseTimer();
-              debugPopoverPinnedRef.current = true;
-              debugShouldFollowRef.current = true;
-              setDebugPopoverOpen(true);
-            }}
-          >
-            实时返回内容
-          </Button>
-        </Popover>
-      </section>
-    );
+    return null;
   }, [
     answers,
     busy,
     downloadArtifact,
     downloadingArtifactId,
     feedback,
-    activeSafeStreamTrace,
-    clearDebugPopoverCloseTimer,
-    debugPopoverOpen,
-    handleDebugTraceScroll,
-    scheduleDebugPopoverClose,
     sendCommand,
     session,
     stages,
@@ -1611,7 +1579,16 @@ export default function WPlusSopWorkspace() {
       </div>
 
       <div className={styles.workspaceGrid}>
-        <div className={styles.primaryColumn}>{mainPanel}</div>
+        <div className={styles.primaryColumn}>
+          {sessionIsGenerating || visibleSafeStreamTrace ? (
+            <LiveRunTranscript
+              trace={visibleSafeStreamTrace}
+              running={sessionIsGenerating}
+              title={getSessionStateLabel(session)}
+            />
+          ) : null}
+          {mainPanel}
+        </div>
         <EvidenceRail session={session} />
       </div>
 

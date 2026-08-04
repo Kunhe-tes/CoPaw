@@ -5,12 +5,14 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 
 import type { WPlusSopSession } from "@/api/types/wplusSop";
 import WPlusSopWorkspace from "./index";
+import styles from "./index.module.less";
 
 const apiMock = vi.hoisted(() => ({
   getSession: vi.fn(),
@@ -98,6 +100,7 @@ function emitSafeStreamTrace({
   stateVersion = 5,
   truncated = false,
   subscriptionIndex = 0,
+  entries = [],
 }: {
   runId: string;
   sequence: number;
@@ -105,6 +108,21 @@ function emitSafeStreamTrace({
   stateVersion?: number;
   truncated?: boolean;
   subscriptionIndex?: number;
+  entries?: Array<
+    | {
+        entry_id: string;
+        kind: "assistant_text";
+        text: string;
+        status: "running" | "completed" | "failed";
+      }
+    | {
+        entry_id: string;
+        kind: "tool";
+        tool_name: string;
+        server_label?: string;
+        status: "running" | "completed" | "failed";
+      }
+  >;
 }) {
   act(() => {
     subscriptionCallbacks[subscriptionIndex].onEvent({
@@ -117,6 +135,7 @@ function emitSafeStreamTrace({
         sequence,
         summary_text: summaryText,
         truncated,
+        entries,
       },
     });
   });
@@ -171,7 +190,7 @@ describe("WPlusSopWorkspace", () => {
     ).toBeInTheDocument();
   });
 
-  it("announces generation and labels both progress indicators", async () => {
+  it("announces generation without an estimated run progress bar", async () => {
     apiMock.getSession.mockResolvedValue(
       makeSession({
         state: "GeneratingQuestions",
@@ -187,8 +206,8 @@ describe("WPlusSopWorkspace", () => {
       screen.getByRole("progressbar", { name: "SOP 总体进度" }),
     ).toHaveAttribute("aria-valuenow", "12");
     expect(
-      screen.getByRole("progressbar", { name: "当前运行进度" }),
-    ).toHaveAttribute("aria-valuenow", "12");
+      screen.queryByRole("progressbar", { name: "当前运行进度" }),
+    ).not.toBeInTheDocument();
   });
 
   it("gives the pre-run result table a caption and scoped headers", async () => {
@@ -751,6 +770,159 @@ describe("WPlusSopWorkspace", () => {
     );
   }, 15_000);
 
+  it("wraps long prompts, labels selection types, and submits every multi-select option", async () => {
+    const longPrompt =
+      "请选择本环节需要覆盖的全部客户触达渠道，并结合实际执行范围确认所有适用选项";
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        state_version: 7,
+        question_batch: {
+          batch_id: "batch-selection-types",
+          stage_id: "stage-1",
+          questions: [
+            {
+              question_id: "q-single",
+              kind: "single_select",
+              prompt: "选择主要渠道",
+              required: true,
+              options: [{ option_id: "phone", label: "电话" }],
+            },
+            {
+              question_id: "q-multi",
+              kind: "multi_select",
+              prompt: longPrompt,
+              required: true,
+              options: [
+                {
+                  option_id: "call",
+                  label: "致电",
+                  description: "适合需要实时沟通的客户",
+                },
+                {
+                  option_id: "message",
+                  label: "企业微信",
+                  description: "适合异步发送资料和提醒",
+                },
+              ],
+            },
+          ],
+        },
+      }),
+    );
+    renderPage();
+
+    expect(await screen.findByText(longPrompt)).toHaveClass(
+      styles.questionPrompt,
+    );
+    expect(screen.getByText("单选")).toBeInTheDocument();
+    expect(screen.getByText("多选")).toBeInTheDocument();
+    expect(screen.getAllByText("必填")).toHaveLength(2);
+    expect(screen.getByText("适合需要实时沟通的客户")).toBeInTheDocument();
+    expect(screen.getByText("适合异步发送资料和提醒")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "电话" }));
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "致电 适合需要实时沟通的客户",
+      }),
+    );
+    fireEvent.click(
+      screen.getByRole("checkbox", {
+        name: "企业微信 适合异步发送资料和提醒",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "提交本轮 2 个回答" }));
+
+    await waitFor(() => expect(apiMock.sendCommand).toHaveBeenCalledTimes(1));
+    expect(apiMock.sendCommand.mock.calls[0][1]).toEqual(
+      expect.objectContaining({
+        command: "submit_answers",
+        payload: {
+          batch_id: "batch-selection-types",
+          answers: {
+            "q-single": "phone",
+            "q-multi": ["call", "message"],
+          },
+        },
+      }),
+    );
+  });
+
+  it("disables every answer control while answers are being submitted", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        state_version: 7,
+        question_batch: {
+          batch_id: "batch-busy-controls",
+          stage_id: "stage-1",
+          questions: [
+            {
+              question_id: "q-single",
+              kind: "single_select",
+              prompt: "选择主要渠道",
+              required: true,
+              options: [
+                {
+                  option_id: "other",
+                  label: "其他渠道",
+                  requires_custom_input: true,
+                },
+              ],
+            },
+            {
+              question_id: "q-multi",
+              kind: "multi_select",
+              prompt: "选择补充渠道",
+              required: true,
+              options: [{ option_id: "message", label: "企业微信" }],
+            },
+            {
+              question_id: "q-free",
+              kind: "free_text",
+              prompt: "填写执行范围",
+              required: true,
+            },
+          ],
+        },
+      }),
+    );
+    let rejectCommand: ((reason?: unknown) => void) | undefined;
+    apiMock.sendCommand.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          rejectCommand = reject;
+        }),
+    );
+    renderPage();
+
+    const single = await screen.findByRole("radio", { name: "其他渠道" });
+    const multi = screen.getByRole("checkbox", { name: "企业微信" });
+    const freeText = screen.getByLabelText("填写执行范围");
+    fireEvent.click(single);
+    const customText = screen.getByLabelText("选择主要渠道 自定义补充");
+    fireEvent.change(customText, { target: { value: "线下拜访" } });
+    fireEvent.click(multi);
+    fireEvent.change(freeText, { target: { value: "覆盖华东区" } });
+    fireEvent.click(screen.getByRole("button", { name: "提交本轮 3 个回答" }));
+
+    await waitFor(() => expect(rejectCommand).toBeDefined());
+    expect(single).toBeDisabled();
+    expect(multi).toBeDisabled();
+    expect(customText).toBeDisabled();
+    expect(freeText).toBeDisabled();
+
+    await act(async () => rejectCommand?.(new Error("network unavailable")));
+
+    await waitFor(() => {
+      expect(single).toBeEnabled();
+      expect(multi).toBeEnabled();
+      expect(customText).toBeEnabled();
+      expect(freeText).toBeEnabled();
+    });
+  });
+
   it("hides a custom input after switching to a normal option", async () => {
     apiMock.getSession.mockResolvedValue(
       makeSession({
@@ -896,11 +1068,27 @@ describe("WPlusSopWorkspace", () => {
           summary: "已完成查询并脱敏。",
           result_rows: [{ product: "稳健理财", due_at: "2026-08-01" }],
         },
+        facts: ["统计范围为未来 30 天"],
+        unknowns: ["是否排除已冻结账户"],
+        capabilities: [
+          {
+            capability_id: "crm.query",
+            name: "客户产品查询",
+            verification_status: "verified",
+            output_contract_status: "verified",
+          },
+        ],
       }),
     );
     renderPage();
 
     const feedback = await screen.findByLabelText("预跑反馈");
+    expect(screen.getByText("已完成查询并脱敏。")).toBeInTheDocument();
+    expect(screen.getByText("稳健理财")).toBeInTheDocument();
+    expect(screen.getByText("统计范围为未来 30 天")).toBeInTheDocument();
+    expect(screen.getByText("是否排除已冻结账户")).toBeInTheDocument();
+    expect(screen.getByText("客户产品查询")).toBeInTheDocument();
+    expect(screen.getByText("已验证")).toBeInTheDocument();
     fireEvent.change(feedback, {
       target: { value: "排除缺少任务日期的记录" },
     });
@@ -1132,9 +1320,7 @@ describe("WPlusSopWorkspace", () => {
     );
     renderPage();
 
-    const trigger = await screen.findByRole("button", {
-      name: "查看实时返回内容（调试）",
-    });
+    await screen.findByRole("region", { name: "实时运行过程" });
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
 
     emitSafeStreamTrace({
@@ -1145,8 +1331,6 @@ describe("WPlusSopWorkspace", () => {
       stateVersion: 99,
       truncated: true,
     });
-    fireEvent.click(trigger);
-
     expect(
       await screen.findByText(/content_chars=8 hidden=true/),
     ).toBeInTheDocument();
@@ -1194,8 +1378,96 @@ describe("WPlusSopWorkspace", () => {
     });
 
     expect(
+      screen.queryByRole("region", { name: "实时运行过程" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("streams assistant text and tool activity inline, then folds before the question card", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "GeneratingQuestions",
+        state_version: 5,
+        trial: { run_id: "run-1", status: "planning", steps: [] },
+      }),
+    );
+    renderPage();
+
+    await screen.findByRole("heading", { name: "正在生成问题" });
+    await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
+    emitSafeStreamTrace({
+      runId: "run-1",
+      sequence: 2,
+      summaryText: "正在核对客户范围。\n已完成范围核对。",
+      entries: [
+        {
+          entry_id: "text-1",
+          kind: "assistant_text",
+          text: "正在核对客户范围。",
+          status: "completed",
+        },
+        {
+          entry_id: "tool-1",
+          kind: "tool",
+          tool_name: "execute_shell_command",
+          status: "completed",
+        },
+        {
+          entry_id: "text-2",
+          kind: "assistant_text",
+          text: "已完成范围核对。",
+          status: "completed",
+        },
+      ],
+    });
+
+    const transcript = await screen.findByRole("region", {
+      name: "实时运行过程",
+    });
+    expect(within(transcript).getByText("正在核对客户范围。")).toBeVisible();
+    expect(within(transcript).getByText("执行操作")).toBeVisible();
+    expect(within(transcript).getByText("已完成范围核对。")).toBeVisible();
+    expect(
+      within(transcript).queryByRole("progressbar", { name: "当前运行进度" }),
+    ).not.toBeInTheDocument();
+    expect(
       screen.queryByRole("button", { name: "查看实时返回内容（调试）" }),
     ).not.toBeInTheDocument();
+
+    act(() => {
+      subscriptionCallbacks[0].onEvent({
+        event_id: "evt-6",
+        session_id: "sop-1",
+        state_version: 6,
+        kind: "question_batch",
+        run_id: "run-1",
+        snapshot: makeSession({
+          state: "AwaitingAnswer",
+          state_version: 6,
+          trial: { run_id: "run-1", status: "completed", steps: [] },
+          question_batch: {
+            batch_id: "batch-1",
+            stage_id: "stage-1",
+            questions: [
+              {
+                question_id: "q-1",
+                kind: "single_select",
+                prompt: "请选择客户范围",
+                required: true,
+                options: [{ option_id: "all", label: "全部客户" }],
+              },
+            ],
+          },
+        }),
+      });
+    });
+
+    expect(
+      screen.getByRole("button", { name: /展开运行过程/ }),
+    ).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByText("请选择客户范围")).toBeVisible();
+    expect(
+      within(transcript).queryByText("正在核对客户范围。"),
+    ).not.toBeVisible();
   });
 
   async function renderGeneratingTracePage() {
@@ -1208,84 +1480,18 @@ describe("WPlusSopWorkspace", () => {
     );
     renderPage();
     return screen.findByRole("button", {
-      name: "查看实时返回内容（调试）",
+      name: /折叠运行过程/,
     });
   }
 
-  it("opens the safe trace on hover while generating", async () => {
+  it("lets the inline run transcript be folded and reopened", async () => {
     const trigger = await renderGeneratingTracePage();
-    fireEvent.mouseEnter(trigger);
-
-    await waitFor(() =>
-      expect(trigger).toHaveAttribute("aria-expanded", "true"),
-    );
-    const popover = await screen.findByTestId("wplus-debug-stream-popover");
-    const title = screen.getByTestId("wplus-debug-stream-title");
-
-    vi.useFakeTimers();
-    try {
-      fireEvent.mouseLeave(trigger);
-      fireEvent.mouseEnter(title);
-      act(() => vi.advanceTimersByTime(200));
-      expect(trigger).toHaveAttribute("aria-expanded", "true");
-
-      fireEvent.mouseLeave(popover);
-      act(() => vi.advanceTimersByTime(200));
-      expect(trigger).toHaveAttribute("aria-expanded", "false");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("opens the safe trace on keyboard focus while generating", async () => {
-    const trigger = await renderGeneratingTracePage();
-    fireEvent.focus(trigger);
-
-    await waitFor(() =>
-      expect(trigger).toHaveAttribute("aria-expanded", "true"),
-    );
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
     expect(await screen.findByText("等待返回内容…")).toBeInTheDocument();
-
-    vi.useFakeTimers();
-    try {
-      fireEvent.blur(trigger);
-      act(() => vi.advanceTimersByTime(200));
-      expect(trigger).toHaveAttribute("aria-expanded", "false");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("closes the clicked safe trace with Escape and reopens it", async () => {
-    const trigger = await renderGeneratingTracePage();
     fireEvent.click(trigger);
-    await waitFor(() =>
-      expect(trigger).toHaveAttribute("aria-expanded", "true"),
-    );
-    expect(
-      await screen.findByText(
-        /仅展示普通回复文本；思考过程、工具调用、参数、工具输出和非文本内容均已隐藏/,
-      ),
-    ).toBeInTheDocument();
-
-    vi.useFakeTimers();
-    try {
-      fireEvent.mouseLeave(trigger);
-      fireEvent.blur(trigger);
-      act(() => vi.advanceTimersByTime(200));
-      expect(trigger).toHaveAttribute("aria-expanded", "true");
-    } finally {
-      vi.useRealTimers();
-    }
-
-    fireEvent.keyDown(document, { key: "Escape" });
-    await waitFor(() =>
-      expect(trigger).toHaveAttribute("aria-expanded", "false"),
-    );
+    expect(trigger).toHaveAttribute("aria-expanded", "false");
     fireEvent.click(trigger);
-    await waitFor(() =>
-      expect(trigger).toHaveAttribute("aria-expanded", "true"),
-    );
+    expect(trigger).toHaveAttribute("aria-expanded", "true");
   });
 
   it("ignores descending sequences and late events from an old run", async () => {
@@ -1298,11 +1504,8 @@ describe("WPlusSopWorkspace", () => {
     );
     renderPage();
 
-    const trigger = await screen.findByRole("button", {
-      name: "查看实时返回内容（调试）",
-    });
+    await screen.findByRole("region", { name: "实时运行过程" });
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
-    fireEvent.focus(trigger);
 
     emitSafeStreamTrace({
       runId: "run-1",
@@ -1353,9 +1556,7 @@ describe("WPlusSopWorkspace", () => {
       }),
     );
     renderPage();
-    const trigger = await screen.findByRole("button", {
-      name: "查看实时返回内容（调试）",
-    });
+    await screen.findByRole("button", { name: /折叠运行过程/ });
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
 
     emitSafeStreamTrace({
@@ -1364,8 +1565,7 @@ describe("WPlusSopWorkspace", () => {
       summaryText: "sequence=1",
       stateVersion: 8,
     });
-    fireEvent.focus(trigger);
-    const trace = await screen.findByTestId("wplus-debug-stream-trace");
+    const trace = await screen.findByTestId("wplus-live-run-body");
     Object.defineProperties(trace, {
       scrollHeight: { configurable: true, value: 500 },
       clientHeight: { configurable: true, value: 100 },
@@ -1376,7 +1576,6 @@ describe("WPlusSopWorkspace", () => {
 
     trace.scrollTop = 100;
     fireEvent.scroll(trace);
-    fireEvent.mouseEnter(trigger);
     emitSafeStreamTrace({
       runId: "run-1",
       sequence: 2,
@@ -1397,7 +1596,7 @@ describe("WPlusSopWorkspace", () => {
     await waitFor(() => expect(trace.scrollTop).toBe(500));
   });
 
-  it("clears pinned trace state when the owning Session changes", async () => {
+  it("clears the inline trace when the owning Session changes", async () => {
     apiMock.getSession.mockImplementation(async (requestedSessionId) =>
       makeSession({
         session_id: requestedSessionId,
@@ -1408,9 +1607,7 @@ describe("WPlusSopWorkspace", () => {
     );
     renderPage({ withSessionSwitcher: true });
 
-    const trigger = await screen.findByRole("button", {
-      name: "查看实时返回内容（调试）",
-    });
+    await screen.findByRole("button", { name: /折叠运行过程/ });
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(1));
     emitSafeStreamTrace({
       runId: "shared-run-id",
@@ -1418,7 +1615,6 @@ describe("WPlusSopWorkspace", () => {
       summaryText: "old-session-trace",
       stateVersion: 8,
     });
-    fireEvent.click(trigger);
     expect(await screen.findByText("old-session-trace")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "切换测试 Session" }));
@@ -1429,11 +1625,10 @@ describe("WPlusSopWorkspace", () => {
       ),
     );
     const currentTrigger = screen.getByRole("button", {
-      name: "查看实时返回内容（调试）",
+      name: /折叠运行过程/,
     });
-    await waitFor(() =>
-      expect(currentTrigger).toHaveAttribute("aria-expanded", "false"),
-    );
+    expect(currentTrigger).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("等待返回内容…")).toBeInTheDocument();
 
     await waitFor(() => expect(subscriptionCallbacks).toHaveLength(2));
     emitSafeStreamTrace({
@@ -1443,10 +1638,6 @@ describe("WPlusSopWorkspace", () => {
       stateVersion: 8,
       subscriptionIndex: 0,
     });
-    fireEvent.click(currentTrigger);
-    await waitFor(() =>
-      expect(currentTrigger).toHaveAttribute("aria-expanded", "true"),
-    );
     expect(
       screen.queryByText("late-old-session-trace"),
     ).not.toBeInTheDocument();

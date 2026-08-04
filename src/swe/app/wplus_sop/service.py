@@ -213,6 +213,163 @@ def _serialize_stage(
     }
 
 
+def _current_trial_events(
+    record: SessionRecord,
+    run_id: str | None,
+) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+    dict[str, dict[str, Any]],
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
+    plan: dict[str, Any] | None = None
+    started: dict[str, Any] | None = None
+    completed: dict[str, Any] | None = None
+    failed: dict[str, Any] | None = None
+    progress_by_step: dict[str, dict[str, Any]] = {}
+    for event in record.events:
+        payload = event.payload.model_dump(mode="json")
+        if payload.get("run_id") != run_id:
+            continue
+        if event.kind is EventKind.TRIAL_PLAN:
+            plan = payload
+        elif event.kind is EventKind.TRIAL_EXECUTION_STARTED:
+            started = payload
+        elif event.kind is EventKind.TRIAL_EXECUTION_PROGRESS:
+            progress_by_step[str(payload["step_id"])] = payload
+        elif event.kind is EventKind.TRIAL_EXECUTION_COMPLETED:
+            completed = payload
+        elif event.kind is EventKind.TRIAL_EXECUTION_FAILED:
+            failed = payload
+    return plan, started, progress_by_step, completed, failed
+
+
+def _serialize_trial_steps(
+    plan: dict[str, Any] | None,
+    progress_by_step: dict[str, dict[str, Any]],
+    completed: dict[str, Any] | None,
+    failed: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    steps: list[dict[str, Any]] = []
+    capabilities: list[dict[str, Any]] = []
+    seen_capabilities: set[str] = set()
+    is_completed = completed is not None
+    contract_verified = bool(completed and completed.get("schema_validated"))
+    for step in (plan or {}).get("steps", []):
+        step_id = str(step["step_id"])
+        progress = progress_by_step.get(step_id, {})
+        status = str(progress.get("status") or "pending")
+        if is_completed:
+            status = "completed"
+        elif failed is not None and failed.get("failed_step_id") == step_id:
+            status = "failed"
+        if status not in {
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "blocked",
+        }:
+            status = "running"
+        capability_id = str(step["capability_id"])
+        steps.append(
+            {
+                "step_id": step_id,
+                "title": str(step["label"]),
+                "capability": capability_id,
+                "status": status,
+                "summary": progress.get("summary"),
+                "elapsed_ms": progress.get("elapsed_ms"),
+            },
+        )
+        if capability_id in seen_capabilities:
+            continue
+        seen_capabilities.add(capability_id)
+        capabilities.append(
+            {
+                "capability_id": capability_id,
+                "name": capability_id,
+                "verification_status": (
+                    "verified" if is_completed else "unverified"
+                ),
+                "output_contract_status": (
+                    "verified" if contract_verified else "unverified"
+                ),
+            },
+        )
+    return steps, capabilities
+
+
+def _trial_status(
+    current_attempt: RunAttempt | None,
+    *,
+    completed: bool,
+    failed: bool,
+) -> str:
+    if completed:
+        return "completed"
+    if failed:
+        return "failed"
+    if current_attempt is None or current_attempt.status is RunStatus.CLAIMED:
+        return "planning"
+    if current_attempt.status is RunStatus.RUNNING:
+        return "running"
+    return "failed"
+
+
+def _serialize_current_trial(
+    record: SessionRecord,
+    current_attempt: RunAttempt | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    projection = record.projection
+    run_id = projection.current_run_id
+    result_lists = projection.trial_result_lists
+    if not run_id and not result_lists:
+        return None, []
+    plan, started, progress_by_step, completed, failed = _current_trial_events(
+        record,
+        run_id,
+    )
+
+    result_columns: list[dict[str, Any]] = []
+    result_rows: list[dict[str, Any]] = []
+    if result_lists:
+        result_columns = [
+            column.model_dump(mode="json")
+            for column in result_lists[0].columns
+        ]
+        result_rows = result_lists[0].rows
+
+    steps, capabilities = _serialize_trial_steps(
+        plan,
+        progress_by_step,
+        completed,
+        failed,
+    )
+    trial = {
+        "run_id": run_id or (current_attempt.run_id if current_attempt else ""),
+        "attempt_id": current_attempt.attempt_id if current_attempt else None,
+        "rerun_of_run_id": (
+            current_attempt.rerun_of_run_id if current_attempt else None
+        ),
+        "status": _trial_status(
+            current_attempt,
+            completed=completed is not None,
+            failed=failed is not None,
+        ),
+        "started_at": (started or {}).get("started_at"),
+        "completed_at": (completed or {}).get("completed_at"),
+        "elapsed_ms": None,
+        "steps": steps,
+        "summary": (completed or failed or {}).get("summary"),
+        "warnings": (completed or {}).get("warnings", []),
+        "result_columns": result_columns,
+        "result_rows": result_rows,
+    }
+    return trial, capabilities
+
+
 def serialize_session(record: SessionRecord) -> dict[str, Any]:
     """Project the persisted domain model into the frontend contract."""
     projection = record.projection
@@ -224,16 +381,6 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
         ),
         None,
     )
-    result_lists = projection.trial_result_lists
-    result_columns: list[dict[str, Any]] = []
-    result_rows: list[dict[str, Any]] = []
-    if result_lists:
-        result_columns = [
-            column.model_dump(mode="json")
-            for column in result_lists[0].columns
-        ]
-        result_rows = result_lists[0].rows
-
     question_batch = None
     if projection.current_question_batch is not None:
         batch = projection.current_question_batch
@@ -256,36 +403,7 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
             ],
         }
 
-    trial = None
-    if projection.current_run_id or result_lists:
-        trial = {
-            "run_id": projection.current_run_id
-            or (current_attempt.run_id if current_attempt else ""),
-            "attempt_id": (
-                current_attempt.attempt_id if current_attempt else None
-            ),
-            "rerun_of_run_id": (
-                current_attempt.rerun_of_run_id if current_attempt else None
-            ),
-            "status": (
-                "completed"
-                if result_lists
-                else (
-                    (
-                        "planning"
-                        if current_attempt.status is RunStatus.CLAIMED
-                        else current_attempt.status.value
-                    )
-                    if current_attempt is not None
-                    else "planning"
-                )
-            ),
-            "steps": [],
-            "summary": None,
-            "warnings": [],
-            "result_columns": result_columns,
-            "result_rows": result_rows,
-        }
+    trial, capabilities = _serialize_current_trial(record, current_attempt)
 
     return {
         "session_id": projection.sop_session_id,
@@ -308,7 +426,7 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
         "trial": trial,
         "facts": projection.confirmed_facts,
         "unknowns": projection.unknowns,
-        "capabilities": [],
+        "capabilities": capabilities,
         "artifacts": (
             [
                 {
@@ -1564,6 +1682,7 @@ class WPlusSopService:
             )
             changes = {
                 "trial_feedback": [*projection.trial_feedback, feedback],
+                "trial_result_lists": [],
             }
             starts_run = True
         elif command == "accept_trial":
@@ -1741,6 +1860,8 @@ class WPlusSopService:
                 "current_question_batch": None,
                 "trial_result_lists": [],
                 "trial_feedback": [],
+                "confirmed_facts": [],
+                "unknowns": [],
                 "final_result": None,
                 "memory_candidates": [],
                 "last_error": None,
@@ -1946,6 +2067,11 @@ class WPlusSopService:
             runtime_payload = {
                 **runtime_payload,
                 "current_stage_id": current_stage_id,
+            }
+        if starts_run and target_state is SessionState.FINALIZING_OUTPUTS:
+            runtime_payload = {
+                **runtime_payload,
+                "final_result_persisted": projection.final_result is not None,
             }
 
         if starts_run:
@@ -2301,7 +2427,13 @@ class WPlusSopService:
                 raise WPlusCommandError(
                     "trial result run_id does not match the trusted run",
                 )
-            changes["trial_result_lists"] = typed.result_lists
+            changes.update(
+                {
+                    "trial_result_lists": typed.result_lists,
+                    "confirmed_facts": typed.confirmed_facts,
+                    "unknowns": typed.unknowns,
+                },
+            )
         elif event_kind is EventKind.TRIAL_EXECUTION_FAILED:
             target = SessionState.RECOVERABLE_FAILURE
             failure = TrialExecutionFailedPayload.model_validate(payload)

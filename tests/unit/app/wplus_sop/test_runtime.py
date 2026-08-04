@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from swe.app.wplus_sop.models import QuestionBatchPayload, StageProposalPayload
+from swe.app.wplus_sop.models import (
+    MemoryCandidatesPayload,
+    QuestionBatchPayload,
+    SopResultPayload,
+    StageProposalPayload,
+)
 from swe.app.wplus_sop.runtime import (
     WPlusChatRunBusyError,
     WPlusSafeStreamTraceRegistry,
@@ -143,6 +148,85 @@ def test_safe_stream_trace_collects_only_ordinary_assistant_text():
     ):
         assert sentinel not in snapshot.summary_text
     assert snapshot.truncated is False
+
+
+def test_safe_stream_trace_projects_sanitized_tool_activity_in_order():
+    registry = WPlusSafeStreamTraceRegistry(max_chars=1_000, max_lines=20)
+    registry.start_run("sop-1", "run-1")
+
+    frames = [
+        {
+            "object": "message",
+            "id": "msg-answer",
+            "type": "message",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [{"type": "text", "text": "正在核对客户范围。"}],
+        },
+        {
+            "object": "message",
+            "id": "msg-tool-start",
+            "type": "function_call",
+            "role": "assistant",
+            "status": "in_progress",
+            "content": [
+                {
+                    "type": "data",
+                    "data": {
+                        "call_id": "call-1",
+                        "name": "execute_shell_command",
+                        "arguments": {"command": "SECRET_COMMAND"},
+                    },
+                },
+            ],
+        },
+        {
+            "object": "message",
+            "id": "msg-tool-finish",
+            "type": "function_call_output",
+            "role": "assistant",
+            "status": "completed",
+            "content": [
+                {
+                    "type": "data",
+                    "data": {
+                        "tool_call_id": "call-1",
+                        "name": "execute_shell_command",
+                        "output": "SECRET_OUTPUT",
+                    },
+                },
+            ],
+        },
+        {
+            "object": "message",
+            "id": "msg-final",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "text", "text": "已完成范围核对。"}],
+        },
+    ]
+
+    for frame in frames:
+        registry.ingest("sop-1", "run-1", _sse(frame))
+
+    snapshot = registry.snapshot("sop-1", "run-1")
+    assert snapshot is not None
+    assert [entry.kind for entry in snapshot.entries] == [
+        "assistant_text",
+        "tool",
+        "assistant_text",
+    ]
+    assert snapshot.entries[0].text == "正在核对客户范围。"
+    assert snapshot.entries[1].tool_name == "execute_shell_command"
+    assert snapshot.entries[1].status == "completed"
+    assert snapshot.entries[2].text == "已完成范围核对。"
+    rendered = json.dumps(
+        [entry.to_dict() for entry in snapshot.entries],
+        ensure_ascii=False,
+    )
+    assert "SECRET_COMMAND" not in rendered
+    assert "SECRET_OUTPUT" not in rendered
 
 
 def test_safe_stream_trace_final_content_replaces_incremental_body():
@@ -447,6 +531,61 @@ def test_trial_command_requires_same_background_turn_to_emit_terminal_event(
     assert "trial_execution_failed" in text
     assert "run_id 必须严格等于命令中的 run_id=\"run-1\"" in text
     assert "attempt_id 必须严格等于命令中的 attempt_id=\"attempt-1\"" in text
+    assert "confirmed_facts" in text
+    assert "unknowns" in text
+
+
+@pytest.mark.parametrize(
+    ("command", "payload", "expected_sequence"),
+    [
+        (
+            "confirm_stage",
+            {},
+            ["sop_result", "memory_candidates"],
+        ),
+        (
+            "retry_current_turn",
+            {
+                "target_state": "FinalizingOutputs",
+                "retry_of_run_id": "run-1",
+                "final_result_persisted": True,
+            },
+            ["memory_candidates"],
+        ),
+    ],
+)
+def test_finalizing_outputs_has_an_explicit_terminal_event_sequence(
+    command,
+    payload,
+    expected_sequence,
+):
+    text = build_wplus_command_text(
+        command=command,
+        sop_session_id="sop-1",
+        run_id="run-2",
+        attempt_id="attempt-2",
+        payload=payload,
+        target_state="FinalizingOutputs",
+    )
+    body = json.loads(text.splitlines()[1])
+
+    assert body["expected_event_sequence"] == expected_sequence
+    assert "同一个后台 Agent 回合" in text
+    assert "不得提交 kind='retry_started'" in text
+    assert "不得调用 copy_file_to_static" in text
+    assert "工具返回 ok=false" in text
+    if payload.get("final_result_persisted"):
+        assert "不得重复提交 sop_result" in text
+    else:
+        assert "先提交且只提交一个 sop_result" in text
+        sop_example = json.loads(
+            text.split("sop_result payload 示例：\n", maxsplit=1)[1].splitlines()[0],
+        )
+        SopResultPayload.model_validate(sop_example)
+    memory_example = json.loads(
+        text.split("memory_candidates payload 示例：\n", maxsplit=1)[1].splitlines()[0],
+    )
+    MemoryCandidatesPayload.model_validate(memory_example)
 
 
 @pytest.mark.parametrize(
@@ -604,7 +743,7 @@ async def test_starts_one_turn_on_owning_chat_and_detaches_internal_queue():
 
 
 @pytest.mark.asyncio
-async def test_running_turn_feeds_process_local_safe_trace_and_cleans_up():
+async def test_running_turn_freezes_process_local_safe_trace_on_completion():
     stream_ready = asyncio.Event()
     release_stream = asyncio.Event()
     completed = asyncio.Event()
@@ -666,13 +805,27 @@ async def test_running_turn_feeds_process_local_safe_trace_and_cleans_up():
     release_stream.set()
     await asyncio.wait_for(completed.wait(), timeout=1)
     await asyncio.sleep(0)
-    assert (
-        get_wplus_safe_stream_trace_registry(workspace).snapshot(
-            "sop-1",
-            "run-1",
-        )
-        is None
+    completed_snapshot = get_wplus_safe_stream_trace_registry(workspace).snapshot(
+        "sop-1",
+        "run-1",
     )
+    assert completed_snapshot is not None
+    assert completed_snapshot.summary_text == "ACCOUNT_SENTINEL"
+    registry = get_wplus_safe_stream_trace_registry(workspace)
+    registry.ingest(
+        "sop-1",
+        "run-1",
+        _sse(
+            {
+                "object": "message",
+                "id": "late-message",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "late"}],
+            },
+        ),
+    )
+    assert registry.snapshot("sop-1", "run-1").summary_text == "ACCOUNT_SENTINEL"
 
 
 @pytest.mark.asyncio

@@ -647,8 +647,27 @@ class TrialExecutionCompletedPayload(StrictModel):
     summary: str
     result_lists: list[ResultObjectList] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    confirmed_facts: list[str] = Field(default_factory=list, max_length=50)
+    unknowns: list[str] = Field(default_factory=list, max_length=50)
     schema_validated: bool = True
     completed_at: datetime = Field(default_factory=utc_now)
+
+    @field_validator("confirmed_facts", "unknowns")
+    @classmethod
+    def _validate_sanitized_context(cls, values: list[str]) -> list[str]:
+        normalized: list[str] = []
+        for value in values:
+            item = value.strip()
+            if not item:
+                raise ValueError("trial context entries cannot be blank")
+            if len(item) > 500:
+                raise ValueError(
+                    "trial context entries cannot exceed 500 characters",
+                )
+            if _contains_sensitive_contact_value(item):
+                raise ValueError("trial context entries cannot contain contact values")
+            normalized.append(item)
+        return normalized
 
 
 class TrialExecutionFailedPayload(StrictModel):

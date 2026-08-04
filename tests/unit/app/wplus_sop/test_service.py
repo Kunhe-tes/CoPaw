@@ -14,11 +14,13 @@ import pytest
 from swe.app.wplus_sop import service as service_module
 from swe.app.wplus_sop.models import (
     CommandReceipt,
+    FinalSopResult,
     OwnershipTuple,
     Question,
     QuestionBatch,
     QuestionOption,
     QuestionType,
+    RecoverableFailurePayload,
     RunAttempt,
     RunStatus,
     SessionProjection,
@@ -32,6 +34,7 @@ from swe.app.wplus_sop.service import (
     WPlusOwnershipError,
     WPlusRuntimeStartError,
     WPlusSopService,
+    serialize_session,
 )
 from swe.app.wplus_sop.store import StaleStateVersionError, WPlusSopStore
 
@@ -328,6 +331,117 @@ def _trial_result_payload(run_id: str) -> dict:
             },
         ],
     }
+
+
+@pytest.mark.asyncio
+async def test_completed_trial_snapshot_restores_results_and_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-trial-evidence"
+    _create_question_generation_run(service, session_id=session_id)
+
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service.append_agent_event(
+        kind="question_batch",
+        payload=_question_payload("stage-1", "trial-evidence"),
+        event_key="trial-evidence-questions",
+    )
+    await _send(
+        service,
+        session_id,
+        "submit_answers",
+        {"answers": {"q-trial-evidence": "yes"}},
+        request_id="cmd-trial-evidence-answers",
+    )
+    run_id = service.get_session(session_id).projection.current_run_id
+    assert run_id is not None
+    service.append_agent_event(
+        kind="trial_plan",
+        payload=_trial_plan_payload(run_id),
+        event_key="trial-evidence-plan",
+    )
+    service.append_agent_event(
+        kind="trial_execution_started",
+        payload={
+            "run_id": run_id,
+            "attempt_id": "attempt-trial-evidence",
+            "started_at": "2026-08-03T08:00:00Z",
+        },
+        event_key="trial-evidence-started",
+    )
+    service.append_agent_event(
+        kind="trial_execution_progress",
+        payload={
+            "run_id": run_id,
+            "step_id": f"step-{run_id}",
+            "status": "completed",
+            "summary": "查询完成，共 1 条脱敏记录",
+            "elapsed_ms": 1200,
+        },
+        event_key="trial-evidence-progress",
+    )
+    completed_payload = _trial_result_payload(run_id)
+    completed_payload.update(
+        {
+            "warnings": ["结果仅包含脱敏字段"],
+            "confirmed_facts": ["统计范围为未来 30 天"],
+            "unknowns": ["是否排除已冻结账户"],
+            "completed_at": "2026-08-03T08:00:02Z",
+        },
+    )
+    service.append_agent_event(
+        kind="trial_execution_completed",
+        payload=completed_payload,
+        event_key="trial-evidence-completed",
+    )
+
+    reloaded = WPlusSopStore(tmp_path / "wplus-sop.json").get_session(session_id)
+    assert reloaded is not None
+    snapshot = serialize_session(reloaded)
+
+    assert snapshot["trial"]["summary"] == "预跑完成"
+    assert snapshot["trial"]["warnings"] == ["结果仅包含脱敏字段"]
+    assert snapshot["trial"]["started_at"] == "2026-08-03T08:00:00Z"
+    assert snapshot["trial"]["completed_at"] == "2026-08-03T08:00:02Z"
+    assert snapshot["trial"]["steps"] == [
+        {
+            "step_id": f"step-{run_id}",
+            "title": "调用业务能力",
+            "capability": "crm.query",
+            "status": "completed",
+            "summary": "查询完成，共 1 条脱敏记录",
+            "elapsed_ms": 1200,
+        },
+    ]
+    assert snapshot["trial"]["result_rows"][0]["name"] == "示例记录"
+    assert snapshot["facts"] == ["统计范围为未来 30 天"]
+    assert snapshot["unknowns"] == ["是否排除已冻结账户"]
+    assert snapshot["capabilities"] == [
+        {
+            "capability_id": "crm.query",
+            "name": "crm.query",
+            "verification_status": "verified",
+            "output_contract_status": "verified",
+        },
+    ]
+
+    await _send(
+        service,
+        session_id,
+        "submit_trial_feedback",
+        {"feedback": "请排除冻结账户"},
+        request_id="cmd-trial-evidence-rerun",
+    )
+    rerun_snapshot = serialize_session(service.get_session(session_id))
+    assert rerun_snapshot["trial"]["status"] == "planning"
+    assert rerun_snapshot["trial"]["result_rows"] == []
+    assert rerun_snapshot["trial"]["summary"] is None
+    assert rerun_snapshot["capabilities"] == []
 
 
 @pytest.mark.asyncio
@@ -976,10 +1090,10 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    starts: list[str] = []
+    starts: list[dict[str, object]] = []
 
     async def fake_start(**kwargs):
-        starts.append(kwargs["command"])
+        starts.append(kwargs)
         return SimpleNamespace(run_id=kwargs["run_id"])
 
     monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
@@ -1087,7 +1201,7 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
     assert completed.record.projection.state is SessionState.COMPLETED
     nested = completed.record.projection.trial_result_lists[0].rows[0]
     assert nested["details"]["children"][0]["label"] == "子项"
-    assert starts == [
+    assert [start["command"] for start in starts] == [
         "propose_stage_queue",
         "confirm_stage_queue",
         "submit_answers",
@@ -1095,6 +1209,10 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
         "submit_answers",
         "confirm_stage",
     ]
+    assert starts[-1]["target_state"] == "FinalizingOutputs"
+    finalizing_payload = starts[-1]["payload"]
+    assert isinstance(finalizing_payload, dict)
+    assert finalizing_payload["final_result_persisted"] is False
     assert await service.flush_chat_projection_outbox() > 0
     assert service.workspace.chat_manager.chat.meta[
         "wplus_sop_session"
@@ -1957,9 +2075,16 @@ async def test_revise_answer_invalidates_downstream_and_starts_new_run(
         payload=_trial_plan_payload("trial-revision"),
         event_key="revision-plan",
     )
+    revision_result = _trial_result_payload("trial-revision")
+    revision_result.update(
+        {
+            "confirmed_facts": ["旧范围事实"],
+            "unknowns": ["旧范围未知项"],
+        },
+    )
     service.append_agent_event(
         kind="trial_execution_completed",
-        payload=_trial_result_payload("trial-revision"),
+        payload=revision_result,
         event_key="revision-result",
     )
 
@@ -2009,6 +2134,8 @@ async def test_revise_answer_invalidates_downstream_and_starts_new_run(
     assert projection.answers[0].answers[0].selected_option_ids == ["no"]
     assert projection.answers[0].answers[0].text == "改为人工复核"
     assert projection.trial_result_lists == []
+    assert projection.confirmed_facts == []
+    assert projection.unknowns == []
     assert projection.invalidated_history[0]["revised_round"] == 1
     assert starts[-1]["command"] == "revise_answer"
 
@@ -2433,6 +2560,75 @@ async def test_retry_uses_only_server_owned_target_and_lineage(
         .retry_of_run_id
         == "run-sop-server-owned-retry"
     )
+
+
+@pytest.mark.asyncio
+async def test_finalizing_retry_reports_when_sop_result_is_already_persisted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    captured: dict[str, object] = {}
+    session_id = "sop-finalizing-retry"
+    failed_run_id = "run-finalizing-failed"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.RECOVERABLE_FAILURE,
+            state_version=1,
+            title="SOP",
+            current_run_id=failed_run_id,
+            resume_state=SessionState.FINALIZING_OUTPUTS,
+            last_error=RecoverableFailurePayload(
+                error_code="agent_turn_incomplete",
+                summary="最终产出未完成",
+                failed_operation="confirm_stage",
+                failed_run_id=failed_run_id,
+            ),
+            final_result=FinalSopResult(
+                sop_spec={"name": "客户经营 SOP"},
+                readable_sop="# 客户经营 SOP",
+                html="<h1>客户经营 SOP</h1>",
+            ),
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-finalizing-original",
+            command="confirm_stage",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+            starts_run=True,
+            run_id=failed_run_id,
+            attempt_id="attempt-finalizing-failed",
+        ),
+        run_attempt=RunAttempt(
+            run_id=failed_run_id,
+            attempt_id="attempt-finalizing-failed",
+            command_request_id="cmd-finalizing-original",
+            command="confirm_stage",
+            status=RunStatus.FAILED,
+        ),
+    )
+
+    async def fake_start(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    await _send(
+        service,
+        session_id,
+        "retry_current_turn",
+        {"final_result_persisted": False},
+        request_id="cmd-finalizing-retry",
+    )
+
+    assert captured["payload"] == {
+        "target_state": "FinalizingOutputs",
+        "retry_of_run_id": failed_run_id,
+        "final_result_persisted": True,
+    }
 
 
 @pytest.mark.asyncio

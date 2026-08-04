@@ -60,6 +60,22 @@ _QUESTION_BATCH_EXAMPLE = {
     ],
 }
 
+_SOP_RESULT_EXAMPLE = {
+    "result": {
+        "sop_spec": {
+            "name": "客户经营 SOP",
+            "version": 1,
+            "stages": [],
+        },
+        "readable_sop": "# 客户经营 SOP\n\n按已确认环节执行。",
+        "html": "<article><h1>客户经营 SOP</h1></article>",
+        "schema_validated": True,
+        "privacy_validated": True,
+    },
+}
+
+_MEMORY_CANDIDATES_EXAMPLE = {"candidates": []}
+
 
 class WPlusChatRunBusyError(RuntimeError):
     """Raised when the owning Chat already has an unrelated active run."""
@@ -77,12 +93,39 @@ class WPlusTurnStart:
 
 
 @dataclass(frozen=True)
+class WPlusSafeStreamTraceEntry:
+    """One display-safe assistant text or tool activity entry."""
+
+    entry_id: str
+    kind: str
+    status: str
+    text: str = ""
+    tool_name: str = ""
+    server_label: str = ""
+
+    def to_dict(self) -> dict[str, str]:
+        payload = {
+            "entry_id": self.entry_id,
+            "kind": self.kind,
+            "status": self.status,
+        }
+        if self.kind == "assistant_text":
+            payload["text"] = self.text
+        else:
+            payload["tool_name"] = self.tool_name
+            if self.server_label:
+                payload["server_label"] = self.server_label
+        return payload
+
+
+@dataclass(frozen=True)
 class WPlusSafeStreamTraceSnapshot:
     """Bounded, non-persisted safe frame summaries for one W+ Agent run."""
 
     sequence: int
     summary_text: str
     truncated: bool
+    entries: tuple[WPlusSafeStreamTraceEntry, ...]
 
 
 @dataclass
@@ -94,6 +137,7 @@ class _WPlusSafeTextPart:
 @dataclass
 class _WPlusSafeAssistantMessage:
     parts: list[_WPlusSafeTextPart] = field(default_factory=list)
+    status: str = "running"
 
     @property
     def text(self) -> str:
@@ -106,7 +150,14 @@ class _WPlusSafeStreamTraceRun:
     messages: OrderedDict[str, _WPlusSafeAssistantMessage] = field(
         default_factory=OrderedDict,
     )
+    tools: OrderedDict[str, WPlusSafeStreamTraceEntry] = field(
+        default_factory=OrderedDict,
+    )
+    timeline: OrderedDict[str, tuple[str, str]] = field(
+        default_factory=OrderedDict,
+    )
     truncated: bool = False
+    finished: bool = False
 
 
 class WPlusSafeStreamTraceRegistry:
@@ -139,13 +190,19 @@ class WPlusSafeStreamTraceRegistry:
             self._runs.popitem(last=False)
 
     def finish_run(self, session_id: str, run_id: str) -> None:
-        """Remove a completed trace so process memory cannot accumulate."""
-        self._runs.pop((session_id, run_id), None)
+        """Freeze a completed trace until the Session starts its next run."""
+        run = self._runs.get((session_id, run_id))
+        if run is None:
+            return
+        if not self._entries(run):
+            self._runs.pop((session_id, run_id), None)
+            return
+        run.finished = True
 
     def ingest(self, session_id: str, run_id: str, sse_chunk: str) -> None:
         """Apply allowlisted text frames with Chat Builder merge semantics."""
         run = self._runs.get((session_id, run_id))
-        if run is None or not isinstance(sse_chunk, str):
+        if run is None or run.finished or not isinstance(sse_chunk, str):
             return
         for line in sse_chunk.splitlines():
             if not line.startswith("data:"):
@@ -168,6 +225,7 @@ class WPlusSafeStreamTraceRegistry:
             sequence=run.sequence,
             summary_text=self._render(run),
             truncated=run.truncated,
+            entries=self._entries(run),
         )
 
     def _ingest_frame(
@@ -178,7 +236,10 @@ class WPlusSafeStreamTraceRegistry:
         if not isinstance(frame, dict):
             return
         if frame.get("object") == "message":
-            self._ingest_message(run, frame)
+            if frame.get("type") == "message":
+                self._ingest_message(run, frame)
+            else:
+                self._ingest_tool(run, frame)
         elif frame.get("object") == "content":
             self._ingest_content(run, frame)
 
@@ -196,6 +257,11 @@ class WPlusSafeStreamTraceRegistry:
             message_id,
             _WPlusSafeAssistantMessage(),
         )
+        run.timeline.setdefault(
+            f"assistant_text:{message_id}",
+            ("assistant_text", message_id),
+        )
+        message.status = self._safe_status(frame.get("status"))
         content = frame.get("content")
         if isinstance(content, list) and content:
             parts = [
@@ -212,6 +278,104 @@ class WPlusSafeStreamTraceRegistry:
             if parts:
                 run.sequence += 1
         self._enforce_limits(run)
+
+    def _ingest_tool(
+        self,
+        run: _WPlusSafeStreamTraceRun,
+        frame: dict[str, Any],
+    ) -> None:
+        message_type = frame.get("type")
+        if message_type not in {
+            "function_call",
+            "function_call_output",
+            "plugin_call",
+            "plugin_call_output",
+            "component_call",
+            "component_call_output",
+            "mcp_call",
+            "mcp_call_output",
+        }:
+            return
+        data = self._first_data_payload(frame.get("content"))
+        if data is None:
+            return
+        fallback_id = frame.get("id")
+        call_id = next(
+            (
+                value
+                for key in ("call_id", "tool_call_id", "id")
+                if isinstance((value := data.get(key)), str) and value
+            ),
+            fallback_id if isinstance(fallback_id, str) else "",
+        )
+        if not call_id:
+            return
+        existing = run.tools.get(call_id)
+        tool_name = self._safe_tool_label(self._tool_name(data))
+        server_label = self._safe_tool_label(
+            data.get("server_label") or data.get("mcp_server"),
+        )
+        is_output = message_type.endswith("_output")
+        raw_status = data.get("tool_status") or frame.get("status")
+        status = self._safe_status(raw_status, completed=is_output)
+        if data.get("tool_error") or data.get("isError") is True:
+            status = "failed"
+        elif not is_output:
+            status = "running"
+        run.tools[call_id] = WPlusSafeStreamTraceEntry(
+            entry_id=f"tool:{call_id}",
+            kind="tool",
+            status=status,
+            tool_name=tool_name or existing.tool_name if existing else tool_name,
+            server_label=(
+                server_label or existing.server_label if existing else server_label
+            ),
+        )
+        run.timeline.setdefault(f"tool:{call_id}", ("tool", call_id))
+        run.sequence += 1
+        self._enforce_limits(run)
+
+    @staticmethod
+    def _first_data_payload(content: Any) -> dict[str, Any] | None:
+        if not isinstance(content, list):
+            return None
+        for item in content:
+            if not isinstance(item, dict) or item.get("type") != "data":
+                continue
+            data = item.get("data")
+            if isinstance(data, dict):
+                return data
+        return None
+
+    @staticmethod
+    def _tool_name(data: dict[str, Any]) -> Any:
+        direct = data.get("name") or data.get("tool_name") or data.get(
+            "mcp_tool_name",
+        )
+        if direct:
+            return direct
+        for key in ("function", "tool", "tool_call", "mcp_tool"):
+            nested = data.get(key)
+            if isinstance(nested, dict) and nested.get("name"):
+                return nested["name"]
+        return ""
+
+    @staticmethod
+    def _safe_tool_label(value: Any) -> str:
+        if not isinstance(value, str):
+            return ""
+        normalized = " ".join(value.split()).strip()
+        if not normalized or any(char in normalized for char in "{}[]\""):
+            return ""
+        return normalized[:96]
+
+    @staticmethod
+    def _safe_status(value: Any, *, completed: bool = False) -> str:
+        if value in {"failed", "rejected", "canceled"}:
+            return "failed"
+        if completed or value == "completed":
+            return "completed"
+        return "running"
 
     def _ingest_content(
         self,
@@ -258,15 +422,47 @@ class WPlusSafeStreamTraceRegistry:
             if (text := message.text)
         )
 
+    @staticmethod
+    def _entries(
+        run: _WPlusSafeStreamTraceRun,
+    ) -> tuple[WPlusSafeStreamTraceEntry, ...]:
+        entries: list[WPlusSafeStreamTraceEntry] = []
+        for kind, item_id in run.timeline.values():
+            if kind == "tool":
+                if tool := run.tools.get(item_id):
+                    entries.append(tool)
+                continue
+            message = run.messages.get(item_id)
+            if message and message.text:
+                entries.append(
+                    WPlusSafeStreamTraceEntry(
+                        entry_id=f"assistant_text:{item_id}",
+                        kind="assistant_text",
+                        status=message.status,
+                        text=message.text,
+                    ),
+                )
+        return tuple(entries)
+
     def _enforce_limits(self, run: _WPlusSafeStreamTraceRun) -> None:
+        while len(run.timeline) > self._max_lines:
+            _, (kind, item_id) = run.timeline.popitem(last=False)
+            if kind == "tool":
+                run.tools.pop(item_id, None)
+            else:
+                run.messages.pop(item_id, None)
+            run.truncated = True
+
         while len(run.messages) > self._max_lines:
-            _, removed = run.messages.popitem(last=False)
+            message_id, removed = run.messages.popitem(last=False)
+            run.timeline.pop(f"assistant_text:{message_id}", None)
             if removed.text:
                 run.truncated = True
 
         while len(self._render(run).splitlines()) > self._max_lines:
             if len(run.messages) > 1:
-                run.messages.popitem(last=False)
+                message_id, _ = run.messages.popitem(last=False)
+                run.timeline.pop(f"assistant_text:{message_id}", None)
             else:
                 message = next(iter(run.messages.values()))
                 lines = message.text.splitlines()
@@ -280,7 +476,8 @@ class WPlusSafeStreamTraceRegistry:
 
         while len(self._render(run)) > self._max_chars:
             if len(run.messages) > 1:
-                run.messages.popitem(last=False)
+                message_id, _ = run.messages.popitem(last=False)
+                run.timeline.pop(f"assistant_text:{message_id}", None)
             else:
                 message = next(iter(run.messages.values()))
                 message.parts = [
@@ -331,9 +528,90 @@ def _build_trial_command_contract(
         + "；trial_execution_started 的 attempt_id 必须严格等于命令中的 "
         "attempt_id="
         + json.dumps(attempt_id, ensure_ascii=False)
-        + "。结果只保留脱敏摘要、计数、schema 校验、警告和失败位置；"
+        + "。trial_execution_completed 还必须用 confirmed_facts 提交截至本轮"
+        "的累计已确认事实，并用 unknowns 提交当前明确未知项；这些内容只写"
+        "脱敏业务摘要。结果只保留脱敏摘要、"
+        "计数、schema 校验、警告和失败位置；"
         "不得把原始客户响应、账户值或自由文本备注写入事件。"
     )
+
+
+def _build_finalizing_command_contract(*, final_result_persisted: bool) -> str:
+    if final_result_persisted:
+        sequence = (
+            "本次重试检测到 sop_result 已成功持久化；只提交且只提交一个 "
+            "memory_candidates，不得重复提交 sop_result。"
+        )
+    else:
+        sequence = (
+            "先提交且只提交一个 sop_result；工具返回 ok=true 后，再提交且只提交"
+            "一个 memory_candidates。"
+        )
+    sop_example = (
+        "\nsop_result payload 示例：\n"
+        + json.dumps(
+            _SOP_RESULT_EXAMPLE,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if not final_result_persisted
+        else ""
+    )
+    return (
+        "\n本命令必须在同一个后台 Agent 回合内完成最终产出闭环。"
+        + sequence
+        + "不得提交 kind='retry_started'，该事件不属于 W+ SOP 协议；也不得用 "
+        "lifecycle_progress 代替上述业务边界事件。若 emit_wplus_sop_event 工具"
+        "返回 ok=false，必须根据返回的 allowed agent events 修正参数后重试。"
+        "最终化阶段不得调用 copy_file_to_static、OpenCLI 或其他业务/文件工具；"
+        "直接把已生成并校验的内容提交到 sop_result。"
+        "终态事件成功持久化前不得结束本回合。sop_result 必须包含通过 schema "
+        "和隐私校验的 sop_spec、readable_sop 与 html；memory_candidates 即使为空"
+        "也必须提交 candidates=[]，由服务端据此进入 Completed 或 MemoryReview。"
+        + sop_example
+        + "\nmemory_candidates payload 示例：\n"
+        + json.dumps(
+            _MEMORY_CANDIDATES_EXAMPLE,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+    )
+
+
+def _resolve_target_state(
+    command: str,
+    payload: dict[str, Any],
+    target_state: str | None,
+) -> str | None:
+    if target_state is not None:
+        return target_state
+    if command == "propose_stage_queue":
+        return "GeneratingStageProposal"
+    if command == "retry_current_turn":
+        retry_target = payload.get("target_state")
+        return retry_target if isinstance(retry_target, str) else None
+    return None
+
+
+def _expected_event_sequence(
+    target_state: str | None,
+    payload: dict[str, Any],
+) -> list[str] | None:
+    if target_state in {"GeneratingTrial", "ExecutingTrial"}:
+        sequence = []
+        if target_state == "GeneratingTrial":
+            sequence.append("trial_plan")
+        return [
+            *sequence,
+            "trial_execution_started",
+            "trial_execution_progress?",
+            "trial_execution_completed|trial_execution_failed",
+        ]
+    if target_state == "FinalizingOutputs":
+        if payload.get("final_result_persisted") is True:
+            return ["memory_candidates"]
+        return ["sop_result", "memory_candidates"]
+    return None
 
 
 def build_wplus_command_text(
@@ -346,13 +624,11 @@ def build_wplus_command_text(
     target_state: str | None = None,
 ) -> str:
     """Build a deterministic instruction without putting ownership in user data."""
-    effective_target_state = target_state
-    if effective_target_state is None and command == "propose_stage_queue":
-        effective_target_state = "GeneratingStageProposal"
-    elif effective_target_state is None and command == "retry_current_turn":
-        retry_target = payload.get("target_state")
-        if isinstance(retry_target, str):
-            effective_target_state = retry_target
+    effective_target_state = _resolve_target_state(
+        command,
+        payload,
+        target_state,
+    )
     expected_event_kind = {
         "GeneratingStageProposal": "stage_proposal",
         "GeneratingQuestions": "question_batch",
@@ -361,6 +637,11 @@ def build_wplus_command_text(
         "GeneratingTrial",
         "ExecutingTrial",
     }
+    is_finalizing_turn = effective_target_state == "FinalizingOutputs"
+    expected_sequence = _expected_event_sequence(
+        effective_target_state,
+        payload,
+    )
     body = {
         "protocol": "wplus-sop-command-v1",
         "command": command,
@@ -373,17 +654,8 @@ def build_wplus_command_text(
         body["target_state"] = effective_target_state
     if expected_event_kind is not None:
         body["expected_event_kind"] = expected_event_kind
-    if is_trial_turn:
-        body["expected_event_sequence"] = [
-            *(
-                ["trial_plan"]
-                if effective_target_state == "GeneratingTrial"
-                else []
-            ),
-            "trial_execution_started",
-            "trial_execution_progress?",
-            "trial_execution_completed|trial_execution_failed",
-        ]
+    if expected_sequence is not None:
+        body["expected_event_sequence"] = expected_sequence
     command_contract = ""
     if expected_event_kind == "stage_proposal":
         command_contract = (
@@ -442,6 +714,12 @@ def build_wplus_command_text(
             run_id=run_id,
             attempt_id=attempt_id,
             requires_plan=effective_target_state == "GeneratingTrial",
+        )
+    elif is_finalizing_turn:
+        command_contract = _build_finalizing_command_contract(
+            final_result_persisted=(
+                payload.get("final_result_persisted") is True
+            ),
         )
     return (
         "执行下面由专用 W+ SOP 工作流界面提交的结构化命令。"
