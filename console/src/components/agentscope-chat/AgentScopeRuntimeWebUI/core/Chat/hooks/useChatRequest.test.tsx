@@ -664,4 +664,81 @@ describe("useChatRequest", () => {
     expect(updateMessage).toHaveBeenCalledTimes(1);
     expect(onFinish).toHaveBeenCalledWith(createOwner());
   });
+
+  it("emits compaction boundaries without building an assistant response", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+    } as Response);
+    mocks.streamChunks[0] = {
+      data: JSON.stringify({
+        object: "conversation_compacted",
+        chat_id: "chat-real-a",
+        boundary: {
+          id: "boundary-1",
+          archived_message_count: 3,
+        },
+      }),
+    };
+    mocks.streamChunks[1] = {
+      data: JSON.stringify({
+        object: "response",
+        id: "response-1",
+        status: "completed",
+        created_at: 1,
+        completed_at: 2,
+        output: [],
+      }),
+    };
+    const onBoundary = vi.fn();
+    document.addEventListener("conversation_compacted", onBoundary);
+    const updateMessage = vi.fn();
+    const currentQARef = {
+      current: {
+        response: {
+          id: "ui-response-a",
+          msgStatus: "generating",
+          cards: [
+            {
+              code: "AgentScopeRuntimeResponseCard",
+              data: {
+                id: "response-1",
+                status: "created",
+                created_at: 0,
+                output: [],
+              },
+            },
+          ],
+        },
+        activeRequestOwner: createOwner(),
+      },
+    } as CurrentQARef;
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        onFinish={vi.fn()}
+      />,
+    );
+
+    const requestPromise = hookApi.request([], undefined, createOwner());
+    await waitFor(() => {
+      expect(onBoundary).toHaveBeenCalledTimes(1);
+    });
+    mocks.streamGate.resolve();
+    await act(async () => {
+      await requestPromise;
+    });
+
+    expect(onBoundary.mock.calls[0]?.[0].detail).toEqual({
+      chat_id: "chat-real-a",
+      boundary: {
+        id: "boundary-1",
+        archived_message_count: 3,
+      },
+    });
+    expect(updateMessage).not.toHaveBeenCalled();
+    document.removeEventListener("conversation_compacted", onBoundary);
+  });
 });

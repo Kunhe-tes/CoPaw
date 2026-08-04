@@ -25,7 +25,6 @@ from ..tool_failure import ToolExecutionError
 from ...app.runner.tool_output_frames import (
     ToolOutputSource,
     emit_tool_output_text,
-    normalize_tool_output,
 )
 from ...envs.runtime import build_runtime_env
 from ...runtime_invocation_claims import apply_runtime_claim_env
@@ -1383,7 +1382,6 @@ async def execute_shell_command(
             response_text,
             process_limit_policy,
         )
-        response_text = normalize_tool_output(response_text)
         if returncode != 0:
             _raise_shell_error(
                 _classify_shell_failure(

@@ -46,6 +46,7 @@ class MemoryCompactionHook:
     async def _print_status_message(
         agent: ReActAgent,
         text: str,
+        metadata: dict[str, Any] | None = None,
     ) -> None:
         """Print a status message to the agent's output.
 
@@ -57,6 +58,7 @@ class MemoryCompactionHook:
             name=agent.name,
             role="assistant",
             content=[TextBlock(type="text", text=text)],
+            metadata=metadata or {},
         )
         await agent.print(msg)
 
@@ -186,10 +188,6 @@ class MemoryCompactionHook:
         running_config: Any,
     ) -> str:
         if not running_config.context_compact.context_compact_enabled:
-            await self._print_status_message(
-                agent,
-                "✅ Context compaction skipped",
-            )
             return ""
 
         compact_content = await self.memory_manager.compact_memory(
@@ -198,14 +196,11 @@ class MemoryCompactionHook:
             _bound_chat_model=agent.model,
             _bound_formatter=agent.formatter,
         )
-        await self._print_status_message(
-            agent,
-            (
-                "✅ Context compaction completed"
-                if compact_content
-                else "⚠️ Context compaction failed."
-            ),
-        )
+        if not compact_content:
+            await self._print_status_message(
+                agent,
+                "⚠️ Context compaction failed.",
+            )
         return compact_content
 
     async def _persist_compaction_result(
@@ -213,12 +208,19 @@ class MemoryCompactionHook:
         memory: Any,
         messages_to_compact: list[Msg],
         compact_content: str,
-    ) -> None:
-        updated_count = await memory.mark_messages_compressed(
-            messages_to_compact,
-        )
+    ) -> Any | None:
+        archive_messages = getattr(memory, "archive_compacted_messages", None)
+        if archive_messages is not None:
+            boundary = await archive_messages(messages_to_compact)
+            updated_count = len(messages_to_compact)
+        else:
+            boundary = None
+            updated_count = await memory.mark_messages_compressed(
+                messages_to_compact,
+            )
         logger.info("Marked %s messages as compacted", updated_count)
         await memory.update_compressed_summary(compact_content)
+        return boundary
 
     async def __call__(
         self,
@@ -280,20 +282,27 @@ class MemoryCompactionHook:
                 running_config,
                 messages_to_compact,
             )
-            await self._print_status_message(
-                agent,
-                "🔄 Context compaction started...",
-            )
             compact_content = await self._run_context_compaction(
                 agent,
                 messages_to_compact,
                 running_config,
             )
-            await self._persist_compaction_result(
+            if not compact_content:
+                return None
+
+            boundary = await self._persist_compaction_result(
                 memory,
                 messages_to_compact,
                 compact_content,
             )
+            if boundary is not None:
+                await self._print_status_message(
+                    agent,
+                    "",
+                    metadata={
+                        "conversation_compaction_boundary": boundary.to_dict(),
+                    },
+                )
 
         except Exception as e:
             logger.exception(

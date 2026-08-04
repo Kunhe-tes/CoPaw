@@ -11,7 +11,6 @@ export type HookEventName =
   | "PreToolUse"
   | "PostToolUse"
   | "PostToolUseFailure"
-  | "BeforeStop"
   | "Stop";
 
 export type HookHandlerType = HookHandler["type"];

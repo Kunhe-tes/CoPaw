@@ -16,7 +16,6 @@ class HookEventName(str, Enum):
     PRE_TOOL_USE = "PreToolUse"
     POST_TOOL_USE = "PostToolUse"
     POST_TOOL_USE_FAILURE = "PostToolUseFailure"
-    BEFORE_STOP = "BeforeStop"
     STOP = "Stop"
 
 
@@ -27,7 +26,6 @@ PROMPT_HANDLER_BLOCKABLE_EVENTS = {
     HookEventName.PRE_TOOL_USE,
     HookEventName.POST_TOOL_USE,
     HookEventName.POST_TOOL_USE_FAILURE,
-    HookEventName.BEFORE_STOP,
     HookEventName.STOP,
 }
 
@@ -165,6 +163,8 @@ class MergedHookResult(BaseModel):
     session_title: str | None = None
     suppress_output: bool = False
     system_messages: list[str] = Field(default_factory=list)
+    has_blocking_failure: bool = False
+    blocking_failure_reason: str = ""
 
     @property
     def blocked(self) -> bool:

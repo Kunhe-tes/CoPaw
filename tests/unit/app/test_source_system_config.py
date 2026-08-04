@@ -35,10 +35,12 @@ from swe.app.source_system_config.runtime import (
     resolve_cron_notification_config,
     resolve_cron_task_session_cleanup_config,
     resolve_cron_unread_auto_pause_config,
-    resolve_file_read_truncation_config,
     resolve_llm_rate_limiter_config,
     resolve_query_retry_config,
     resolve_tool_result_compact_config,
+)
+from swe.app.source_system_config.registry import (
+    CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS,
 )
 from swe.app.source_system_config.service import (
     SourceSystemConfigDataInvalid,
@@ -62,10 +64,6 @@ DEFAULT_EXPECTED_SOURCE_CONFIG = {
         "old_max_bytes": 3000,
         "recent_max_bytes": 50000,
         "retention_days": 5,
-    },
-    "file_read_truncation": {
-        "enabled": True,
-        "max_bytes": 50000,
     },
     "cron_unread_auto_pause": {
         "enabled": True,
@@ -134,6 +132,25 @@ class TestSourceSystemConfigModels:
             "feature_switches": {"experimental_tooling": True},
         }
 
+    def test_deprecated_file_read_truncation_is_dropped_from_model_and_merge(
+        self,
+    ):
+        """废弃文件读取配置不能回流，其他未注册配置仍应保留。"""
+        config = SourceSystemConfig.model_validate(
+            {
+                "provider_policy": {"default_model": "qwen-max"},
+                "file_read_truncation": {"enabled": False, "max_bytes": 1},
+            },
+        )
+
+        assert config.as_dict() == {
+            "provider_policy": {"default_model": "qwen-max"},
+        }
+        assert config.merged_with_defaults().as_dict() == {
+            **DEFAULT_EXPECTED_SOURCE_CONFIG,
+            "provider_policy": {"default_model": "qwen-max"},
+        }
+
     def test_non_object_config_is_rejected(self):
         """数组或标量不能作为 source 系统配置根对象。"""
         with pytest.raises(ValueError, match="JSON object"):
@@ -199,23 +216,12 @@ class TestSourceSystemConfigModels:
             },
         }
 
-    def test_immediate_truncation_configs_are_accepted(self):
-        """即时截断配置应作为 tool_result_compact 的兄弟配置保存。"""
-        config = SourceSystemConfig.model_validate(
-            {
-                "file_read_truncation": {
-                    "enabled": False,
-                    "max_bytes": 12000,
-                },
-            },
+    def test_file_read_truncation_is_not_a_registered_config_section(self):
+        """file_read_truncation 不应再有注册的 source 配置入口。"""
+        assert all(
+            not setting.key.startswith("file_read_truncation.")
+            for setting in CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS
         )
-
-        assert config.as_dict() == {
-            "file_read_truncation": {
-                "enabled": False,
-                "max_bytes": 12000,
-            },
-        }
 
     def test_cron_unread_auto_pause_config_is_accepted(self):
         """定时任务未读自动暂停配置应允许按 source 覆盖。"""
@@ -386,25 +392,6 @@ class TestSourceSystemConfigModels:
             SourceSystemConfig.model_validate(
                 {"archive_maintenance": payload},
             )
-
-    @pytest.mark.parametrize(
-        ("payload", "match"),
-        [
-            ({"file_read_truncation": {"max_bytes": 999}}, "max_bytes"),
-            (
-                {"file_read_truncation": {"enabled": "disabled"}},
-                "enabled",
-            ),
-        ],
-    )
-    def test_invalid_immediate_truncation_configs_are_rejected(
-        self,
-        payload,
-        match,
-    ):
-        """即时截断配置只接受整数阈值和可识别布尔值。"""
-        with pytest.raises(ValueError, match=match):
-            SourceSystemConfig.model_validate(payload)
 
     @pytest.mark.parametrize(
         ("payload", "match"),
@@ -907,39 +894,6 @@ class TestSourceSystemConfigService:
         assert store.deleted == ["portal"]
 
     @pytest.mark.asyncio
-    async def test_upsert_current_source_config_keeps_immediate_markers(
-        self,
-    ):
-        """即时截断配置即使等于默认值，也应保留 enabled 表示显式接管。"""
-        store = _FakeManagementStore()
-        service = SourceSystemConfigService(
-            store,
-            ttl_seconds=30,
-            time_fn=lambda: 100,
-        )
-
-        result = await service.upsert_current_source_config(
-            "portal",
-            SourceSystemConfig.model_validate(
-                {
-                    "file_read_truncation": {
-                        "enabled": True,
-                        "max_bytes": 50000,
-                    },
-                },
-            ),
-            updated_by="alice",
-        )
-
-        assert result.is_default is False
-        assert result.config.as_dict() == {
-            "file_read_truncation": {"enabled": True},
-        }
-        assert store.records["portal"].config.as_dict() == {
-            "file_read_truncation": {"enabled": True},
-        }
-
-    @pytest.mark.asyncio
     async def test_upsert_current_source_config_keeps_model_call_policy_defaults(
         self,
     ):
@@ -1000,33 +954,6 @@ class TestSourceSystemConfigService:
         assert (
             store.records["portal"].config.as_dict() == result.config.as_dict()
         )
-
-    @pytest.mark.asyncio
-    async def test_upsert_current_source_config_prunes_empty_immediate_sections(
-        self,
-    ):
-        """缺少 enabled 的即时截断空对象不应被保存成显式接管。"""
-        store = _FakeManagementStore()
-        service = SourceSystemConfigService(
-            store,
-            ttl_seconds=30,
-            time_fn=lambda: 100,
-        )
-
-        result = await service.upsert_current_source_config(
-            "portal",
-            SourceSystemConfig.model_validate(
-                {
-                    "file_read_truncation": {},
-                },
-            ),
-            updated_by="alice",
-        )
-
-        assert result.is_default is True
-        assert result.config.as_dict() == {}
-        assert store.records == {}
-        assert store.deleted == ["portal"]
 
     @pytest.mark.asyncio
     async def test_upsert_current_source_config_preserves_unknown_keys(
@@ -1611,96 +1538,6 @@ class TestSourceSystemConfigRuntime:
         warning.assert_called_once()
         assert warning.call_args.args[1] == "portal"
 
-    def test_file_read_truncation_inherits_tool_result_when_missing(self):
-        """缺少显式配置时，文件读取截断沿用历史近期工具结果阈值。"""
-        tool_result = ToolResultCompactConfig(recent_max_bytes=24000)
-
-        result = resolve_file_read_truncation_config(tool_result, None)
-
-        assert result.enabled is True
-        assert result.max_bytes == 24000
-        assert result.explicit is False
-
-    def test_file_read_truncation_explicit_config_owns_runtime(self):
-        """显式配置后，文件读取截断不再回退到工具结果近期阈值。"""
-        tool_result = ToolResultCompactConfig(recent_max_bytes=24000)
-        effective = EffectiveSourceSystemConfig(
-            source_id="portal",
-            config=SourceSystemConfig.model_validate(
-                DEFAULT_EXPECTED_SOURCE_CONFIG,
-            ),
-            raw_config=SourceSystemConfig.model_validate(
-                {
-                    "file_read_truncation": {
-                        "enabled": False,
-                        "max_bytes": 12000,
-                    },
-                },
-            ),
-            version=3,
-        )
-
-        result = resolve_file_read_truncation_config(tool_result, effective)
-
-        assert result.enabled is False
-        assert result.max_bytes == 12000
-        assert result.explicit is True
-
-    def test_file_read_truncation_marker_uses_default_max_bytes(self):
-        """保存裁剪后只剩 enabled 时，应使用文件读取截断默认阈值。"""
-        tool_result = ToolResultCompactConfig(recent_max_bytes=24000)
-
-        result = resolve_file_read_truncation_config(
-            tool_result,
-            SourceSystemConfig.model_validate(
-                {
-                    "file_read_truncation": {
-                        "enabled": True,
-                    },
-                },
-            ),
-        )
-
-        assert result.enabled is True
-        assert result.max_bytes == 50000
-        assert result.explicit is True
-
-    def test_file_read_truncation_empty_section_keeps_inheritance(self):
-        """缺少 enabled 的空对象应继续沿用工具结果近期阈值。"""
-        tool_result = ToolResultCompactConfig(recent_max_bytes=24000)
-
-        result = resolve_file_read_truncation_config(
-            tool_result,
-            SourceSystemConfig.model_validate(
-                {
-                    "file_read_truncation": {},
-                },
-            ),
-        )
-
-        assert result.enabled is True
-        assert result.max_bytes == 24000
-        assert result.explicit is False
-
-    def test_file_read_truncation_max_bytes_only_keeps_inheritance(self):
-        """缺少 enabled 时，仅 max_bytes 不应让文件读取截断接管。"""
-        tool_result = ToolResultCompactConfig(recent_max_bytes=24000)
-
-        result = resolve_file_read_truncation_config(
-            tool_result,
-            SourceSystemConfig.model_validate(
-                {
-                    "file_read_truncation": {
-                        "max_bytes": 12000,
-                    },
-                },
-            ),
-        )
-
-        assert result.enabled is True
-        assert result.max_bytes == 24000
-        assert result.explicit is False
-
     def test_cron_unread_auto_pause_runtime_uses_source_config(self):
         """运行时应读取当前 source 的未读自动暂停开关和条数。"""
         effective = EffectiveSourceSystemConfig(
@@ -1852,7 +1689,9 @@ class TestSourceSystemConfigRuntime:
     def test_zhaohu_tool_guard_notification_runtime_uses_defaults(self):
         assert is_zhaohu_tool_guard_notification_enabled(None) is False
 
-    def test_zhaohu_tool_guard_notification_runtime_uses_enabled_source_config(self):
+    def test_zhaohu_tool_guard_notification_runtime_uses_enabled_source_config(
+        self,
+    ):
         effective = EffectiveSourceSystemConfig(
             source_id="portal",
             config=SourceSystemConfig.model_validate(
@@ -1876,7 +1715,9 @@ class TestSourceSystemConfigRuntime:
 
         assert result is True
 
-    def test_zhaohu_tool_guard_notification_runtime_uses_disabled_source_config(self):
+    def test_zhaohu_tool_guard_notification_runtime_uses_disabled_source_config(
+        self,
+    ):
         effective = EffectiveSourceSystemConfig(
             source_id="portal",
             config=SourceSystemConfig.model_validate(
@@ -2134,6 +1975,10 @@ class TestSourceSystemConfigApi:
                 "config": {
                     "feature_switches": {
                         "chat_task_progress_enabled": False,
+                    },
+                    "file_read_truncation": {
+                        "enabled": False,
+                        "max_bytes": 1,
                     },
                 },
             },

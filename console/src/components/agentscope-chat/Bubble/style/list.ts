@@ -14,6 +14,10 @@ export default createGlobalStyle`
   scrollbar-gutter: stable both-edges;
 }
 
+.${(p) => p.theme.prefixCls}-bubble-list-scroll-anchor-disabled {
+  overflow-anchor: none;
+}
+
 .${(p) => p.theme.prefixCls}-bubble-list {
   display: flex;
   flex-direction: column;

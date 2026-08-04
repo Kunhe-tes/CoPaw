@@ -10,6 +10,7 @@ import {
 } from "@/components/agentscope-chat";
 import AgentScopeRuntimeRequestCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card";
 import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card";
+import ConversationCompactionBoundary from "./components/ConversationCompactionBoundary";
 // ==================== 组件引入方式变更结束 ====================
 import {
   useCallback,
@@ -159,6 +160,7 @@ function useExternalApprovalResolvedRefresh() {
 }
 
 const chatCardRenderers = {
+  ConversationCompactionBoundary,
   AgentScopeRuntimeRequestCard: (props: {
     data: ChatRuntimeRequestCardData;
   }) => <RuntimeRequestCard {...props} />,

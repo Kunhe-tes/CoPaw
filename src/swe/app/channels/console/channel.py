@@ -513,6 +513,31 @@ class ConsoleChannel(BaseChannel):
                             if media_message:
                                 event.output.append(media_message)
 
+                event_metadata = getattr(event, "metadata", None)
+                boundary = (
+                    event_metadata.get("conversation_compaction_boundary")
+                    if isinstance(event_metadata, dict)
+                    else None
+                )
+                if obj == "message" and isinstance(boundary, dict):
+                    yield (
+                        "data: "
+                        + json.dumps(
+                            {
+                                "object": "conversation_compacted",
+                                "chat_id": getattr(
+                                    request,
+                                    "chat_id",
+                                    "",
+                                ),
+                                "boundary": boundary,
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n\n"
+                    )
+                    continue
+
                 data = _event_to_sse_json(event, request)
                 if should_buffer_before_title(obj, status):
                     buffered_initial_events.append(f"data: {data}\n\n")

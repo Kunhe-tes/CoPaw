@@ -8,6 +8,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from ...agents.memory.conversation_archive import ConversationArchiveStore
 from .models import ChatPage, ChatSpec
 from .repo import BaseChatRepository
 from ..channels.schema import DEFAULT_CHANNEL
@@ -51,7 +52,7 @@ def _keep_generated_title(existing: ChatSpec, incoming: ChatSpec) -> None:
 class ChatManager:
     """Manages chat specifications in repository.
 
-    Only handles ChatSpec CRUD operations.
+    Handles ChatSpec CRUD and lifecycle cleanup for chat-scoped archives.
     Does NOT manage Redis session state - that's handled by runner's session.
 
     Similar to CronManager's role in crons module.
@@ -61,6 +62,7 @@ class ChatManager:
         self,
         *,
         repo: BaseChatRepository,
+        archive_store: ConversationArchiveStore | None = None,
     ):
         """Initialize chat manager.
 
@@ -68,6 +70,7 @@ class ChatManager:
             repo: Chat spec repository for persistence
         """
         self._repo = repo
+        self._archive_store = archive_store
         self._lock = asyncio.Lock()
         repo_path = getattr(repo, "path", "<unknown>")
         logger.info(
@@ -339,6 +342,9 @@ class ChatManager:
             deleted = await self._repo.delete_chats(chat_ids)
 
             if deleted:
+                if self._archive_store is not None:
+                    for chat_id in chat_ids:
+                        await self._archive_store.delete_chat(chat_id)
                 logger.debug(f"Deleted chats: {chat_ids}")
 
             return deleted

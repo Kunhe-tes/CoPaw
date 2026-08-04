@@ -34,9 +34,7 @@ import {
   QUERY_RETRY_NUMBER_FIELDS,
   TOOL_RESULT_COMPACT_NUMBER_FIELDS,
   clearModelCallPolicyConfig,
-  clearImmediateTruncationConfig,
   enableModelCallPolicyConfig,
-  enableImmediateTruncationConfig,
   readArchiveMaintenanceConfig,
   readCronNotificationConfig,
   readCronTaskSessionCleanupConfig,
@@ -44,7 +42,6 @@ import {
   readLlmRateLimiterConfigState,
   readQueryRetryConfigState,
   readRegisteredSwitchValue,
-  readImmediateTruncationConfig,
   readSystemPromptInjections,
   readToolResultCompactConfig,
   validateSourceSystemConfig,
@@ -56,11 +53,9 @@ import {
   writeQueryRetryValue,
   writeRegisteredSwitchValue,
   writeSystemPromptInjections,
-  writeImmediateTruncationValue,
   writeToolResultCompactValue,
 } from "./registry";
 import type {
-  ImmediateTruncationConfigKey,
   LlmRateLimiterConfig,
   ModelCallPolicyConfigKey,
 } from "./registry";
@@ -492,56 +487,6 @@ export default function SystemConfigPage() {
     );
   };
 
-  const handleEnableImmediateTruncation = (
-    configKey: ImmediateTruncationConfigKey,
-  ) => {
-    if (formDisabled) {
-      return;
-    }
-    setValidationError(null);
-    setDraftConfig((previous) =>
-      enableImmediateTruncationConfig(previous, configKey),
-    );
-  };
-
-  const handleImmediateTruncationEnabledChange = (
-    configKey: ImmediateTruncationConfigKey,
-    checked: boolean,
-  ) => {
-    if (formDisabled) {
-      return;
-    }
-    setValidationError(null);
-    setDraftConfig((previous) =>
-      writeImmediateTruncationValue(previous, configKey, "enabled", checked),
-    );
-  };
-
-  const handleImmediateTruncationMaxBytesChange = (
-    configKey: ImmediateTruncationConfigKey,
-    value: number | null,
-  ) => {
-    if (formDisabled || typeof value !== "number") {
-      return;
-    }
-    setValidationError(null);
-    setDraftConfig((previous) =>
-      writeImmediateTruncationValue(previous, configKey, "max_bytes", value),
-    );
-  };
-
-  const handleRestoreImmediateTruncationInheritance = (
-    configKey: ImmediateTruncationConfigKey,
-  ) => {
-    if (formDisabled) {
-      return;
-    }
-    setValidationError(null);
-    setDraftConfig((previous) =>
-      clearImmediateTruncationConfig(previous, configKey),
-    );
-  };
-
   const handleSave = async () => {
     if (formDisabled) {
       return;
@@ -560,8 +505,10 @@ export default function SystemConfigPage() {
     setRequestError(null);
     setValidationError(null);
     try {
+      const configToSave = { ...draftConfig };
+      delete configToSave.file_read_truncation;
       const nextRecord = await sourceSystemConfigApi.updateCurrent({
-        config: draftConfig,
+        config: configToSave,
       });
       if (
         !isCurrentRequest(request) ||
@@ -630,10 +577,6 @@ export default function SystemConfigPage() {
     effectiveConfigPayload,
   );
   const toolResultCompactConfig = readToolResultCompactConfig(draftConfig);
-  const fileReadTruncationState = readImmediateTruncationConfig(
-    draftConfig,
-    "file_read_truncation",
-  );
   const capabilitySummaries = buildCapabilitySummaries({
     savedConfig: record?.config ?? {},
     draftConfig,
@@ -990,72 +933,6 @@ export default function SystemConfigPage() {
               ))}
             </div>
           </details>
-        </section>
-        <section className={styles.toolOutputSection}>
-          <div className={styles.toolOutputSectionHeader}>
-            <span className={styles.switchTitle}>文件读取截断</span>
-            <Tag color={fileReadTruncationState.explicit ? "green" : "blue"}>
-              {fileReadTruncationState.explicit
-                ? "独立配置已启用"
-                : "继承旧工具结果近期阈值"}
-            </Tag>
-          </div>
-          {fileReadTruncationState.explicit ? (
-            <>
-              <div className={styles.switchRow}>
-                <span className={styles.switchTitle}>启用文件读取截断</span>
-                <Switch
-                  checked={fileReadTruncationState.config.enabled}
-                  disabled={formDisabled}
-                  onChange={(checked) =>
-                    handleImmediateTruncationEnabledChange(
-                      "file_read_truncation",
-                      checked,
-                    )
-                  }
-                />
-              </div>
-              <details className={styles.advancedParameters}>
-                <summary>高级参数</summary>
-                <label className={styles.numberField}>
-                  <span className={styles.numberLabel}>输出片段字节数</span>
-                  <InputNumber
-                    min={1000}
-                    step={1000}
-                    value={fileReadTruncationState.config.max_bytes}
-                    disabled={
-                      formDisabled || !fileReadTruncationState.config.enabled
-                    }
-                    onChange={(value) =>
-                      handleImmediateTruncationMaxBytesChange(
-                        "file_read_truncation",
-                        value,
-                      )
-                    }
-                  />
-                </label>
-              </details>
-              <Button
-                disabled={formDisabled}
-                onClick={() =>
-                  handleRestoreImmediateTruncationInheritance(
-                    "file_read_truncation",
-                  )
-                }
-              >
-                恢复继承
-              </Button>
-            </>
-          ) : (
-            <Button
-              disabled={formDisabled}
-              onClick={() =>
-                handleEnableImmediateTruncation("file_read_truncation")
-              }
-            >
-              启用独立配置
-            </Button>
-          )}
         </section>
       </div>
     ) : null;
@@ -1735,7 +1612,7 @@ export default function SystemConfigPage() {
               <div className={styles.toolResultIntro}>
                 {t("sourceSystemConfigPage.toolResultCompactIntro", {
                   defaultValue:
-                    "当前系统下工具历史压缩和文件读取即时截断的解析配置。",
+                    "recent_max_bytes 同时控制新产生和近期的工具输出；old_max_bytes 仅控制历史工具输出。",
                 })}
               </div>
               <section className={styles.toolOutputSection}>
@@ -1799,127 +1676,6 @@ export default function SystemConfigPage() {
                     </label>
                   ))}
                 </div>
-              </section>
-
-              <section className={styles.toolOutputSection}>
-                <div className={styles.toolOutputSectionHeader}>
-                  <div className={styles.switchCopy}>
-                    <span className={styles.switchTitle}>
-                      {t("sourceSystemConfigPage.fileReadTruncationTitle", {
-                        defaultValue: "文件读取截断",
-                      })}
-                    </span>
-                    <span className={styles.switchDescription}>
-                      {t(
-                        "sourceSystemConfigPage.fileReadTruncationDescription",
-                        {
-                          defaultValue:
-                            "缺少独立配置时继续使用历史工具结果的近期阈值；显式配置后由本段接管。",
-                        },
-                      )}
-                    </span>
-                  </div>
-                  <Tag
-                    color={fileReadTruncationState.explicit ? "green" : "blue"}
-                  >
-                    {fileReadTruncationState.explicit
-                      ? fileReadTruncationState.config.enabled
-                        ? t(
-                            "sourceSystemConfigPage.fileReadIndependentEnabledState",
-                            {
-                              defaultValue: "独立配置已启用",
-                            },
-                          )
-                        : t(
-                            "sourceSystemConfigPage.fileReadIndependentDisabledState",
-                            {
-                              defaultValue: "独立配置已关闭",
-                            },
-                          )
-                      : t("sourceSystemConfigPage.fileReadInheritedState", {
-                          defaultValue: "继承旧工具结果近期阈值",
-                        })}
-                  </Tag>
-                </div>
-                {fileReadTruncationState.explicit ? (
-                  <>
-                    <div className={styles.switchRow}>
-                      <div className={styles.switchCopy}>
-                        <span className={styles.switchTitle}>
-                          {t("sourceSystemConfigPage.fileReadEnabledTitle", {
-                            defaultValue: "启用文件读取截断",
-                          })}
-                        </span>
-                        <span className={styles.switchDescription}>
-                          {t(
-                            "sourceSystemConfigPage.fileReadEnabledDescription",
-                            {
-                              defaultValue:
-                                "关闭后当前系统的文件读取即时输出不再由 SWE 截断。",
-                            },
-                          )}
-                        </span>
-                      </div>
-                      <Switch
-                        checked={fileReadTruncationState.config.enabled}
-                        disabled={formDisabled}
-                        onChange={(checked) =>
-                          handleImmediateTruncationEnabledChange(
-                            "file_read_truncation",
-                            checked,
-                          )
-                        }
-                      />
-                    </div>
-                    <div className={styles.numberGrid}>
-                      <label className={styles.numberField}>
-                        <span className={styles.numberLabel}>
-                          {t("sourceSystemConfigPage.fileReadMaxBytesLabel", {
-                            defaultValue: "输出片段字节数",
-                          })}
-                        </span>
-                        <InputNumber
-                          min={1000}
-                          step={1000}
-                          value={fileReadTruncationState.config.max_bytes}
-                          disabled={
-                            formDisabled ||
-                            !fileReadTruncationState.config.enabled
-                          }
-                          onChange={(value) =>
-                            handleImmediateTruncationMaxBytesChange(
-                              "file_read_truncation",
-                              value,
-                            )
-                          }
-                        />
-                      </label>
-                    </div>
-                    <Button
-                      disabled={formDisabled}
-                      onClick={() =>
-                        handleRestoreImmediateTruncationInheritance(
-                          "file_read_truncation",
-                        )
-                      }
-                    >
-                      {t("sourceSystemConfigPage.restoreInheritance", {
-                        defaultValue: "恢复继承",
-                      })}
-                    </Button>
-                  </>
-                ) : (
-                  <Button
-                    disabled={formDisabled}
-                    onClick={() =>
-                      handleEnableImmediateTruncation("file_read_truncation")
-                    }
-                  >
-                    {t("sourceSystemConfigPage.enableFileReadTruncation", {
-                      defaultValue: "启用独立配置",
-                    })}
-                  </Button>
-                )}
               </section>
             </Card>
 

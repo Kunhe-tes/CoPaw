@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Literal, Union, Any, Optional, Dict
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import (
     APIRouter,
@@ -50,6 +50,7 @@ from ..file_manager_execution import (
     run_file_manager_mutation,
     run_file_manager_read,
 )
+from ..runner.context_references import MAX_CONTEXT_REFERENCES
 from ...config.context import resolve_request_effective_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -634,6 +635,113 @@ def _extract_context_references(
     return request_data.get("context_references")
 
 
+def _local_path_from_console_attachment_url(url: object) -> Path | None:
+    """Resolve the local path encoded in a Console attachment preview URL."""
+    if not isinstance(url, str) or not url:
+        return None
+    parsed = urlparse(url)
+    preview_prefix = "/files/preview/"
+    path = parsed.path
+    if path.startswith(preview_prefix):
+        return Path("/" + unquote(path.removeprefix(preview_prefix)))
+    if not parsed.scheme:
+        return Path(url)
+    return None
+
+
+async def _append_uploaded_attachment_references(
+    native_payload: dict[str, Any],
+    workspace: Any,
+) -> None:
+    """Expose same-turn Console attachments as trusted workspace references."""
+    workspace_dir_value = getattr(workspace, "workspace_dir", None)
+    if not workspace_dir_value:
+        return
+    try:
+        workspace_dir = Path(workspace_dir_value).resolve()
+        workspace_media_dir = (workspace_dir / "media").resolve()
+        workspace_media_dir.relative_to(workspace_dir)
+    except OSError:
+        return
+    except ValueError:
+        return
+
+    existing_references = native_payload.get("meta", {}).get(
+        "context_references",
+    )
+    if existing_references is None:
+        existing_references = []
+    if not isinstance(existing_references, list):
+        return
+
+    attachment_references: list[dict[str, str]] = []
+    for content in native_payload.get("content_parts", []):
+        file_url = (
+            content.get("file_url")
+            if isinstance(content, dict)
+            else getattr(content, "file_url", None)
+        )
+        attachment_path = _local_path_from_console_attachment_url(file_url)
+        if attachment_path is None:
+            continue
+        try:
+            resolved_path = attachment_path.resolve()
+            relative_path = resolved_path.relative_to(workspace_media_dir)
+        except (OSError, ValueError):
+            continue
+        if not resolved_path.is_file():
+            continue
+        relative_path_text = relative_path.as_posix()
+        reference_id = f"workspace_file:media/{relative_path_text}"
+        attachment_references.append(
+            {
+                "type": "workspace_file",
+                "id": reference_id,
+                "root": "media",
+                "relative_path": relative_path_text,
+            },
+        )
+
+    if attachment_references:
+        attachment_ids = {
+            reference["id"] for reference in attachment_references
+        }
+        existing_references = [
+            reference
+            for reference in existing_references
+            if not (
+                isinstance(reference, dict)
+                and reference.get("id") in attachment_ids
+            )
+        ]
+        existing_references = [
+            *[
+                reference
+                for reference in existing_references
+                if isinstance(reference, dict)
+                and reference.get("type") == "skill"
+            ],
+            *[
+                reference
+                for reference in existing_references
+                if not (
+                    isinstance(reference, dict)
+                    and reference.get("type") == "skill"
+                )
+            ],
+        ]
+        attachment_limit = max(
+            1,
+            MAX_CONTEXT_REFERENCES - len(existing_references),
+        )
+        attachment_references = attachment_references[:attachment_limit]
+        existing_limit = MAX_CONTEXT_REFERENCES - len(attachment_references)
+        native_payload["meta"]["context_references"] = [
+            *existing_references[:existing_limit],
+            *attachment_references,
+        ]
+
+
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """Extract run_key (ChatSpec.id), session_id, and native payload.
 
@@ -827,6 +935,7 @@ async def post_console_chat(
         native_payload = _extract_session_and_payload(request_data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    await _append_uploaded_attachment_references(native_payload, workspace)
 
     b3_trace_id = _extract_b3_trace_id(request)
     if b3_trace_id:
@@ -972,8 +1081,21 @@ async def post_console_upload(
 
     path = (media_dir / stored_name).resolve()
     path.write_bytes(data)
+    context_path = path
+    workspace_dir_value = getattr(workspace, "workspace_dir", None)
+    if workspace_dir_value:
+        try:
+            workspace_dir = Path(workspace_dir_value).resolve()
+            workspace_media_dir = (workspace_dir / "media").resolve()
+            workspace_media_dir.relative_to(workspace_dir)
+            if workspace_media_dir != media_dir.resolve():
+                workspace_media_dir.mkdir(parents=True, exist_ok=True)
+                context_path = workspace_media_dir / stored_name
+                context_path.write_bytes(data)
+        except (OSError, ValueError):
+            context_path = path
     return {
-        "url": path,
+        "url": context_path,
         "file_name": safe_name,
         "size": len(data),
     }

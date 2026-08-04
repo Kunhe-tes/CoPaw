@@ -1,12 +1,12 @@
 {
   "enabled": true,
   "events": {
-    "BeforeStop": [
+    "Stop": [
       {
         "id": "completion-gate",
         "hooks": [
           {
-            "id": "before-stop-prompt-judge",
+            "id": "stop-prompt-judge",
             "type": "prompt",
             "timeout": 8,
             "failPolicy": "block",

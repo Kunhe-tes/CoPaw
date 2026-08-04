@@ -10,6 +10,7 @@ import type {
   ChatPage,
   ChatSpec,
   ChatHistory,
+  ChatArchivePage,
   ChatDeleteResponse,
   Session,
 } from "../types";
@@ -260,6 +261,14 @@ export const chatApi = {
 
   getChat: (chatId: string) =>
     request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`),
+
+  getChatHistory: (chatId: string, before?: string | null, limit = 50) => {
+    const params = new URLSearchParams({ limit: String(limit) });
+    if (before) params.set("before", before);
+    return request<ChatArchivePage>(
+      `/chats/${encodeURIComponent(chatId)}/history?${params.toString()}`,
+    );
+  },
 
   updateChat: (chatId: string, chat: Partial<ChatSpec>) =>
     request<ChatSpec>(`/chats/${encodeURIComponent(chatId)}`, {

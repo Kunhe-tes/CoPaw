@@ -9,6 +9,7 @@ import {
 import api, {
   type ChatSpec,
   type ChatHistory,
+  type ChatCompactionBoundary,
   type ChatStatus,
   type Message,
 } from "../../../api";
@@ -54,6 +55,7 @@ const TYPE_PLUGIN_CALL_OUTPUT = "plugin_call_output";
 const CARD_RESPONSE = "AgentScopeRuntimeResponseCard";
 const CARD_APPROVAL_ACTION = "ApprovalAction";
 const CARD_TASK_RUN = "TaskRunGroupCard";
+const CARD_COMPACTION_BOUNDARY = "ConversationCompactionBoundary";
 const TASK_SESSION_KIND = "task";
 const TASK_RUN_SECTION_STEP = "step";
 const TASK_RUN_SECTION_FINAL = "final";
@@ -564,6 +566,59 @@ export const convertMessages = (
 
   return result;
 };
+
+function compactionBoundaryCard(
+  boundary: ChatCompactionBoundary,
+): IAgentScopeRuntimeWebUIMessage {
+  return {
+    id: `conversation-compaction-${boundary.id}`,
+    role: ROLE_ASSISTANT,
+    msgStatus: "finished",
+    cards: [{ code: CARD_COMPACTION_BOUNDARY, data: boundary }],
+  };
+}
+
+function withArchiveBoundaries(
+  messages: IAgentScopeRuntimeWebUIMessage[],
+  boundaries: ChatCompactionBoundary[] | undefined,
+): IAgentScopeRuntimeWebUIMessage[] {
+  if (!boundaries?.length) return messages;
+  return [...boundaries.map(compactionBoundaryCard), ...messages];
+}
+
+/** Convert one archived page while keeping each divider after its batch. */
+export function convertArchivedPage(
+  messages: Message[],
+  boundaries: ChatCompactionBoundary[],
+): IAgentScopeRuntimeWebUIMessage[] {
+  const boundariesByLastMessageId = new Map<
+    string,
+    ChatCompactionBoundary[]
+  >();
+  boundaries.forEach((boundary) => {
+    const current = boundariesByLastMessageId.get(boundary.last_message_id);
+    boundariesByLastMessageId.set(boundary.last_message_id, [
+      ...(current || []),
+      boundary,
+    ]);
+  });
+
+  const result: IAgentScopeRuntimeWebUIMessage[] = [];
+  let segmentStart = 0;
+  messages.forEach((message, index) => {
+    const messageId =
+      typeof message.id === "string" ? message.id : undefined;
+    const batchBoundaries = messageId
+      ? boundariesByLastMessageId.get(messageId)
+      : undefined;
+    if (!batchBoundaries?.length) return;
+    result.push(...convertMessages(messages.slice(segmentStart, index + 1)));
+    result.push(...batchBoundaries.map(compactionBoundaryCard));
+    segmentStart = index + 1;
+  });
+  result.push(...convertMessages(messages.slice(segmentStart)));
+  return result;
+}
 
 function buildTaskRunCard(
   runId: string,
@@ -1668,10 +1723,13 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
 
     const chatHistory = await api.getChat(realId);
     const backendGenerating = isGenerating(chatHistory);
-    const backendMessages = convertMessagesForSession(
-      chatHistory.messages || [],
-      fromList?.meta || {},
-      fromList?.name,
+    const backendMessages = withArchiveBoundaries(
+      convertMessagesForSession(
+        chatHistory.messages || [],
+        fromList?.meta || {},
+        fromList?.name,
+      ),
+      chatHistory.archive?.boundaries,
     );
     const messages =
       backendMessages.length > 0 ? backendMessages : fromList.messages || [];
@@ -1753,11 +1811,11 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       this.sessionList = appendUniqueSessions([fromList], this.sessionList);
     }
     const generating = isGenerating(chatHistory);
-    const messages = convertMessagesForSession(
+    const messages = withArchiveBoundaries(convertMessagesForSession(
       chatHistory.messages || [],
       fromList?.meta || {},
       fromList?.name,
-    );
+    ), chatHistory.archive?.boundaries);
     this.patchLastUserMessage(messages, generating, sessionId, [
       fromList?.sessionId,
       fromList?.realId,

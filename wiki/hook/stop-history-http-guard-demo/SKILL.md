@@ -1,20 +1,20 @@
 ---
-name: before-stop-history-http-guard-demo
-description: "Use this skill when you need a BeforeStop command hook example that reads the full saved conversation history and asks an external policy service whether to block or allow the final agent output."
+name: stop-history-http-guard-demo
+description: "Use this skill when you need a Stop command hook example that reads the full saved conversation history and asks an external policy service whether to block or allow the final agent output."
 license: Proprietary. LICENSE.txt has complete terms
 metadata:
   builtin_skill_version: "1.0"
 ---
 
-# BeforeStop History HTTP Guard Demo
+# Stop History HTTP Guard Demo
 
-这个样例演示 skill 级 `BeforeStop + command handler`。它和 prompt 版最终输出检查不同：
+这个样例演示 skill 级 `Stop + command handler`。它和 prompt 版最终输出检查不同：
 脚本会读取 `HookContext.transcript_path` 指向的完整会话保存文件，再把完整历史和
 当前候选最终输出一起发给外部接口判定。
 
 ## 覆盖点
 
-- 事件：`BeforeStop`
+- 事件：`Stop`
 - handler 类型：`command`
 - 目的：外部策略服务基于完整历史决定最终输出是 `allow` 还是 `block`
 
@@ -45,7 +45,7 @@ Authorization: Bearer <token>
 ```json
 {
   "hookContext": {
-    "hook_event_name": "BeforeStop",
+    "hook_event_name": "Stop",
     "prompt": "...",
     "assistant_response": "...",
     "transcript_path": "..."
@@ -76,7 +76,7 @@ Authorization: Bearer <token>
 - `allow`
 - `block`
 
-`BeforeStop` 不支持 `additionalContext`，所以阻断说明必须放在顶层 `reason`。
+`Stop` 不支持 `additionalContext`，所以阻断说明必须放在顶层 `reason`。
 
 ## 失败策略
 
@@ -87,5 +87,5 @@ Authorization: Bearer <token>
 ## 目录内容
 
 1. `hooks/hooks.json`
-2. `scripts/before_stop_history_http_guard.py`
+2. `scripts/stop_history_http_guard.py`
 3. 当前 `SKILL.md`
