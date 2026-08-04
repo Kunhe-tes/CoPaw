@@ -57,6 +57,32 @@ class ChatMessage(Message):
     )
 
 
+class ChatCompactionBoundary(BaseModel):
+    """One visible divider anchored to an archived compaction batch."""
+
+    id: str
+    archived_message_count: int
+    first_message_id: str
+    last_message_id: str
+    created_at: str
+    first_timestamp: str | None = None
+    last_timestamp: str | None = None
+
+
+class ChatArchiveMetadata(BaseModel):
+    """Archive availability included with the current-memory chat detail."""
+
+    has_more: bool = False
+    boundaries: list[ChatCompactionBoundary] = Field(default_factory=list)
+
+
+class ChatArchivePage(ChatArchiveMetadata):
+    """One page of archived conversation messages."""
+
+    messages: list[ChatMessage] = Field(default_factory=list)
+    next_cursor: str | None = None
+
+
 class ChatHistory(BaseModel):
     """Complete chat view with spec and state."""
 
@@ -69,6 +95,7 @@ class ChatHistory(BaseModel):
         default="idle",
         description="Conversation status: idle, running, or stopping",
     )
+    archive: ChatArchiveMetadata = Field(default_factory=ChatArchiveMetadata)
 
 
 class ChatPage(BaseModel):

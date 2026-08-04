@@ -692,11 +692,11 @@ The successful output produced by the current tool invocation for the active `Po
 _Avoid_: full tool result block, conversation snapshot, AgentScope acting return value
 
 **PreToolUse Terminal Stop**:
-A `PreToolUse` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}` and available to every handler type, that rejects the pending tool invocation and ends the current Main Agent turn without another model call. The first `stop` in handler order is authoritative and cannot be replaced by another decision or input update; handler failures and `failPolicy:block` never imply it. Its reason, or the stable fallback `Hook requested stop`, is always emitted and persisted as the turn's final assistant message while the failed tool result remains available for tool presentation and audit as `hook_stopped`. It blocks unstarted peer calls and requests best-effort cancellation of already-started peer calls; it does not promise rollback of external side effects. It bypasses later `BeforeStop` and `Stop` hooks. It is distinct from `deny` and `block`, which reject the invocation but allow the Main Agent to choose a different next action.
+A `PreToolUse` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}` and available to every handler type, that rejects the pending tool invocation and ends the current Main Agent turn without another model call. The first `stop` in handler order is authoritative and cannot be replaced by another decision or input update; handler failures and `failPolicy:block` never imply it. Its reason, or the stable fallback `Hook requested stop`, is always emitted and persisted as the turn's final assistant message while the failed tool result remains available for tool presentation and audit as `hook_stopped`. It blocks unstarted peer calls and requests best-effort cancellation of already-started peer calls; it does not promise rollback of external side effects. It bypasses the later `Stop` hook. It is distinct from `deny` and `block`, which reject the invocation but allow the Main Agent to choose a different next action.
 _Avoid_: terminal deny, blocked tool, cancelled session
 
 **PostTool Terminal Stop**:
-A `PostToolUse` or `PostToolUseFailure` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}`, that ends the current Main Agent turn after the tool outcome is known. It requests best-effort cancellation of unfinished peer calls while retaining completed outcomes and without promising external rollback. It records the completed tool outcome and post-hook context before the final assistant reason, then bypasses `BeforeStop` and `Stop` hooks. It does not rewrite the completed tool outcome; for a failed tool, it replaces propagation of the original tool exception while retaining that failure for presentation and audit. Hook failure, `failPolicy:block`, `deny`, and `block` never imply it. It is distinct from `deny` and `block`, which remain non-terminal for post-tool events.
+A `PostToolUse` or `PostToolUseFailure` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}`, that ends the current Main Agent turn after the tool outcome is known. It requests best-effort cancellation of unfinished peer calls while retaining completed outcomes and without promising external rollback. It records the completed tool outcome and post-hook context before the final assistant reason, then bypasses the `Stop` hook. It does not rewrite the completed tool outcome; for a failed tool, it replaces propagation of the original tool exception while retaining that failure for presentation and audit. Hook failure, `failPolicy:block`, `deny`, and `block` never imply it. It is distinct from `deny` and `block`, which remain non-terminal for post-tool events.
 _Avoid_: post-tool denial, tool rollback, completed session
 
 **Hook Conversation Snapshot**:
@@ -862,6 +862,14 @@ _Avoid_: logical chat session, UI session, conversation identity
 **Chat Record Last Updated Time**:
 The timestamp of the most recent persisted change to a **Chat Record**. It establishes recency when Chat Records are listed.
 _Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
+
+**Conversation Compaction Boundary**:
+The durable, user-visible separator within one **Chat Record** marking the point where automatic context compaction or an explicit `/compact` archived earlier messages. It appears immediately through a non-message stream event and is restored from the archive on reload; its archived-message count is the number of display-safe history messages, not rendered cards; it never represents `/new` or `/clear`.
+_Avoid_: history-clear marker, new-conversation marker, summary message
+
+**Conversation Compaction Archive**:
+The Chat-Record-scoped durable store of messages removed by **Conversation Compaction Boundaries**, with exactly one committed immutable message batch per boundary. Deleting its **Chat Record** permanently deletes this archive, while existing Logical Chat Session state follows its separate retention policy.
+_Avoid_: shared daily dialog file, chat transcript, session state
 
 ## Flagged Ambiguities
 
@@ -1355,6 +1363,28 @@ _Avoid_: unbounded MCP discovery, serial MCP lookup, timeout error row
 **Workspace File Index Capacity**:
 The maximum number of files retained in each source-root portion of a Workspace File filename index. `media` and `static` each retain at most 5,000 files, selecting the most recently modified files when their directory has more.
 _Avoid_: unbounded directory index, whole-directory search at request time, source-combined capacity limit
+
+## Stop Hook Language
+
+**Stop Hook**:
+The single completion lifecycle event for every candidate Assistant Response. Each configured handler runs once and may perform its own attempt-recording or notification work. Its merged decision approves or blocks completion.
+_Avoid_: BeforeStop hook, observation-only stop hook
+
+**Stop Decision**:
+The only valid completion decision from a Stop Hook: `allow` approves the candidate Assistant Response and `block` rejects that completion attempt. An explicit `block` may schedule a bounded automatic follow-up Agent turn; if any matched handler blocks, the merged decision blocks.
+_Avoid_: deny, stop, implicit retry
+
+**Stop Handler Failure**:
+An execution failure from a Stop Hook handler. With `failPolicy: block`, it ends the request as incomplete with the failure reason and never schedules an automatic follow-up; with `failPolicy: allow`, it is diagnostic only. Only an explicit Stop Decision of `block` may request another Agent turn.
+_Avoid_: retryable hook failure, silent completion failure
+
+**Stop Migration**:
+The non-compatible removal of the `BeforeStop` event. Configuration must use `Stop`; a residual `BeforeStop` configuration is invalid rather than silently translated.
+_Avoid_: BeforeStop compatibility alias, automatic event translation
+
+**Stop Trigger**:
+The boundary at which a normal candidate Assistant Response is about to complete a request. Tool-hook terminal-stop paths and turns without a candidate Assistant Response skip Stop.
+_Avoid_: tool termination audit, no-output completion hook
 
 ## Example Dialogue
 

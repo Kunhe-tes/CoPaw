@@ -44,13 +44,12 @@ describe("Hook overview model", () => {
       "PreToolUse",
       "PostToolUse",
       "PostToolUseFailure",
-      "BeforeStop",
       "Stop",
     ]);
   });
 
   it("keeps unconfigured events empty", () => {
-    expect(getEventSummary({ enabled: true, events: {} }, "BeforeStop")).toEqual({
+    expect(getEventSummary({ enabled: true, events: {} }, "Stop")).toEqual({
       configured: false,
       groups: 0,
       handlers: 0,

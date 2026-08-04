@@ -32,16 +32,15 @@ from __future__ import annotations
 
 from concurrent import futures
 import hashlib
-import json
 import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from .history import BlockedSkillRecord, SkillScanHistoryRecorder
 from .models import (
     Finding,
     ScanResult,
@@ -69,9 +68,7 @@ __all__ = [
     "SkillScanError",
     "ThreatCategory",
     "compute_skill_content_hash",
-    "get_blocked_history",
-    "clear_blocked_history",
-    "remove_blocked_entry",
+    "install_skill_scan_history_recorder",
     "is_skill_whitelisted",
     "scan_skill_directory",
 ]
@@ -173,50 +170,15 @@ def is_skill_whitelisted(
 # Blocked history persistence
 # ---------------------------------------------------------------------------
 
-_BLOCKED_HISTORY_FILE = "skill_scanner_blocked.json"
-_history_lock = threading.Lock()
+_history_recorder: SkillScanHistoryRecorder | None = None
 
 
-def _get_blocked_history_path() -> Path:
-    try:
-        from ...constant import WORKING_DIR
-
-        return WORKING_DIR / _BLOCKED_HISTORY_FILE
-    except Exception:
-        return Path.home() / ".swe" / _BLOCKED_HISTORY_FILE
-
-
-@dataclass
-class BlockedSkillRecord:
-    """A record of a scan alert (blocked or warned)."""
-
-    skill_name: str
-    blocked_at: str
-    max_severity: str
-    findings: list[dict[str, Any]] = field(default_factory=list)
-    content_hash: str = ""
-    action: str = "blocked"
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "skill_name": self.skill_name,
-            "blocked_at": self.blocked_at,
-            "max_severity": self.max_severity,
-            "findings": self.findings,
-            "content_hash": self.content_hash,
-            "action": self.action,
-        }
-
-    @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> BlockedSkillRecord:
-        return cls(
-            skill_name=data.get("skill_name", ""),
-            blocked_at=data.get("blocked_at", ""),
-            max_severity=data.get("max_severity", ""),
-            findings=data.get("findings", []),
-            content_hash=data.get("content_hash", ""),
-            action=data.get("action", "blocked"),
-        )
+def install_skill_scan_history_recorder(
+    recorder: SkillScanHistoryRecorder | None,
+) -> None:
+    """Install the application-scoped database history recorder."""
+    global _history_recorder
+    _history_recorder = recorder
 
 
 def _finding_to_dict(f: Finding) -> dict[str, Any]:
@@ -236,7 +198,7 @@ def _record_blocked_skill(
     *,
     action: str = "blocked",
 ) -> None:
-    """Append a scan alert to the history file."""
+    """Submit a scan alert to the database-backed history recorder."""
     record = BlockedSkillRecord(
         skill_name=result.skill_name,
         blocked_at=datetime.now(timezone.utc).isoformat(),
@@ -245,63 +207,27 @@ def _record_blocked_skill(
         content_hash=compute_skill_content_hash(skill_dir),
         action=action,
     )
-    path = _get_blocked_history_path()
-    with _history_lock:
-        try:
-            existing: list[dict[str, Any]] = []
-            if path.is_file():
-                existing = json.loads(path.read_text(encoding="utf-8"))
-            existing.append(record.to_dict())
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(existing, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except Exception as exc:
-            logger.warning("Failed to record blocked skill: %s", exc)
-
-
-def get_blocked_history() -> list[BlockedSkillRecord]:
-    """Load all blocked skill records from disk."""
-    path = _get_blocked_history_path()
-    if not path.is_file():
-        return []
+    recorder = _history_recorder
+    if recorder is None:
+        logger.error(
+            "Skill scan history recorder is unavailable; record %s was dropped",
+            record.id,
+        )
+        return
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        return [BlockedSkillRecord.from_dict(d) for d in data]
+        accepted = recorder.submit(record)
     except Exception as exc:
-        logger.warning("Failed to load blocked history: %s", exc)
-        return []
-
-
-def clear_blocked_history() -> None:
-    """Delete all blocked skill records."""
-    path = _get_blocked_history_path()
-    try:
-        if path.is_file():
-            path.unlink()
-    except OSError as exc:
-        logger.warning("Failed to clear blocked history: %s", exc)
-
-
-def remove_blocked_entry(index: int) -> bool:
-    """Remove a single blocked record by index. Returns True on success."""
-    path = _get_blocked_history_path()
-    if not path.is_file():
-        return False
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if 0 <= index < len(data):
-            data.pop(index)
-            path.write_text(
-                json.dumps(data, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-            return True
-        return False
-    except Exception as exc:
-        logger.warning("Failed to remove blocked entry: %s", exc)
-        return False
+        logger.error(
+            "Failed to submit skill scan history record %s: %s",
+            record.id,
+            exc,
+        )
+        return
+    if not accepted:
+        logger.error(
+            "Skill scan history recorder rejected record %s",
+            record.id,
+        )
 
 
 # ---------------------------------------------------------------------------

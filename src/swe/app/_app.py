@@ -55,6 +55,8 @@ from .runtime_diagnostic import RuntimeDiagnosticManager
 # Apply log level on load so reload child process gets same level as CLI.
 logger = setup_logger(os.environ.get(LOG_LEVEL_ENV, "info"))
 
+_SKILL_SCAN_HISTORY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
+
 
 # Ensure static assets are served with browser-compatible MIME types across
 # platforms (notably Windows may miss .js/.mjs mappings).
@@ -495,6 +497,43 @@ async def _initialize_approval_audit_store(
         logger.warning("Failed to initialize approval audit storage: %s", e)
 
 
+async def _initialize_skill_scan_history(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """Initialize database-only skill scan history persistence."""
+    from ..security.skill_scanner import install_skill_scan_history_recorder
+    from ..security.skill_scanner.history import (
+        SkillScanHistoryRecorder,
+        SkillScanHistoryStore,
+    )
+
+    store = SkillScanHistoryStore(db_connection)
+    app.state.skill_scan_history_store = store
+    app.state.skill_scan_history_recorder = None
+    install_skill_scan_history_recorder(None)
+    if not store.is_available:
+        logger.warning(
+            "Skill scan history storage skipped: database is not connected",
+        )
+        return
+
+    try:
+        await store.initialize()
+        recorder = SkillScanHistoryRecorder(store)
+        await recorder.start()
+        app.state.skill_scan_history_recorder = recorder
+        install_skill_scan_history_recorder(recorder)
+        logger.info("Skill scan history storage initialized")
+    except Exception as exc:
+        app.state.skill_scan_history_store = SkillScanHistoryStore(None)
+        install_skill_scan_history_recorder(None)
+        logger.warning(
+            "Failed to initialize skill scan history storage: %s",
+            exc,
+        )
+
+
 async def _initialize_cron_broadcast_children_store(
     app: FastAPI,
     db_connection: Any | None,
@@ -670,6 +709,7 @@ async def _start_lifespan_background_services(
         logger.warning("Failed to start runtime diagnostic manager: %s", e)
 
 
+# pylint: disable=too-many-statements
 async def _shutdown_lifespan_resources(
     app: FastAPI,
     db_connection: Any | None,
@@ -725,6 +765,41 @@ async def _shutdown_lifespan_resources(
     except Exception as e:
         logger.warning("Error closing tracing manager: %s", e)
 
+    try:
+        await stop_service_heartbeat()
+    except Exception as e:
+        logger.warning("Error stopping service heartbeat: %s", e)
+    await _stop_multi_agent_manager(app)
+    await _stop_tenant_workspace_pool(app)
+
+    history_recorder = getattr(
+        app.state,
+        "skill_scan_history_recorder",
+        None,
+    )
+    if history_recorder is not None:
+        try:
+            await asyncio.wait_for(
+                history_recorder.stop(),
+                timeout=_SKILL_SCAN_HISTORY_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            logger.info("Skill scan history recorder stopped")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out stopping skill scan history recorder; "
+                "continuing application shutdown",
+            )
+        except Exception as e:
+            logger.warning("Error stopping skill scan history recorder: %s", e)
+    try:
+        from ..security.skill_scanner import (
+            install_skill_scan_history_recorder,
+        )
+
+        install_skill_scan_history_recorder(None)
+    except Exception as e:
+        logger.warning("Error detaching skill scan history recorder: %s", e)
+
     if db_connection:
         try:
             await db_connection.close()
@@ -732,9 +807,6 @@ async def _shutdown_lifespan_resources(
         except Exception as e:
             logger.warning("Error closing database connection: %s", e)
 
-    await stop_service_heartbeat()
-    await _stop_multi_agent_manager(app)
-    await _stop_tenant_workspace_pool(app)
     logger.info("Application shutdown complete")
 
     shutdown_logger()
@@ -807,6 +879,7 @@ async def lifespan(
 
     # --- 初始化定时任务分发用户反查快照 ---
     await _initialize_approval_audit_store(app, db_connection)
+    await _initialize_skill_scan_history(app, db_connection)
     await _initialize_cron_broadcast_children_store(app, db_connection)
     await _initialize_cron_broadcast_task_store(app, db_connection)
 

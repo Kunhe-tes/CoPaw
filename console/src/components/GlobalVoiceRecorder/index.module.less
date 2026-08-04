@@ -1,0 +1,122 @@
+.root {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 1050;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 12px;
+  pointer-events: none;
+  font-family: var(--console-font-ui);
+}
+
+.chatClearance {
+  bottom: 30px;
+}
+
+.workspace {
+  width: min(360px, calc(100vw - 48px));
+  max-height: min(580px, calc(100vh - 136px));
+  overflow: auto;
+  padding: 16px;
+  color: var(--console-management-text);
+  background: var(--console-management-surface);
+  border-radius: 12px;
+  box-shadow: var(--console-management-shadow-raised);
+  pointer-events: auto;
+}
+
+.chatClearance .workspace {
+  max-height: min(560px, calc(100vh - 216px));
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.title {
+  min-width: 0;
+  margin: 0 !important;
+  font-size: 15px !important;
+}
+
+.statusRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  margin-bottom: 12px;
+  color: var(--console-management-text-secondary);
+}
+
+.recordingDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  background: var(--console-management-error);
+  border-radius: 50%;
+  animation: recordingPulse 1.4s ease-in-out infinite;
+}
+
+.time {
+  color: var(--console-management-text);
+  font-family: var(--console-font-mono);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.player {
+  display: block;
+  width: 100%;
+  height: 40px;
+  margin-top: 4px;
+}
+
+.notice {
+  margin-top: 10px;
+}
+
+@keyframes recordingPulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .recordingDot {
+    animation: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .root {
+    right: 16px;
+    bottom: 16px;
+  }
+
+  .chatClearance {
+    bottom: 96px;
+  }
+
+  .workspace {
+    width: min(360px, calc(100vw - 32px));
+  }
+}

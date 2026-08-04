@@ -147,6 +147,7 @@ async def test_tool_output_frames_are_buffered_for_active_replay():
         "source": "stdout",
         "text": "live output\n",
         "truncated": False,
+        "budget_bytes": 50 * 1024,
     }
 
     replay_queue = await tracker.attach("chat-1")

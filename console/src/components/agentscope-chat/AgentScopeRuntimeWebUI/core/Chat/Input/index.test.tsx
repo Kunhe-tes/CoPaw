@@ -10,6 +10,11 @@ import type { UploadFile } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Input from "./index";
 import { RUNTIME_INPUT_SET_CONTENT_EVENT } from "../hooks/followUpSubmit";
+import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
+import {
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+} from "@/components/agentscope-chat/chatInputDraft";
 
 const attachmentState = {
   currentFileList: [] as UploadFile[],
@@ -20,6 +25,24 @@ const attachmentState = {
   handlePasteFile: vi.fn<(file: File) => void>(),
 };
 
+vi.mock("@/components/GlobalVoiceRecorder/VoiceRecorderTrigger", () => ({
+  default: () => null,
+}));
+
+function renderActiveInput(onSubmit = vi.fn()) {
+  return render(
+    <ChatAnywhereMessagesContext.Provider
+      value={{
+        messages: [{ id: "message-1" } as never],
+        setMessages: vi.fn(),
+        getMessages: () => [],
+      }}
+    >
+      <Input onCancel={vi.fn()} onSubmit={onSubmit} />
+    </ChatAnywhereMessagesContext.Provider>,
+  );
+}
+
 vi.mock("@/components/agentscope-chat", () => ({
   ChatInput: (props: {
     value?: string;
@@ -27,7 +50,7 @@ vi.mock("@/components/agentscope-chat", () => ({
     onSubmit?: () => void;
   }) => (
     <div>
-      <input
+      <textarea
         data-testid="chat-input"
         value={props.value || ""}
         onChange={(event) => props.onChange?.(event.target.value)}
@@ -108,9 +131,9 @@ describe("Chat Input restore flow", () => {
     );
 
     await waitFor(() => {
-      expect(
-        (screen.getByTestId("chat-input") as HTMLInputElement).value,
-      ).toBe("recover me");
+      expect((screen.getByTestId("chat-input") as HTMLInputElement).value).toBe(
+        "recover me",
+      );
     });
     expect(attachmentState.setFileList).toHaveBeenCalledWith(restoredFiles);
 
@@ -156,9 +179,9 @@ describe("Chat Input restore flow", () => {
     );
 
     await waitFor(() => {
-      expect(
-        (screen.getByTestId("chat-input") as HTMLInputElement).value,
-      ).toBe("normal prompt");
+      expect((screen.getByTestId("chat-input") as HTMLInputElement).value).toBe(
+        "normal prompt",
+      );
     });
 
     fireEvent.click(
@@ -221,5 +244,57 @@ describe("Chat Input restore flow", () => {
     );
 
     expect(attachmentState.handlePasteFile).toHaveBeenCalledWith(file);
+  });
+
+  it("appends transcribed text to the active conversation draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    renderActiveInput(onSubmit);
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "已有草稿" },
+    });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_APPEND_TEXT_EVENT, {
+        detail: { content: "语音转写" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-input")).toHaveValue(
+        "已有草稿\n语音转写",
+      );
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("ignores transcribed text while the conversation input is hidden", () => {
+    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
+
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_APPEND_TEXT_EVENT, {
+        detail: { content: "欢迎页负责接收" },
+      }),
+    );
+
+    expect(screen.getByTestId("chat-input")).toHaveValue("");
+  });
+
+  it("replaces the active conversation draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    renderActiveInput(onSubmit);
+
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "需要清空的原草稿" },
+    });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_REPLACE_TEXT_EVENT, {
+        detail: { content: "完整 SOP 提示词" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-input")).toHaveValue("完整 SOP 提示词");
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

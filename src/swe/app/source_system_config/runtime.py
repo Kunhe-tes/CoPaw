@@ -25,8 +25,6 @@ from .registry import (
     CRON_TASK_SESSION_CLEANUP_RETENTION_DAYS_SETTING,
     CRON_UNREAD_AUTO_PAUSE_ENABLED_SETTING,
     CRON_UNREAD_AUTO_PAUSE_THRESHOLD_SETTING,
-    FILE_READ_TRUNCATION_ENABLED_SETTING,
-    FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
     LLM_ACQUIRE_TIMEOUT_SETTING,
     LLM_CHAT_ACQUIRE_TIMEOUT_SETTING,
     LLM_CHAT_MAX_CONCURRENT_SETTING,
@@ -40,7 +38,6 @@ from .registry import (
     QUERY_RETRY_BACKOFF_CAP_SETTING,
     QUERY_RETRY_ENABLED_SETTING,
     QUERY_RETRY_MAX_RETRIES_SETTING,
-    SourceSystemConfigSetting,
     get_system_prompt_injections as _get_system_prompt_injections,
     merge_source_system_config_with_defaults,
     normalize_registered_setting_values,
@@ -51,15 +48,6 @@ _current_source_system_config: ContextVar[
     EffectiveSourceSystemConfig | None
 ] = ContextVar("current_source_system_config", default=None)
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class ImmediateTruncationConfig:
-    """运行时即时截断解析结果。"""
-
-    enabled: bool
-    max_bytes: int
-    explicit: bool
 
 
 @dataclass(frozen=True)
@@ -90,6 +78,7 @@ class ArchiveMaintenanceConfig:
     max_files_per_workspace: int
     max_files_per_run: int
     timeout_seconds: int
+
 
 _RATE_LIMIT_SOURCE_TO_RUNTIME_FIELDS = {
     "llm_max_concurrent": "max_concurrent",
@@ -233,38 +222,6 @@ def resolve_llm_rate_limiter_config(
             payload[runtime_key] = value
     _adjust_rate_limiter_timeouts(payload, source_config)
     return RateLimitConfig(**payload)
-
-
-def resolve_file_read_truncation_config(
-    tool_result_compact: ToolResultCompactConfig,
-    source_config: Any | None = None,
-) -> ImmediateTruncationConfig:
-    """解析文件读取即时截断配置，缺失时兼容继承历史近期阈值。"""
-    source_payload = _extract_immediate_truncation_override(
-        "file_read_truncation",
-        source_config,
-    )
-    if source_payload is None:
-        return ImmediateTruncationConfig(
-            enabled=True,
-            max_bytes=tool_result_compact.recent_max_bytes,
-            explicit=False,
-        )
-    return ImmediateTruncationConfig(
-        enabled=bool(
-            _get_immediate_truncation_value(
-                source_payload,
-                FILE_READ_TRUNCATION_ENABLED_SETTING,
-            ),
-        ),
-        max_bytes=int(
-            _get_immediate_truncation_value(
-                source_payload,
-                FILE_READ_TRUNCATION_MAX_BYTES_SETTING,
-            ),
-        ),
-        explicit=True,
-    )
 
 
 def resolve_cron_unread_auto_pause_config(
@@ -412,8 +369,7 @@ def resolve_cron_notification_config(
             normalized_section.get(
                 "skip_weekend_zhaohu_enabled",
                 (
-                    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING
-                    .default_value
+                    CRON_NOTIFICATIONS_SKIP_WEEKEND_ZHAOHU_ENABLED_SETTING.default_value
                 ),
             ),
         ),
@@ -443,6 +399,7 @@ def is_zhaohu_tool_guard_notification_enabled(
             default_value,
         ),
     )
+
 
 def get_system_prompt_injections(
     source_config: Any | None = None,
@@ -549,32 +506,6 @@ def _adjust_rate_limiter_timeouts(
             adjusted,
         )
         payload[key] = adjusted
-
-
-def _extract_immediate_truncation_override(
-    section: str,
-    source_config: Any | None,
-) -> dict[str, Any] | None:
-    """读取即时截断 raw 配置对象，缺席时返回 None 以保留迁移语义。"""
-    payload = _extract_raw_config_payload(source_config)
-    raw_section = payload.get(section)
-    if not isinstance(raw_section, dict):
-        return None
-    if "enabled" not in raw_section:
-        return None
-    normalized = normalize_registered_setting_values({section: raw_section})
-    normalized_section = normalized.get(section)
-    if not isinstance(normalized_section, dict):
-        return None
-    return normalized_section
-
-
-def _get_immediate_truncation_value(
-    payload: dict[str, Any],
-    setting: SourceSystemConfigSetting,
-) -> Any:
-    """读取即时截断字段，保存裁剪后的 marker-only 配置回退到字段默认值。"""
-    return payload.get(setting.path[-1], setting.default_value)
 
 
 def _extract_raw_config_payload(source_config: Any | None) -> dict[str, Any]:

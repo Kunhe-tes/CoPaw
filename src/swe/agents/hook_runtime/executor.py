@@ -296,7 +296,7 @@ def _build_prompt_model_input(
         getattr(context.hook_event_name, "value", context.hook_event_name),
     )
     decision_constraint = "allow or block"
-    if event_name != HookEventName.BEFORE_STOP.value:
+    if event_name != HookEventName.STOP.value:
         decision_constraint = "allow, deny, or block"
     return (
         "You are Swe's prompt hook policy judge.\n"

@@ -26,6 +26,10 @@ from swe.agents.memory.base_memory_manager import BaseMemoryManager
 from swe.agents.model_factory import create_model_and_formatter
 from swe.agents.tools import read_file, write_file, edit_file
 from swe.agents.utils import get_swe_token_counter
+from swe.agents.utils.tool_output_compaction import (
+    cleanup_expired_artifacts,
+    compact_tool_result_messages,
+)
 from swe.app.source_system_config import resolve_tool_result_compact_config
 from swe.tracing import capture_current_trace_context
 from swe.config import load_config
@@ -389,12 +393,31 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         )
         return result
 
-    async def compact_tool_result(self, **kwargs):
-        """Compact tool results by truncating large outputs."""
+    async def compact_tool_result(
+        self,
+        *,
+        messages: list[Msg],
+        old_max_bytes: int,
+        recent_max_bytes: int,
+        recent_n: int,
+        retention_days: int,
+    ) -> list[Msg]:
+        """Compact recoverable tool-result text in native message history."""
         self._warn_if_version_mismatch()
-        if self._reme is None:
-            return None
-        return await self._reme.compact_tool_result(**kwargs)
+        workspace_dir = Path(self.working_dir)
+        artifact_dir = workspace_dir / "tool_result"
+        cleanup_expired_artifacts(
+            artifact_dir,
+            retention_days=retention_days,
+        )
+        return compact_tool_result_messages(
+            messages,
+            old_max_bytes=old_max_bytes,
+            recent_max_bytes=recent_max_bytes,
+            recent_n=recent_n,
+            artifact_dir=artifact_dir,
+            workspace_dir=workspace_dir,
+        )
 
     async def check_context(self, **kwargs):
         """Check context size and determine if compaction is needed."""
@@ -537,14 +560,28 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             min_score=min_score,
         )
 
-    def get_in_memory_memory(self, **_kwargs) -> "ReMeInMemoryMemory | None":
+    def get_in_memory_memory(
+        self,
+        chat_id: str | None = None,
+        **_kwargs,
+    ) -> "ReMeInMemoryMemory | None":
         """Retrieve the in-memory memory object with token counting support."""
         self._warn_if_version_mismatch()
         if self._reme is None:
             return None
         agent_config = self._load_agent_config()
-        return self._reme.get_in_memory_memory(
+        memory = self._reme.get_in_memory_memory(
             as_token_counter=get_swe_token_counter(agent_config),
+        )
+        if not chat_id:
+            return memory
+
+        from .conversation_archive import attach_conversation_archive
+
+        return attach_conversation_archive(
+            memory,
+            Path(self.working_dir) / "dialog",
+            chat_id,
         )
 
     # ------------------------------------------------------------------
