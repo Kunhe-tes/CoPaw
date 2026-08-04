@@ -38,42 +38,22 @@ import {
 import {
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
+  buildSkillSelectOptions,
   getBroadcastResultMessage,
   getBroadcastTaskProgressText,
   type CronJobFormValues,
+  type SkillSelectOption,
 } from "./helpers";
 import styles from "./index.module.less";
 
 type CronJob = CronJobSpecOutput;
 type BroadcastDispatchMode = "normal" | "batch";
-type SkillSelectOption = { value: string; label: string };
 const DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS = 4;
 const DEFAULT_TABLE_PAGE_SIZE = 10;
 const TABLE_PAGE_SIZE_OPTIONS = ["10", "20", "50", "100"];
 
 function getCurrentSourceId(): string {
   return getIframeContext().source || DEFAULT_SOURCE_ID;
-}
-
-function buildSkillSelectOptions(
-  skills: Array<{
-    skill_id: string;
-    skill_name: string;
-    cn_name?: string | null;
-  }>,
-): SkillSelectOption[] {
-  return skills
-    .filter((skill) => skill.skill_id)
-    .map((skill) => {
-      const displayName = skill.cn_name || skill.skill_name || skill.skill_id;
-      return {
-        value: skill.skill_id,
-        label:
-          displayName === skill.skill_id
-            ? skill.skill_id
-            : `${displayName} (${skill.skill_id})`,
-      };
-    });
 }
 
 function isBatchDispatchEnabled(job: CronJob): boolean {

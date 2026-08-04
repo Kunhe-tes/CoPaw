@@ -2,6 +2,7 @@ import dayjs from "dayjs";
 import { describe, expect, it } from "vitest";
 import type { CronJobSpecOutput } from "@/api/types";
 import {
+  buildSkillSelectOptions,
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
   getBroadcastResultMessage,
@@ -188,8 +189,32 @@ describe("CronJobs helpers", () => {
     expect(normalizeSkillIdsInput(["a", "b", "a"])).toBe("a,b");
   });
 
-  it("rejects invalid skill id characters", () => {
-    expect(() => normalizeSkillIdsInput("bad/id")).toThrow();
+  it("deduplicates dropdown options by skill_id", () => {
+    expect(
+      buildSkillSelectOptions([
+        {
+          skill_id: "same-skill-id",
+          skill_name: "first_skill_name",
+          cn_name: "首次展示",
+        },
+        {
+          skill_id: "same-skill-id",
+          skill_name: "second_skill_name",
+          cn_name: "重复展示",
+        },
+      ]),
+    ).toEqual([
+      {
+        value: "same-skill-id",
+        label: "首次展示 (same-skill-id)",
+      },
+    ]);
+  });
+
+  it("accepts selected database skill ids without frontend character filtering", () => {
+    expect(normalizeSkillIdsInput(["数据分析/技能_001", "skill:demo"])).toBe(
+      "数据分析/技能_001,skill:demo",
+    );
   });
 
   it("rejects skill ids beyond the API length limit", () => {

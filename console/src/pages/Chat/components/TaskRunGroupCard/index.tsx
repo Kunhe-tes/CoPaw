@@ -24,6 +24,10 @@ import type { ResponseFeedbackTaskMeta } from "../ResponseFeedbackCard";
 const MARKDOWN_LINK_PATTERN = /!?\[([^\]]*)\]\(([^)]+)\)/g;
 const PLAIN_URL_PATTERN = /https?:\/\/[^\s<>"']+/g;
 const TRAILING_URL_PUNCTUATION_PATTERN = /[\]),.。！？!?,，；;：:]+$/;
+const UNSAFE_PREVIEW_URL_CHARACTER_PATTERN = /[\s{}<>"'`\\]/;
+const EXPLICIT_PREVIEW_URL_PREFIX_PATTERN =
+  /^(?:https?:\/\/|\/\/|\/|\.\/|\.\.\/)/i;
+const HTML_PREVIEW_PATH_PATTERN = /\.html?(?:[?#].*)?$/i;
 
 type AutoPreviewHtmlMatch = {
   url: string;
@@ -41,12 +45,35 @@ function readString(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+function isValidAutoPreviewUrlCandidate(value: string): boolean {
+  if (!value || UNSAFE_PREVIEW_URL_CHARACTER_PATTERN.test(value)) {
+    return false;
+  }
+
+  try {
+    const parsedUrl = new URL(value, window.location.origin);
+    if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return (
+    EXPLICIT_PREVIEW_URL_PREFIX_PATTERN.test(value) ||
+    HTML_PREVIEW_PATH_PATTERN.test(value)
+  );
+}
+
 function toAutoPreviewHtmlMatch(
   value: string,
   fileName?: string,
 ): AutoPreviewHtmlMatch | null {
-  const url = value.replace(TRAILING_URL_PUNCTUATION_PATTERN, "");
-  if (!isAutoPreviewHtmlLink(url, fileName)) {
+  const url = value.replace(TRAILING_URL_PUNCTUATION_PATTERN, "").trim();
+  if (
+    !isValidAutoPreviewUrlCandidate(url) ||
+    !isAutoPreviewHtmlLink(url, fileName)
+  ) {
     return null;
   }
   return { url, fileName };
@@ -87,19 +114,20 @@ function findAutoPreviewHtmlValue(
   }
 
   if (typeof value === "string") {
-    const textMatch = findAutoPreviewHtmlTextMatch(value);
-    if (textMatch) return textMatch;
-
     const trimmed = value.trim();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
-        return findAutoPreviewHtmlValue(JSON.parse(trimmed), depth + 1);
+        const parsedMatch = findAutoPreviewHtmlValue(
+          JSON.parse(trimmed),
+          depth + 1,
+        );
+        if (parsedMatch) return parsedMatch;
       } catch {
-        return null;
+        // Fall through to text scanning for malformed or mixed tool output.
       }
     }
 
-    return null;
+    return findAutoPreviewHtmlTextMatch(value);
   }
 
   if (Array.isArray(value)) {
@@ -116,6 +144,8 @@ function findAutoPreviewHtmlValue(
 
   const url =
     readString(value.file_url) ||
+    readString(value.previewUrl) ||
+    readString(value.preview_url) ||
     readString(value.url) ||
     readString(value.href);
   const fileName =
@@ -127,6 +157,9 @@ function findAutoPreviewHtmlValue(
   if (url) {
     const directMatch = toAutoPreviewHtmlMatch(url, fileName);
     if (directMatch) return directMatch;
+
+    const embeddedMatch = findAutoPreviewHtmlTextMatch(url);
+    if (embeddedMatch) return embeddedMatch;
   }
 
   for (const key of ["path", "content", "data", "output", "text", "value"]) {
@@ -186,6 +219,8 @@ function pickAutoPreviewHtmlResponseData(
         )
           ? {
               ...outputMessage,
+              role: "assistant",
+              type: "message",
               content: [contentItem],
             }
           : buildAutoPreviewOutputMessage(outputMessage, match);
@@ -391,10 +426,7 @@ export default function TaskRunGroupCard(props: {
   ]);
   const finalMessages = autoPreviewMessages || data.finalMessages;
   const stepMessages = autoPreviewMessages
-    ? mergeTaskRunDetailMessages([
-        ...data.stepMessages,
-        ...data.finalMessages,
-      ])
+    ? mergeTaskRunDetailMessages([...data.stepMessages, ...data.finalMessages])
     : data.stepMessages;
   const hasSteps = stepMessages.length > 0;
   const taskName = data.taskName || `任务 ${data.runIndex + 1}`;
