@@ -147,6 +147,8 @@ import {
   type ChatTaskProgressUpdateDetail,
 } from "./taskProgressEvents";
 import { isChatTaskProgressEnabled } from "./taskProgressConfig";
+import GlobalVoiceRecorder from "@/components/GlobalVoiceRecorder";
+import { shouldShowGlobalVoiceRecorder } from "@/components/GlobalVoiceRecorder/presentation";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
@@ -505,6 +507,9 @@ export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
+  const [isOriginY] = useState(
+    () => new URLSearchParams(location.search).get("origin") === "Y",
+  );
   const { isDark } = useTheme();
   const showContentOnly = useChatPresentationStore(
     (state) => state.showContentOnly,
@@ -877,6 +882,11 @@ export default function ChatPage() {
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const feedbackUserId = useIframeStore((state) => state.userId);
+  const voiceRecorderEnabled = shouldShowGlobalVoiceRecorder(
+    feedbackUserId,
+    showContentOnly,
+    isOriginY,
+  );
   const skipPreviewTracking = useIframeStore(
     (state) => state.skipPreviewTracking,
   );
@@ -1864,7 +1874,9 @@ export default function ChatPage() {
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
                 <ChatContentOnlyProvider enabled={isContentOnly}>
-                  <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                  <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                    <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                  </GlobalVoiceRecorder>
                 </ChatContentOnlyProvider>
                 {!isContentOnly && (
                   <DragUploadOverlay

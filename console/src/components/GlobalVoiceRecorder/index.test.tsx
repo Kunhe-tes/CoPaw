@@ -1,29 +1,39 @@
-import {
-  cleanup,
-  fireEvent,
-  render,
-  screen,
-  waitFor,
-} from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import type { ButtonHTMLAttributes, ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { installAudioPlaybackMocks, installClipboardMock } from "./testUtils";
+import { installAudioPlaybackMocks } from "./testUtils";
 import GlobalVoiceRecorder from "./index";
+import VoiceRecorderTrigger from "./VoiceRecorderTrigger";
 
 const mocks = vi.hoisted(() => ({
-  message: {
-    success: vi.fn(),
-    error: vi.fn(),
-  },
   recorder: {} as Record<string, unknown>,
   recorderOptions: {} as Record<string, unknown>,
   emitChatInputAppendText: vi.fn(),
   emitChatInputReplaceText: vi.fn(),
 }));
 
-vi.mock("@/hooks/useAppMessage", () => ({
-  useAppMessage: () => ({ message: mocks.message }),
+vi.mock("@agentscope-ai/icons", () => ({
+  SparkMicLine: () => <span data-testid="mic-icon" />,
+  SparkMicOnLine: () => <span data-testid="mic-on-icon" />,
+}));
+
+vi.mock("@agentscope-ai/design", () => ({
+  IconButton: ({
+    bordered,
+    icon,
+    ...props
+  }: ButtonHTMLAttributes<HTMLButtonElement> & {
+    bordered?: boolean;
+    icon?: ReactNode;
+  }) => {
+    void bordered;
+    return (
+      <button type="button" {...props}>
+        {icon}
+      </button>
+    );
+  },
 }));
 
 vi.mock("./useVoiceRecorder", () => ({
@@ -50,7 +60,6 @@ function seedRecorder(overrides: Record<string, unknown> = {}) {
     stopReason: null,
     error: null,
     transcript: "",
-    setTranscript: vi.fn(),
     panelOpen: false,
     setPanelOpen: vi.fn(),
     transcriptionConfigured: false,
@@ -62,22 +71,20 @@ function seedRecorder(overrides: Record<string, unknown> = {}) {
   });
 }
 
-function renderRecorder(path = "/models") {
+function renderRecorder(enabled = true) {
   return render(
-    <MemoryRouter initialEntries={[path]}>
-      <GlobalVoiceRecorder />
-    </MemoryRouter>,
+    <GlobalVoiceRecorder enabled={enabled}>
+      <div data-testid="recorder-child">聊天内容</div>
+      <VoiceRecorderTrigger />
+    </GlobalVoiceRecorder>,
   );
 }
 
 describe("GlobalVoiceRecorder UI", () => {
   beforeEach(() => {
     seedRecorder();
-    mocks.message.success.mockReset();
-    mocks.message.error.mockReset();
     mocks.emitChatInputAppendText.mockReset();
     mocks.emitChatInputReplaceText.mockReset();
-    installClipboardMock();
     installAudioPlaybackMocks();
   });
 
@@ -86,7 +93,7 @@ describe("GlobalVoiceRecorder UI", () => {
     vi.restoreAllMocks();
   });
 
-  it("renders a compact icon launcher and starts recording from idle", () => {
+  it("renders an inline trigger and starts recording from idle", () => {
     renderRecorder();
 
     const launcher = screen.getByRole("button", { name: "开始语音录制" });
@@ -94,6 +101,18 @@ describe("GlobalVoiceRecorder UI", () => {
     expect(launcher.textContent).toBe("");
     fireEvent.click(launcher);
     expect(mocks.recorder.startRecording).toHaveBeenCalledOnce();
+  });
+
+  it("renders only its children when voice recording is not enabled", () => {
+    renderRecorder(false);
+
+    expect(screen.getByTestId("recorder-child")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "开始语音录制" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("global-voice-recorder"),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps unsupported compatibility guidance keyboard discoverable", () => {
@@ -110,7 +129,7 @@ describe("GlobalVoiceRecorder UI", () => {
 
   it("keeps the active state visible while its workspace is closed", () => {
     seedRecorder({ status: "recording", elapsedMs: 1_000 });
-    renderRecorder("/chat/session/1");
+    renderRecorder();
 
     const root = screen.getByTestId("global-voice-recorder");
     expect(root.className).toContain("chatClearance");
@@ -122,26 +141,16 @@ describe("GlobalVoiceRecorder UI", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("forwards successful transcription only while the current route is chat", () => {
-    const chat = renderRecorder("/chat/session/1");
-
+  it("forwards successful transcription to the chat input", () => {
+    renderRecorder();
     const notifySuccess = mocks.recorderOptions.onTranscriptionSuccess as (
       text: string,
     ) => void;
     notifySuccess("聊天页转写");
     expect(mocks.emitChatInputAppendText).toHaveBeenCalledWith("聊天页转写");
-
-    chat.unmount();
-    mocks.emitChatInputAppendText.mockClear();
-    renderRecorder("/models");
-    const notifyOutsideChat = mocks.recorderOptions.onTranscriptionSuccess as (
-      text: string,
-    ) => void;
-    notifyOutsideChat("其他页面转写");
-    expect(mocks.emitChatInputAppendText).not.toHaveBeenCalled();
   });
 
-  it("renders local playback/download and editable copyable transcript", async () => {
+  it("renders local playback/download controls without a duplicate transcript draft", () => {
     const recording = {
       file: new File(["wav"], "voice.wav", { type: "audio/wav" }),
       objectUrl: "blob:voice",
@@ -154,7 +163,6 @@ describe("GlobalVoiceRecorder UI", () => {
       transcript: "可编辑文字",
       panelOpen: true,
     });
-    const clipboard = installClipboardMock();
     renderRecorder();
 
     expect(screen.getByLabelText("录音播放控件")).toHaveAttribute(
@@ -165,16 +173,13 @@ describe("GlobalVoiceRecorder UI", () => {
       "download",
       "voice.wav",
     );
-    expect(screen.getByLabelText("可编辑的转写文字")).toHaveValue("可编辑文字");
+    expect(screen.queryByLabelText("可编辑的转写文字")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "复制" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /转换文字$/ })).toBeDisabled();
     expect(screen.getByRole("button", { name: "生成SOP" })).toBeEnabled();
     expect(screen.getByText("转写接口尚未配置")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: /复制$/ }));
-    await waitFor(() => {
-      expect(clipboard.writeText).toHaveBeenCalledWith("可编辑文字");
-    });
-    expect(mocks.message.success).toHaveBeenCalled();
   });
 
   it("generates an SOP draft and replaces the chat input", () => {
@@ -189,39 +194,16 @@ describe("GlobalVoiceRecorder UI", () => {
         createdAt: 0,
       },
     });
-    renderRecorder("/chat/session/1");
+    renderRecorder();
 
     fireEvent.click(screen.getByRole("button", { name: "生成SOP" }));
 
     const sopPrompt =
       "@wplus-sop-miner 我要澄清一个工作流程，流程是：先提交申请，再等待审批";
-    expect(mocks.recorder.setTranscript).toHaveBeenCalledWith(sopPrompt);
     expect(mocks.emitChatInputReplaceText).toHaveBeenCalledWith(sopPrompt);
   });
 
-  it("updates the SOP draft without touching chat input outside chat", () => {
-    seedRecorder({
-      status: "ready",
-      panelOpen: true,
-      transcript: "执行复核",
-      recording: {
-        file: new File(["wav"], "voice.wav", { type: "audio/wav" }),
-        objectUrl: "blob:voice",
-        durationMs: 1_000,
-        createdAt: 0,
-      },
-    });
-    renderRecorder("/models");
-
-    fireEvent.click(screen.getByRole("button", { name: "生成SOP" }));
-
-    expect(mocks.recorder.setTranscript).toHaveBeenCalledWith(
-      "@wplus-sop-miner 我要澄清一个工作流程，流程是：执行复核",
-    );
-    expect(mocks.emitChatInputReplaceText).not.toHaveBeenCalled();
-  });
-
-  it("requires confirmation before replacing the current WAV and draft", () => {
+  it("requires confirmation before replacing the current WAV and transcript", () => {
     seedRecorder({
       status: "ready",
       panelOpen: true,
@@ -234,6 +216,7 @@ describe("GlobalVoiceRecorder UI", () => {
     });
     renderRecorder();
 
+    expect(screen.getByRole("button", { name: "生成SOP" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /重新录制$/ }));
     expect(screen.getByText("替换当前录音？")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "清除并重新录制" }));

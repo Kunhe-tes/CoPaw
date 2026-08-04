@@ -16,6 +16,7 @@ import {
 } from "../hooks/followUpSubmit";
 import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
 import { useContextSelector } from "use-context-selector";
+import VoiceRecorderTrigger from "@/components/GlobalVoiceRecorder/VoiceRecorderTrigger";
 import {
   appendChatInputText,
   CHAT_INPUT_APPEND_TEXT_EVENT,
@@ -212,6 +213,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
           value={content}
           prefix={
             <>
+              <VoiceRecorderTrigger />
               {uploadIconButton}
               {prefix}
             </>
