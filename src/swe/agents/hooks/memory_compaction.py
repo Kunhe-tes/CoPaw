@@ -86,6 +86,60 @@ class MemoryCompactionHook:
             memory_manager: Memory manager instance for compaction
         """
         self.memory_manager = memory_manager
+        self._precompaction_watermarks: dict[str, int] = {}
+
+    async def _apply_checkpoint_budget_stage(
+        self,
+        agent: ReActAgent,
+        running_config: Any,
+        messages: list[Msg],
+        projected_tokens: int,
+    ) -> bool:
+        """Apply staged checkpoint policy; return whether legacy flow stops."""
+        compact_config = getattr(running_config, "context_compact", None)
+        required = (
+            "lightweight_governance_ratio",
+            "precompaction_step_ratio",
+            "memory_compact_ratio",
+            "emergency_compact_ratio",
+        )
+        if compact_config is None or not all(
+            hasattr(compact_config, name) for name in required
+        ):
+            return False
+        chat_id = str(
+            getattr(agent, "_request_context", {}).get("chat_id") or "",
+        )
+        if not chat_id:
+            return False
+        decision = decide_context_budget(
+            projected_tokens,
+            running_config.max_input_length,
+            compact_config,
+        )
+        if decision.stage == "normal":
+            return True
+        if decision.stage == "governance":
+            watermark = decision.precompaction_watermark
+            if watermark is None:
+                return True
+            if watermark <= self._precompaction_watermarks.get(chat_id, -1):
+                return True
+            self._precompaction_watermarks[chat_id] = watermark
+            await self.memory_manager.schedule_precompaction(
+                chat_id=chat_id,
+                watermark=watermark,
+                messages=messages,
+                chat_model=agent.model,
+                formatter=agent.formatter,
+            )
+            return True
+        installed = await self.memory_manager.install_ready_precompaction(
+            chat_id=chat_id,
+        )
+        # A valid candidate replaces the online compaction work. If none is
+        # ready, continue to the established ReMe fallback below.
+        return installed
 
     @staticmethod
     async def _print_status_message(
@@ -312,6 +366,19 @@ class MemoryCompactionHook:
                 messages,
                 running_config,
             )
+
+            projected_tokens = await token_counter.count(
+                messages=messages,
+                text=(agent.sys_prompt or "")
+                + (memory.get_compressed_summary() or ""),
+            )
+            if await self._apply_checkpoint_budget_stage(
+                agent,
+                running_config,
+                messages,
+                projected_tokens,
+            ):
+                return None
 
             messages_to_compact = await self._get_messages_to_compact(
                 messages,
