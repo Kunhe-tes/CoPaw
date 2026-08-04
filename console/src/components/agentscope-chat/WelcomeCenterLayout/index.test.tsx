@@ -10,6 +10,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WelcomeCenterLayout from "./index";
 import { chatApi } from "@/api/modules/chat";
+import {
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+} from "../chatInputDraft";
 
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => <span data-testid="attachment-icon" />,
@@ -105,6 +109,42 @@ describe("WelcomeCenterLayout", () => {
     await waitFor(() => {
       expect(screen.getByText("demo.txt")).toBeInTheDocument();
     });
+  });
+
+  it("appends transcribed text to the welcome draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={onSubmit} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "已有草稿" } });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_APPEND_TEXT_EVENT, {
+        detail: { content: "语音转写" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(input).toHaveValue("已有草稿\n语音转写");
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("replaces the welcome draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={onSubmit} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "需要清空的原草稿" } });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_REPLACE_TEXT_EVENT, {
+        detail: { content: "完整 SOP 提示词" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(input).toHaveValue("完整 SOP 提示词");
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
   it("opens the shared labelled skill menu and selects a matching skill by click", () => {

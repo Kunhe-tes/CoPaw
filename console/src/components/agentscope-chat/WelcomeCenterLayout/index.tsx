@@ -14,6 +14,13 @@ import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
 import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
+import {
+  appendChatInputText,
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+  type ChatInputAppendTextPayload,
+  type ChatInputReplaceTextPayload,
+} from "../chatInputDraft";
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
 const PLACEHOLDER_OPTIONS = [
@@ -24,9 +31,10 @@ const PLACEHOLDER_OPTIONS = [
 
 interface WelcomeCenterLayoutProps {
   greeting?: string;
-  onSubmit: (
-    data: { query: string; fileList?: UploadFile[] },
-  ) => void | Promise<void>;
+  onSubmit: (data: {
+    query: string;
+    fileList?: UploadFile[];
+  }) => void | Promise<void>;
   skillMentions?: SkillMentionsData;
   beforeSubmit?: () => Promise<boolean>;
 }
@@ -68,6 +76,38 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     const randomIndex = Math.floor(Math.random() * PLACEHOLDER_OPTIONS.length);
     setRandomPlaceholder(PLACEHOLDER_OPTIONS[randomIndex]);
   }, []);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatInputAppendTextPayload>).detail;
+      if (typeof detail?.content !== "string" || !detail.content) {
+        return;
+      }
+
+      setCurrentInputValue(
+        appendChatInputText(inputValueRef.current, detail.content),
+      );
+    };
+
+    const replaceHandler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatInputReplaceTextPayload>).detail;
+      if (typeof detail?.content !== "string" || !detail.content) {
+        return;
+      }
+
+      setCurrentInputValue(detail.content);
+    };
+
+    document.addEventListener(CHAT_INPUT_APPEND_TEXT_EVENT, handler);
+    document.addEventListener(CHAT_INPUT_REPLACE_TEXT_EVENT, replaceHandler);
+    return () => {
+      document.removeEventListener(CHAT_INPUT_APPEND_TEXT_EVENT, handler);
+      document.removeEventListener(
+        CHAT_INPUT_REPLACE_TEXT_EVENT,
+        replaceHandler,
+      );
+    };
+  }, [setCurrentInputValue]);
 
   const handleSend = useCallback(async () => {
     if (isSubmittingRef.current) return;

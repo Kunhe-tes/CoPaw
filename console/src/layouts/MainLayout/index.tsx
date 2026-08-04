@@ -1,6 +1,6 @@
 import { Layout } from "antd";
 import { Routes, Route, useLocation, Navigate } from "react-router-dom";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 // useIframeStore: 获取父窗口传递的 hideMenu 参数
 import { useIframeStore } from "../../stores/iframeStore";
 import { useChatPresentationStore } from "../../stores/chatPresentationStore";
@@ -10,6 +10,8 @@ import { DEFAULT_SOURCE_ID } from "../../constants/identity";
 import Sidebar from "../Sidebar";
 import Header from "../Header";
 import ConsoleCronBubble from "../../components/ConsoleCronBubble";
+import GlobalVoiceRecorder from "../../components/GlobalVoiceRecorder";
+import { shouldShowGlobalVoiceRecorder } from "../../components/GlobalVoiceRecorder/presentation";
 import styles from "../index.module.less";
 import Chat from "../../pages/Chat";
 import ChannelsPage from "../../pages/Control/Channels";
@@ -97,6 +99,9 @@ export default function MainLayout() {
   const location = useLocation();
   const currentPath = location.pathname;
   const selectedKey = pathToKey[currentPath] || "chat";
+  const [isOriginY] = useState(
+    () => new URLSearchParams(location.search).get("origin") === "Y",
+  );
 
   // 动态渲染模版上下文
   const dynamicRender = useDynamicRender(); // 使用 useDynamicRender 钩子
@@ -110,6 +115,7 @@ export default function MainLayout() {
   // - showContentOnly initializes a runtime presentation flag before React renders
   const hideMenu = useIframeStore((state) => state.hideMenu);
   const hideChat = useIframeStore((state) => state.hideChat);
+  const voiceRecorderUserId = useIframeStore((state) => state.userId);
   const showContentOnly = useChatPresentationStore(
     (state) => state.showContentOnly,
   );
@@ -209,6 +215,11 @@ export default function MainLayout() {
           </div>
         </Content>
       </Layout>
+      {shouldShowGlobalVoiceRecorder(
+        voiceRecorderUserId,
+        showContentOnly,
+        isOriginY,
+      ) && <GlobalVoiceRecorder />}
     </Layout>
   );
 }
