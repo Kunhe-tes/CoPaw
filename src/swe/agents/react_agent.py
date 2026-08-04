@@ -56,6 +56,7 @@ from .tools import (
     # stop_background_process,
     write_file,
     create_memory_search_tool,
+    create_recover_evidence_tool,
     copy_file_to_static,
     update_task_progress,
 )
@@ -744,6 +745,31 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 namesake_strategy=namesake_strategy,
             )
             logger.debug("Registered memory_search tool")
+            chat_id = self._request_context.get("chat_id") or None
+            checkpoint_store = getattr(
+                self.memory,
+                "chat_checkpoint_store",
+                None,
+            )
+            if chat_id and checkpoint_store is not None:
+                try:
+                    state = checkpoint_store._read_checkpoint_state(chat_id)
+                except (TypeError, ValueError):
+                    logger.warning(
+                        "Skip recover_evidence: request Chat ID is invalid",
+                    )
+                else:
+                    self.toolkit.register_tool_function(
+                        create_recover_evidence_tool(
+                            self.memory_manager,
+                            chat_id=chat_id,
+                            epoch=state.current_epoch,
+                        ),
+                        namesake_strategy=namesake_strategy,
+                    )
+                    logger.debug(
+                        "Registered request-bound recover_evidence tool",
+                    )
 
     def _register_hooks(self) -> None:
         """Register pre-reasoning and pre-acting hooks."""
