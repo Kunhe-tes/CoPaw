@@ -9,45 +9,12 @@ from types import SimpleNamespace
 import pytest
 
 
-def test_normalize_tool_output_keeps_utf8_safe_head_and_tail():
-    from swe.app.runner.tool_output_frames import normalize_tool_output
-
-    text = "首段\n" + ("中间数据\n" * 200) + "尾段\n"
-
-    normalized = normalize_tool_output(
-        text,
-        max_bytes=512,
-        max_lines=20,
-    )
-
-    assert normalized.startswith("首段\n")
-    assert normalized.endswith("尾段\n")
-    assert "[工具输出已截断：原始" in normalized
-    assert "省略" in normalized
-    assert len(normalized.encode("utf-8")) <= 512
-    assert normalized.count("\n") <= 20
-
-
-def test_normalize_tool_output_leaves_within_budget_text_unchanged():
-    from swe.app.runner.tool_output_frames import normalize_tool_output
-
-    assert (
-        normalize_tool_output(
-            "stdout\nstderr\n",
-            max_bytes=512,
-            max_lines=20,
-        )
-        == "stdout\nstderr\n"
-    )
-
-
 @pytest.mark.asyncio
-async def test_shell_terminal_result_uses_live_output_budget(
+async def test_shell_terminal_result_is_not_truncated_before_central_compaction(
     monkeypatch,
     tmp_path,
 ):
     from swe.agents.tools import shell
-    from swe.app.runner.tool_output_frames import normalize_tool_output
 
     raw_output = "head\n" + ("middle\n" * 20_000) + "tail\n"
 
@@ -87,38 +54,50 @@ async def test_shell_terminal_result_uses_live_output_budget(
 
     result = await shell.execute_shell_command("echo ignored")
 
-    assert result.content[0]["text"] == normalize_tool_output(raw_output)
+    assert result.content[0]["text"] == raw_output
 
 
 @pytest.mark.asyncio
-async def test_live_frame_budget_includes_omission_marker():
+@pytest.mark.parametrize(
+    ("configured_budget", "expected_budget"),
+    [(80, 80), (None, 50 * 1024)],
+)
+async def test_live_frame_uses_current_recent_tool_result_budget(
+    configured_budget,
+    expected_budget,
+):
     from swe.app.runner.tool_output_frames import (
-        LIVE_TOOL_OUTPUT_MAX_BYTES,
         bind_tool_output_emitter,
         emit_tool_output_text,
         tool_output_invocation,
     )
+    from swe.config.context import set_current_recent_max_bytes
 
     frames = []
 
     async def collect(frame):
         frames.append(frame)
 
-    with (
-        bind_tool_output_emitter(collect),
-        tool_output_invocation(
-            tool_call_id="call-1",
-            tool_name="execute_shell_command",
-        ),
-    ):
-        await emit_tool_output_text(
-            "stdout",
-            "x" * (LIVE_TOOL_OUTPUT_MAX_BYTES + 1),
-        )
+    set_current_recent_max_bytes(configured_budget)
+    try:
+        with (
+            bind_tool_output_emitter(collect),
+            tool_output_invocation(
+                tool_call_id="call-1",
+                tool_name="execute_shell_command",
+            ),
+        ):
+            await emit_tool_output_text(
+                "stdout",
+                "x" * (expected_budget + 1),
+            )
+    finally:
+        set_current_recent_max_bytes(None)
 
     assert sum(len(frame["text"].encode("utf-8")) for frame in frames) <= (
-        LIVE_TOOL_OUTPUT_MAX_BYTES
+        expected_budget
     )
+    assert frames[-1]["budget_bytes"] == expected_budget
     assert frames[-1]["truncated"] is True
     assert "[早期实时输出已省略]" in frames[-1]["text"]
 

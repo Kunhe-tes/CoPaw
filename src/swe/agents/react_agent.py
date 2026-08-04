@@ -42,6 +42,7 @@ from .skills_manager import (
 )
 from .tool_failure import normalize_tool_function_errors
 from .tool_guard_mixin import ToolGuardMixin
+from .tool_output_budget_mixin import ToolOutputBudgetMixin
 from .tools import (
     edit_file,
     execute_shell_command,
@@ -101,7 +102,7 @@ class AgentPhaseState:
     reason: str | None = None
 
 
-class SWEAgent(ToolGuardMixin, ReActAgent):
+class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     """SWE Agent with integrated tools, skills, and memory management.
 
     This agent extends ReActAgent with:
@@ -115,7 +116,8 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
     MRO note
     ~~~~~~~~
     ``ToolGuardMixin`` overrides ``_acting`` and ``_reasoning`` via
-    Python's MRO: SWEAgent → ToolGuardMixin → ReActAgent.  If you
+    Python's MRO: SWEAgent → ToolGuardMixin → ToolOutputBudgetMixin →
+    ReActAgent.  If you
     add a ``_acting`` or ``_reasoning`` override in this class, you
     **must** call ``super()._acting(...)`` / ``super()._reasoning(...)``
     so the guard interception remains active.
@@ -732,7 +734,9 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         # Register memory_search tool if enabled and available
         if self._enable_memory_manager and self.memory_manager is not None:
             # update memory manager
-            self.memory = self.memory_manager.get_in_memory_memory()
+            self.memory = self.memory_manager.get_in_memory_memory(
+                chat_id=self._request_context.get("chat_id") or None,
+            )
 
             # Register memory_search as a tool function
             self.toolkit.register_tool_function(
@@ -1608,16 +1612,13 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         """
         # Set workspace_dir and recent_max_bytes in context for tool functions
         from ..config.context import (
-            set_current_file_read_max_bytes,
             set_current_task_progress_chat_id,
             set_current_task_progress_tracker,
             set_current_task_progress_turn_id,
-            set_current_tool_result_retention_days,
             set_current_workspace_dir,
             set_current_recent_max_bytes,
         )
         from ..app.source_system_config import (
-            resolve_file_read_truncation_config,
             resolve_tool_result_compact_config,
         )
 
@@ -1625,20 +1626,7 @@ class SWEAgent(ToolGuardMixin, ReActAgent):
         tool_result_compact = resolve_tool_result_compact_config(
             self._agent_config.running.tool_result_compact,
         )
-        file_read_truncation = resolve_file_read_truncation_config(
-            tool_result_compact,
-        )
         set_current_recent_max_bytes(tool_result_compact.recent_max_bytes)
-        set_current_file_read_max_bytes(
-            (
-                file_read_truncation.max_bytes
-                if file_read_truncation.enabled
-                else 0
-            ),
-        )
-        set_current_tool_result_retention_days(
-            tool_result_compact.retention_days,
-        )
         set_current_task_progress_tracker(self._task_tracker)
         set_current_task_progress_chat_id(
             self._request_context.get("chat_id"),

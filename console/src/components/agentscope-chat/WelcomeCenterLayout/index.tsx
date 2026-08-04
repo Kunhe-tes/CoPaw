@@ -14,6 +14,14 @@ import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
 import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
+import VoiceRecorderTrigger from "@/components/GlobalVoiceRecorder/VoiceRecorderTrigger";
+import {
+  appendChatInputText,
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+  type ChatInputAppendTextPayload,
+  type ChatInputReplaceTextPayload,
+} from "../chatInputDraft";
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
 const PLACEHOLDER_OPTIONS = [
@@ -24,9 +32,10 @@ const PLACEHOLDER_OPTIONS = [
 
 interface WelcomeCenterLayoutProps {
   greeting?: string;
-  onSubmit: (
-    data: { query: string; fileList?: UploadFile[] },
-  ) => void | Promise<void>;
+  onSubmit: (data: {
+    query: string;
+    fileList?: UploadFile[];
+  }) => void | Promise<void>;
   skillMentions?: SkillMentionsData;
   beforeSubmit?: () => Promise<boolean>;
 }
@@ -41,6 +50,8 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const [selectedCase, setSelectedCase] = useState<FeaturedCase | null>(null);
   const [randomPlaceholder, setRandomPlaceholder] = useState("");
   const [loadingCase, setLoadingCase] = useState(false);
+  const [mentionMenuContainer, setMentionMenuContainer] =
+    useState<HTMLDivElement | null>(null);
   const uploadRef = useRef<GetRef<typeof Upload>>(null);
   const inputValueRef = useRef(inputValue);
   const fileListRef = useRef(fileList);
@@ -68,6 +79,38 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     const randomIndex = Math.floor(Math.random() * PLACEHOLDER_OPTIONS.length);
     setRandomPlaceholder(PLACEHOLDER_OPTIONS[randomIndex]);
   }, []);
+
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatInputAppendTextPayload>).detail;
+      if (typeof detail?.content !== "string" || !detail.content) {
+        return;
+      }
+
+      setCurrentInputValue(
+        appendChatInputText(inputValueRef.current, detail.content),
+      );
+    };
+
+    const replaceHandler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatInputReplaceTextPayload>).detail;
+      if (typeof detail?.content !== "string" || !detail.content) {
+        return;
+      }
+
+      setCurrentInputValue(detail.content);
+    };
+
+    document.addEventListener(CHAT_INPUT_APPEND_TEXT_EVENT, handler);
+    document.addEventListener(CHAT_INPUT_REPLACE_TEXT_EVENT, replaceHandler);
+    return () => {
+      document.removeEventListener(CHAT_INPUT_APPEND_TEXT_EVENT, handler);
+      document.removeEventListener(
+        CHAT_INPUT_REPLACE_TEXT_EVENT,
+        replaceHandler,
+      );
+    };
+  }, [setCurrentInputValue]);
 
   const handleSend = useCallback(async () => {
     if (isSubmittingRef.current) return;
@@ -226,7 +269,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         <div className="welcome-greeting">{greeting}</div>
 
         {/* Input Card with upload */}
-        <div className="welcome-input-card">
+        <div className="welcome-input-card" ref={setMentionMenuContainer}>
           {/* Attachment preview area */}
           {fileList.length > 0 && (
             <div style={{ marginBottom: -8, marginTop: -8, marginLeft: -20 }}>
@@ -242,6 +285,8 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
               aria-label="消息"
               className="welcome-input-placeholder welcome-skill-editor"
               disabled={isSubmitting}
+              mentionMenuContainer={mentionMenuContainer}
+              mentionMenuPlacement="bottom"
               onKeyDown={handleKeyDown}
               onValueChange={setCurrentInputValue}
               placeholder={randomPlaceholder}
@@ -262,6 +307,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
           )}
           <div className="welcome-input-actions">
             <div className="welcome-input-actions-left">
+              <VoiceRecorderTrigger />
               <Tooltip title="上传附件">
                 <div>
                   <Upload

@@ -573,6 +573,41 @@ def test_update_statistics_config_returns_200(tmp_path):
     assert data["success"] is True
 
 
+def test_list_skills_reads_statistics_eligible_marketplace_skills(tmp_path):
+    """测试定时任务技能下拉列表读取统计白名单市场技能."""
+    app = _make_app(tmp_path)
+    app.state.marketplace.db.fetch_all.return_value = [
+        {
+            "skill_id": "skill_a",
+            "skill_name": "skill_a_name",
+            "cn_name": "技能A",
+        },
+    ]
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/market/skills/list",
+        json={"source_id": "src_a"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data == {
+        "source_id": "src_a",
+        "count": 1,
+        "skills": [
+            {
+                "skill_id": "skill_a",
+                "skill_name": "skill_a_name",
+                "cn_name": "技能A",
+            },
+        ],
+    }
+    sql = app.state.marketplace.db.fetch_all.call_args.args[0]
+    assert "FROM swe_marketplace_skills" in sql
+    assert "include_in_statistics = 1" in sql
+
+
 def test_update_statistics_config_non_manager_returns_403(tmp_path):
     """测试非管理员无法更新统计配置."""
     from market.marketplace.schemas import PublishSkillRequest

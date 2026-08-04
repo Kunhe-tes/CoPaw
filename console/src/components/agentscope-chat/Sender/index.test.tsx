@@ -93,6 +93,17 @@ describe("Sender skill mentions", () => {
     expect(screen.getByText("未找到匹配的上下文引用")).toBeInTheDocument();
   });
 
+  it("anchors the context-reference menu above the complete sender card", () => {
+    const { input } = renderSender();
+
+    setTokenEditorValue(input, "@");
+    const menu = document.getElementById("context-reference-menu");
+
+    expect(menu?.parentElement).toBe(input.closest(".sender"));
+    expect(menu).toHaveStyle({ bottom: "calc(100% + 8px)" });
+    expect(menu).not.toHaveStyle({ top: "calc(100% + 8px)" });
+  });
+
   it("submits an unmatched mention when Enter cannot select a skill", () => {
     const onSubmit = vi.fn();
     render(

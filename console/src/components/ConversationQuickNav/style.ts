@@ -18,6 +18,18 @@ export default createGlobalStyle`
   pointer-events: none;
 }
 
+.conversation-quick-nav--rail {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  flex: 0 0 48px;
+  width: 48px;
+  height: 100%;
+  align-items: center;
+  z-index: auto;
+}
+
 .conversation-quick-nav::before,
 .conversation-quick-nav::after {
   content: '';
@@ -27,6 +39,11 @@ export default createGlobalStyle`
   height: 14px;
   z-index: 1;
   pointer-events: none;
+}
+
+.conversation-quick-nav--rail::before,
+.conversation-quick-nav--rail::after {
+  display: none;
 }
 
 .conversation-quick-nav::before {
@@ -51,6 +68,14 @@ export default createGlobalStyle`
   scrollbar-color: transparent transparent;
   -ms-overflow-style: none;
   overscroll-behavior: contain;
+}
+
+.conversation-quick-nav--rail .conversation-quick-nav__scroll {
+  width: 100%;
+}
+
+.conversation-quick-nav--rail .conversation-quick-nav__items {
+  align-items: center;
 }
 
 .conversation-quick-nav__items {
@@ -110,6 +135,17 @@ export default createGlobalStyle`
 
 .quick-nav-overflow-hint--bottom {
   bottom: 4px;
+}
+
+.conversation-quick-nav--rail .quick-nav-overflow-hint {
+  right: 12px;
+  width: 24px;
+  padding: 0;
+  justify-content: center;
+}
+
+.conversation-quick-nav--rail .quick-nav-overflow-hint span {
+  display: none;
 }
 
 /* 当整个导航组件被hover时，所有横线都有宽度变化 */

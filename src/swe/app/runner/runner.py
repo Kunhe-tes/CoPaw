@@ -113,12 +113,12 @@ _APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
 _APPROVAL_DECISION_META_KEY = "approval_decision"
 _SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
 _TASK_SESSION_KIND = "task"
-_BEFORE_STOP_FOLLOW_UP_REASON_TEMPLATE = (
-    "BeforeStop completion gate blocked stopping: {reason}\n"
+_STOP_FOLLOW_UP_REASON_TEMPLATE = (
+    "Stop completion gate blocked stopping: {reason}\n"
     "Continue working until the gate can allow completion."
 )
-_BEFORE_STOP_INCOMPLETE_MESSAGE_TEMPLATE = (
-    "任务未完成：BeforeStop 完成门禁已达到自动续跑上限。最新阻断原因：{reason}"
+_STOP_INCOMPLETE_MESSAGE_TEMPLATE = (
+    "任务未完成：Stop 完成门禁未通过。最新阻断原因：{reason}"
 )
 _SKILL_FRESHNESS_NOTICE_HEADER = (
     "[Skill freshness notice]\n"
@@ -230,8 +230,8 @@ class _QueryTurnOutcome:
 
     task_completed: bool = True
     assistant_response: str = ""
-    before_stop_follow_up_turns: int = 0
-    max_before_stop_turns: int = 0
+    stop_follow_up_turns: int = 0
+    max_stop_turns: int = 0
     automatic_follow_up_turns: int = 0
     max_automatic_follow_up_turns: int = 0
     stop_hook_active: bool = False
@@ -1143,14 +1143,19 @@ def _extract_text_from_blocks(blocks: list) -> str:
     return "\n".join(texts) if texts else ""
 
 
-def _extract_assistant_response(agent: SWEAgent) -> str:
-    """从 agent memory 中提取最后的助手响应文本."""
+def _extract_assistant_response(
+    agent: SWEAgent,
+    *,
+    memory_start: int = 0,
+) -> str:
+    """从 agent memory 的当前 turn 中提取最后的助手响应文本."""
     if not agent or not hasattr(agent, "memory"):
         return ""
 
     try:
         # memory.content 是 list of (Msg, marks) tuples
-        for msg, _marks in reversed(agent.memory.content):
+        memory = agent.memory.content
+        for msg, _marks in reversed(memory[max(memory_start, 0) :]):
             if msg.role != "assistant" or not hasattr(msg, "content"):
                 continue
             # content 可能是 list of blocks 或 string
@@ -1181,22 +1186,22 @@ def _build_internal_follow_up_msg(follow_up_prompt: str) -> Msg:
     )
 
 
-def _build_before_stop_follow_up_msg(reason: str) -> Msg:
-    """构造 BeforeStop 阻断后的内部续跑指令。"""
+def _build_stop_follow_up_msg(reason: str) -> Msg:
+    """构造 Stop 阻断后的内部续跑指令。"""
     return _build_internal_follow_up_msg(
-        _BEFORE_STOP_FOLLOW_UP_REASON_TEMPLATE.format(
-            reason=(reason or "BeforeStop blocked completion").strip(),
+        _STOP_FOLLOW_UP_REASON_TEMPLATE.format(
+            reason=(reason or "Stop blocked completion").strip(),
         ),
     )
 
 
-def _build_before_stop_incomplete_msg(reason: str) -> Msg:
+def _build_stop_incomplete_msg(reason: str) -> Msg:
     """构造自动续跑预算耗尽后的显式未完成消息。"""
     return Msg(
         name="Friday",
         role="assistant",
-        content=_BEFORE_STOP_INCOMPLETE_MESSAGE_TEMPLATE.format(
-            reason=(reason or "BeforeStop blocked completion").strip(),
+        content=_STOP_INCOMPLETE_MESSAGE_TEMPLATE.format(
+            reason=(reason or "Stop blocked completion").strip(),
         ),
     )
 
@@ -1494,24 +1499,24 @@ def _refresh_session_skill_snapshot_entries(
     return changes
 
 
-def _resolve_max_before_stop_turns(agent_config: Any) -> int:
-    """解析 BeforeStop 自动续跑上限，未配置时使用保守默认值。"""
+def _resolve_max_stop_turns(agent_config: Any) -> int:
+    """解析 Stop 自动续跑上限，未配置时使用保守默认值。"""
     running_config = getattr(agent_config, "running", None)
     hook_runtime_config = getattr(running_config, "hook_runtime", None)
     configured_turns = getattr(
         hook_runtime_config,
-        "max_before_stop_turns",
+        "max_stop_turns",
         None,
     )
     if configured_turns is None:
         configured_turns = getattr(
             running_config,
-            "max_before_stop_turns",
+            "max_stop_turns",
             2,
         )
-    before_stop_turns = 2 if configured_turns is None else configured_turns
+    stop_turns = 2 if configured_turns is None else configured_turns
     try:
-        return max(int(before_stop_turns), 0)
+        return max(int(stop_turns), 0)
     except (TypeError, ValueError):
         return 2
 
@@ -1876,10 +1881,10 @@ def _has_automatic_follow_up_budget(outcome: _QueryTurnOutcome) -> bool:
     )
 
 
-def _should_before_stop_follow_up(outcome: _QueryTurnOutcome) -> bool:
-    """判断 BeforeStop 阻断后是否允许再自动续跑一次。"""
+def _should_stop_follow_up(outcome: _QueryTurnOutcome) -> bool:
+    """判断 Stop 阻断后是否允许再自动续跑一次。"""
     return bool(
-        outcome.before_stop_follow_up_turns < outcome.max_before_stop_turns
+        outcome.stop_follow_up_turns < outcome.max_stop_turns
         and _has_automatic_follow_up_budget(outcome),
     )
 
@@ -3276,14 +3281,16 @@ class AgentRunner(Runner):
     ):
         """流式执行当前 agent turn。"""
         turn_msgs = plan.turn_msgs
-        before_stop_turns = _resolve_max_before_stop_turns(
+        outcome.assistant_response = ""
+        memory_start = len(getattr(runtime.agent.memory, "content", []))
+        stop_turns = _resolve_max_stop_turns(
             runtime.agent_config,
         )
-        outcome.max_before_stop_turns = before_stop_turns
+        outcome.max_stop_turns = stop_turns
         outcome.max_automatic_follow_up_turns = (
             _resolve_max_automatic_follow_up_turns(
                 runtime.agent_config,
-                before_stop_turns,
+                stop_turns,
             )
         )
         reset_terminal_stop = getattr(
@@ -3334,10 +3341,11 @@ class AgentRunner(Runner):
 
         outcome.assistant_response = _extract_assistant_response(
             runtime.agent,
+            memory_start=memory_start,
         )
         outcome.task_completed = True
 
-    async def _emit_before_stop_hook_if_needed(
+    async def _emit_stop_hook_if_needed(
         self,
         *,
         request: AgentRequest,
@@ -3345,7 +3353,7 @@ class AgentRunner(Runner):
         plan: _TurnPlan,
         outcome: _QueryTurnOutcome,
     ) -> MergedHookResult | None:
-        """执行 BeforeStop gate，active guard 已设置时跳过递归触发。"""
+        """执行 Stop completion gate，active guard 已设置时跳过递归触发。"""
         if outcome.stop_hook_active:
             return None
         if not outcome.assistant_response:
@@ -3359,7 +3367,7 @@ class AgentRunner(Runner):
 
         outcome.stop_hook_active = True
         return await _emit_runner_hook(
-            HookEventName.BEFORE_STOP,
+            HookEventName.STOP,
             request=request,
             runner=self,
             tenant_hooks=runtime.tenant_hooks,
@@ -3378,7 +3386,7 @@ class AgentRunner(Runner):
         plan: _TurnPlan,
         outcome: _QueryTurnOutcome,
     ):
-        """执行 agent turn、BeforeStop gate 与最终 Stop hook 生命周期。"""
+        """执行 agent turn 与统一 Stop completion gate 生命周期。"""
         while True:
             outcome.stop_hook_active = False
             async for msg, last in self._stream_agent_turns(
@@ -3391,30 +3399,34 @@ class AgentRunner(Runner):
             if outcome.pre_tool_terminal_stop:
                 return
 
-            before_stop_result = await self._emit_before_stop_hook_if_needed(
+            stop_result = await self._emit_stop_hook_if_needed(
                 request=request,
                 runtime=runtime,
                 plan=plan,
                 outcome=outcome,
             )
             if (
-                before_stop_result is not None
-                and before_stop_result.decision == HookDecision.BLOCK
+                stop_result is not None
+                and stop_result.decision == HookDecision.BLOCK
             ):
                 reason = (
-                    before_stop_result.reason
-                    or "BeforeStop blocked completion"
-                )
-                if _should_before_stop_follow_up(outcome):
-                    outcome.before_stop_follow_up_turns += 1
+                    stop_result.blocking_failure_reason
+                    if stop_result.has_blocking_failure
+                    else stop_result.reason
+                ) or "Stop blocked completion"
+                if (
+                    not stop_result.has_blocking_failure
+                    and _should_stop_follow_up(outcome)
+                ):
+                    outcome.stop_follow_up_turns += 1
                     outcome.automatic_follow_up_turns += 1
-                    plan.turn_msgs = [_build_before_stop_follow_up_msg(reason)]
+                    plan.turn_msgs = [_build_stop_follow_up_msg(reason)]
                     outcome.stop_hook_active = False
                     logger.info(
-                        "BeforeStop scheduled automatic follow-up turn "
+                        "Stop scheduled automatic follow-up turn "
                         "%d/%d for session %s: %s",
-                        outcome.before_stop_follow_up_turns,
-                        outcome.max_before_stop_turns,
+                        outcome.stop_follow_up_turns,
+                        outcome.max_stop_turns,
                         runtime.session_id,
                         reason,
                     )
@@ -3425,69 +3437,12 @@ class AgentRunner(Runner):
                 outcome.completion_block_reason = reason
                 outcome.completion_marked_incomplete = True
                 outcome.stop_hook_active = False
-                incomplete_msg = _build_before_stop_incomplete_msg(reason)
+                incomplete_msg = _build_stop_incomplete_msg(reason)
                 await runtime.agent.memory.add(incomplete_msg)
                 yield incomplete_msg, True
                 return
-
-            if (
-                before_stop_result is not None
-                and before_stop_result.decision
-                in {
-                    HookDecision.DENY,
-                    HookDecision.STOP,
-                }
-            ):
-                outcome.task_completed = False
-                outcome.completion_blocked = True
-                outcome.completion_block_reason = before_stop_result.reason
-                outcome.stop_hook_active = False
-                yield _hook_block_message(before_stop_result), True
-                return
-
-            stop_response = await self._emit_stop_hook_if_needed(
-                request=request,
-                runtime=runtime,
-                plan=plan,
-                outcome=outcome,
-            )
             outcome.stop_hook_active = False
-            if stop_response is not None:
-                outcome.completion_blocked = True
-                outcome.completion_block_reason = (
-                    stop_response.get_text_content()
-                )
-                yield stop_response, True
             return
-
-    async def _emit_stop_hook_if_needed(
-        self,
-        *,
-        request: AgentRequest,
-        runtime: _QueryRuntime,
-        plan: _TurnPlan,
-        outcome: _QueryTurnOutcome,
-    ) -> Msg | None:
-        """执行 STOP hook，必要时把附加上下文写入 agent memory。"""
-        if not _hook_config_enabled(
-            runtime.tenant_hooks,
-            runtime.agent_config,
-            runtime.hook_overlay,
-        ):
-            return None
-
-        await _emit_runner_hook(
-            HookEventName.STOP,
-            request=request,
-            runner=self,
-            tenant_hooks=runtime.tenant_hooks,
-            agent_config=runtime.agent_config,
-            overlay=runtime.hook_overlay,
-            prompt=plan.original_user_message,
-            assistant_response=outcome.assistant_response,
-            agent=runtime.agent,
-        )
-        return None
 
     async def _generate_backend_suggestions_if_needed(
         self,
@@ -4293,7 +4248,7 @@ class AgentRunner(Runner):
         trace_id: str | None,
         skill_snapshot_to_persist: dict[str, dict[str, Any]] | None = None,
     ) -> None:
-        """BeforeStop 耗尽预算时仍需写入最终输出并结束 trace。"""
+        """Stop 耗尽预算时仍需写入最终输出并结束 trace。"""
         if outcome.pre_tool_terminal_stop:
             await self._end_trace_if_needed(
                 trace_id,

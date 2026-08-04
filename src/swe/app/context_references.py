@@ -508,10 +508,11 @@ class ContextReferenceDirectory:
                 return True
             return query_folded in item.label.casefold()
 
+        def limit_results(items: list[T]) -> list[T]:
+            return items if not query_folded else items[:MAX_RESULTS_PER_GROUP]
+
         return ContextReferencesResponse(
-            skills=[item for item in skills if matches(item)][
-                :MAX_RESULTS_PER_GROUP
-            ],
+            skills=limit_results([item for item in skills if matches(item)]),
             mcp_tools=[item for item in mcp_tools if matches(item)][
                 :MAX_RESULTS_PER_GROUP
             ],

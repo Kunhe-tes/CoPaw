@@ -16,6 +16,14 @@ import {
 } from "../hooks/followUpSubmit";
 import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
 import { useContextSelector } from "use-context-selector";
+import VoiceRecorderTrigger from "@/components/GlobalVoiceRecorder/VoiceRecorderTrigger";
+import {
+  appendChatInputText,
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+  type ChatInputAppendTextPayload,
+  type ChatInputReplaceTextPayload,
+} from "@/components/agentscope-chat/chatInputDraft";
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
 
@@ -26,9 +34,8 @@ export interface InputProps {
 
 export default function Input({ onCancel, onSubmit }: InputProps) {
   const [content, setContent, getContent] = useGetState("");
-  const restoredBizParamsRef = useRef<
-    IAgentScopeRuntimeWebUIInputData["biz_params"]
-  >(undefined);
+  const restoredBizParamsRef =
+    useRef<IAgentScopeRuntimeWebUIInputData["biz_params"]>(undefined);
   const prefixCls = useProviderContext().getPrefixCls("chat-anywhere-input");
   const senderOptions = useChatAnywhereOptions((v) => v.sender);
   const inputContext = useChatAnywhereInput((v) => v);
@@ -82,7 +89,10 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
 
       setContent(nextContent);
 
-      if (Object.prototype.hasOwnProperty.call(detail, "fileList") && setFileList) {
+      if (
+        Object.prototype.hasOwnProperty.call(detail, "fileList") &&
+        setFileList
+      ) {
         setFileList(detail.fileList || []);
       }
 
@@ -97,6 +107,42 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     return () =>
       document.removeEventListener(RUNTIME_INPUT_SET_CONTENT_EVENT, handler);
   }, [setContent, setFileList]);
+
+  useEffect(() => {
+    if (!hasMessages) {
+      return;
+    }
+
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatInputAppendTextPayload>).detail;
+      if (typeof detail?.content !== "string" || !detail.content) {
+        return;
+      }
+
+      restoredBizParamsRef.current = undefined;
+      setContent(appendChatInputText(getContent(), detail.content));
+    };
+
+    const replaceHandler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatInputReplaceTextPayload>).detail;
+      if (typeof detail?.content !== "string" || !detail.content) {
+        return;
+      }
+
+      restoredBizParamsRef.current = undefined;
+      setContent(detail.content);
+    };
+
+    document.addEventListener(CHAT_INPUT_APPEND_TEXT_EVENT, handler);
+    document.addEventListener(CHAT_INPUT_REPLACE_TEXT_EVENT, replaceHandler);
+    return () => {
+      document.removeEventListener(CHAT_INPUT_APPEND_TEXT_EVENT, handler);
+      document.removeEventListener(
+        CHAT_INPUT_REPLACE_TEXT_EVENT,
+        replaceHandler,
+      );
+    };
+  }, [getContent, hasMessages, setContent]);
 
   useEffect(() => {
     if (!handlePasteFile) {
@@ -138,7 +184,14 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
     if (setFileList) {
       setFileList([]);
     }
-  }, [beforeSubmit, getContent, getFileList, onSubmit, setContent, setFileList]);
+  }, [
+    beforeSubmit,
+    getContent,
+    getFileList,
+    onSubmit,
+    setContent,
+    setFileList,
+  ]);
 
   const handleCancel = useCallback(() => {
     onCancel();
@@ -146,7 +199,12 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
 
   return (
     <div className={prefixCls}>
-      <div className={`${prefixCls}-wrapper`} style={{ display: hasMessages || fileList.length > 0 ? "block" : "none" }}>
+      <div
+        className={`${prefixCls}-wrapper`}
+        style={{
+          display: hasMessages || fileList.length > 0 ? "block" : "none",
+        }}
+      >
         {beforeUI}
         <ChatInput
           loading={inputContext.loading}
@@ -155,6 +213,7 @@ export default function Input({ onCancel, onSubmit }: InputProps) {
           value={content}
           prefix={
             <>
+              <VoiceRecorderTrigger />
               {uploadIconButton}
               {prefix}
             </>

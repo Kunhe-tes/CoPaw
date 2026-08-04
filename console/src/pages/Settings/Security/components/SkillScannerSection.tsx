@@ -9,6 +9,7 @@ import {
   Tooltip,
   Empty,
   Tabs,
+  Alert,
 } from "@agentscope-ai/design";
 import { useAppMessage } from "../../../../hooks/useAppMessage";
 import { Select, Space } from "antd";
@@ -23,8 +24,6 @@ import type {
 } from "../../../../api/modules/security";
 import { mySkillsApi } from "../../../../api/modules/mySkills";
 import { useTheme } from "../../../../contexts/ThemeContext";
-import { useIframeStore } from "../../../../stores/iframeStore";
-import { DEFAULT_SOURCE_ID } from "../../../../constants/identity";
 import styles from "../index.module.less";
 
 function FindingsModal({
@@ -87,17 +86,24 @@ export function SkillScannerSection() {
   const { t } = useTranslation();
   const { isDark } = useTheme();
   const darkBtnStyle = isDark ? { color: "rgba(255,255,255,0.75)" } : undefined;
-  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const {
     config,
     blockedHistory,
     whitelist,
     loading,
+    historyLoading,
+    historyMutating,
+    historyError,
+    historyPage,
+    historyPageSize,
+    historyTotal,
     updateConfig,
     addToWhitelist,
     removeFromWhitelist,
     removeBlockedEntry,
     clearBlockedHistory,
+    fetchBlockedHistory,
+    setHistoryPagination,
   } = useSkillScanner();
 
   const { message } = useAppMessage();
@@ -116,7 +122,7 @@ export function SkillScannerSection() {
       else message.error(t("security.skillScanner.saveFailed"));
       setSaving(false);
     },
-    [updateConfig, t],
+    [message, updateConfig, t],
   );
 
   const [pendingTimeout, setPendingTimeout] = useState<number | null>(null);
@@ -133,19 +139,34 @@ export function SkillScannerSection() {
     else message.error(t("security.skillScanner.saveFailed"));
     setPendingTimeout(null);
     setSaving(false);
-  }, [pendingTimeout, updateConfig, t]);
+  }, [message, pendingTimeout, updateConfig, t]);
 
   const handleAllowSkill = useCallback(
-    async (record: BlockedSkillRecord, index: number) => {
+    async (record: BlockedSkillRecord) => {
       const ok = await addToWhitelist(record.skill_name, record.content_hash);
       if (ok) {
         message.success(t("security.skillScanner.whitelist.addSuccess"));
-        await removeBlockedEntry(index);
+        const removed = await removeBlockedEntry(record.id);
+        if (!removed) {
+          message.error(t("security.skillScanner.scanAlerts.removeFailed"));
+        }
       } else {
         message.error(t("security.skillScanner.whitelist.addFailed"));
       }
     },
-    [addToWhitelist, removeBlockedEntry, t],
+    [addToWhitelist, message, removeBlockedEntry, t],
+  );
+
+  const handleRemoveBlockedEntry = useCallback(
+    async (recordId: string) => {
+      const ok = await removeBlockedEntry(recordId);
+      if (ok) {
+        message.success(t("security.skillScanner.scanAlerts.removeSuccess"));
+      } else {
+        message.error(t("security.skillScanner.scanAlerts.removeFailed"));
+      }
+    },
+    [message, removeBlockedEntry, t],
   );
 
   const handleRemoveWhitelist = useCallback(
@@ -170,17 +191,22 @@ export function SkillScannerSection() {
         },
       });
     },
-    [removeFromWhitelist, t],
+    [message, removeFromWhitelist, t],
   );
 
   const handleClearHistory = useCallback(() => {
     Modal.confirm({
       title: t("security.skillScanner.scanAlerts.clearConfirm"),
       onOk: async () => {
-        await clearBlockedHistory();
+        const ok = await clearBlockedHistory();
+        if (ok) {
+          message.success(t("security.skillScanner.scanAlerts.clearSuccess"));
+        } else {
+          message.error(t("security.skillScanner.scanAlerts.clearFailed"));
+        }
       },
     });
-  }, [clearBlockedHistory, t]);
+  }, [clearBlockedHistory, message, t]);
 
   if (loading || !config) return null;
 
@@ -223,10 +249,11 @@ export function SkillScannerSection() {
       title: t("security.skillScanner.scanAlerts.actions"),
       key: "actions",
       width: 200,
-      render: (_: unknown, record: BlockedSkillRecord, index: number) => (
+      render: (_: unknown, record: BlockedSkillRecord) => (
         <Space size="small">
           <Tooltip title={t("security.skillScanner.scanAlerts.viewFindings")}>
             <Button
+              aria-label={t("security.skillScanner.scanAlerts.viewFindings")}
               type="text"
               size="middle"
               style={darkBtnStyle}
@@ -243,20 +270,24 @@ export function SkillScannerSection() {
           </Tooltip>
           <Tooltip title={t("security.skillScanner.scanAlerts.allowSkill")}>
             <Button
+              aria-label={t("security.skillScanner.scanAlerts.allowSkill")}
               type="text"
               size="middle"
               style={darkBtnStyle}
-              onClick={() => handleAllowSkill(record, index)}
+              disabled={historyMutating}
+              onClick={() => handleAllowSkill(record)}
             >
               <ShieldCheck size={14} />
             </Button>
           </Tooltip>
           <Tooltip title={t("security.skillScanner.scanAlerts.remove")}>
             <Button
+              aria-label={t("security.skillScanner.scanAlerts.remove")}
               type="text"
               size="middle"
               danger
-              onClick={() => removeBlockedEntry(index)}
+              disabled={historyMutating}
+              onClick={() => handleRemoveBlockedEntry(record.id)}
             >
               <Trash2 size={14} />
             </Button>
@@ -374,24 +405,44 @@ export function SkillScannerSection() {
             label: (
               <span>
                 {t("security.skillScanner.scanAlerts.title")}
-                {blockedHistory.length > 0 && (
-                  <span className={styles.tabBadge}>
-                    {blockedHistory.length}
-                  </span>
+                {historyTotal > 0 && (
+                  <span className={styles.tabBadge}>{historyTotal}</span>
                 )}
               </span>
             ),
             children: (
               <div className={styles.tabPanelContent}>
-                {blockedHistory.length > 0 && (
+                {historyTotal > 0 && (
                   <div className={styles.tabPanelHeader}>
-                    <Button size="small" danger onClick={handleClearHistory}>
+                    <Button
+                      aria-label={t(
+                        "security.skillScanner.scanAlerts.clearAll",
+                      )}
+                      size="small"
+                      danger
+                      loading={historyMutating}
+                      disabled={historyMutating}
+                      onClick={handleClearHistory}
+                    >
                       {t("security.skillScanner.scanAlerts.clearAll")}
                     </Button>
                   </div>
                 )}
                 <Card className={styles.tableCard}>
-                  {blockedHistory.length === 0 ? (
+                  {historyError ? (
+                    <Alert
+                      type="error"
+                      showIcon
+                      message={t("security.skillScanner.scanAlerts.loadFailed")}
+                      action={
+                        <Button size="small" onClick={fetchBlockedHistory}>
+                          {t("security.skillScanner.scanAlerts.retry")}
+                        </Button>
+                      }
+                    />
+                  ) : blockedHistory.length === 0 &&
+                    !historyLoading &&
+                    historyTotal === 0 ? (
                     <div className={styles.emptyState}>
                       <Empty
                         description={
@@ -405,11 +456,15 @@ export function SkillScannerSection() {
                     <Table
                       dataSource={blockedHistory}
                       columns={blockedColumns}
-                      rowKey={(_, idx) => String(idx)}
+                      rowKey="id"
+                      loading={historyLoading}
                       pagination={{
-                        defaultPageSize: 20,
+                        current: historyPage,
+                        pageSize: historyPageSize,
+                        total: historyTotal,
                         showSizeChanger: true,
-                        pageSizeOptions: ["20", "50", "100"],
+                        pageSizeOptions: ["10", "20", "50", "100"],
+                        onChange: setHistoryPagination,
                       }}
                       size="small"
                     />

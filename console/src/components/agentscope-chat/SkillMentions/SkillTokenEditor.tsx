@@ -6,6 +6,7 @@ import React, {
   useRef,
   useState,
 } from "react";
+import { createPortal } from "react-dom";
 import { SkillMentionMenu } from "./index";
 import {
   contextReferenceText,
@@ -45,6 +46,8 @@ export interface SkillTokenEditorProps
     "children" | "contentEditable" | "onChange" | "onInput" | "value"
   > {
   disabled?: boolean;
+  mentionMenuContainer?: HTMLElement | null;
+  mentionMenuPlacement?: "top" | "bottom";
   readOnly?: boolean;
   placeholder?: string;
   skillMentions: SkillMentionsData;
@@ -236,6 +239,8 @@ export const SkillTokenEditor = forwardRef<
     onCompositionStart,
     onValueChange,
     placeholder,
+    mentionMenuContainer,
+    mentionMenuPlacement = "top",
     readOnly = false,
     skillMentions,
     style,
@@ -263,6 +268,10 @@ export const SkillTokenEditor = forwardRef<
   });
   const closeMentionMenu = mentions.close;
   const mentionMenuOpen = mentions.open;
+  const menuPlacementStyle =
+    mentionMenuPlacement === "bottom"
+      ? { top: "calc(100% + 8px)" }
+      : { bottom: "calc(100% + 8px)" };
 
   useLayoutEffect(() => {
     const editor = editorRef.current;
@@ -289,13 +298,17 @@ export const SkillTokenEditor = forwardRef<
       return;
     }
     const closeWhenOutside = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
+      const target = event.target as Node;
+      if (
+        !rootRef.current?.contains(target) &&
+        !mentionMenuContainer?.contains(target)
+      ) {
         closeMentionMenu();
       }
     };
     document.addEventListener("mousedown", closeWhenOutside);
     return () => document.removeEventListener("mousedown", closeWhenOutside);
-  }, [closeMentionMenu, mentionMenuOpen]);
+  }, [closeMentionMenu, mentionMenuContainer, mentionMenuOpen]);
 
   const removeToken = (token: HTMLElement) => {
     const selectionIndex = Number(token.dataset.selectionIndex);
@@ -319,6 +332,30 @@ export const SkillTokenEditor = forwardRef<
     });
     onValueChange(nextParts.map((part) => part.value).join(""));
   };
+
+  const menu = mentionMenuOpen ? (
+    <div
+      id="context-reference-menu"
+      style={{
+        left: 0,
+        position: "absolute",
+        right: 0,
+        zIndex: 10,
+        ...menuPlacementStyle,
+      }}
+    >
+      <SkillMentionMenu
+        activeIndex={mentions.activeIndex}
+        error={skillMentions.error}
+        items={mentions.filteredItems}
+        loading={mentions.loading}
+        onRetry={skillMentions.onRetry}
+        open={mentions.open}
+        query={mentions.query}
+        onSelect={mentions.select}
+      />
+    </div>
+  ) : null;
 
   return (
     <div ref={rootRef} style={{ minWidth: 0, position: "relative" }}>
@@ -391,28 +428,7 @@ export const SkillTokenEditor = forwardRef<
           onKeyDown?.(event);
         }}
       />
-      <div
-        id="context-reference-menu"
-        style={{
-          bottom: "calc(100% + 3px)",
-          filter: "drop-shadow(0 5px 7px rgba(35, 31, 27, 0.06))",
-          left: 0,
-          position: "absolute",
-          right: 0,
-          zIndex: 10,
-        }}
-      >
-        <SkillMentionMenu
-          activeIndex={mentions.activeIndex}
-          error={skillMentions.error}
-          items={mentions.filteredItems}
-          loading={mentions.loading}
-          onRetry={skillMentions.onRetry}
-          open={mentions.open}
-          query={mentions.query}
-          onSelect={mentions.select}
-        />
-      </div>
+      {mentionMenuContainer ? createPortal(menu, mentionMenuContainer) : menu}
     </div>
   );
 });

@@ -20,6 +20,58 @@ _Avoid_: subagent creation
 The user-facing agent that owns global task understanding, user interaction, mode decisions, and final responses.
 _Avoid_: parent bot, orchestrator bot
 
+**Chat Checkpoint**:
+A Chat-scoped recoverable state container that identifies the current task and retains a compact index of earlier completed tasks in the same Chat. Starting an explicit new task replaces its current task; `/new` resets the Chat Checkpoint.
+_Avoid_: global task state, session summary, cross-chat checkpoint
+
+**Checkpoint Record**:
+The versioned, structured source of truth for a Chat Checkpoint. A Checkpoint Record distinguishes confirmed state from unresolved work and retains references to its supporting evidence.
+_Avoid_: free-form summary, model-only memory, untraceable state
+
+**Evidence Recovery**:
+The on-demand, Chat-scoped restoration of an original conversation or tool-result fragment identified by a Checkpoint Record. It adds only the evidence needed for the Current Task and does not replace the checkpoint state.
+_Avoid_: cross-chat history search, automatic full-history injection, summary reconstruction
+
+**Checkpoint Update**:
+The validated replacement of a Checkpoint Record from deterministic conversation facts and semantic task-state interpretation. It cannot discard evidence before the replacement record has passed validation.
+_Avoid_: markdown-only rewrite, unvalidated summarization, destructive compaction
+
+**Compaction Transaction**:
+The per-Chat operation that validates and durably installs a Checkpoint Update together with its archived source history. It either exposes a recoverable checkpoint or retains enough pending state to finish safely after recovery.
+_Avoid_: overwrite-in-place compaction, archive-without-state, lost concurrent event
+
+**Checkpoint Event Journal**:
+The ordered, append-only Chat-scoped record of deterministic events that occurred after the event sequence incorporated by the active Checkpoint Record. It preserves the current-state delta until a later Checkpoint Update incorporates it.
+_Avoid_: second free-form summary, mutable progress list, discarded pre-compaction event
+
+**Recent Event Delta**:
+The budget-bounded model-context projection of unincorporated entries from the Checkpoint Event Journal. It supplies current deterministic facts without duplicating the original interaction or becoming another semantic summary.
+_Avoid_: all event history, raw tool output duplication, per-turn resummarization
+
+**Context Budget Stage**:
+One of the ordered context-capacity states—Lightweight Governance, Active Compaction, or Emergency Degradation—that determines how a Chat Checkpoint and its online history are reduced before a model call.
+_Avoid_: single hard truncation threshold, post-overflow-only compaction
+
+**Proactive Incremental Compaction**:
+The asynchronous, non-blocking preparation and validation of a bounded Chat Checkpoint update before an Active Compaction threshold is reached. Its prepared candidate is installed only when its snapshot remains valid at an Active Compaction or Emergency Degradation threshold.
+_Avoid_: threshold-only bulk compaction, blocking reply-path compression, per-message full resummarization
+
+**Precompaction Candidate**:
+A validated but inactive Checkpoint Update derived from a stable Chat snapshot. It may be installed without another ReMe call only when its base record revision and event sequence remain valid.
+_Avoid_: stale summary cache, immediately active checkpoint, overwrite of newer events
+
+**Elastic Context Budget**:
+The allocatable capacity remaining after permanent context and model-output safety space are protected. Checkpoint projection, recent original interaction, and recovered evidence compete within it according to the Current Task rather than occupying fixed partitions.
+_Avoid_: fixed percentage partition, unused reserved context, unbounded recovery injection
+
+**Context Epoch**:
+The portion of a Chat's context history eligible for default model-context assembly after a `/new` or `/clear` boundary. Earlier epochs remain durable Chat evidence but require explicit user intent before they may be recovered.
+_Avoid_: automatic pre-reset recovery, physical deletion on context reset, cross-epoch default context
+
+**Task Transition**:
+The explicit change of the Current Task within a Chat Checkpoint. It occurs only when the user introduces an independent goal after completion, explicitly starts a new task, or resets the Chat; corrective and incremental requests remain part of the Current Task.
+_Avoid_: every user turn is a new task, inferred task split, destructive history reset
+
 **Agent Profile**:
 A tenant-owned runtime configuration and workspace identity for one runnable Agent. An **Agent Profile** is distinct from a **SubAgent Definition**, which is a versioned delegation worker description.
 _Avoid_: agent-level config, subagent profile, worker profile
@@ -692,11 +744,11 @@ The successful output produced by the current tool invocation for the active `Po
 _Avoid_: full tool result block, conversation snapshot, AgentScope acting return value
 
 **PreToolUse Terminal Stop**:
-A `PreToolUse` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}` and available to every handler type, that rejects the pending tool invocation and ends the current Main Agent turn without another model call. The first `stop` in handler order is authoritative and cannot be replaced by another decision or input update; handler failures and `failPolicy:block` never imply it. Its reason, or the stable fallback `Hook requested stop`, is always emitted and persisted as the turn's final assistant message while the failed tool result remains available for tool presentation and audit as `hook_stopped`. It blocks unstarted peer calls and requests best-effort cancellation of already-started peer calls; it does not promise rollback of external side effects. It bypasses later `BeforeStop` and `Stop` hooks. It is distinct from `deny` and `block`, which reject the invocation but allow the Main Agent to choose a different next action.
+A `PreToolUse` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}` and available to every handler type, that rejects the pending tool invocation and ends the current Main Agent turn without another model call. The first `stop` in handler order is authoritative and cannot be replaced by another decision or input update; handler failures and `failPolicy:block` never imply it. Its reason, or the stable fallback `Hook requested stop`, is always emitted and persisted as the turn's final assistant message while the failed tool result remains available for tool presentation and audit as `hook_stopped`. It blocks unstarted peer calls and requests best-effort cancellation of already-started peer calls; it does not promise rollback of external side effects. It bypasses the later `Stop` hook. It is distinct from `deny` and `block`, which reject the invocation but allow the Main Agent to choose a different next action.
 _Avoid_: terminal deny, blocked tool, cancelled session
 
 **PostTool Terminal Stop**:
-A `PostToolUse` or `PostToolUseFailure` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}`, that ends the current Main Agent turn after the tool outcome is known. It requests best-effort cancellation of unfinished peer calls while retaining completed outcomes and without promising external rollback. It records the completed tool outcome and post-hook context before the final assistant reason, then bypasses `BeforeStop` and `Stop` hooks. It does not rewrite the completed tool outcome; for a failed tool, it replaces propagation of the original tool exception while retaining that failure for presentation and audit. Hook failure, `failPolicy:block`, `deny`, and `block` never imply it. It is distinct from `deny` and `block`, which remain non-terminal for post-tool events.
+A `PostToolUse` or `PostToolUseFailure` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}`, that ends the current Main Agent turn after the tool outcome is known. It requests best-effort cancellation of unfinished peer calls while retaining completed outcomes and without promising external rollback. It records the completed tool outcome and post-hook context before the final assistant reason, then bypasses the `Stop` hook. It does not rewrite the completed tool outcome; for a failed tool, it replaces propagation of the original tool exception while retaining that failure for presentation and audit. Hook failure, `failPolicy:block`, `deny`, and `block` never imply it. It is distinct from `deny` and `block`, which remain non-terminal for post-tool events.
 _Avoid_: post-tool denial, tool rollback, completed session
 
 **Hook Conversation Snapshot**:
@@ -862,6 +914,14 @@ _Avoid_: logical chat session, UI session, conversation identity
 **Chat Record Last Updated Time**:
 The timestamp of the most recent persisted change to a **Chat Record**. It establishes recency when Chat Records are listed.
 _Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
+
+**Conversation Compaction Boundary**:
+The durable, user-visible separator within one **Chat Record** marking the point where automatic context compaction or an explicit `/compact` archived earlier messages. It appears immediately through a non-message stream event and is restored from the archive on reload; its archived-message count is the number of display-safe history messages, not rendered cards; it never represents `/new` or `/clear`.
+_Avoid_: history-clear marker, new-conversation marker, summary message
+
+**Conversation Compaction Archive**:
+The Chat-Record-scoped durable store of messages removed by **Conversation Compaction Boundaries**, with exactly one committed immutable message batch per boundary. Deleting its **Chat Record** permanently deletes this archive, while existing Logical Chat Session state follows its separate retention policy.
+_Avoid_: shared daily dialog file, chat transcript, session state
 
 ## Flagged Ambiguities
 
@@ -1355,6 +1415,28 @@ _Avoid_: unbounded MCP discovery, serial MCP lookup, timeout error row
 **Workspace File Index Capacity**:
 The maximum number of files retained in each source-root portion of a Workspace File filename index. `media` and `static` each retain at most 5,000 files, selecting the most recently modified files when their directory has more.
 _Avoid_: unbounded directory index, whole-directory search at request time, source-combined capacity limit
+
+## Stop Hook Language
+
+**Stop Hook**:
+The single completion lifecycle event for every candidate Assistant Response. Each configured handler runs once and may perform its own attempt-recording or notification work. Its merged decision approves or blocks completion.
+_Avoid_: BeforeStop hook, observation-only stop hook
+
+**Stop Decision**:
+The only valid completion decision from a Stop Hook: `allow` approves the candidate Assistant Response and `block` rejects that completion attempt. An explicit `block` may schedule a bounded automatic follow-up Agent turn; if any matched handler blocks, the merged decision blocks.
+_Avoid_: deny, stop, implicit retry
+
+**Stop Handler Failure**:
+An execution failure from a Stop Hook handler. With `failPolicy: block`, it ends the request as incomplete with the failure reason and never schedules an automatic follow-up; with `failPolicy: allow`, it is diagnostic only. Only an explicit Stop Decision of `block` may request another Agent turn.
+_Avoid_: retryable hook failure, silent completion failure
+
+**Stop Migration**:
+The non-compatible removal of the `BeforeStop` event. Configuration must use `Stop`; a residual `BeforeStop` configuration is invalid rather than silently translated.
+_Avoid_: BeforeStop compatibility alias, automatic event translation
+
+**Stop Trigger**:
+The boundary at which a normal candidate Assistant Response is about to complete a request. Tool-hook terminal-stop paths and turns without a candidate Assistant Response skip Stop.
+_Avoid_: tool termination audit, no-output completion hook
 
 ## Example Dialogue
 

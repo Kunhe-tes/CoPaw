@@ -1,5 +1,7 @@
 # Tool-Hook Terminal Stop Design
 
+> Historical design. Superseded in part by [ADR 0020](../../adr/0020-stop-is-the-unified-completion-hook.md): `BeforeStop` has been removed and `Stop` is the only completion gate.
+
 ## Goal
 
 Allow `PreToolUse`, `PostToolUse`, and `PostToolUseFailure` hook handlers to explicitly terminate the current Main Agent turn without closing the chat session or making another model call.
@@ -14,7 +16,7 @@ Only an explicit `stop` triggers terminal behavior. `deny`, `block`, handler fai
 
 `HookDecision.STOP` remains the strongest merged decision. For `PreToolUse`, the first stop in resolved handler order is authoritative: later decisions and `updatedInput` outputs cannot replace it. A stopped pre-tool call emits the normal failed tool-result presentation with `error_type: "hook_stopped"` and retains it in agent memory.
 
-The tool-call execution layer reports a terminal-stop signal to the turn runner. The runner treats that signal as a hard terminal outcome: it prevents any next agent-model turn, emits and persists the hook reason as the final assistant message, records the attempt as blocked, and skips `BeforeStop` and `Stop` hooks. When the reason is empty, the final message is `Hook requested stop`; `suppressOutput` never hides it.
+The tool-call execution layer reports a terminal-stop signal to the turn runner. The runner treats that signal as a hard terminal outcome: it prevents any next agent-model turn, emits and persists the hook reason as the final assistant message, records the attempt as blocked, and skips the `Stop` hook. When the reason is empty, the final message is `Hook requested stop`; `suppressOutput` never hides it.
 
 For parallel tool calls, the terminal signal prevents unstarted calls and requests cancellation of cancellable in-flight calls. Completion does not promise rollback of external side effects.
 

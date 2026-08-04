@@ -138,22 +138,38 @@ export function handleScanError(error: unknown, t: TFunction): boolean {
   return false;
 }
 
+/** Capture a server-side boundary without making the skill operation fail. */
+export async function captureScanWarningCursor(
+  fetchCursor: () => Promise<string>,
+): Promise<string | null> {
+  try {
+    return await fetchCursor();
+  } catch {
+    return null;
+  }
+}
+
 /**
  * After a successful operation, check if the scanner recorded any
  * warn-mode findings and show a warning modal if so.
  */
 export async function checkScanWarnings(
   skillName: string,
-  fetchAlerts: () => Promise<BlockedSkillRecord[]>,
+  since: string | null,
+  fetchLatestWarning: (
+    skillName: string,
+    since: string,
+  ) => Promise<BlockedSkillRecord | null>,
   fetchScannerCfg: () => Promise<SkillScannerConfig>,
   t: TFunction,
 ): Promise<void> {
+  if (!since) return;
   try {
-    const [alerts, scannerCfg] = await Promise.all([
-      fetchAlerts(),
+    const [latestForSkill, scannerCfg] = await Promise.all([
+      fetchLatestWarning(skillName, since),
       fetchScannerCfg(),
     ]);
-    if (!alerts.length) return;
+    if (!latestForSkill) return;
     if (
       scannerCfg?.whitelist?.some(
         (w: { skill_name: string }) => w.skill_name === skillName,
@@ -161,10 +177,6 @@ export async function checkScanWarnings(
     ) {
       return;
     }
-    const latestForSkill = alerts
-      .filter((a) => a.skill_name === skillName && a.action === "warned")
-      .pop();
-    if (!latestForSkill) return;
     showScanWarnModal(latestForSkill.findings || [], t);
   } catch {
     // best-effort; don't break the caller on failure

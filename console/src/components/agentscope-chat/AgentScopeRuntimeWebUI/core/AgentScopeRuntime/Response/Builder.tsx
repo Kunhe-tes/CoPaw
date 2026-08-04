@@ -18,7 +18,6 @@ import {
   mergeToolMessages,
 } from "./ToolMessageMerge";
 
-const LIVE_TOOL_OUTPUT_MAX_BYTES = 64 * 1024;
 const LIVE_TOOL_OUTPUT_MAX_LINES = 2000;
 const LIVE_TOOL_OUTPUT_OMISSION_TEXT = "\n[早期实时输出已省略]\n";
 
@@ -30,15 +29,19 @@ interface IToolOutputFrame {
   source: "stdout" | "stderr" | "message";
   text: string;
   truncated?: boolean;
+  budget_bytes?: number;
 }
 
-function trimLiveToolOutput(text: string) {
+function trimLiveToolOutput(text: string, budgetBytes?: number) {
   const encoded = new TextEncoder().encode(text);
   let next = text;
   let truncated = false;
 
-  if (encoded.length > LIVE_TOOL_OUTPUT_MAX_BYTES) {
-    const start = Math.max(0, encoded.length - LIVE_TOOL_OUTPUT_MAX_BYTES);
+  if (budgetBytes && encoded.length > budgetBytes) {
+    const markerBytes = new TextEncoder().encode(
+      LIVE_TOOL_OUTPUT_OMISSION_TEXT,
+    ).length;
+    const start = Math.max(0, encoded.length - (budgetBytes - markerBytes));
     next = new TextDecoder().decode(encoded.slice(start));
     truncated = true;
   }
@@ -49,8 +52,20 @@ function trimLiveToolOutput(text: string) {
     truncated = true;
   }
 
-  if (truncated && !next.startsWith(LIVE_TOOL_OUTPUT_OMISSION_TEXT)) {
-    next = `${LIVE_TOOL_OUTPUT_OMISSION_TEXT}${next}`;
+  if (truncated) {
+    if (budgetBytes) {
+      const markerBytes = new TextEncoder().encode(
+        LIVE_TOOL_OUTPUT_OMISSION_TEXT,
+      ).length;
+      const retainedBytes = Math.max(0, budgetBytes - markerBytes);
+      const textBytes = new TextEncoder().encode(next);
+      next = new TextDecoder().decode(
+        textBytes.slice(Math.max(0, textBytes.length - retainedBytes)),
+      );
+    }
+    if (!next.startsWith(LIVE_TOOL_OUTPUT_OMISSION_TEXT)) {
+      next = `${LIVE_TOOL_OUTPUT_OMISSION_TEXT}${next}`;
+    }
   }
 
   return {
@@ -203,7 +218,10 @@ class AgentScopeRuntimeResponseBuilder {
         typeof content.data.live_output === "string"
           ? content.data.live_output
           : "";
-      const trimmed = trimLiveToolOutput(`${currentText}${data.text}`);
+      const trimmed = trimLiveToolOutput(
+        `${currentText}${data.text}`,
+        data.budget_bytes,
+      );
       content.data.live_output = trimmed.text;
       content.data.live_output_truncated =
         Boolean(content.data.live_output_truncated) ||

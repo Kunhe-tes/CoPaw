@@ -10,6 +10,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WelcomeCenterLayout from "./index";
 import { chatApi } from "@/api/modules/chat";
+import {
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+} from "../chatInputDraft";
 
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => <span data-testid="attachment-icon" />,
@@ -107,6 +111,42 @@ describe("WelcomeCenterLayout", () => {
     });
   });
 
+  it("appends transcribed text to the welcome draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={onSubmit} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "已有草稿" } });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_APPEND_TEXT_EVENT, {
+        detail: { content: "语音转写" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(input).toHaveValue("已有草稿\n语音转写");
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("replaces the welcome draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={onSubmit} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "需要清空的原草稿" } });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_REPLACE_TEXT_EVENT, {
+        detail: { content: "完整 SOP 提示词" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(input).toHaveValue("完整 SOP 提示词");
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
   it("opens the shared labelled skill menu and selects a matching skill by click", () => {
     const onChange = vi.fn();
 
@@ -133,6 +173,35 @@ describe("WelcomeCenterLayout", () => {
 
     expect(onChange).toHaveBeenCalledWith([skills[0]]);
     expect(input.textContent).toBe("请用 @browser ");
+  });
+
+  it("anchors the context-reference menu below the complete new-conversation card", () => {
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "@");
+    const menu = document.getElementById("context-reference-menu");
+
+    expect(menu?.parentElement).toBe(
+      input.closest(".welcome-input-card"),
+    );
+    expect(menu).toHaveStyle({
+      top: "calc(100% + 8px)",
+    });
+    expect(menu).not.toHaveStyle({
+      bottom: "calc(100% + 8px)",
+    });
   });
 
   it("selects a matching skill with Enter without submitting", () => {

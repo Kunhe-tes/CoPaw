@@ -10,6 +10,7 @@ import {
 } from "@/components/agentscope-chat";
 import AgentScopeRuntimeRequestCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card";
 import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card";
+import ConversationCompactionBoundary from "./components/ConversationCompactionBoundary";
 // ==================== 组件引入方式变更结束 ====================
 import {
   useCallback,
@@ -147,6 +148,8 @@ import {
   type ChatTaskProgressUpdateDetail,
 } from "./taskProgressEvents";
 import { isChatTaskProgressEnabled } from "./taskProgressConfig";
+import GlobalVoiceRecorder from "@/components/GlobalVoiceRecorder";
+import { shouldShowGlobalVoiceRecorder } from "@/components/GlobalVoiceRecorder/presentation";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
@@ -159,6 +162,7 @@ function useExternalApprovalResolvedRefresh() {
 }
 
 const chatCardRenderers = {
+  ConversationCompactionBoundary,
   AgentScopeRuntimeRequestCard: (props: {
     data: ChatRuntimeRequestCardData;
   }) => <RuntimeRequestCard {...props} />,
@@ -505,6 +509,9 @@ export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
+  const [isOriginY] = useState(
+    () => new URLSearchParams(location.search).get("origin") === "Y",
+  );
   const { isDark } = useTheme();
   const showContentOnly = useChatPresentationStore(
     (state) => state.showContentOnly,
@@ -877,6 +884,11 @@ export default function ChatPage() {
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const feedbackUserId = useIframeStore((state) => state.userId);
+  const voiceRecorderEnabled = shouldShowGlobalVoiceRecorder(
+    feedbackUserId,
+    showContentOnly,
+    isOriginY,
+  );
   const skipPreviewTracking = useIframeStore(
     (state) => state.skipPreviewTracking,
   );
@@ -1863,16 +1875,24 @@ export default function ChatPage() {
                 onDragOver={isContentOnly ? undefined : handleDragOver}
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
-                <ChatContentOnlyProvider enabled={isContentOnly}>
-                  <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                </ChatContentOnlyProvider>
+                <div className={styles.chatMessagesLayout}>
+                  <div className={styles.chatMessagesViewport}>
+                    <ChatContentOnlyProvider enabled={isContentOnly}>
+                      <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                        <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                      </GlobalVoiceRecorder>
+                    </ChatContentOnlyProvider>
+                  </div>
+                  <div className={styles.chatQuickNavRail}>
+                    <ConversationQuickNav placement="rail" />
+                  </div>
+                </div>
                 {!isContentOnly && (
                   <DragUploadOverlay
                     visible={isDragging}
                     onClose={handleDragOverlayClose}
                   />
                 )}
-                <ConversationQuickNav />
               </div>
             </div>
           </AutoPreviewHtmlProvider>

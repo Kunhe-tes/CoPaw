@@ -98,6 +98,50 @@ class TestMarketSkillRegistry:
 
         assert result == {"skill1", "skill2"}
 
+    async def test_list_statistics_eligible_unique_skills_by_source_id(self):
+        """测试获取纳入统计的技能下拉选项."""
+        db = MagicMock()
+        db.is_connected = True
+        db.fetch_all = AsyncMock(
+            return_value=[
+                {
+                    "skill_id": "skill_a",
+                    "skill_name": "skill_a_name",
+                    "cn_name": "技能A",
+                },
+                {
+                    "skill_id": "skill_b",
+                    "skill_name": "skill_b_name",
+                    "cn_name": "技能B",
+                },
+            ],
+        )
+
+        registry = MarketSkillRegistry(db)
+        result = (
+            await registry.list_statistics_eligible_unique_skills_by_source_id(
+                "test_source",
+            )
+        )
+
+        assert result == [
+            {
+                "skill_id": "skill_a",
+                "skill_name": "skill_a_name",
+                "cn_name": "技能A",
+            },
+            {
+                "skill_id": "skill_b",
+                "skill_name": "skill_b_name",
+                "cn_name": "技能B",
+            },
+        ]
+        sql = db.fetch_all.call_args.args[0]
+        assert "FROM swe_marketplace_skills" in sql
+        assert "include_in_statistics = 1" in sql
+        assert "GROUP BY skill_id" in sql
+        assert db.fetch_all.call_args.args[1] == ("test_source",)
+
     async def test_database_not_connected(self):
         """测试数据库未连接时的处理."""
         db = MagicMock()

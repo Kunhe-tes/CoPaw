@@ -25,6 +25,8 @@ import {
 } from "./abortReasons";
 import { emit } from "../../Context/useChatAnywhereEventEmitter";
 
+export const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
+
 interface UseChatRequestOptions {
   currentQARef: CurrentQARef;
   updateMessage: (message: IAgentScopeRuntimeWebUIMessage) => void;
@@ -96,6 +98,25 @@ function getSessionTitlePatch(data: unknown) {
     session_id: sessionId,
     session_title: sessionTitle,
   };
+}
+
+function getConversationCompaction(data: unknown) {
+  if (!data || typeof data !== "object") return undefined;
+  const frame = data as {
+    object?: unknown;
+    chat_id?: unknown;
+    boundary?: unknown;
+  };
+  if (
+    frame.object !== CONVERSATION_COMPACTION_EVENT ||
+    typeof frame.chat_id !== "string" ||
+    !frame.chat_id ||
+    !frame.boundary ||
+    typeof frame.boundary !== "object"
+  ) {
+    return undefined;
+  }
+  return { chat_id: frame.chat_id, boundary: frame.boundary };
 }
 
 /**
@@ -362,6 +383,15 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           const responseParser =
             apiOptionsRef.current.responseParser || JSON.parse;
           const chunkData = responseParser(chunk.data);
+
+          const compaction = getConversationCompaction(chunkData);
+          if (compaction) {
+            if (!isOwnerActive() || compaction.chat_id !== owner.chatId) {
+              return;
+            }
+            emit({ type: CONVERSATION_COMPACTION_EVENT, data: compaction });
+            continue;
+          }
 
           // 标题生成帧不依赖当前请求归属，切会话后也要同步本地标题。
           const sessionTitlePatch = getSessionTitlePatch(chunkData);

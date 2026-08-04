@@ -211,16 +211,17 @@ def test_handler_conversation_snapshot_limit_is_bounded() -> None:
         )
 
 
-def test_before_stop_is_blockable_and_accepts_prompt_handlers() -> None:
-    assert HookEventName.BEFORE_STOP.value == "BeforeStop"
-    assert HookEventName.BEFORE_STOP in PROMPT_HANDLER_BLOCKABLE_EVENTS
+def test_stop_is_blockable_and_before_stop_is_rejected() -> None:
+    assert HookEventName.STOP in PROMPT_HANDLER_BLOCKABLE_EVENTS
+    with pytest.raises(ValueError, match="BeforeStop"):
+        HookEventName("BeforeStop")
 
     config = HookConfig(
         enabled=True,
         events={
-            HookEventName.BEFORE_STOP: [
+            HookEventName.STOP: [
                 HookMatcherGroupConfig(
-                    id="before-stop-policy",
+                    id="stop-policy",
                     hooks=[
                         _prompt_handler(
                             "policy",
@@ -232,9 +233,7 @@ def test_before_stop_is_blockable_and_accepts_prompt_handlers() -> None:
         },
     )
 
-    assert config.events[HookEventName.BEFORE_STOP][0].hooks[0].type == (
-        "prompt"
-    )
+    assert config.events[HookEventName.STOP][0].hooks[0].type == ("prompt")
 
 
 @pytest.mark.parametrize(
@@ -266,13 +265,13 @@ def test_post_tool_events_accept_prompt_handlers(
     assert config.events[event_name][0].hooks[0].type == "prompt"
 
 
-def test_resolver_loads_before_stop_prompt_handlers_from_all_levels() -> None:
+def test_resolver_loads_stop_prompt_handlers_from_all_levels() -> None:
     tenant = HookConfig(
         enabled=True,
         events={
-            HookEventName.BEFORE_STOP: [
+            HookEventName.STOP: [
                 HookMatcherGroupConfig(
-                    id="tenant-before-stop",
+                    id="tenant-stop",
                     hooks=[_prompt_handler("tenant-policy", "tenant")],
                 ),
             ],
@@ -281,9 +280,9 @@ def test_resolver_loads_before_stop_prompt_handlers_from_all_levels() -> None:
     agent = HookConfig(
         enabled=True,
         events={
-            HookEventName.BEFORE_STOP: [
+            HookEventName.STOP: [
                 HookMatcherGroupConfig(
-                    id="agent-before-stop",
+                    id="agent-stop",
                     hooks=[_prompt_handler("agent-policy", "agent")],
                 ),
             ],
@@ -299,9 +298,9 @@ def test_resolver_loads_before_stop_prompt_handlers_from_all_levels() -> None:
                 hook_config=HookConfig(
                     enabled=True,
                     events={
-                        HookEventName.BEFORE_STOP: [
+                        HookEventName.STOP: [
                             HookMatcherGroupConfig(
-                                id="skill:qa:before-stop",
+                                id="skill:qa:stop",
                                 hooks=[
                                     _prompt_handler(
                                         "skill:qa:policy",
@@ -322,7 +321,7 @@ def test_resolver_loads_before_stop_prompt_handlers_from_all_levels() -> None:
         session_overlay=state,
     ).resolve_event_plan(
         _context(
-            HookEventName.BEFORE_STOP,
+            HookEventName.STOP,
             prompt="原始提示词",
             assistant_response="候选回复",
         ),

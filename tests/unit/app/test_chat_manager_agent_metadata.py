@@ -1,9 +1,12 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from agentscope.message import Msg
+
 from src.swe.app.runner.manager import ChatManager
 from src.swe.app.runner.models import ChatSpec, ChatsFile
 from src.swe.app.runner.repo import BaseChatRepository
+from swe.agents.memory.conversation_archive import ConversationArchiveStore
 
 
 class _InMemoryChatRepo(BaseChatRepository):
@@ -157,3 +160,27 @@ async def test_update_chat_name_merges_title_metadata() -> None:
         "agent_id": "agent-a",
         "session_title_generated": True,
     }
+
+
+async def test_delete_chats_removes_the_chat_scoped_archive(tmp_path) -> None:
+    repo = _InMemoryChatRepo()
+    archive_store = ConversationArchiveStore(
+        tmp_path / "dialog",
+        cursor_secret=b"test-cursor-secret",
+    )
+    manager = ChatManager(repo=repo, archive_store=archive_store)
+    chat = await manager.get_or_create_chat("session-1", "user-1")
+    await archive_store.commit(
+        chat.id,
+        [
+            Msg(
+                name="user",
+                role="user",
+                content="archived",
+            ),
+        ],
+    )
+
+    assert await manager.delete_chats([chat.id]) is True
+    assert await repo.get_chat(chat.id) is None
+    assert not archive_store.path_for(chat.id).exists()
