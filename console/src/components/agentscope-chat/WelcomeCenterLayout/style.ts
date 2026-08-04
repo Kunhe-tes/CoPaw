@@ -17,7 +17,7 @@ export default createGlobalStyle`
 
 .welcome-greeting {
   font-size: 22px;
-  font-weight: 500;
+  font-weight: 600;
   color: ${DESIGN_TOKENS.colorTextDark};
   line-height: 33px;
   margin-bottom: 40px;
@@ -81,7 +81,7 @@ export default createGlobalStyle`
 .welcome-input-send-btn {
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: 50%;
   background-color: ${DESIGN_TOKENS.colorPrimary};
   border: none;
   cursor: pointer;
