@@ -398,13 +398,44 @@ class ContextCompactConfig(BaseModel):
         description="Whether to enable automatic context compaction",
     )
 
-    memory_compact_ratio: float = Field(
-        default=0.75,
-        ge=0.3,
-        le=0.9,
+    lightweight_governance_ratio: float = Field(
+        default=0.65,
+        ge=0.30,
+        le=0.79,
         description=(
-            "Compaction trigger threshold ratio: compaction is triggered when "
-            "the context length reaches this fraction of max_input_length"
+            "Start asynchronously preparing checkpoint-compaction candidates "
+            "when context usage reaches this fraction of max_input_length"
+        ),
+    )
+
+    precompaction_step_ratio: float = Field(
+        default=0.05,
+        ge=0.01,
+        le=0.20,
+        description=(
+            "Prepare at most one newer checkpoint-compaction candidate for "
+            "each additional fraction of max_input_length consumed"
+        ),
+    )
+
+    memory_compact_ratio: float = Field(
+        default=0.80,
+        ge=0.31,
+        le=0.89,
+        description=(
+            "Active compaction threshold ratio: install a valid prepared "
+            "candidate or compact when context reaches this fraction of "
+            "max_input_length"
+        ),
+    )
+
+    emergency_compact_ratio: float = Field(
+        default=0.90,
+        ge=0.32,
+        le=0.95,
+        description=(
+            "Emergency degradation threshold ratio: preferentially install a "
+            "valid prepared candidate before deterministic fallback compaction"
         ),
     )
 
@@ -422,6 +453,19 @@ class ContextCompactConfig(BaseModel):
         default=True,
         description="Whether to include thinking blocks when compacting",
     )
+
+    @model_validator(mode="after")
+    def validate_context_compact_stages(self) -> "ContextCompactConfig":
+        """Require the ordered lightweight, active, and emergency stages."""
+        if not (
+            self.lightweight_governance_ratio
+            < self.memory_compact_ratio
+            < self.emergency_compact_ratio
+        ):
+            raise ValueError(
+                "lightweight, active, and emergency ratios must increase",
+            )
+        return self
 
 
 class ToolResultCompactConfig(BaseModel):
