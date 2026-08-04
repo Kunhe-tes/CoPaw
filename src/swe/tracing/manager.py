@@ -604,23 +604,6 @@ class TraceManager:
             # Attach to context
             ctx.set_skill_detector(detector, enabled_skills)
 
-            # Layer 0: Detect skill from user message
-            if ctx.trace and ctx.trace.user_message:
-                skill, confidence = detector.detect_from_user_message(
-                    ctx.trace.user_message,
-                )
-                if skill:
-                    logger.info(
-                        "Layer 0 result: skill='%s', confidence=%.2f",
-                        skill,
-                        confidence,
-                    )
-                if skill and confidence < 0.7:
-                    logger.info(
-                        "Skill detected but confidence too low: '%s' (confidence: %.2f < 0.5)",
-                        skill,
-                        confidence,
-                    )
         except Exception as e:
             logger.warning("Failed to setup skill detector: %s", e)
 

@@ -130,6 +130,20 @@ class CommandHandler(ConversationCommandHandlerMixin):
         request_context = getattr(self, "_request_context", {}) or {}
         return str(request_context.get("session_id") or "").strip() or None
 
+    async def _reset_checkpoint_epoch(self, reason: str) -> None:
+        """Reset Chat checkpoint state when a command starts fresh context."""
+        if not self._has_memory_manager():
+            return
+        chat_id = str(
+            (getattr(self, "_request_context", {}) or {}).get("chat_id") or "",
+        )
+        if not chat_id:
+            return
+        await self.memory_manager.reset_context_epoch(
+            chat_id=chat_id,
+            reason=reason,
+        )
+
     async def _process_compact(
         self,
         messages: list[Msg],
@@ -199,6 +213,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
     async def _process_new(self, messages: list[Msg], _args: str = "") -> Msg:
         """Process /new command."""
         if not messages:
+            await self._reset_checkpoint_epoch("new")
             self.memory.clear_compressed_summary()
             return await self._make_system_msg(
                 "**No messages to summarize.**\n\n"
@@ -219,6 +234,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
             formatter=self.formatter,
             scope_id=self._summary_task_scope_id(),
         )
+        await self._reset_checkpoint_epoch("new")
         self.memory.clear_compressed_summary()
 
         self.memory.clear_content()
@@ -234,6 +250,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
         _args: str = "",
     ) -> Msg:
         """Process /clear command."""
+        await self._reset_checkpoint_epoch("clear")
         self.memory.clear_content()
         self.memory.clear_compressed_summary()
         return await self._make_system_msg(
