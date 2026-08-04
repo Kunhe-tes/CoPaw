@@ -62,11 +62,13 @@ vi.mock("@/components/agentscope-chat", () => ({
           items,
           onReachStart,
           onBottomStateChange,
+          pagination,
           topContent,
         }: {
           items: unknown[];
           onReachStart?: () => void;
           onBottomStateChange?: (isAtBottom: boolean) => void;
+          pagination?: boolean;
           topContent?: React.ReactNode;
         },
         ref,
@@ -79,6 +81,7 @@ vi.mock("@/components/agentscope-chat", () => ({
         return (
           <div
             data-testid="bubble-list"
+            data-pagination={String(pagination)}
             onPointerMove={onReachStart}
             ref={(element) => {
               scrollRef.current = element;
@@ -246,6 +249,21 @@ describe("MessageList content-only composition", () => {
     );
 
     expect(screen.getByTestId("bubble-list")).toHaveTextContent("1");
+  });
+
+  it("uses cursor history paging instead of BubbleList's local pagination", () => {
+    mocks.messages = [{ id: "online-message", history: true }];
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    expect(screen.getByTestId("bubble-list")).toHaveAttribute(
+      "data-pagination",
+      "false",
+    );
   });
 
   it("does not request archived history until normal scrolling enters the preload range", async () => {

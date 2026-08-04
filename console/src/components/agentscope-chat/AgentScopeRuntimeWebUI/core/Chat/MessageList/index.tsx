@@ -8,7 +8,6 @@ import { useContextSelector } from "use-context-selector";
 import { ChatAnywhereSessionsContext } from "../../Context/ChatAnywhereSessionsContext";
 import cls from "classnames";
 import Welcome from "../Welcome";
-import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 import React from "react";
 import { Result, Spin } from "antd";
 import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
@@ -70,7 +69,6 @@ export default function MessageList(props: {
     ChatAnywhereSessionsContext,
     (v) => v.sessionNotFound,
   );
-  const bubbleListOptions = useChatAnywhereOptions((v) => v.theme?.bubbleList);
   const listRef = React.useRef<{
     scrollToBottom: () => void;
     getScrollElement: () => HTMLDivElement | null;
@@ -308,7 +306,7 @@ export default function MessageList(props: {
   return (
     <Bubble.List
       ref={listRef}
-      pagination={bubbleListOptions?.pagination ?? true}
+      pagination={false}
       order="desc"
       key={currentSessionId}
       classNames={{
