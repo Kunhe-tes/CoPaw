@@ -1354,20 +1354,13 @@ class SkillInvocationDetector:
             trigger_reason: How the skill was detected
             confidence: Attribution confidence
         """
-        # Get skill description - prefer cached manifest, fallback to SKILL.md
-        skill_description = self.get_skill_description(skill_name)
-
-        # Get skill_id and cn_name from cache
+        # Get skill_id from cache; description is read by tracing only if needed
         skill_id = self._skill_ids.get(skill_name)
-        cn_name = self._skill_cn_names.get(skill_name)
 
-        # Debug log for skill_id and cn_name
         logger.debug(
-            "start_skill: skill_name=%s, skill_id=%s, cn_name=%s, description=%s",
+            "start_skill: skill_name=%s, skill_id=%s",
             skill_name,
             skill_id,
-            cn_name,
-            skill_description[:50] if skill_description else None,
         )
         # Emit tracing event first to get span_id
         span_id = None
@@ -1388,8 +1381,6 @@ class SkillInvocationDetector:
                     user_name=self._user_name,
                     bbk_id=self._bbk_id,
                     skill_id=skill_id,
-                    skill_cn_name=cn_name,
-                    skill_description=skill_description,
                 )
             except Exception as e:
                 logger.warning("Failed to emit skill start event: %s", e)

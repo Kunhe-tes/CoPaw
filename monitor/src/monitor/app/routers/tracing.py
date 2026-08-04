@@ -33,9 +33,12 @@ from ..models.tracing import (
     ExtractCustomerNamesResponse,
     InputTokensMismatchItem,
     InputTokensFixItem,
+    InitSpanSkillIdRequest,
+    InitSpanSkillIdResponse,
 )
 from ..services.tracing import TracingQueryService, TracingExportService
 from ..services.tracing.extract_service import ExtractCustomerNamesService
+from ..services.tracing.skill_id_initializer import SkillIdInitializer
 from ..database import get_es_client, get_db_connection
 from ...config.constant import USER_INFO_API_URL
 
@@ -1551,6 +1554,60 @@ async def extract_customer_names(
         raise HTTPException(
             status_code=500,
             detail=f"Failed to extract customer names: {e}",
+        ) from e
+
+
+# ===== 历史 span skill_id 初始化 =====
+
+
+@router.post(
+    "/admin/spans/init-skill-id",
+    response_model=InitSpanSkillIdResponse,
+    summary="初始化历史 span 的 skill_id",
+    description=(
+        "按 source_id + skill_name 从 swe_skills 匹配并回填 "
+        "swe_tracing_spans.skill_id。同一 (source_id, skill_name) 在 "
+        "swe_skills 存在多个候选时按 cn_name 非空、enabled=1、updated_at DESC、"
+        "id DESC 稳定选择一个 skill_id 写入；接口幂等，仅处理 skill_id 为空的"
+        "记录。服务内部按 start_time + span_id 复合游标自动分批扫描，单次请求会"
+        "持续处理到没有剩余记录。dry_run=true 时仅统计，不写库。"
+    ),
+)
+async def init_span_skill_id(
+    body: InitSpanSkillIdRequest,
+) -> InitSpanSkillIdResponse:
+    """初始化历史 span 的 skill_id.
+
+    仅在以下条件同时满足时回写 span.skill_id：
+    - swe_tracing_spans.skill_id 为空
+    - swe_skills 中存在与该 (source_id, skill_name) 对应的候选
+    - 多个候选时按稳定优先级选出一个 skill_id
+
+    Args:
+        body: 初始化请求参数（source_id、batch_size、dry_run）
+
+    Returns:
+        初始化结果统计
+
+    Raises:
+        HTTPException: dry_run=false 时如出现数据库异常，返回 500
+    """
+    try:
+        db = get_db_connection()
+        initializer = SkillIdInitializer(db=db)
+        result = await initializer.initialize(
+            source_id=body.source_id,
+            batch_size=body.batch_size,
+            dry_run=body.dry_run,
+        )
+        return InitSpanSkillIdResponse(**result.to_dict())
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error("Failed to init span skill_id: %s", e)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to init span skill_id: {e}",
         ) from e
 
 

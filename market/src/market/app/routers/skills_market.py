@@ -1455,12 +1455,16 @@ async def init_swe_skills(
         results["total_users"] += len(tenant_dirs)
 
         for tenant_dir in tenant_dirs:
-            manifest_before = _dump_workspace_manifests(tenant_dir)
+            manifest_before = _dump_workspace_manifests_for_log(tenant_dir)
             logger.info(
                 "manifest 之前: tenant=%s, source_id=%s, content=%s",
                 tenant_dir.name,
                 source_id,
-                manifest_before,
+                json.dumps(
+                    manifest_before,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
             )
             try:
                 result = await process_tenant_skills(
@@ -1489,12 +1493,16 @@ async def init_swe_skills(
                     },
                 )
             else:
-                manifest_after = _dump_workspace_manifests(tenant_dir)
+                manifest_after = _dump_workspace_manifests_for_log(tenant_dir)
                 logger.info(
                     "manifest 之后: tenant=%s, source_id=%s, content=%s",
                     tenant_dir.name,
                     source_id,
-                    manifest_after,
+                    json.dumps(
+                        manifest_after,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
                 )
 
     logger.info(
@@ -1532,6 +1540,17 @@ def _dump_workspace_manifests(tenant_dir: Path) -> dict[str, object]:
             )
         except json.JSONDecodeError as exc:
             manifests[ws_dir.name] = {"_error": f"manifest 解析失败: {exc}"}
+    return manifests
+
+
+def _dump_workspace_manifests_for_log(tenant_dir: Path) -> object:
+    """生成适合直接写入日志的 manifest 内容。
+
+    只有一个 workspace 时，直接展开其 skill.json 内容，避免多包一层 workspace 名。
+    """
+    manifests = _dump_workspace_manifests(tenant_dir)
+    if len(manifests) == 1:
+        return next(iter(manifests.values()))
     return manifests
 
 

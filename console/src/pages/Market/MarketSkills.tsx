@@ -45,6 +45,16 @@ interface MarketSkillsProps {
   isManager: boolean;
 }
 
+export function matchesMarketSkillSearch(skill: MarketSkill, query: string): boolean {
+  const normalizedQuery = query.trim().toLowerCase();
+  return (
+    skill.name.toLowerCase().includes(normalizedQuery) ||
+    (skill.chinese_name?.toLowerCase().includes(normalizedQuery) ?? false) ||
+    (skill.description?.toLowerCase().includes(normalizedQuery) ?? false) ||
+    (skill.creator_name?.toLowerCase().includes(normalizedQuery) ?? false)
+  );
+}
+
 export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
   const {
     categories,
@@ -260,12 +270,7 @@ export function MarketSkills({ sourceId, isManager }: MarketSkillsProps) {
 
   // 过滤技能列表
   const filteredSkills = skills.filter((skill) => {
-    const query = searchQuery.toLowerCase();
-    return (
-      skill.name.toLowerCase().includes(query) ||
-      (skill.description?.toLowerCase().includes(query) ?? false) ||
-      (skill.creator_name?.toLowerCase().includes(query) ?? false)
-    );
+    return matchesMarketSkillSearch(skill, searchQuery);
   });
 
   // 过滤 MCP 列表

@@ -271,7 +271,7 @@ async def _process_single_skill(
         },
     )
 
-    logger.debug(
+    logger.info(
         "技能 %s (user_id=%s): skill_id=%s, cn_name=%s",
         skill_name,
         user_id,
@@ -323,11 +323,7 @@ def _extract_skill_fields(
 
     # 优先：manifest entry 上的 metadata.skill_id（显式锚定，跨用户共享）
     manifest_skill_id = metadata.get("skill_id", "")
-    if (
-        isinstance(manifest_skill_id, str)
-        and manifest_skill_id
-        and not force
-    ):
+    if isinstance(manifest_skill_id, str) and manifest_skill_id and not force:
         skill_id = manifest_skill_id
         skill_md_path = skill_dir / "SKILL.md"
         md_content = (

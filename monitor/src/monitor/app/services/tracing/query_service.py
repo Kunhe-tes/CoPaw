@@ -209,6 +209,28 @@ def build_excluded_skill_filter() -> tuple[str, list[str]]:
     )
 
 
+# 技能展示映射：每个 skill_id 选出一条稳定记录用于展示。
+# 排序优先级：cn_name 非空 > enabled=1 > updated_at DESC > id DESC。
+SKILL_DISPLAY_MAPPING_SQL_TEMPLATE = """
+    SELECT skill_id, skill_name, cn_name, description
+    FROM (
+        SELECT skill_id, skill_name, cn_name, description,
+               ROW_NUMBER() OVER (
+                   PARTITION BY skill_id
+                   ORDER BY
+                       CASE WHEN cn_name IS NOT NULL AND TRIM(cn_name) <> ''
+                            THEN 0 ELSE 1 END ASC,
+                       CASE WHEN enabled = 1 THEN 0 ELSE 1 END ASC,
+                       updated_at DESC, id DESC
+               ) AS rn
+        FROM swe_skills
+        WHERE skill_id IS NOT NULL AND TRIM(skill_id) <> ''
+        {skill_id_filter}
+    ) ranked
+    WHERE rn = 1
+"""
+
+
 def _summarize_task_status_rows(
     rows: list[dict],
 ) -> tuple[int, int, int, int, int]:
@@ -2394,7 +2416,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         if source_id == "all":
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             query = f"""
-                SELECT skill_name, MAX(skill_description) as skill_description,
+                SELECT MAX(NULLIF(skill_id, '')) as skill_id,
+                       skill_name,
                        COUNT(DISTINCT trace_id) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
@@ -2404,7 +2427,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                   AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND source_id NOT IN ({exclude_placeholders})
                   AND user_id != 'default'{bbk_filter_sql}
-                GROUP BY skill_name
+                GROUP BY skill_name,
+                    COALESCE(NULLIF(skill_id, ''), CONCAT('__NAME__:', skill_name))
                 ORDER BY count DESC
                 LIMIT 10
             """
@@ -2418,7 +2442,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             rows = await self._db.fetch_all(query, params)
         else:
             query = f"""
-                SELECT skill_name, MAX(skill_description) as skill_description,
+                SELECT MAX(NULLIF(skill_id, '')) as skill_id,
+                       skill_name,
                        COUNT(DISTINCT trace_id) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
@@ -2427,7 +2452,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                   {skill_filter_sql}
                   AND bbk_id IS NOT NULL AND bbk_id != ''
                   AND user_id != 'default'{bbk_filter_sql}
-                GROUP BY skill_name
+                GROUP BY skill_name,
+                    COALESCE(NULLIF(skill_id, ''), CONCAT('__NAME__:', skill_name))
                 ORDER BY count DESC
                 LIMIT 10
             """
@@ -2439,10 +2465,24 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 *bbk_filter_params,
             )
             rows = await self._db.fetch_all(query, params)
+        skill_ids = [row["skill_id"] for row in rows if row.get("skill_id")]
+        display_mapping = await self._get_skill_display_mapping(skill_ids)
         return [
             SkillUsage(
                 skill_name=row["skill_name"],
-                skill_description=row["skill_description"] or "",
+                skill_id=row.get("skill_id") or None,
+                cn_name=(
+                    display_mapping.get(row.get("skill_id") or "", {}).get(
+                        "cn_name",
+                    )
+                    or None
+                ),
+                skill_description=(
+                    display_mapping.get(row.get("skill_id") or "", {}).get(
+                        "description",
+                    )
+                    or None
+                ),
                 count=row["count"] or 0,
                 avg_duration_ms=int(row["avg_duration"] or 0),
             )
@@ -2755,6 +2795,56 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             logger.warning("Failed to get statistics eligible skills: %s", e)
             return set()
 
+    async def _get_skill_display_mapping(
+        self,
+        skill_ids: Optional[list[str]] = None,
+    ) -> dict[str, dict[str, str]]:
+        """获取技能展示映射（每个 skill_id 选出一条稳定记录）.
+
+        swe_skills 同一 skill_id 可能有多个用户/租户记录，不能直接
+        关联到 span 聚合结果，否则会放大调用次数。本方法在服务端先把
+        技能表压缩为每个 skill_id 一条展示记录。
+
+        排序优先级：cn_name 非空 > enabled=1 > updated_at DESC > id DESC。
+
+        Args:
+            skill_ids: 可选过滤列表；为空表示返回全部
+
+        Returns:
+            skill_id -> {"skill_name": ..., "cn_name": ...} 的映射
+        """
+        if not self._db or not self._db.is_connected:
+            return {}
+
+        if skill_ids is not None and not skill_ids:
+            return {}
+
+        if skill_ids:
+            placeholders = ", ".join(["%s"] * len(skill_ids))
+            skill_id_filter = f" AND skill_id IN ({placeholders})"
+            params: tuple = tuple(skill_ids)
+        else:
+            skill_id_filter = ""
+            params = ()
+
+        sql = SKILL_DISPLAY_MAPPING_SQL_TEMPLATE.format(
+            skill_id_filter=skill_id_filter,
+        )
+        try:
+            rows = await self._db.fetch_all(sql, params)
+        except Exception as e:
+            logger.warning("Failed to load skill display mapping: %s", e)
+            return {}
+
+        mapping: dict[str, dict[str, str]] = {}
+        for row in rows:
+            mapping[row["skill_id"]] = {
+                "skill_name": row.get("skill_name") or "",
+                "cn_name": row.get("cn_name") or "",
+                "description": row.get("description") or "",
+            }
+        return mapping
+
     async def get_skills_paginated(
         self,
         source_id: str,
@@ -2823,34 +2913,55 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             base_where += f" AND skill_name IN ({placeholders})"
             count_params.extend(eligible_skills)
 
-        # 查询总数
+        # 查询总数（按 skill_id 或 skill_name 去重）
         count_query = f"""
-            SELECT COUNT(DISTINCT skill_name) as total
+            SELECT COUNT(DISTINCT CONCAT_WS(
+                '|',
+                COALESCE(NULLIF(skill_id, ''), '__NAME__'),
+                skill_name
+            )) as total
             FROM swe_tracing_spans
             WHERE {base_where}
         """
         count_row = await self._db.fetch_one(count_query, tuple(count_params))
         total = count_row["total"] if count_row else 0
 
-        # 分页查询
+        # 分页查询：先按 skill_id（若存在）/ skill_name 聚合，再 LEFT JOIN 展示映射
         offset = (page - 1) * page_size
         data_query = f"""
-            SELECT skill_name, MAX(skill_description) as skill_description,
+            SELECT MAX(NULLIF(skill_id, '')) as skill_id,
+                   skill_name,
                    COUNT(DISTINCT trace_id) as count,
                    AVG(duration_ms) as avg_duration
             FROM swe_tracing_spans
             WHERE {base_where}
-            GROUP BY skill_name
+            GROUP BY skill_name,
+                COALESCE(NULLIF(skill_id, ''), CONCAT('__NAME__:', skill_name))
             ORDER BY count DESC, skill_name ASC
             LIMIT %s OFFSET %s
         """
         params = count_params + [page_size, offset]
         rows = await self._db.fetch_all(data_query, tuple(params))
 
+        skill_ids = [row["skill_id"] for row in rows if row.get("skill_id")]
+        display_mapping = await self._get_skill_display_mapping(skill_ids)
+
         skills = [
             SkillUsage(
                 skill_name=row["skill_name"],
-                skill_description=row["skill_description"] or "",
+                skill_id=row.get("skill_id") or None,
+                cn_name=(
+                    display_mapping.get(row.get("skill_id") or "", {}).get(
+                        "cn_name",
+                    )
+                    or None
+                ),
+                skill_description=(
+                    display_mapping.get(row.get("skill_id") or "", {}).get(
+                        "description",
+                    )
+                    or None
+                ),
                 count=row["count"] or 0,
                 avg_duration_ms=int(row["avg_duration"] or 0),
             )
@@ -3566,7 +3677,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
             base_where = f"""
                 s.start_time >= %s AND s.start_time <= %s
-                AND s.skill_name = %s
+                AND (s.skill_id = %s OR (s.skill_id IS NULL AND s.skill_name = %s))
                 AND s.source_id NOT IN ({exclude_placeholders})
                 AND s.user_id != 'default'
             """
@@ -3574,15 +3685,23 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 start_date,
                 end_date,
                 skill_name,
+                skill_name,
                 *EXCLUDED_SOURCE_IDS,
             ]
         else:
             base_where = """
-                s.source_id = %s AND s.start_time >= %s AND s.start_time <= %s
-                AND s.skill_name = %s
+                s.source_id = %s
+                AND s.start_time >= %s AND s.start_time <= %s
+                AND (s.skill_id = %s OR (s.skill_id IS NULL AND s.skill_name = %s))
                 AND s.user_id != 'default'
             """
-            count_params = [source_id, start_date, end_date, skill_name]
+            count_params = [
+                source_id,
+                start_date,
+                end_date,
+                skill_name,
+                skill_name,
+            ]
 
         # 查询总数
         count_query = f"""
@@ -3962,13 +4081,15 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
         if source_id == "all":
             skill_query = f"""
-                SELECT skill_name, MAX(skill_description) as skill_description,
+                SELECT MAX(NULLIF(skill_id, '')) as skill_id,
+                       skill_name,
                        COUNT(DISTINCT trace_id) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE user_id = %s AND start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL{bbk_filter_sql}
-                GROUP BY skill_name
+                GROUP BY skill_name,
+                    COALESCE(NULLIF(skill_id, ''), CONCAT('__NAME__:', skill_name))
                 ORDER BY count DESC
             """
             skill_rows = await self._db.fetch_all(
@@ -3977,13 +4098,15 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             )
         else:
             skill_query = f"""
-                SELECT skill_name, MAX(skill_description) as skill_description,
+                SELECT MAX(NULLIF(skill_id, '')) as skill_id,
+                       skill_name,
                        COUNT(DISTINCT trace_id) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
                 WHERE source_id = %s AND user_id = %s AND start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL{bbk_filter_sql}
-                GROUP BY skill_name
+                GROUP BY skill_name,
+                    COALESCE(NULLIF(skill_id, ''), CONCAT('__NAME__:', skill_name))
                 ORDER BY count DESC
             """
             skill_rows = await self._db.fetch_all(
@@ -3991,10 +4114,20 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 (source_id, user_id, start_date, end_date, *bbk_filter_params),
             )
 
+        skill_ids = [
+            row["skill_id"] for row in skill_rows if row.get("skill_id")
+        ]
+        display_mapping = await self._get_skill_display_mapping(skill_ids)
         return [
             SkillUsage(
                 skill_name=row["skill_name"],
-                skill_description=row["skill_description"] or "",
+                skill_id=row.get("skill_id") or None,
+                cn_name=(
+                    display_mapping.get(row.get("skill_id") or "", {}).get(
+                        "cn_name",
+                    )
+                    or None
+                ),
                 count=row["count"],
                 avg_duration_ms=int(row["avg_duration"] or 0),
             )
@@ -4923,14 +5056,19 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         end_date: datetime,
         bbk_ids: Optional[str] = None,
     ) -> list:
-        """获取会话技能使用数据."""
+        """获取会话技能使用数据.
+
+        返回的字典中除数据库字段外，额外补充 cn_name
+        （来自 swe_skills 映射，由前端决定如何回退展示）。
+        """
         bbk_filter_sql, bbk_params = build_bbk_in_filter(bbk_ids)
         if source_id == "all":
             exclude_placeholders = ", ".join(
                 ["%s"] * len(EXCLUDED_SOURCE_IDS),
             )
             query = f"""
-                SELECT skill_name, MAX(skill_description) as skill_description,
+                SELECT MAX(NULLIF(skill_id, '')) as skill_id,
+                       skill_name,
                        COUNT(*) as count,
                        AVG(duration_ms) as avg_duration
                 FROM swe_tracing_spans
@@ -4938,10 +5076,11 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                       AND session_id = %s AND start_time >= %s AND start_time <= %s
                   AND skill_name IS NOT NULL
                   {bbk_filter_sql}
-                GROUP BY skill_name
+                GROUP BY skill_name,
+                    COALESCE(NULLIF(skill_id, ''), CONCAT('__NAME__:', skill_name))
                 ORDER BY count DESC
             """
-            return await self._db.fetch_all(
+            rows = await self._db.fetch_all(
                 query,
                 (
                     *EXCLUDED_SOURCE_IDS,
@@ -4951,20 +5090,37 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     *bbk_params,
                 ),
             )
-        return await self._db.fetch_all(
-            f"""
-            SELECT skill_name, MAX(skill_description) as skill_description,
-                   COUNT(*) as count,
-                   AVG(duration_ms) as avg_duration
-            FROM swe_tracing_spans
-            WHERE source_id = %s AND session_id = %s AND start_time >= %s AND start_time <= %s
-              AND skill_name IS NOT NULL
-              {bbk_filter_sql}
-            GROUP BY skill_name
-            ORDER BY count DESC
-            """,
-            (source_id, session_id, start_date, end_date, *bbk_params),
-        )
+        else:
+            rows = await self._db.fetch_all(
+                f"""
+                SELECT MAX(NULLIF(skill_id, '')) as skill_id,
+                       skill_name,
+                       COUNT(*) as count,
+                       AVG(duration_ms) as avg_duration
+                FROM swe_tracing_spans
+                WHERE source_id = %s AND session_id = %s AND start_time >= %s AND start_time <= %s
+                  AND skill_name IS NOT NULL
+                  {bbk_filter_sql}
+                GROUP BY skill_name,
+                    COALESCE(NULLIF(skill_id, ''), CONCAT('__NAME__:', skill_name))
+                ORDER BY count DESC
+                """,
+                (source_id, session_id, start_date, end_date, *bbk_params),
+            )
+
+        skill_ids = [
+            row.get("skill_id") for row in rows if row.get("skill_id")
+        ]
+        display_mapping = await self._get_skill_display_mapping(skill_ids)
+        for row in rows:
+            row["cn_name"] = (
+                display_mapping.get(
+                    row.get("skill_id") or "",
+                    {},
+                ).get("cn_name")
+                or None
+            )
+        return rows
 
     async def _fetch_session_mcp_tools(
         self,
@@ -5078,7 +5234,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         return [
             SkillUsage(
                 skill_name=row["skill_name"],
-                skill_description=row.get("skill_description", "") or "",
+                skill_id=row.get("skill_id") or None,
+                cn_name=row.get("cn_name") or None,
                 count=row["count"],
                 avg_duration_ms=int(row["avg_duration"] or 0),
             )
@@ -5805,6 +5962,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             output_tokens=row["output_tokens"],
             tool_name=row["tool_name"],
             skill_name=row["skill_name"],
+            skill_id=row.get("skill_id"),
             mcp_server=row.get("mcp_server"),
             tool_input=(
                 json.loads(row["tool_input"]) if row["tool_input"] else None
