@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """Staged checkpoint-compaction budget decision coverage."""
 
+import asyncio
+
 import pytest
 
 from swe.agents.hooks.memory_compaction import decide_context_budget
@@ -52,8 +54,10 @@ async def test_governance_schedules_only_new_watermarks() -> None:
     )
 
     assert await hook._apply_checkpoint_budget_stage(agent, running, [], 65)
+    await asyncio.sleep(0)
     assert await hook._apply_checkpoint_budget_stage(agent, running, [], 69)
     assert await hook._apply_checkpoint_budget_stage(agent, running, [], 70)
+    await asyncio.sleep(0)
 
     assert manager.schedule_precompaction.await_count == 2
     assert (

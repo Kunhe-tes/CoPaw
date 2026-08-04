@@ -6,6 +6,7 @@ when the context window approaches its limit, preserving recent messages
 and the system prompt.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from math import floor
@@ -87,6 +88,7 @@ class MemoryCompactionHook:
         """
         self.memory_manager = memory_manager
         self._precompaction_watermarks: dict[tuple[str, int], int] = {}
+        self._precompaction_tasks: dict[tuple[str, int], asyncio.Task] = {}
 
     async def _apply_checkpoint_budget_stage(
         self,
@@ -136,15 +138,43 @@ class MemoryCompactionHook:
                 -1,
             ):
                 return True
-            scheduled = await self.memory_manager.schedule_precompaction(
-                chat_id=chat_id,
-                watermark=watermark,
-                messages=messages,
-                chat_model=agent.model,
-                formatter=agent.formatter,
-            )
-            if scheduled:
-                self._precompaction_watermarks[watermark_key] = watermark
+            task = self._precompaction_tasks.get(watermark_key)
+            if task is not None and not task.done():
+                return True
+
+            async def schedule() -> bool:
+                return await self.memory_manager.schedule_precompaction(
+                    chat_id=chat_id,
+                    watermark=watermark,
+                    messages=messages,
+                    chat_model=agent.model,
+                    formatter=agent.formatter,
+                )
+
+            task = asyncio.create_task(schedule())
+            self._precompaction_tasks[watermark_key] = task
+            self._precompaction_watermarks[watermark_key] = watermark
+
+            def record_result(completed: asyncio.Task) -> None:
+                if completed.cancelled():
+                    return
+                try:
+                    if completed.result():
+                        return
+                    if (
+                        self._precompaction_watermarks.get(watermark_key)
+                        == watermark
+                    ):
+                        self._precompaction_watermarks.pop(watermark_key, None)
+                except Exception:
+                    if (
+                        self._precompaction_watermarks.get(watermark_key)
+                        == watermark
+                    ):
+                        self._precompaction_watermarks.pop(watermark_key, None)
+                    logger.exception("Checkpoint precompaction failed")
+
+            task.add_done_callback(record_result)
             return True
         installed = await self.memory_manager.install_ready_precompaction(
             chat_id=chat_id,
