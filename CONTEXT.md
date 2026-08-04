@@ -20,6 +20,58 @@ _Avoid_: subagent creation
 The user-facing agent that owns global task understanding, user interaction, mode decisions, and final responses.
 _Avoid_: parent bot, orchestrator bot
 
+**Chat Checkpoint**:
+A Chat-scoped recoverable state container that identifies the current task and retains a compact index of earlier completed tasks in the same Chat. Starting an explicit new task replaces its current task; `/new` resets the Chat Checkpoint.
+_Avoid_: global task state, session summary, cross-chat checkpoint
+
+**Checkpoint Record**:
+The versioned, structured source of truth for a Chat Checkpoint. A Checkpoint Record distinguishes confirmed state from unresolved work and retains references to its supporting evidence.
+_Avoid_: free-form summary, model-only memory, untraceable state
+
+**Evidence Recovery**:
+The on-demand, Chat-scoped restoration of an original conversation or tool-result fragment identified by a Checkpoint Record. It adds only the evidence needed for the Current Task and does not replace the checkpoint state.
+_Avoid_: cross-chat history search, automatic full-history injection, summary reconstruction
+
+**Checkpoint Update**:
+The validated replacement of a Checkpoint Record from deterministic conversation facts and semantic task-state interpretation. It cannot discard evidence before the replacement record has passed validation.
+_Avoid_: markdown-only rewrite, unvalidated summarization, destructive compaction
+
+**Compaction Transaction**:
+The per-Chat operation that validates and durably installs a Checkpoint Update together with its archived source history. It either exposes a recoverable checkpoint or retains enough pending state to finish safely after recovery.
+_Avoid_: overwrite-in-place compaction, archive-without-state, lost concurrent event
+
+**Checkpoint Event Journal**:
+The ordered, append-only Chat-scoped record of deterministic events that occurred after the event sequence incorporated by the active Checkpoint Record. It preserves the current-state delta until a later Checkpoint Update incorporates it.
+_Avoid_: second free-form summary, mutable progress list, discarded pre-compaction event
+
+**Recent Event Delta**:
+The budget-bounded model-context projection of unincorporated entries from the Checkpoint Event Journal. It supplies current deterministic facts without duplicating the original interaction or becoming another semantic summary.
+_Avoid_: all event history, raw tool output duplication, per-turn resummarization
+
+**Context Budget Stage**:
+One of the ordered context-capacity states—Lightweight Governance, Active Compaction, or Emergency Degradation—that determines how a Chat Checkpoint and its online history are reduced before a model call.
+_Avoid_: single hard truncation threshold, post-overflow-only compaction
+
+**Proactive Incremental Compaction**:
+The asynchronous, non-blocking preparation and validation of a bounded Chat Checkpoint update before an Active Compaction threshold is reached. Its prepared candidate is installed only when its snapshot remains valid at an Active Compaction or Emergency Degradation threshold.
+_Avoid_: threshold-only bulk compaction, blocking reply-path compression, per-message full resummarization
+
+**Precompaction Candidate**:
+A validated but inactive Checkpoint Update derived from a stable Chat snapshot. It may be installed without another ReMe call only when its base record revision and event sequence remain valid.
+_Avoid_: stale summary cache, immediately active checkpoint, overwrite of newer events
+
+**Elastic Context Budget**:
+The allocatable capacity remaining after permanent context and model-output safety space are protected. Checkpoint projection, recent original interaction, and recovered evidence compete within it according to the Current Task rather than occupying fixed partitions.
+_Avoid_: fixed percentage partition, unused reserved context, unbounded recovery injection
+
+**Context Epoch**:
+The portion of a Chat's context history eligible for default model-context assembly after a `/new` or `/clear` boundary. Earlier epochs remain durable Chat evidence but require explicit user intent before they may be recovered.
+_Avoid_: automatic pre-reset recovery, physical deletion on context reset, cross-epoch default context
+
+**Task Transition**:
+The explicit change of the Current Task within a Chat Checkpoint. It occurs only when the user introduces an independent goal after completion, explicitly starts a new task, or resets the Chat; corrective and incremental requests remain part of the Current Task.
+_Avoid_: every user turn is a new task, inferred task split, destructive history reset
+
 **Agent Profile**:
 A tenant-owned runtime configuration and workspace identity for one runnable Agent. An **Agent Profile** is distinct from a **SubAgent Definition**, which is a versioned delegation worker description.
 _Avoid_: agent-level config, subagent profile, worker profile

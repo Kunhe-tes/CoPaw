@@ -1875,18 +1875,24 @@ export default function ChatPage() {
                 onDragOver={isContentOnly ? undefined : handleDragOver}
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
-                <ChatContentOnlyProvider enabled={isContentOnly}>
-                  <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
-                    <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                  </GlobalVoiceRecorder>
-                </ChatContentOnlyProvider>
+                <div className={styles.chatMessagesLayout}>
+                  <div className={styles.chatMessagesViewport}>
+                    <ChatContentOnlyProvider enabled={isContentOnly}>
+                      <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                        <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                      </GlobalVoiceRecorder>
+                    </ChatContentOnlyProvider>
+                  </div>
+                  <div className={styles.chatQuickNavRail}>
+                    <ConversationQuickNav placement="rail" />
+                  </div>
+                </div>
                 {!isContentOnly && (
                   <DragUploadOverlay
                     visible={isDragging}
                     onClose={handleDragOverlayClose}
                   />
                 )}
-                <ConversationQuickNav />
               </div>
             </div>
           </AutoPreviewHtmlProvider>

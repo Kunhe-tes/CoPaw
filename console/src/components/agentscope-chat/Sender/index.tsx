@@ -319,6 +319,12 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
   const prefixCls = getPrefixCls("sender");
 
   const containerRef = React.useRef<HTMLDivElement>(null);
+  const [mentionMenuContainer, setMentionMenuContainer] =
+    useState<HTMLDivElement | null>(null);
+  const setContainerRef = React.useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node;
+    setMentionMenuContainer(node);
+  }, []);
   const inputRef = React.useRef<AntdInputRef>(null);
   const tokenEditorRef = React.useRef<HTMLDivElement>(null);
 
@@ -592,6 +598,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
             classNames.input,
           )}
           disabled={!!disabled}
+          mentionMenuContainer={mentionMenuContainer}
           readOnly={readOnly}
           onKeyDown={(event) => {
             const shouldSubmit =
@@ -725,7 +732,7 @@ const ForwardSender = React.forwardRef<SenderRef, SenderProps>((props, ref) => {
     <>
       <Style />
 
-      <div ref={containerRef} className={mergedCls} style={style}>
+      <div ref={setContainerRef} className={mergedCls} style={style}>
         {header && (
           <SendHeaderContext.Provider
             value={{ prefixCls, focus, enableFocusExpand }}

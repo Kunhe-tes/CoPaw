@@ -25,6 +25,7 @@ export default createGlobalStyle`
 }
 
 .welcome-input-card {
+  position: relative;
   width: ${DESIGN_TOKENS.inputCardWidth}px;
   max-width: 100%;
   background-color: ${DESIGN_TOKENS.colorBgCard};

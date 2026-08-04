@@ -17,6 +17,8 @@ export interface QuestionInfo {
 export interface ConversationQuickNavProps {
   /** 最小问题数量才显示（默认 1） */
   minQuestions?: number;
+  /** 布局位置；rail 在消息视口外的独立导航槽中渲染。 */
+  placement?: "overlay" | "rail";
   /** 外部传入的消息列表；不传时读取会话页上下文 */
   messages?: IAgentScopeRuntimeWebUIMessage[];
   /** 限定查询和滚动的根节点，避免弹窗与主会话互相影响 */
