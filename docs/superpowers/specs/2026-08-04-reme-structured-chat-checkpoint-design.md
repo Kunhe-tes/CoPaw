@@ -103,6 +103,21 @@ Default stage thresholds are calculated from projected next-call usage, includin
 
 The current `memory_compact_ratio` remains migration-compatible as the active-compaction threshold until the staged configuration is introduced.
 
+### Proactive incremental compaction
+
+When predicted usage first reaches 65% of the model window, the runtime queues a non-blocking Precompaction Candidate. It queues a newer candidate after each additional 5% of model-window growth while the active Context Epoch has unincorporated complete interaction units. The candidate derives from a stable record revision and event-sequence snapshot, is fully validated, and remains pending rather than immediately changing online context.
+
+Only one candidate job may run per Chat. Newer trigger watermarks coalesce into the latest snapshot, so a busy Chat does not queue redundant ReMe work. This policy has no elapsed-time trigger.
+
+At the 80% Active Compaction or 90% Emergency Degradation threshold, the runtime installs the newest ready candidate without a new ReMe call when all of the following hold:
+
+- its base Checkpoint Record revision remains active;
+- its applied event sequence is a valid prefix of the current journal;
+- its source evidence remains durable; and
+- installation preserves every message and event after its snapshot.
+
+The runtime then recomputes the budget. If no candidate is valid or installation remains over budget, it falls back to the normal active-compaction path or the emergency minimum-checkpoint path respectively.
+
 Compaction boundaries are complete interaction units. Tool call/result pairs, command/result pairs, approval/actual parameters, file modification/verification pairs, and subtask request/result pairs never split across a boundary. Current user input, latest correction, unfinished transactions, latest errors, and unverified changes remain online.
 
 Tool results continue to use only the existing `tool_result_compact` output budget and recoverable-reference protocol.

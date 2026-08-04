@@ -52,6 +52,14 @@ _Avoid_: all event history, raw tool output duplication, per-turn resummarizatio
 One of the ordered context-capacity states—Lightweight Governance, Active Compaction, or Emergency Degradation—that determines how a Chat Checkpoint and its online history are reduced before a model call.
 _Avoid_: single hard truncation threshold, post-overflow-only compaction
 
+**Proactive Incremental Compaction**:
+The asynchronous, non-blocking preparation and validation of a bounded Chat Checkpoint update before an Active Compaction threshold is reached. Its prepared candidate is installed only when its snapshot remains valid at an Active Compaction or Emergency Degradation threshold.
+_Avoid_: threshold-only bulk compaction, blocking reply-path compression, per-message full resummarization
+
+**Precompaction Candidate**:
+A validated but inactive Checkpoint Update derived from a stable Chat snapshot. It may be installed without another ReMe call only when its base record revision and event sequence remain valid.
+_Avoid_: stale summary cache, immediately active checkpoint, overwrite of newer events
+
 **Elastic Context Budget**:
 The allocatable capacity remaining after permanent context and model-output safety space are protected. Checkpoint projection, recent original interaction, and recovered evidence compete within it according to the Current Task rather than occupying fixed partitions.
 _Avoid_: fixed percentage partition, unused reserved context, unbounded recovery injection
