@@ -7,7 +7,9 @@ and the system prompt.
 """
 
 import logging
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from math import floor
+from typing import TYPE_CHECKING, Any, Literal
 
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg, TextBlock
@@ -24,6 +26,49 @@ if TYPE_CHECKING:
     from ..memory import BaseMemoryManager
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class ContextBudgetDecision:
+    """One deterministic decision for the configured context budget stages."""
+
+    projected_tokens: int
+    ratio: float
+    stage: Literal["normal", "governance", "active", "emergency"]
+    precompaction_watermark: int | None
+
+
+def decide_context_budget(
+    projected_tokens: int,
+    max_input_length: int,
+    config: Any,
+) -> ContextBudgetDecision:
+    """Classify use into the confirmed 65/5/80/90 staged policy."""
+    if max_input_length <= 0:
+        raise ValueError("max_input_length must be positive")
+    ratio = max(projected_tokens, 0) / max_input_length
+    if ratio >= config.emergency_compact_ratio:
+        return ContextBudgetDecision(
+            projected_tokens,
+            ratio,
+            "emergency",
+            None,
+        )
+    if ratio >= config.memory_compact_ratio:
+        return ContextBudgetDecision(projected_tokens, ratio, "active", None)
+    if ratio >= config.lightweight_governance_ratio:
+        watermark = floor(
+            (ratio - config.lightweight_governance_ratio)
+            / config.precompaction_step_ratio
+            + 1e-9,
+        )
+        return ContextBudgetDecision(
+            projected_tokens,
+            ratio,
+            "governance",
+            watermark,
+        )
+    return ContextBudgetDecision(projected_tokens, ratio, "normal", None)
 
 
 class MemoryCompactionHook:
