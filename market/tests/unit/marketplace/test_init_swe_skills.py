@@ -331,3 +331,14 @@ def test_init_swe_skills_logs_manifest_before_and_after_at_info_level(
     assert encode_scope_id("alice", "paasuat") in before_logs[0].message
     assert "paasuat" in before_logs[0].message
     assert encode_scope_id("alice", "paasuat") in after_logs[0].message
+
+    # 单 workspace 时不应再包一层 workspace 名，content 应是可解析的标准 JSON
+    before_content = before_logs[0].message.split("content=", 1)[1]
+    after_content = after_logs[0].message.split("content=", 1)[1]
+    before_manifest = json.loads(before_content)
+    after_manifest = json.loads(after_content)
+
+    assert "default" not in before_manifest
+    assert "default" not in after_manifest
+    assert "demo" in before_manifest["skills"]
+    assert "demo" in after_manifest["skills"]

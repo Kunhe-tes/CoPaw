@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS `swe_tracing_spans` (
     `output_tokens` INT DEFAULT NULL COMMENT '输出Token数，仅LLM事件使用',
     `tool_name` VARCHAR(64) DEFAULT NULL COMMENT '工具名称，仅工具事件使用',
     `skill_name` VARCHAR(128) DEFAULT NULL COMMENT '技能名称，用于工具归属和技能事件',
-    `skill_description` TEXT DEFAULT NULL COMMENT '技能描述，从 SKILL.md 的 description 字段读取',
+    `skill_id` VARCHAR(128) DEFAULT NULL COMMENT '技能唯一标识符，跨服务稳定关联 swe_skills.skill_id',
     `mcp_server` VARCHAR(64) DEFAULT NULL COMMENT 'MCP服务器名，标识MCP工具来源',
     `tool_input` JSON DEFAULT NULL COMMENT '工具输入参数，脱敏后的JSON格式',
     `tool_output` TEXT DEFAULT NULL COMMENT '工具输出结果，截断后的摘要',
@@ -86,6 +86,7 @@ CREATE TABLE IF NOT EXISTS `swe_tracing_spans` (
     INDEX `idx_source_tool` (`source_id`, `event_type`, `tool_name`),
     INDEX `idx_event_type` (`event_type`),
     INDEX `idx_skill_name` (`skill_name`),
+    INDEX `idx_skill_id` (`skill_id`),
     INDEX `idx_mcp_server` (`mcp_server`),
     INDEX `idx_start_time` (`start_time`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='Span记录表';

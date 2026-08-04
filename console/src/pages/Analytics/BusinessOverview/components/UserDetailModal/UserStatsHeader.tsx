@@ -18,6 +18,7 @@ import {
   SessionStats,
   SkillUsage,
   UserStats,
+  displaySkillName,
 } from "../../../../../api/modules/tracing";
 import styles from "./index.module.less";
 
@@ -242,7 +243,7 @@ export default function UserStatsHeader({
   const skillItems = useMemo(
     () =>
       activeUsageStats.skills_used.map((skill) => ({
-        name: skill.skill_name,
+        name: displaySkillName(skill),
         count: skill.count,
         filter: { type: "skill" as const, name: skill.skill_name },
       })),
