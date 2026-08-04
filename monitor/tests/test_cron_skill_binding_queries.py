@@ -46,6 +46,7 @@ async def test_branch_skills_raw_data_uses_bound_skill_ids():
     assert "j.skill_ids" in db.last_sql
     assert "swe_marketplace_skills" in db.last_sql
     assert "s.include_in_statistics = 1" in db.last_sql
+    assert "s.source_id = j.source_id" in db.last_sql
 
 
 @pytest.mark.asyncio
@@ -71,10 +72,59 @@ async def test_branch_skill_manager_query_filters_by_bound_skill_id():
     assert "FIND_IN_SET(s.skill_id, j.skill_ids)" in sql
     assert "swe_marketplace_skills" in sql
     assert "s.include_in_statistics = 1" in sql
+    assert "s.source_id = j.source_id" in sql
     assert (
         "COALESCE(NULLIF(s.cn_name, ''), NULLIF(s.skill_name, ''), s.skill_id)"
         in sql
     )
+
+
+@pytest.mark.asyncio
+async def test_manager_skill_detail_uses_marketplace_source_isolated_binding():
+    """客户经理技能明细应按同应用的市场技能绑定统计。"""
+    db = FakeDb()
+    service = QueryService()
+
+    await service._fetch_manager_skill_stats(
+        db,
+        "100",
+        "manager-1",
+        datetime(2026, 7, 1),
+        datetime(2026, 7, 2),
+        "default",
+    )
+
+    sql = db.last_sql
+    assert "JOIN swe_tracing_traces" not in sql
+    assert "skills_used" not in sql
+    assert "JOIN swe_marketplace_skills s" in sql
+    assert "FIND_IN_SET(s.skill_id, j.skill_ids)" in sql
+    assert "s.include_in_statistics = 1" in sql
+    assert "s.source_id = j.source_id" in sql
+
+
+@pytest.mark.asyncio
+async def test_manager_skill_detail_groups_by_skill_id_for_mysql_strict_mode():
+    """客户经理技能明细应兼容 MySQL ONLY_FULL_GROUP_BY."""
+    db = FakeDb()
+    service = QueryService()
+
+    await service._fetch_manager_skill_stats(
+        db,
+        "100",
+        "manager-1",
+        datetime(2026, 7, 1),
+        datetime(2026, 7, 2),
+        "default",
+    )
+
+    sql = db.last_sql
+    assert "GROUP BY s.skill_id" in sql
+    assert "GROUP BY skill_name" not in sql
+    assert "NULLIF(MIN(s.cn_name), '')" in sql
+    assert "NULLIF(MIN(s.skill_name), '')" in sql
+    assert "s.skill_id" in sql
+    assert "AS skill_name" in sql
 
 
 @pytest.mark.asyncio
