@@ -555,6 +555,10 @@ _Avoid_: trusted skill directive, tool call, execution proof
 A **Skill Runtime View** member that a user explicitly selects for a single chat turn and remains available when that turn starts. A turn may contain repeated **User-Selected Skills**; their **Skill Use Directives** are injected in selection order after duplicate runtime identifiers are removed. Each selection records user intent as structured turn context with a readable message marker, but is not evidence that the skill actually executed.
 _Avoid_: skill mention, forced tool call, permanently active skill, single selected skill
 
+**Explicit Skill Selection Activation**:
+The session-scoped activation of a **User-Selected Skill** after the server validates its structured selection against the current **Skill Runtime View** and resolves its readable `SKILL.md`. It loads that skill's Hooks after the current turn's `UserPromptSubmit` and `SessionStart` events, before subsequent tool calls, and persists them for the rest of the session; it does not establish **Actual Skill Use**, set a current skill, create a skill invocation trace, or prove the model read the skill document.
+_Avoid_: plain-text skill mention, filename match, automatic semantic inference, confirmed skill use
+
 **Skill Runtime Identifier**:
 The stable `name` of a skill package in one Workspace: its managed skill-directory name and **Skill Management State** key. It is the identity used for runtime selection, channel availability, and injection de-duplication; a frontmatter or market `skill_id` is not a substitute.
 _Avoid_: display name, frontmatter name, market skill id
@@ -568,8 +572,20 @@ The runtime policy that verifies an Agent followed a **Skill Use Directive** bef
 _Avoid_: prompt injection, tool attribution, guaranteed skill execution
 
 **Actual Skill Use**:
-The runtime-detected participation of a skill in a turn, established by tool or asset evidence. It is distinct from **User-Selected Skill** and is the only basis for tool-call skill attribution.
-_Avoid_: selected skill, requested skill, assumed skill invocation
+The runtime-detected participation of a skill in a turn, established only by reading its resolved `SKILL.md` or by a tool input that targets an asset under its resolved skill directory. It is distinct from **User-Selected Skill** and is the only basis for tool-call skill attribution.
+_Avoid_: selected skill, requested skill, assumed skill invocation, filename suffix match, keyword match
+
+**Non-Authoritative Skill Signal**:
+A file suffix, prose-derived keyword, tool hint, tool sequence, or MCP server name associated with a skill. It may support offline analysis but never activates, continues, attributes, or loads Hooks for a skill at runtime.
+_Avoid_: activation evidence, continuation evidence, attribution evidence, hook trigger
+
+**Skill Asset Evidence**:
+A tool input that resolves to a path inside one enabled skill's effective directory. It may establish **Actual Skill Use**, but loads that skill's Hooks only when the skill was already explicitly selected or its resolved `SKILL.md` was read in the session.
+_Avoid_: extension match, text substring, arbitrary workspace path, hook bootstrap
+
+**Session Skill Hook Order**:
+The deterministic hook order for a session with explicitly selected skills: tenant Hooks, then Agent Profile Hooks, then one deduplicated Hook source for each selected skill in its first-selection order. Later selections append only previously unloaded skills; normal Hook result merging resolves conflicts.
+_Avoid_: arbitrary hook order, repeat-selection duplication, last-selected-first execution
 
 **Unavailable Skill Selection**:
 A user-requested skill choice that is no longer in the **Skill Runtime View** when its chat turn starts. The choice is discarded without skill guidance or selection-based attribution, while other **User-Selected Skills** in the same turn may still apply; the turn is ordinary chat only when none remain.
