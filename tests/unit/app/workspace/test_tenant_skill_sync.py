@@ -10,7 +10,7 @@ def _configure_market(monkeypatch, url: str, token: str = ""):
     """覆盖模块级 market 配置常量（EnvVarLoader 在导入期已求值）。"""
     from src.swe.app.workspace import tenant_skill_sync
 
-    monkeypatch.setattr(tenant_skill_sync, "MARKET_API_BASE_URL", url)
+    monkeypatch.setattr(tenant_skill_sync, "MARKET_INTERNAL_URL", url)
     monkeypatch.setattr(tenant_skill_sync, "MARKET_INTERNAL_TOKEN", token)
     return tenant_skill_sync
 
