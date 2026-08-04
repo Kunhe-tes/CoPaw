@@ -210,3 +210,24 @@ def test_checkpoint_and_candidate_round_trip_through_durable_json() -> None:
 
     assert CheckpointRecord.from_dict(json.loads(active.to_json())) == active
     assert PrecompactionCandidate.from_dict(candidate.to_dict()) == candidate
+
+
+def test_checkpoint_rejects_invalid_durable_field_types_and_values() -> None:
+    record = CheckpointRecord.new(chat_id=CHAT_ID, epoch=1)
+    malformed = record.to_dict()
+    malformed["confidence"] = "forged"
+    malformed["archived_through"] = 42
+
+    with pytest.raises(ValueError, match="confidence|archived_through"):
+        CheckpointRecord.from_dict(malformed)
+
+    invalid = replace(
+        record,
+        confidence="forged",
+        source_revision=-1,
+        archived_through=42,  # type: ignore[arg-type]
+    )
+    errors = validate_checkpoint_record(invalid).errors
+    assert "checkpoint confidence is unsupported" in errors
+    assert "checkpoint source_revision must not be negative" in errors
+    assert "checkpoint archived_through must be a non-empty string" in errors

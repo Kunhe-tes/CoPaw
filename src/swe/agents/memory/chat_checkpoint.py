@@ -158,6 +158,24 @@ def _string_tuple(value: Any, field_name: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _strict_int(value: Any, field_name: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise ValueError(f"{field_name} must be an integer")
+    return value
+
+
+def _strict_string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{field_name} must be a string")
+    return value
+
+
+def _optional_string(value: Any, field_name: str) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    raise ValueError(f"{field_name} must be a string or null")
+
+
 def _evidence_item_from_dict(value: Any, field_name: str) -> "EvidenceItem":
     data = _mapping(value, field_name)
     text = data.get("text")
@@ -308,11 +326,17 @@ class CheckpointEvent:
     def from_dict(cls, value: Any) -> "CheckpointEvent":
         data = _mapping(value, "checkpoint event")
         return cls(
-            id=str(data["id"]),
-            sequence=int(data["sequence"]),
-            epoch=int(data["epoch"]),
-            occurred_at=str(data["occurred_at"]),
-            type=str(data["type"]),
+            id=_strict_string(data["id"], "checkpoint event.id"),
+            sequence=_strict_int(
+                data["sequence"],
+                "checkpoint event.sequence",
+            ),
+            epoch=_strict_int(data["epoch"], "checkpoint event.epoch"),
+            occurred_at=_strict_string(
+                data["occurred_at"],
+                "checkpoint event.occurred_at",
+            ),
+            type=_strict_string(data["type"], "checkpoint event.type"),
             facts=_mapping(data["facts"], "checkpoint event facts"),
             source_refs=_string_tuple(
                 data.get("source_refs", []),
@@ -436,6 +460,12 @@ class CheckpointRecord:
             data["current_task"],
             "checkpoint.current_task",
         )
+        task_status = _strict_string(
+            current_task_data["status"],
+            "checkpoint.current_task.status",
+        )
+        if task_status not in ("empty", "in_progress", "completed"):
+            raise ValueError("checkpoint.current_task.status is unsupported")
         progress_data = _mapping(data["progress"], "checkpoint.progress")
 
         def progress_items(bucket: ProgressBucket) -> tuple[ProgressItem, ...]:
@@ -446,9 +476,13 @@ class CheckpointRecord:
                 )
             return tuple(
                 ProgressItem(
-                    text=str(_mapping(item, f"progress.{bucket}")["text"]),
-                    status=str(
+                    text=_strict_string(
+                        _mapping(item, f"progress.{bucket}")["text"],
+                        f"progress.{bucket}.text",
+                    ),
+                    status=_strict_string(
                         _mapping(item, f"progress.{bucket}")["status"],
+                        f"progress.{bucket}.status",
                     ),  # type: ignore[arg-type]
                     evidence_refs=_string_tuple(
                         _mapping(item, f"progress.{bucket}").get(
@@ -467,7 +501,10 @@ class CheckpointRecord:
                 raise ValueError("checkpoint.key_decisions must be an array")
             return tuple(
                 Decision(
-                    text=str(_mapping(item, "key_decision")["text"]),
+                    text=_strict_string(
+                        _mapping(item, "key_decision")["text"],
+                        "key_decision.text",
+                    ),
                     evidence_refs=_string_tuple(
                         _mapping(item, "key_decision").get(
                             "evidence_refs",
@@ -485,7 +522,10 @@ class CheckpointRecord:
                 raise ValueError("checkpoint.next_steps must be an array")
             return tuple(
                 NextStep(
-                    text=str(_mapping(item, "next_step")["text"]),
+                    text=_strict_string(
+                        _mapping(item, "next_step")["text"],
+                        "next_step.text",
+                    ),
                     evidence_refs=_string_tuple(
                         _mapping(item, "next_step").get("evidence_refs", []),
                         "next_step.evidence_refs",
@@ -499,18 +539,47 @@ class CheckpointRecord:
             raise ValueError(
                 "checkpoint.completed_task_index must be an array",
             )
+        confidence = _strict_string(
+            data["confidence"],
+            "checkpoint.confidence",
+        )
+        if confidence not in ("verified", "degraded"):
+            raise ValueError("checkpoint.confidence is unsupported")
+        archived_through = _optional_string(
+            data.get("archived_through"),
+            "checkpoint.archived_through",
+        )
+        if archived_through == "":
+            raise ValueError(
+                "checkpoint.archived_through must not be empty",
+            )
         return cls(
-            schema_version=int(data["schema_version"]),
-            checkpoint_id=str(data["checkpoint_id"]),
-            chat_id=str(data["chat_id"]),
-            epoch=int(data["epoch"]),
-            revision=int(data["revision"]),
-            updated_at=str(data["updated_at"]),
-            confidence=str(data["confidence"]),  # type: ignore[arg-type]
+            schema_version=_strict_int(
+                data["schema_version"],
+                "checkpoint.schema_version",
+            ),
+            checkpoint_id=_strict_string(
+                data["checkpoint_id"],
+                "checkpoint.checkpoint_id",
+            ),
+            chat_id=_strict_string(data["chat_id"], "checkpoint.chat_id"),
+            epoch=_strict_int(data["epoch"], "checkpoint.epoch"),
+            revision=_strict_int(data["revision"], "checkpoint.revision"),
+            updated_at=_strict_string(
+                data["updated_at"],
+                "checkpoint.updated_at",
+            ),
+            confidence=confidence,  # type: ignore[arg-type]
             current_task=TaskState(
-                id=current_task_data.get("id"),
-                title=current_task_data.get("title"),
-                status=str(current_task_data["status"]),  # type: ignore[arg-type]
+                id=_optional_string(
+                    current_task_data.get("id"),
+                    "checkpoint.current_task.id",
+                ),
+                title=_optional_string(
+                    current_task_data.get("title"),
+                    "checkpoint.current_task.title",
+                ),
+                status=task_status,  # type: ignore[arg-type]
                 goal=_evidence_items_from_dict(
                     current_task_data.get("goal", []),
                     "checkpoint.current_task.goal",
@@ -541,10 +610,17 @@ class CheckpointRecord:
             ),
             completed_task_index=tuple(
                 CompletedTask(
-                    id=str(_mapping(item, "completed_task")["id"]),
-                    title=str(_mapping(item, "completed_task")["title"]),
-                    completed_at=str(
+                    id=_strict_string(
+                        _mapping(item, "completed_task")["id"],
+                        "completed_task.id",
+                    ),
+                    title=_strict_string(
+                        _mapping(item, "completed_task")["title"],
+                        "completed_task.title",
+                    ),
+                    completed_at=_strict_string(
                         _mapping(item, "completed_task")["completed_at"],
+                        "completed_task.completed_at",
                     ),
                     evidence_refs=_string_tuple(
                         _mapping(item, "completed_task").get(
@@ -556,9 +632,15 @@ class CheckpointRecord:
                 )
                 for item in completed_values
             ),
-            archived_through=data.get("archived_through"),
-            source_revision=int(data["source_revision"]),
-            applied_event_sequence=int(data["applied_event_sequence"]),
+            archived_through=archived_through,
+            source_revision=_strict_int(
+                data["source_revision"],
+                "checkpoint.source_revision",
+            ),
+            applied_event_sequence=_strict_int(
+                data["applied_event_sequence"],
+                "checkpoint.applied_event_sequence",
+            ),
         )
 
 
@@ -607,13 +689,25 @@ class PrecompactionCandidate:
     def from_dict(cls, value: Any) -> "PrecompactionCandidate":
         data = _mapping(value, "precompaction candidate")
         return cls(
-            id=str(data["id"]),
-            chat_id=str(data["chat_id"]),
-            epoch=int(data["epoch"]),
-            base_revision=int(data["base_revision"]),
-            applied_event_sequence=int(data["applied_event_sequence"]),
+            id=_strict_string(data["id"], "precompaction candidate.id"),
+            chat_id=_strict_string(
+                data["chat_id"],
+                "precompaction candidate.chat_id",
+            ),
+            epoch=_strict_int(data["epoch"], "precompaction candidate.epoch"),
+            base_revision=_strict_int(
+                data["base_revision"],
+                "precompaction candidate.base_revision",
+            ),
+            applied_event_sequence=_strict_int(
+                data["applied_event_sequence"],
+                "precompaction candidate.applied_event_sequence",
+            ),
             record=CheckpointRecord.from_dict(data["record"]),
-            created_at=str(data["created_at"]),
+            created_at=_strict_string(
+                data["created_at"],
+                "precompaction candidate.created_at",
+            ),
         )
 
 
@@ -658,12 +752,10 @@ def _validate_evidence_items(
         _validate_refs(item.evidence_refs, f"{field_name}[{index}]", errors)
 
 
-def validate_checkpoint_record(
+def _validate_record_header(
     record: CheckpointRecord,
-    events: Sequence[CheckpointEvent] = (),
-) -> CheckpointValidationResult:
-    """Validate source-of-truth invariants without mutating checkpoint state."""
-    errors: list[str] = []
+    errors: list[str],
+) -> None:
     if record.schema_version != CHECKPOINT_SCHEMA_VERSION:
         errors.append("checkpoint schema version is unsupported")
     if not record.chat_id:
@@ -672,10 +764,28 @@ def validate_checkpoint_record(
         errors.append("checkpoint epoch must be positive")
     if record.revision < 0:
         errors.append("checkpoint revision must not be negative")
+    if record.source_revision < 0:
+        errors.append("checkpoint source_revision must not be negative")
+    elif record.source_revision > record.revision:
+        errors.append("checkpoint source_revision must not exceed revision")
     if record.applied_event_sequence < 0:
         errors.append("checkpoint applied_event_sequence must not be negative")
+    if record.confidence not in ("verified", "degraded"):
+        errors.append("checkpoint confidence is unsupported")
+    if record.archived_through is not None and (
+        not isinstance(record.archived_through, str)
+        or not record.archived_through
+    ):
+        errors.append("checkpoint archived_through must be a non-empty string")
 
+
+def _validate_current_task(
+    record: CheckpointRecord,
+    errors: list[str],
+) -> None:
     task = record.current_task
+    if task.status not in ("empty", "in_progress", "completed"):
+        errors.append("current_task status is unsupported")
     if task.status == "empty" and (task.id or task.title or task.goal):
         errors.append("empty current_task must not contain task state")
     if task.status != "empty":
@@ -688,31 +798,24 @@ def validate_checkpoint_record(
             errors,
         )
 
-    _validate_evidence_items(
-        record.constraints_and_preferences,
-        "constraints_and_preferences",
-        errors,
-    )
-    _validate_evidence_items(
-        record.critical_context,
-        "critical_context",
-        errors,
-    )
-    _validate_evidence_items(
-        record.risks_and_unverified,
-        "risks_and_unverified",
-        errors,
-    )
-    for index, item in enumerate(record.key_decisions):
-        _validate_refs(item.evidence_refs, f"key_decisions[{index}]", errors)
-    for index, item in enumerate(record.next_steps):
-        _validate_refs(item.evidence_refs, f"next_steps[{index}]", errors)
-    for index, item in enumerate(record.completed_task_index):
-        _validate_refs(
-            item.evidence_refs,
-            f"completed_task_index[{index}]",
-            errors,
-        )
+
+def _validate_record_evidence(
+    record: CheckpointRecord,
+    errors: list[str],
+) -> None:
+    for name, items in (
+        ("constraints_and_preferences", record.constraints_and_preferences),
+        ("critical_context", record.critical_context),
+        ("risks_and_unverified", record.risks_and_unverified),
+    ):
+        _validate_evidence_items(items, name, errors)
+    for name, items in (
+        ("key_decisions", record.key_decisions),
+        ("next_steps", record.next_steps),
+        ("completed_task_index", record.completed_task_index),
+    ):
+        for index, item in enumerate(items):
+            _validate_refs(item.evidence_refs, f"{name}[{index}]", errors)
     for bucket in _PROGRESS_BUCKETS:
         for index, item in enumerate(record.progress.items(bucket)):
             if item.status != bucket:
@@ -723,6 +826,12 @@ def validate_checkpoint_record(
                 errors,
             )
 
+
+def _validate_events(
+    record: CheckpointRecord,
+    events: Sequence[CheckpointEvent],
+    errors: list[str],
+) -> None:
     previous_sequence = record.applied_event_sequence
     for index, event in enumerate(events):
         if event.epoch != record.epoch:
@@ -751,6 +860,18 @@ def validate_checkpoint_record(
             errors.append(
                 f"event[{index}].facts must contain strict JSON values",
             )
+
+
+def validate_checkpoint_record(
+    record: CheckpointRecord,
+    events: Sequence[CheckpointEvent] = (),
+) -> CheckpointValidationResult:
+    """Validate source-of-truth invariants without mutating checkpoint state."""
+    errors: list[str] = []
+    _validate_record_header(record, errors)
+    _validate_current_task(record, errors)
+    _validate_record_evidence(record, errors)
+    _validate_events(record, events, errors)
 
     return CheckpointValidationResult(errors)
 
@@ -799,6 +920,10 @@ def validate_precompaction_candidate(
         errors.append("candidate chat_id differs from active checkpoint")
     if candidate.epoch != active_record.epoch:
         errors.append("candidate epoch differs from active checkpoint")
+    if candidate.base_revision < 0:
+        errors.append("candidate base revision must not be negative")
+    if candidate.applied_event_sequence < 0:
+        errors.append("candidate event sequence must not be negative")
     if candidate.base_revision != active_record.revision:
         errors.append("candidate base revision is stale")
     if candidate.record.source_revision != candidate.base_revision:

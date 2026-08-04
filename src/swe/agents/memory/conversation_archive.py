@@ -289,6 +289,7 @@ class ConversationArchiveStore:
         self._write_batch(chat_dir / f"{boundary.id}.jsonl", messages)
         self._write_evidence_epochs(
             chat_dir,
+            boundary.id,
             messages,
             self._read_current_epoch(chat_dir),
         )
@@ -518,11 +519,32 @@ class ConversationArchiveStore:
                     + "; ".join(validation.errors),
                 )
             record = replace(candidate.record, archived_through=None)
-            boundary = self._commit_locked(
-                canonical_chat_id,
-                archived_messages,
-                checkpoint=record,
+            chat_dir = self.path_for(canonical_chat_id)
+            checkpoint_before = self._snapshot_file(
+                self._checkpoint_path(canonical_chat_id),
             )
+            evidence_epochs_before = self._snapshot_file(
+                self._evidence_epochs_path(chat_dir),
+            )
+            try:
+                boundary = self._commit_locked(
+                    canonical_chat_id,
+                    archived_messages,
+                    checkpoint=record,
+                )
+            except Exception:
+                # The batch is intentionally still invisible without a manifest
+                # entry. Restore the two derived files so the pending candidate
+                # remains valid and the same request can be retried safely.
+                self._restore_file(
+                    self._checkpoint_path(canonical_chat_id),
+                    checkpoint_before,
+                )
+                self._restore_file(
+                    self._evidence_epochs_path(chat_dir),
+                    evidence_epochs_before,
+                )
+                raise
             record = replace(record, archived_through=boundary.id)
             self._candidate_path(canonical_chat_id, candidate.id).unlink(
                 missing_ok=True,
@@ -552,12 +574,25 @@ class ConversationArchiveStore:
             chat_dir = self.path_for(canonical_chat_id)
             prior_epoch = self._read_current_epoch(chat_dir)
             next_epoch = prior_epoch + 1
+            epochs_before = self._snapshot_file(
+                self._epochs_path(canonical_chat_id),
+            )
             self._write_epochs(chat_dir, next_epoch, reason)
             record = CheckpointRecord.new(
                 chat_id=canonical_chat_id,
                 epoch=next_epoch,
             )
-            self._write_checkpoint_locked(canonical_chat_id, record)
+            try:
+                self._write_checkpoint_locked(canonical_chat_id, record)
+            except Exception:
+                # A new epoch without its matching record makes the Chat
+                # unreadable. Restore the previous epoch metadata before
+                # releasing the per-Chat lock.
+                self._restore_file(
+                    self._epochs_path(canonical_chat_id),
+                    epochs_before,
+                )
+                raise
             candidates_dir = chat_dir / _CHECKPOINT_CANDIDATES_DIR
             if candidates_dir.exists():
                 shutil.rmtree(candidates_dir)
@@ -596,17 +631,32 @@ class ConversationArchiveStore:
             chat_dir = self.path_for(canonical_chat_id)
             recovered: list[Msg] = []
             manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
+            evidence_epochs_path = self._evidence_epochs_path(chat_dir)
             evidence_epochs = self._read_evidence_epochs(chat_dir)
+            is_legacy_epoch_one = (
+                not evidence_epochs_path.exists() and state.current_epoch == 1
+            )
             for boundary in self._visible_boundaries(
                 manifest,
                 canonical_chat_id,
             ):
-                for message in self._read_batch(
-                    chat_dir / f"{boundary.id}.jsonl",
+                for message_index, message in enumerate(
+                    self._read_batch(
+                        chat_dir / f"{boundary.id}.jsonl",
+                    ),
                 ):
                     if message is None:
                         continue
-                    if evidence_epochs.get(message.id) != epoch:
+                    evidence_epoch = evidence_epochs.get(
+                        self._evidence_epoch_key(
+                            boundary.id,
+                            message_index,
+                            message.id,
+                        ),
+                    )
+                    if evidence_epoch is None and is_legacy_epoch_one:
+                        evidence_epoch = 1
+                    if evidence_epoch != epoch:
                         continue
                     if any(
                         message.id in (ref, ref.partition(":")[2])
@@ -798,11 +848,17 @@ class ConversationArchiveStore:
     def _write_evidence_epochs(
         self,
         chat_dir: Path,
+        boundary_id: str,
         messages: Sequence[Msg],
         epoch: int,
     ) -> None:
         evidence_epochs = self._read_evidence_epochs(chat_dir)
-        evidence_epochs.update({message.id: epoch for message in messages})
+        evidence_epochs.update(
+            {
+                self._evidence_epoch_key(boundary_id, index, message.id): epoch
+                for index, message in enumerate(messages)
+            },
+        )
         self._atomic_write(
             self._evidence_epochs_path(chat_dir),
             json.dumps(
@@ -811,6 +867,27 @@ class ConversationArchiveStore:
                 separators=(",", ":"),
             ),
         )
+
+    @staticmethod
+    def _evidence_epoch_key(
+        boundary_id: str,
+        message_index: int,
+        message_id: str,
+    ) -> str:
+        """Bind evidence ownership to immutable archive location, not Msg.id."""
+        return f"{boundary_id}:{message_index}:{message_id}"
+
+    @staticmethod
+    def _snapshot_file(path: Path) -> str | None:
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def _restore_file(self, path: Path, payload: str | None) -> None:
+        if payload is not None:
+            self._atomic_write(path, payload)
+            return
+        if path.exists():
+            path.unlink()
+            self._fsync_directory(path.parent)
 
     def _read_checkpoint_locked(
         self,
