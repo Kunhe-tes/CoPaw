@@ -27,7 +27,6 @@ export default createGlobalStyle`
   width: 48px;
   height: 100%;
   align-items: center;
-  border-left: 1px solid rgba(229, 231, 235, 0.86);
   z-index: auto;
 }
 
