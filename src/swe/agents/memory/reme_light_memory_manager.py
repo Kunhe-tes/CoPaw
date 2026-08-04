@@ -5,6 +5,7 @@
 
 import importlib
 import importlib.metadata
+import copy
 import json
 import logging
 import os
@@ -47,6 +48,73 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXPECTED_REME_VERSION = "0.3.1.8"
+
+
+def _clone_unbound_chat_memory(memory: Any) -> Any:
+    """Create an empty Chat-local memory when a backend returns a singleton."""
+    try:
+        clone = copy.copy(memory)
+    except (TypeError, copy.Error) as exc:
+        raise RuntimeError(
+            "ReMe memory backend returned a non-isolatable Chat memory",
+        ) from exc
+
+    if hasattr(clone, "content"):
+        clone.content = []
+    if hasattr(clone, "_compressed_summary"):
+        clone._compressed_summary = ""
+    # These are instance attributes installed by attach_conversation_archive;
+    # removing them lets the class' original methods bind to the clone.
+    for name in (
+        "add",
+        "get_memory",
+        "clear_content",
+        "clear_compressed_summary",
+        "conversation_archive_store",
+        "chat_checkpoint_store",
+        "_chat_checkpoint_chat_id",
+        "_chat_checkpoint_epoch",
+        "_checkpoint_original_add",
+        "_checkpoint_original_get_memory",
+        "_checkpoint_original_clear_content",
+        "_checkpoint_original_clear_compressed_summary",
+    ):
+        try:
+            delattr(clone, name)
+        except AttributeError:
+            pass
+    if not hasattr(type(clone), "add"):
+
+        async def add(message: Msg) -> None:
+            clone.content.append((message, []))
+
+        clone.add = add
+    if not hasattr(type(clone), "get_memory"):
+
+        async def get_memory(*, prepend_summary: bool = True) -> list[Msg]:
+            del prepend_summary
+            return [message for message, _marks in clone.content]
+
+        clone.get_memory = get_memory
+    if not hasattr(type(clone), "clear_content"):
+
+        def clear_content() -> None:
+            clone.content.clear()
+
+        clone.clear_content = clear_content
+    if not hasattr(type(clone), "clear_compressed_summary"):
+
+        def clear_compressed_summary() -> None:
+            clone._compressed_summary = ""
+
+        clone.clear_compressed_summary = clear_compressed_summary
+    if not callable(getattr(clone, "add", None)) or not callable(
+        getattr(clone, "get_memory", None),
+    ):
+        raise RuntimeError(
+            "ReMe memory clone does not expose Chat memory operations",
+        )
+    return clone
 
 
 def _exception_chain_messages(exc: Exception) -> list[str]:
@@ -205,6 +273,7 @@ class ReMeLightMemoryManager(BaseMemoryManager):
         )
         self._reme_version_ok: bool = self._check_reme_version()
         self._reme = None
+        self._chat_memory_cache: dict[str, Any] = {}
 
         logger.info(
             f"ReMeLightMemoryManager init: "
@@ -570,6 +639,14 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         self._warn_if_version_mismatch()
         if self._reme is None:
             return None
+        if chat_id:
+            cached_memory = getattr(
+                self,
+                "_chat_memory_cache",
+                {},
+            ).get(chat_id)
+            if cached_memory is not None:
+                return cached_memory
         agent_config = self._load_agent_config()
         memory = self._reme.get_in_memory_memory(
             as_token_counter=get_swe_token_counter(agent_config),
@@ -577,13 +654,21 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         if not chat_id:
             return memory
 
+        attached_chat_id = getattr(memory, "_chat_checkpoint_chat_id", None)
+        if attached_chat_id is not None and attached_chat_id != chat_id:
+            memory = _clone_unbound_chat_memory(memory)
+
         from .conversation_archive import attach_conversation_archive
 
-        return attach_conversation_archive(
+        attached_memory = attach_conversation_archive(
             memory,
             Path(self.working_dir) / "dialog",
             chat_id,
         )
+        if not hasattr(self, "_chat_memory_cache"):
+            self._chat_memory_cache = {}
+        self._chat_memory_cache[chat_id] = attached_memory
+        return attached_memory
 
     async def archive_checkpoint_messages(
         self,

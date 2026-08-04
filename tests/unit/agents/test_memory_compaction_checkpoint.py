@@ -4,6 +4,7 @@
 import asyncio
 
 import pytest
+from agentscope.message import Msg
 
 from swe.agents.hooks.memory_compaction import decide_context_budget
 from swe.agents.hooks.memory_compaction import MemoryCompactionHook
@@ -12,6 +13,7 @@ from swe.agents.memory.chat_checkpoint import CheckpointEvent
 from swe.agents.memory.conversation_archive import CheckpointArchiveState
 from swe.agents.memory.reme_light_memory_manager import ReMeLightMemoryManager
 from swe.config.config import ContextCompactConfig
+from swe.config.config import ToolResultCompactConfig
 
 
 def test_budget_stages_follow_confirmed_65_5_80_90_contract() -> None:
@@ -68,6 +70,7 @@ async def test_governance_schedules_only_new_watermarks() -> None:
         manager.schedule_precompaction.await_args_list[1].kwargs["watermark"]
         == 1
     )
+    await asyncio.gather(*hook._precompaction_tasks.values())
 
 
 @pytest.mark.asyncio
@@ -90,6 +93,34 @@ async def test_active_stage_installs_ready_candidate_before_reme() -> None:
         chat_id="chat-1",
         messages=[],
     )
+
+
+@pytest.mark.asyncio
+async def test_active_candidate_remeasures_before_one_legacy_fallback() -> (
+    None
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    manager = SimpleNamespace(
+        install_ready_precompaction=AsyncMock(return_value=True),
+    )
+    hook = MemoryCompactionHook(manager)
+    agent = SimpleNamespace(_request_context={"chat_id": "chat-1"})
+    running = SimpleNamespace(
+        max_input_length=100,
+        context_compact=ContextCompactConfig(),
+    )
+    remeasure = AsyncMock(return_value=80)
+
+    assert not await hook._apply_checkpoint_budget_stage(
+        agent,
+        running,
+        [],
+        80,
+        remeasure,
+    )
+    remeasure.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -120,6 +151,69 @@ async def test_emergency_stage_installs_degraded_reference_checkpoint_once() -> 
         chat_id="chat-1",
         messages=[],
     )
+
+
+@pytest.mark.asyncio
+async def test_emergency_degradation_remeasures_then_retries_reme_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    message = Msg(name="user", role="user", content="message-1")
+    message.id = "message-1"
+    memory = SimpleNamespace(
+        get_compressed_summary=lambda: "",
+        get_memory=AsyncMock(return_value=[message]),
+        archive_compacted_messages=AsyncMock(return_value=None),
+        update_compressed_summary=AsyncMock(),
+    )
+    manager = SimpleNamespace(
+        agent_id="default",
+        tenant_id=None,
+        compact_tool_result=AsyncMock(),
+        check_context=AsyncMock(return_value=([message], [], True)),
+        install_ready_precompaction=AsyncMock(return_value=False),
+        install_degraded_checkpoint=AsyncMock(return_value=True),
+        compact_memory=AsyncMock(return_value="summary"),
+    )
+    running = SimpleNamespace(
+        max_input_length=100,
+        memory_compact_threshold=100,
+        memory_compact_reserve=0,
+        tool_result_compact=ToolResultCompactConfig(enabled=False),
+        memory_summary=SimpleNamespace(memory_summary_enabled=False),
+        context_compact=ContextCompactConfig(),
+    )
+    token_counter = SimpleNamespace(
+        count=AsyncMock(side_effect=[0, 90, 90]),
+    )
+    monkeypatch.setattr(
+        "swe.agents.hooks.memory_compaction.load_agent_config",
+        lambda *_args, **_kwargs: SimpleNamespace(running=running),
+    )
+    monkeypatch.setattr(
+        "swe.agents.hooks.memory_compaction.get_swe_token_counter",
+        lambda _config: token_counter,
+    )
+    agent = SimpleNamespace(
+        name="agent",
+        sys_prompt="",
+        memory=memory,
+        model=object(),
+        formatter=object(),
+        print=AsyncMock(),
+        _request_context={"chat_id": "chat-1"},
+    )
+
+    await MemoryCompactionHook(manager)(agent, {})
+
+    manager.install_degraded_checkpoint.assert_awaited_once_with(
+        chat_id="chat-1",
+        messages=[message],
+    )
+    assert token_counter.count.await_count == 3
+    manager.compact_memory.assert_awaited_once()
 
 
 @pytest.mark.asyncio

@@ -556,6 +556,12 @@ class ConversationArchiveStore:
             candidate = self._read_candidate(canonical_chat_id, candidate_id)
             if candidate is None:
                 raise ValueError("Checkpoint candidate does not exist")
+            if tuple(message.id for message in archived_messages) != (
+                candidate.source_message_ids
+            ):
+                raise ValueError(
+                    "Checkpoint source message prefix does not match candidate",
+                )
             current_sequence = max(
                 (event.sequence for event in state.events),
                 default=state.record.applied_event_sequence,
@@ -689,13 +695,25 @@ class ConversationArchiveStore:
         *,
         epoch: int,
         refs: Sequence[str],
+        query: str | None = None,
+        kinds: Sequence[str] | None = None,
+        time_range: str | None = None,
+        limit: int = 10,
     ) -> list[Msg]:
-        """Recover exact archived evidence only for the current Context Epoch."""
+        """Recover bounded evidence only for the current Context Epoch.
+
+        Exact references are authoritative. Semantic lookup is limited to
+        message text, role/name, and an ISO-8601 interval.
+        """
         return await asyncio.to_thread(
             self._recover_evidence,
             chat_id,
             epoch,
             refs,
+            query,
+            kinds,
+            time_range,
+            limit,
         )
 
     def _recover_evidence(
@@ -703,14 +721,28 @@ class ConversationArchiveStore:
         chat_id: str,
         epoch: int,
         refs: Sequence[str],
+        query: str | None,
+        kinds: Sequence[str] | None,
+        time_range: str | None,
+        limit: int,
     ) -> list[Msg]:
         canonical_chat_id = self._validate_chat_id(chat_id)
+        if limit <= 0:
+            return []
+        limit = min(limit, 10)
+        requested = {str(ref) for ref in refs if str(ref)}
+        semantic_query = query.strip().casefold() if query else ""
+        kind_filter = {
+            str(kind).strip().casefold()
+            for kind in (kinds or ())
+            if str(kind).strip()
+        }
+        time_bounds = self._parse_evidence_time_range(time_range)
         with self._chat_lock(canonical_chat_id):
             state = self._read_checkpoint_state_locked(canonical_chat_id)
             if epoch != state.current_epoch:
                 return []
-            requested = set(refs)
-            if not requested:
+            if not requested and not semantic_query:
                 return []
             chat_dir = self.path_for(canonical_chat_id)
             recovered: list[Msg] = []
@@ -742,12 +774,81 @@ class ConversationArchiveStore:
                         evidence_epoch = 1
                     if evidence_epoch != epoch:
                         continue
-                    if any(
+                    has_exact_ref = any(
                         message.id in (ref, ref.partition(":")[2])
                         for ref in requested
+                    )
+                    if requested and not has_exact_ref:
+                        continue
+                    if not requested and semantic_query:
+                        content = message.get_text_content() or ""
+                        if semantic_query not in content.casefold():
+                            continue
+                    if (
+                        not requested
+                        and kind_filter
+                        and not (
+                            str(message.role).casefold() in kind_filter
+                            or str(message.name).casefold() in kind_filter
+                        )
                     ):
-                        recovered.append(message)
+                        continue
+                    if (
+                        not requested
+                        and time_bounds
+                        and not self._message_in_time_range(
+                            message,
+                            time_bounds,
+                        )
+                    ):
+                        continue
+                    recovered.append(message)
+                    if len(recovered) >= limit:
+                        return recovered
             return recovered
+
+    @staticmethod
+    def _parse_evidence_time_range(
+        value: str | None,
+    ) -> tuple[datetime, datetime] | None:
+        if not value:
+            return None
+        if len(value) > 128:
+            raise ValueError("Evidence time range is too long")
+        start_text, separator, end_text = value.partition("/")
+        if not separator:
+            raise ValueError("Evidence time range must be start/end")
+        try:
+            start = datetime.fromisoformat(start_text)
+            end = datetime.fromisoformat(end_text)
+        except ValueError as exc:
+            raise ValueError(
+                "Evidence time range must use ISO timestamps",
+            ) from exc
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        if end < start:
+            raise ValueError("Evidence time range end precedes start")
+        return start, end
+
+    @staticmethod
+    def _message_in_time_range(
+        message: Msg,
+        bounds: tuple[datetime, datetime],
+    ) -> bool:
+        timestamp = getattr(message, "timestamp", None)
+        if not timestamp:
+            return False
+        try:
+            parsed = datetime.fromisoformat(str(timestamp))
+        except ValueError:
+            return False
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        start, end = bounds
+        return start <= parsed <= end
 
     async def read_page(
         self,
@@ -1422,6 +1523,18 @@ def attach_conversation_archive(
     canonical_chat_id = archive_store._validate_chat_id(chat_id)
     if getattr(memory, "_chat_checkpoint_chat_id", None) == canonical_chat_id:
         return memory
+    if getattr(memory, "_chat_checkpoint_chat_id", None):
+        # A test double or custom ReMe backend may reuse one raw object for
+        # multiple Chats. Remove the previous instance wrappers before binding
+        # the new archive, otherwise B.add would append an event to Chat A.
+        for name in (
+            "add",
+            "clear_content",
+            "clear_compressed_summary",
+        ):
+            original = getattr(memory, f"_checkpoint_original_{name}", None)
+            if original is not None:
+                setattr(memory, name, original)
     original_add = getattr(memory, "add", None)
     original_get_memory = getattr(memory, "get_memory", None)
     original_clear_content = getattr(memory, "clear_content", None)
@@ -1566,12 +1679,13 @@ def attach_conversation_archive(
         *,
         epoch: int,
         refs: Sequence[str],
-        **_kwargs: Any,
+        **kwargs: Any,
     ) -> list[Msg]:
         return await archive_store.recover_evidence(
             canonical_chat_id,
             epoch=epoch,
             refs=refs,
+            **kwargs,
         )
 
     async def reset_context_epoch(
@@ -1604,7 +1718,9 @@ def attach_conversation_archive(
     memory.conversation_archive_store = archive_store
     memory.chat_checkpoint_store = archive_store
     memory._chat_checkpoint_chat_id = canonical_chat_id
-    memory._chat_checkpoint_epoch = 1
+    memory._chat_checkpoint_epoch = archive_store._read_checkpoint_state(
+        canonical_chat_id,
+    ).current_epoch
     memory._checkpoint_original_add = original_add
     memory._checkpoint_original_get_memory = original_get_memory
     memory._checkpoint_original_clear_content = original_clear_content

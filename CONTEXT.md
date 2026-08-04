@@ -29,7 +29,7 @@ The versioned, structured source of truth for a Chat Checkpoint. A Checkpoint Re
 _Avoid_: free-form summary, model-only memory, untraceable state
 
 **Evidence Recovery**:
-The on-demand, Chat-scoped restoration of an original conversation or tool-result fragment identified by a Checkpoint Record. It adds only the evidence needed for the Current Task and does not replace the checkpoint state.
+The on-demand, Chat-scoped restoration of an original conversation or tool-result fragment identified by a Checkpoint Record. Exact evidence references take precedence; a bounded current-epoch lookup may otherwise narrow by text, kind, and time interval. It adds only the evidence needed for the Current Task and does not replace the checkpoint state.
 _Avoid_: cross-chat history search, automatic full-history injection, summary reconstruction
 
 **Checkpoint Update**:
@@ -57,7 +57,7 @@ The asynchronous, non-blocking preparation and validation of a bounded Chat Chec
 _Avoid_: threshold-only bulk compaction, blocking reply-path compression, per-message full resummarization
 
 **Precompaction Candidate**:
-A validated but inactive Checkpoint Update derived from a stable Chat snapshot. It may be installed without another ReMe call only when its base record revision and event sequence remain valid.
+A validated but inactive Checkpoint Update derived from a stable Chat snapshot and its exact source-message prefix. It may be installed without another ReMe call only when its base record revision, event sequence, and source prefix remain valid.
 _Avoid_: stale summary cache, immediately active checkpoint, overwrite of newer events
 
 **Elastic Context Budget**:

@@ -1,10 +1,13 @@
 # -*- coding: utf-8 -*-
 """Request-bound recovery of evidence referenced by a Chat checkpoint."""
 
+import logging
 from typing import Any, Sequence
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
+
+logger = logging.getLogger(__name__)
 
 
 def create_recover_evidence_tool(
@@ -32,7 +35,10 @@ def create_recover_evidence_tool(
                     ),
                 ],
             )
-        bounded_limit = min(max(int(limit), 1), 10)
+        try:
+            bounded_limit = min(max(int(limit), 1), 10)
+        except (TypeError, ValueError):
+            bounded_limit = 3
         try:
             messages = await memory_manager.recover_evidence(
                 chat_id=chat_id,
@@ -43,12 +49,13 @@ def create_recover_evidence_tool(
                 time_range=time_range,
                 limit=bounded_limit,
             )
-        except Exception as exc:  # Tool responses must not leak archive paths.
+        except Exception:  # Tool responses must not leak archive paths.
+            logger.exception("Bounded evidence recovery failed")
             return ToolResponse(
                 content=[
                     TextBlock(
                         type="text",
-                        text=f"Evidence recovery failed: {exc}",
+                        text="Evidence recovery is unavailable.",
                     ),
                 ],
             )

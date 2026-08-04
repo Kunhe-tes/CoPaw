@@ -63,18 +63,31 @@ async def test_chat_memory_clear_does_not_create_a_recoverable_boundary(
     ).messages == []
 
 
-def test_reme_memory_factory_attaches_archive_only_for_a_chat_id(
+@pytest.mark.asyncio
+async def test_reme_memory_factory_attaches_archive_only_for_a_chat_id(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_memory = SimpleNamespace(content=[])
+    raw_memory = SimpleNamespace(content=[], _compressed_summary="")
+
+    async def add(message: Msg) -> None:
+        raw_memory.content.append((message, []))
+
+    raw_memory.add = add
+    factory_calls = 0
+
+    def get_memory(**_kwargs):
+        nonlocal factory_calls
+        factory_calls += 1
+        return raw_memory
+
     manager = object.__new__(ReMeLightMemoryManager)
     manager.agent_id = "default"
     manager.tenant_id = None
     manager.working_dir = str(tmp_path)
     manager._warn_if_version_mismatch = lambda: None
     manager._reme = SimpleNamespace(
-        get_in_memory_memory=lambda **_kwargs: raw_memory,
+        get_in_memory_memory=get_memory,
     )
     monkeypatch.setattr(
         "swe.agents.memory.reme_light_memory_manager.load_agent_config",
@@ -86,8 +99,34 @@ def test_reme_memory_factory_attaches_archive_only_for_a_chat_id(
     )
 
     assert manager.get_in_memory_memory() is raw_memory
-    assert manager.get_in_memory_memory(chat_id=_chat_id()) is raw_memory
+    chat_id = _chat_id()
+    assert manager.get_in_memory_memory(chat_id=chat_id) is raw_memory
+    assert manager.get_in_memory_memory(chat_id=chat_id) is raw_memory
+    assert factory_calls == 2
     assert hasattr(raw_memory, "archive_compacted_messages")
+
+    other_chat = _chat_id()
+    other_memory = manager.get_in_memory_memory(chat_id=other_chat)
+    assert other_memory is not raw_memory
+    assert manager.get_in_memory_memory(chat_id=chat_id) is raw_memory
+    await raw_memory.add(_message(1))
+    await other_memory.add(_message(2))
+    await manager.get_in_memory_memory(chat_id=chat_id).add(_message(3))
+    first_state = await raw_memory.chat_checkpoint_store.read_checkpoint_state(
+        chat_id,
+    )
+    second_state = (
+        await other_memory.chat_checkpoint_store.read_checkpoint_state(
+            other_chat,
+        )
+    )
+    assert [event.source_refs for event in first_state.events] == [
+        ("message:message-1",),
+        ("message:message-3",),
+    ]
+    assert [event.source_refs for event in second_state.events] == [
+        ("message:message-2",),
+    ]
 
 
 @pytest.mark.asyncio

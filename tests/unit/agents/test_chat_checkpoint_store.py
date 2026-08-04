@@ -47,6 +47,7 @@ def _candidate(
     base_revision: int,
     applied_event_sequence: int,
     epoch: int = 1,
+    source_message_ids: tuple[str, ...] = (),
 ) -> PrecompactionCandidate:
     base = replace(
         CheckpointRecord.new(chat_id=chat_id, epoch=epoch),
@@ -63,6 +64,7 @@ def _candidate(
         record=record,
         base_revision=base_revision,
         applied_event_sequence=applied_event_sequence,
+        source_message_ids=source_message_ids,
     )
 
 
@@ -77,6 +79,7 @@ async def test_commit_checkpoint_archives_messages_and_activates_candidate(
         chat_id,
         base_revision=0,
         applied_event_sequence=1,
+        source_message_ids=("message:1",),
     )
     await store.write_pending_candidate(chat_id, candidate)
 
@@ -90,6 +93,22 @@ async def test_commit_checkpoint_archives_messages_and_activates_candidate(
     assert result.boundary.last_message_id == "message:1"
     assert (tmp_path / "dialog" / chat_id / "checkpoint.json").is_file()
     assert (await store.read_checkpoint_state(chat_id)).events == ()
+
+
+@pytest.mark.asyncio
+async def test_commit_checkpoint_rejects_messages_outside_candidate_prefix(
+    tmp_path: Path,
+) -> None:
+    chat_id = _chat_id()
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    candidate = replace(
+        _candidate(chat_id, base_revision=0, applied_event_sequence=0),
+        source_message_ids=("message:1",),
+    )
+    await store.write_pending_candidate(chat_id, candidate)
+
+    with pytest.raises(ValueError, match="source message prefix"):
+        await store.commit_checkpoint(chat_id, [_message(2)], candidate.id)
 
 
 @pytest.mark.asyncio
@@ -162,7 +181,12 @@ async def test_checkpoint_commit_rolls_back_activation_when_manifest_fails(
 ) -> None:
     chat_id = _chat_id()
     store = ConversationArchiveStore(tmp_path / "dialog")
-    candidate = _candidate(chat_id, base_revision=0, applied_event_sequence=0)
+    candidate = _candidate(
+        chat_id,
+        base_revision=0,
+        applied_event_sequence=0,
+        source_message_ids=("message:1",),
+    )
     await store.write_pending_candidate(chat_id, candidate)
     original_replace_manifest = store._replace_manifest
     failed = False
@@ -252,3 +276,54 @@ async def test_legacy_epoch_one_archive_remains_recoverable(
     )
 
     assert [message.id for message in recovered] == ["message:3"]
+
+
+@pytest.mark.asyncio
+async def test_recovery_filters_current_epoch_evidence_by_query_kind_and_time(
+    tmp_path: Path,
+) -> None:
+    chat_id = _chat_id()
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    matching = _message(1)
+    matching.role = "assistant"
+    matching.content = "Needle: retained deployment failure"
+    matching.timestamp = "2026-08-01T12:00:00+00:00"
+    other = _message(2)
+    other.role = "user"
+    other.content = "needle but not assistant"
+    other.timestamp = "2026-08-02T12:00:00+00:00"
+    await store.commit(chat_id, [matching, other])
+
+    recovered = await store.recover_evidence(
+        chat_id,
+        epoch=1,
+        refs=[],
+        query="NEEDLE",
+        kinds=["assistant"],
+        time_range="2026-08-01T00:00:00+00:00/2026-08-01T23:59:59+00:00",
+        limit=1,
+    )
+
+    assert [message.id for message in recovered] == ["message:1"]
+
+
+@pytest.mark.asyncio
+async def test_exact_reference_takes_precedence_over_semantic_query(
+    tmp_path: Path,
+) -> None:
+    chat_id = _chat_id()
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    message = _message(1)
+    message.content = "retained failure evidence"
+    await store.commit(chat_id, [message])
+
+    recovered = await store.recover_evidence(
+        chat_id,
+        epoch=1,
+        refs=["message:1"],
+        query="does not match",
+        kinds=["assistant"],
+        limit=1,
+    )
+
+    assert [item.id for item in recovered] == ["message:1"]

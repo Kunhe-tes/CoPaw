@@ -10,7 +10,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from math import floor
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg, TextBlock
@@ -96,6 +96,7 @@ class MemoryCompactionHook:
         running_config: Any,
         messages: list[Msg],
         projected_tokens: int,
+        remeasure_projected_tokens: Callable[[], Awaitable[int]] | None = None,
     ) -> bool:
         """Apply staged checkpoint policy; return whether legacy flow stops."""
         compact_config = getattr(running_config, "context_compact", None)
@@ -180,10 +181,18 @@ class MemoryCompactionHook:
             chat_id=chat_id,
             messages=messages,
         )
-        # A valid candidate replaces the online compaction work. If none is
-        # ready, continue to the established ReMe fallback below.
         if installed:
-            return True
+            # A candidate changes both the checkpoint projection and online
+            # history. Re-measure before deciding whether one ReMe fallback is
+            # still required; direct unit callers may omit this callback.
+            if remeasure_projected_tokens is None:
+                return True
+            remeasured = await remeasure_projected_tokens()
+            return decide_context_budget(
+                remeasured,
+                running_config.max_input_length,
+                compact_config,
+            ).stage in ("normal", "governance")
         if decision.stage == "emergency":
             install_degraded = getattr(
                 self.memory_manager,
@@ -192,6 +201,13 @@ class MemoryCompactionHook:
             )
             if install_degraded is not None:
                 await install_degraded(chat_id=chat_id, messages=messages)
+                if remeasure_projected_tokens is not None:
+                    remeasured = await remeasure_projected_tokens()
+                    return decide_context_budget(
+                        remeasured,
+                        running_config.max_input_length,
+                        compact_config,
+                    ).stage in ("normal", "governance")
         return False
 
     @staticmethod
@@ -444,13 +460,35 @@ class MemoryCompactionHook:
                 text=(agent.sys_prompt or "")
                 + (memory.get_compressed_summary() or ""),
             )
+
+            async def remeasure_projected_tokens() -> int:
+                refreshed_messages = await memory.get_memory(
+                    prepend_summary=False,
+                )
+                return await token_counter.count(
+                    messages=refreshed_messages,
+                    text=(agent.sys_prompt or "")
+                    + (memory.get_compressed_summary() or ""),
+                )
+
             if await self._apply_checkpoint_budget_stage(
                 agent,
                 running_config,
                 candidate_messages,
                 projected_tokens,
+                remeasure_projected_tokens,
             ):
                 return None
+            # A candidate or emergency record may have changed online memory
+            # during the re-measurement. Derive the one permitted legacy ReMe
+            # fallback from that current snapshot, never a stale prefix.
+            messages = await memory.get_memory(prepend_summary=False)
+            messages_to_compact = await self._get_messages_to_compact(
+                messages,
+                running_config,
+                token_counter,
+                left_compact_threshold,
+            )
             if not messages_to_compact:
                 return None
 

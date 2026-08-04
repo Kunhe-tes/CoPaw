@@ -36,3 +36,21 @@ async def test_recovery_uses_bound_chat_epoch_and_caps_limit() -> None:
         limit=10,
     )
     assert response.content[0]["text"] == "No matching evidence."
+
+
+@pytest.mark.asyncio
+async def test_recovery_does_not_expose_internal_exception_details() -> None:
+    manager = SimpleNamespace(
+        recover_evidence=AsyncMock(
+            side_effect=RuntimeError("/private/archive/chat-1.jsonl"),
+        ),
+    )
+    tool = create_recover_evidence_tool(
+        manager,
+        chat_id="7cf02fc9-1c4e-4531-b81d-6513cbfda154",
+        epoch=2,
+    )
+
+    response = await tool(refs=["message:known"])
+
+    assert response.content[0]["text"] == "Evidence recovery is unavailable."
