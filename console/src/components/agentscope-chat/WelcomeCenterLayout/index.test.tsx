@@ -135,6 +135,30 @@ describe("WelcomeCenterLayout", () => {
     expect(input.textContent).toBe("请用 @browser ");
   });
 
+  it("positions the context-reference menu below the new conversation input", () => {
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    setTokenEditorValue(screen.getByRole("textbox"), "@");
+
+    expect(document.getElementById("context-reference-menu")).toHaveStyle({
+      top: "calc(100% + 3px)",
+    });
+    expect(document.getElementById("context-reference-menu")).not.toHaveStyle({
+      bottom: "calc(100% + 3px)",
+    });
+  });
+
   it("selects a matching skill with Enter without submitting", () => {
     const onChange = vi.fn();
     const onSubmit = vi.fn();

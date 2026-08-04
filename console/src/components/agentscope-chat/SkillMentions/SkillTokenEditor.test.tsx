@@ -240,6 +240,29 @@ describe("SkillTokenEditor", () => {
       bottom: "calc(100% + 3px)",
     });
   });
+  it("positions the context-reference menu below the editor when requested", () => {
+    render(
+      <SkillTokenEditor
+        aria-label="消息"
+        mentionMenuPlacement="bottom"
+        value="@"
+        skillMentions={{
+          items,
+          selected: [],
+          onChange: vi.fn(),
+          onOpen: vi.fn(),
+        }}
+        onValueChange={vi.fn()}
+      />,
+    );
+
+    expect(document.getElementById("context-reference-menu")).toHaveStyle({
+      top: "calc(100% + 3px)",
+    });
+    expect(document.getElementById("context-reference-menu")).not.toHaveStyle({
+      bottom: "calc(100% + 3px)",
+    });
+  });
   it("restores editor focus after a clicked option took focus", () => {
     render(<ControlledTokenEditor />);
     const editor = screen.getByRole("textbox", { name: "消息" });

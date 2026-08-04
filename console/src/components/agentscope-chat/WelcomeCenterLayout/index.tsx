@@ -242,6 +242,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
               aria-label="消息"
               className="welcome-input-placeholder welcome-skill-editor"
               disabled={isSubmitting}
+              mentionMenuPlacement="bottom"
               onKeyDown={handleKeyDown}
               onValueChange={setCurrentInputValue}
               placeholder={randomPlaceholder}
