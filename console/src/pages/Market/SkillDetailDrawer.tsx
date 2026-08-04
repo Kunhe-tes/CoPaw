@@ -46,9 +46,6 @@ const HEADER_STYLE = {
   padding: "12px 20px",
   backgroundColor: "#fff",
   borderBottom: "1px solid #f0f0f0",
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
 } as const;
 
 // 元数据项样式 - 淡色小字
@@ -654,9 +651,9 @@ export function SkillDetailDrawer(
         {/* 顶栏：固定 */}
         <div style={HEADER_STYLE}>
           {/* 单行：状态图标 + 名称 + 元数据 + 操作按钮 */}
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
             {/* 左侧：状态图标 + 名称 */}
-            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
               {/* 发布状态图标（仅已发布时显示） */}
               {skill.status === "active" && (
                 <Tooltip title="已发布">
@@ -779,7 +776,7 @@ export function SkillDetailDrawer(
             </div>
 
             {/* 右侧：操作按钮 */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, marginLeft: "auto" }}>
             <Button
               onClick={handleDownloadCurrentVersion}
               loading={downloadingCurrentVersion}
