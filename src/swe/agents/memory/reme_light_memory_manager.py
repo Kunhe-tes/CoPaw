@@ -15,7 +15,7 @@ import types
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg, TextBlock
@@ -583,6 +583,58 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             Path(self.working_dir) / "dialog",
             chat_id,
         )
+
+    async def archive_checkpoint_messages(
+        self,
+        *,
+        chat_id: str,
+        messages: list[Msg],
+        candidate_id: str,
+    ) -> Any:
+        """Archive source messages and install the selected Chat checkpoint."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            raise RuntimeError("ReMe in-memory memory is unavailable")
+        return await memory.archive_checkpoint_messages(messages, candidate_id)
+
+    async def schedule_precompaction(
+        self,
+        *,
+        chat_id: str,
+        watermark: int,
+        messages: list[Msg],
+        **kwargs,
+    ) -> bool:
+        """Candidate construction is installed by the staged budget hook."""
+        del chat_id, watermark, messages, kwargs
+        return False
+
+    async def install_ready_precompaction(self, *, chat_id: str) -> bool:
+        """Install a still-valid candidate and refresh its Markdown projection."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            return False
+        return await memory.install_ready_precompaction()
+
+    async def recover_evidence(
+        self,
+        *,
+        chat_id: str,
+        epoch: int,
+        **kwargs,
+    ) -> Any:
+        """Delegate request-bound recovery to the Chat-attached memory."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            return []
+        return await memory.recover_evidence(epoch=epoch, **kwargs)
+
+    async def reset_context_epoch(self, *, chat_id: str, reason: str) -> Any:
+        """Reset the Chat epoch while retaining physical archive evidence."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            raise RuntimeError("ReMe in-memory memory is unavailable")
+        return await memory.reset_context_epoch(reason=reason)
 
     # ------------------------------------------------------------------
     # Dream-based memory optimization

@@ -5,7 +5,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 
 from agentscope.formatter import FormatterBase
@@ -113,6 +113,45 @@ class BaseMemoryManager(ABC):
         Returns:
             Comprehensive summary string.
         """
+
+    @abstractmethod
+    async def archive_checkpoint_messages(
+        self,
+        *,
+        chat_id: str,
+        messages: list[Msg],
+        candidate_id: str,
+    ) -> Any:
+        """Archive source messages while activating a Chat checkpoint."""
+
+    @abstractmethod
+    async def schedule_precompaction(
+        self,
+        *,
+        chat_id: str,
+        watermark: int,
+        messages: list[Msg],
+        **kwargs,
+    ) -> bool:
+        """Schedule a non-blocking candidate for a stable Chat snapshot."""
+
+    @abstractmethod
+    async def install_ready_precompaction(self, *, chat_id: str) -> bool:
+        """Install the newest valid candidate for a Chat, if available."""
+
+    @abstractmethod
+    async def recover_evidence(
+        self,
+        *,
+        chat_id: str,
+        epoch: int,
+        **kwargs,
+    ) -> Any:
+        """Recover bounded evidence for the request-bound Chat and epoch."""
+
+    @abstractmethod
+    async def reset_context_epoch(self, *, chat_id: str, reason: str) -> Any:
+        """Start a fresh Context Epoch without deleting Chat evidence."""
 
     @abstractmethod
     async def dream_memory(

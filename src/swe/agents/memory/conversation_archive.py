@@ -8,6 +8,7 @@ import base64
 import contextlib
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from .chat_checkpoint import (
     CheckpointEvent,
     CheckpointRecord,
     PrecompactionCandidate,
+    render_checkpoint_projection,
     validate_checkpoint_record,
     validate_precompaction_candidate,
 )
@@ -1327,6 +1329,7 @@ class ConversationArchiveStore:
         return boundary_id, message_index
 
 
+# pylint: disable=too-many-statements
 def attach_conversation_archive(
     memory: Any,
     dialog_root: str | Path,
@@ -1335,6 +1338,49 @@ def attach_conversation_archive(
     """Make a ReMe in-memory object archive compactions by chat record ID."""
     archive_store = ConversationArchiveStore(dialog_root)
     canonical_chat_id = archive_store._validate_chat_id(chat_id)
+    if getattr(memory, "_chat_checkpoint_chat_id", None) == canonical_chat_id:
+        return memory
+    original_add = getattr(memory, "add", None)
+    original_get_memory = getattr(memory, "get_memory", None)
+    original_clear_content = getattr(memory, "clear_content", None)
+    original_clear_summary = getattr(memory, "clear_compressed_summary", None)
+    append_lock = asyncio.Lock()
+
+    async def add(*args: Any, **kwargs: Any) -> Any:
+        """Append an event only after ReMe has accepted the message."""
+        if original_add is None:
+            raise TypeError("Attached memory must expose add")
+        result = original_add(*args, **kwargs)
+        if inspect.isawaitable(result):
+            result = await result
+        message = args[0] if args else kwargs.get("message")
+        if not isinstance(message, Msg):
+            return result
+        async with append_lock:
+            state = await archive_store.read_checkpoint_state(
+                canonical_chat_id,
+            )
+            sequence = (
+                max(
+                    (event.sequence for event in state.events),
+                    default=state.record.applied_event_sequence,
+                )
+                + 1
+            )
+            await archive_store.append_checkpoint_event(
+                canonical_chat_id,
+                CheckpointEvent.new(
+                    sequence=sequence,
+                    epoch=state.current_epoch,
+                    type="message_added",
+                    facts={
+                        "message_id": message.id,
+                        "role": message.role,
+                    },
+                    source_refs=(f"message:{message.id}",),
+                ),
+            )
+        return result
 
     async def archive_compacted_messages(
         messages: Sequence[Msg],
@@ -1348,13 +1394,109 @@ def attach_conversation_archive(
         ]
         return boundary
 
+    async def archive_checkpoint_messages(
+        messages: Sequence[Msg],
+        candidate_id: str,
+    ) -> CheckpointCommitResult:
+        """Atomically archive source turns and activate one checkpoint."""
+        result = await archive_store.commit_checkpoint(
+            canonical_chat_id,
+            messages,
+            candidate_id,
+        )
+        archived_ids = {message.id for message in messages}
+        memory.content = [
+            (message, marks)
+            for message, marks in memory.content
+            if message.id not in archived_ids
+        ]
+        await install_checkpoint_projection(result.record)
+        return result
+
+    async def install_checkpoint_projection(
+        record: CheckpointRecord | None = None,
+    ) -> CheckpointRecord:
+        """Expose a bounded Markdown projection, never checkpoint JSON."""
+        if record is not None:
+            await archive_store.write_active_checkpoint(
+                canonical_chat_id,
+                record,
+            )
+        state = await archive_store.read_checkpoint_state(canonical_chat_id)
+        memory._compressed_summary = render_checkpoint_projection(
+            state.record,
+            state.events,
+        )
+        return state.record
+
+    async def install_ready_precompaction() -> bool:
+        record = await archive_store.install_ready_candidate(canonical_chat_id)
+        if record is None:
+            return False
+        await install_checkpoint_projection()
+        return True
+
+    async def recover_evidence(
+        *,
+        epoch: int,
+        refs: Sequence[str],
+        **_kwargs: Any,
+    ) -> list[Msg]:
+        return await archive_store.recover_evidence(
+            canonical_chat_id,
+            epoch=epoch,
+            refs=refs,
+        )
+
+    async def reset_context_epoch(
+        *,
+        reason: str,
+    ) -> CheckpointArchiveState:
+        state = await archive_store.reset_checkpoint_epoch(
+            canonical_chat_id,
+            reason=reason,
+        )
+        memory._compressed_summary = render_checkpoint_projection(
+            state.record,
+            state.events,
+        )
+        return state
+
     def clear_content() -> None:
-        memory.content.clear()
+        if original_clear_content is not None:
+            original_clear_content()
+        else:
+            memory.content.clear()
+
+    def clear_compressed_summary() -> None:
+        if original_clear_summary is not None:
+            original_clear_summary()
+        else:
+            memory._compressed_summary = ""
 
     memory.conversation_archive_store = archive_store
+    memory.chat_checkpoint_store = archive_store
+    memory._chat_checkpoint_chat_id = canonical_chat_id
+    memory._checkpoint_original_add = original_add
+    memory._checkpoint_original_get_memory = original_get_memory
+    memory._checkpoint_original_clear_content = original_clear_content
+    memory._checkpoint_original_clear_compressed_summary = (
+        original_clear_summary
+    )
+    if original_add is not None:
+        memory.add = add
     memory.archive_compacted_messages = archive_compacted_messages
+    memory.archive_checkpoint_messages = archive_checkpoint_messages
+    memory.install_checkpoint_projection = install_checkpoint_projection
+    memory.install_ready_precompaction = install_ready_precompaction
+    memory.recover_evidence = recover_evidence
+    memory.reset_context_epoch = reset_context_epoch
     memory.clear_content = clear_content
+    memory.clear_compressed_summary = clear_compressed_summary
     return memory
+
+
+# pylint: enable=too-many-statements
 
 
 __all__ = [
