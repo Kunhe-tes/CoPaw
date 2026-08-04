@@ -25,6 +25,10 @@ const attachmentState = {
   handlePasteFile: vi.fn<(file: File) => void>(),
 };
 
+vi.mock("@/components/GlobalVoiceRecorder/VoiceRecorderTrigger", () => ({
+  default: () => null,
+}));
+
 function renderActiveInput(onSubmit = vi.fn()) {
   return render(
     <ChatAnywhereMessagesContext.Provider

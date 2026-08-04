@@ -14,6 +14,7 @@ import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
 import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
+import VoiceRecorderTrigger from "@/components/GlobalVoiceRecorder/VoiceRecorderTrigger";
 import {
   appendChatInputText,
   CHAT_INPUT_APPEND_TEXT_EVENT,
@@ -302,6 +303,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
           )}
           <div className="welcome-input-actions">
             <div className="welcome-input-actions-left">
+              <VoiceRecorderTrigger />
               <Tooltip title="上传附件">
                 <div>
                   <Upload

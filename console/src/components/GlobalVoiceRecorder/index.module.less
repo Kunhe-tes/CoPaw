@@ -84,84 +84,8 @@
   margin-top: 4px;
 }
 
-.transcript {
-  margin-top: 14px;
-}
-
-.transcriptHeader {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-bottom: 8px;
-}
-
-.transcript textarea {
-  resize: vertical;
-}
-
 .notice {
   margin-top: 10px;
-}
-
-.launcherWrap {
-  position: relative;
-  pointer-events: auto;
-}
-
-.launcher {
-  width: 36px !important;
-  height: 36px !important;
-  color: #fff !important;
-  background: var(--console-management-primary) !important;
-  border-color: var(--console-management-primary) !important;
-  box-shadow: 0 2px 8px rgba(55, 105, 252, 0.28);
-  transition:
-    background 160ms ease,
-    border-color 160ms ease,
-    box-shadow 160ms ease;
-}
-
-.launcher:hover:not(:disabled) {
-  background: var(--console-management-primary-hover) !important;
-  border-color: var(--console-management-primary-hover) !important;
-  box-shadow: 0 3px 8px rgba(55, 105, 252, 0.34);
-}
-
-.launcher:focus-visible {
-  outline: 3px solid rgba(55, 105, 252, 0.28);
-  outline-offset: 3px;
-}
-
-.launcherRecording {
-  background: var(--console-management-error) !important;
-  border-color: var(--console-management-error) !important;
-  box-shadow: 0 2px 8px rgba(185, 74, 79, 0.28);
-}
-
-.launcherError {
-  color: var(--console-management-error) !important;
-  background: var(--console-management-surface) !important;
-  border-color: var(--console-management-error) !important;
-}
-
-.launcher:disabled {
-  color: var(--console-management-text-muted) !important;
-  background: var(--console-management-surface-subtle) !important;
-  border-color: var(--console-management-border) !important;
-  box-shadow: none;
-}
-
-.activeBadge {
-  position: absolute;
-  top: 1px;
-  right: 1px;
-  width: 10px;
-  height: 10px;
-  background: #fff;
-  border: 2px solid var(--console-management-error);
-  border-radius: 50%;
-  pointer-events: none;
 }
 
 @keyframes recordingPulse {
