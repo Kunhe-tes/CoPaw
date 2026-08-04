@@ -1518,6 +1518,7 @@ def attach_conversation_archive(
             canonical_chat_id,
             reason=reason,
         )
+        memory._chat_checkpoint_epoch = state.current_epoch
         memory._compressed_summary = render_checkpoint_projection(
             state.record,
             state.events,
@@ -1539,6 +1540,7 @@ def attach_conversation_archive(
     memory.conversation_archive_store = archive_store
     memory.chat_checkpoint_store = archive_store
     memory._chat_checkpoint_chat_id = canonical_chat_id
+    memory._chat_checkpoint_epoch = 1
     memory._checkpoint_original_add = original_add
     memory._checkpoint_original_get_memory = original_get_memory
     memory._checkpoint_original_clear_content = original_clear_content

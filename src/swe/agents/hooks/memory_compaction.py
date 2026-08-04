@@ -86,7 +86,7 @@ class MemoryCompactionHook:
             memory_manager: Memory manager instance for compaction
         """
         self.memory_manager = memory_manager
-        self._precompaction_watermarks: dict[str, int] = {}
+        self._precompaction_watermarks: dict[tuple[str, int], int] = {}
 
     async def _apply_checkpoint_budget_stage(
         self,
@@ -117,22 +117,34 @@ class MemoryCompactionHook:
             running_config.max_input_length,
             compact_config,
         )
+        epoch = int(
+            getattr(
+                getattr(agent, "memory", None),
+                "_chat_checkpoint_epoch",
+                1,
+            ),
+        )
+        watermark_key = (chat_id, epoch)
         if decision.stage == "normal":
             return True
         if decision.stage == "governance":
             watermark = decision.precompaction_watermark
             if watermark is None:
                 return True
-            if watermark <= self._precompaction_watermarks.get(chat_id, -1):
+            if watermark <= self._precompaction_watermarks.get(
+                watermark_key,
+                -1,
+            ):
                 return True
-            self._precompaction_watermarks[chat_id] = watermark
-            await self.memory_manager.schedule_precompaction(
+            scheduled = await self.memory_manager.schedule_precompaction(
                 chat_id=chat_id,
                 watermark=watermark,
                 messages=messages,
                 chat_model=agent.model,
                 formatter=agent.formatter,
             )
+            if scheduled:
+                self._precompaction_watermarks[watermark_key] = watermark
             return True
         installed = await self.memory_manager.install_ready_precompaction(
             chat_id=chat_id,
@@ -374,8 +386,12 @@ class MemoryCompactionHook:
                 token_counter,
                 left_compact_threshold,
             )
-            if not messages_to_compact:
-                return None
+            candidate_messages = (
+                messages_to_compact
+                or messages[
+                    : max(len(messages) - MEMORY_COMPACT_KEEP_RECENT, 0)
+                ]
+            )
 
             projected_tokens = await token_counter.count(
                 messages=messages,
@@ -385,9 +401,11 @@ class MemoryCompactionHook:
             if await self._apply_checkpoint_budget_stage(
                 agent,
                 running_config,
-                messages_to_compact,
+                candidate_messages,
                 projected_tokens,
             ):
+                return None
+            if not messages_to_compact:
                 return None
 
             self._add_summary_task_if_enabled(

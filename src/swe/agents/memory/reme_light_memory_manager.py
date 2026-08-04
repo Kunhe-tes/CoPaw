@@ -607,24 +607,47 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         **kwargs,
     ) -> bool:
         """Persist a revision-bound candidate without changing live memory."""
-        del watermark, messages, kwargs
+        del watermark, kwargs
         memory = self.get_in_memory_memory(chat_id=chat_id)
         if memory is None:
             return False
-        from .chat_checkpoint import PrecompactionCandidate
+        from .chat_checkpoint import EvidenceItem, PrecompactionCandidate
 
         state = await memory.chat_checkpoint_store.read_checkpoint_state(
             chat_id,
         )
-        applied_event_sequence = max(
-            (event.sequence for event in state.events),
-            default=state.record.applied_event_sequence,
+        source_refs = {f"message:{message.id}" for message in messages}
+        selected_events = []
+        for event in state.events:
+            if not any(ref in source_refs for ref in event.source_refs):
+                break
+            selected_events.append(event)
+        if not selected_events:
+            return False
+        applied_event_sequence = selected_events[-1].sequence
+        event_context = tuple(
+            EvidenceItem(
+                text=(
+                    f"{event.type}: "
+                    + json.dumps(
+                        event.to_dict()["facts"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                ),
+                evidence_refs=event.source_refs,
+            )
+            for event in selected_events
         )
         candidate_record = replace(
             state.record,
             revision=state.record.revision + 1,
             source_revision=state.record.revision,
             applied_event_sequence=applied_event_sequence,
+            critical_context=(
+                *state.record.critical_context,
+                *event_context,
+            ),
         )
         candidate = PrecompactionCandidate.new(
             record=candidate_record,
@@ -647,9 +670,11 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         memory = self.get_in_memory_memory(chat_id=chat_id)
         if memory is None:
             return False
-        if messages:
-            return await memory.commit_ready_precompaction(messages)
-        return await memory.install_ready_precompaction()
+        if not messages:
+            # Installing a cursor-advancing candidate without atomically
+            # archiving its source prefix can hide journal evidence.
+            return False
+        return await memory.commit_ready_precompaction(messages)
 
     async def recover_evidence(
         self,
