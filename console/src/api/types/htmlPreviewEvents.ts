@@ -17,6 +17,7 @@ export interface HtmlPreviewClickEventPayload {
   customer_name?: string | null;
   customer_info?: Record<string, string> | null;
   clicked_at?: string | null;
+  trace_id?: string | null;
 }
 
 export interface HtmlPreviewClickSubmitResponse {

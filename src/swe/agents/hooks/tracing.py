@@ -218,7 +218,6 @@ class TracingHook:
         skill_name: str,
         skill_input: Optional[dict[str, Any]] = None,
         skill_id: Optional[str] = None,
-        skill_cn_name: Optional[str] = None,
     ) -> Optional[str]:
         """Called when a skill starts executing.
 
@@ -226,7 +225,6 @@ class TracingHook:
             skill_name: Skill name
             skill_input: Skill input parameters
             skill_id: Optional skill unique identifier
-            skill_cn_name: Optional skill Chinese display name
 
         Returns:
             Span ID
@@ -250,7 +248,6 @@ class TracingHook:
                 user_name=self.user_name,
                 bbk_id=self.bbk_id,
                 skill_id=skill_id,
-                skill_cn_name=skill_cn_name,
             )
             self._current_tool_span_id = span_id  # Reuse for skill tracking
             return span_id

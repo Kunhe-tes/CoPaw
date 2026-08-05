@@ -341,8 +341,6 @@ class TestSpanOperations:
                 "tool_name": None,
                 "skill_name": None,
                 "skill_id": None,
-                "skill_cn_name": None,
-                "skill_description": None,
                 "tool_input": None,
                 "tool_output": None,
                 "error": None,

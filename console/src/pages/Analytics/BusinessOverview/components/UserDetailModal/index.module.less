@@ -1071,10 +1071,18 @@
 
 .readonlyChatBubbleList {
   position: relative;
+  display: flex;
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow: hidden;
   background: #fff;
+}
+
+.readonlyChatBubbleViewport {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
 }
 
 .readonlyBubbleWrapper {

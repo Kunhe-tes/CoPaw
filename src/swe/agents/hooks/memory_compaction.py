@@ -6,8 +6,11 @@ when the context window approaches its limit, preserving recent messages
 and the system prompt.
 """
 
+import asyncio
 import logging
-from typing import TYPE_CHECKING, Any
+from dataclasses import dataclass
+from math import floor
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
 
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg, TextBlock
@@ -26,6 +29,49 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+@dataclass(frozen=True)
+class ContextBudgetDecision:
+    """One deterministic decision for the configured context budget stages."""
+
+    projected_tokens: int
+    ratio: float
+    stage: Literal["normal", "governance", "active", "emergency"]
+    precompaction_watermark: int | None
+
+
+def decide_context_budget(
+    projected_tokens: int,
+    max_input_length: int,
+    config: Any,
+) -> ContextBudgetDecision:
+    """Classify use into the confirmed 65/5/80/90 staged policy."""
+    if max_input_length <= 0:
+        raise ValueError("max_input_length must be positive")
+    ratio = max(projected_tokens, 0) / max_input_length
+    if ratio >= config.emergency_compact_ratio:
+        return ContextBudgetDecision(
+            projected_tokens,
+            ratio,
+            "emergency",
+            None,
+        )
+    if ratio >= config.memory_compact_ratio:
+        return ContextBudgetDecision(projected_tokens, ratio, "active", None)
+    if ratio >= config.lightweight_governance_ratio:
+        watermark = floor(
+            (ratio - config.lightweight_governance_ratio)
+            / config.precompaction_step_ratio
+            + 1e-9,
+        )
+        return ContextBudgetDecision(
+            projected_tokens,
+            ratio,
+            "governance",
+            watermark,
+        )
+    return ContextBudgetDecision(projected_tokens, ratio, "normal", None)
+
+
 class MemoryCompactionHook:
     """Hook for automatic memory compaction when context is full.
 
@@ -41,6 +87,199 @@ class MemoryCompactionHook:
             memory_manager: Memory manager instance for compaction
         """
         self.memory_manager = memory_manager
+        self._precompaction_watermarks: dict[tuple[str, int], int] = {}
+        self._precompaction_tasks: dict[tuple[str, int], asyncio.Task] = {}
+
+    async def _apply_checkpoint_budget_stage(
+        self,
+        agent: ReActAgent,
+        running_config: Any,
+        messages: list[Msg],
+        projected_tokens: int,
+        remeasure_projected_tokens: Callable[[], Awaitable[int]] | None = None,
+    ) -> bool:
+        """Apply staged checkpoint policy; return whether legacy flow stops."""
+        context = self._checkpoint_budget_context(
+            agent,
+            running_config,
+            projected_tokens,
+        )
+        if context is None:
+            return False
+        chat_id, compact_config, decision, watermark_key = context
+        if decision.stage == "normal":
+            return True
+        if decision.stage == "governance":
+            return self._schedule_governance_precompaction(
+                agent,
+                messages,
+                chat_id,
+                decision,
+                watermark_key,
+            )
+        return await self._install_checkpoint_stage(
+            agent,
+            running_config,
+            messages,
+            chat_id,
+            decision,
+            remeasure_projected_tokens,
+        )
+
+    @staticmethod
+    def _checkpoint_budget_context(
+        agent: ReActAgent,
+        running_config: Any,
+        projected_tokens: int,
+    ) -> (
+        tuple[
+            str,
+            Any,
+            ContextBudgetDecision,
+            tuple[str, int],
+        ]
+        | None
+    ):
+        """Return the stable checkpoint routing inputs for this request."""
+        compact_config = getattr(running_config, "context_compact", None)
+        required = (
+            "lightweight_governance_ratio",
+            "precompaction_step_ratio",
+            "memory_compact_ratio",
+            "emergency_compact_ratio",
+        )
+        if compact_config is None or not all(
+            hasattr(compact_config, name) for name in required
+        ):
+            return None
+        chat_id = str(
+            getattr(agent, "_request_context", {}).get("chat_id") or "",
+        )
+        if not chat_id:
+            return None
+        decision = decide_context_budget(
+            projected_tokens,
+            running_config.max_input_length,
+            compact_config,
+        )
+        epoch = int(
+            getattr(
+                getattr(agent, "memory", None),
+                "_chat_checkpoint_epoch",
+                1,
+            ),
+        )
+        return chat_id, compact_config, decision, (chat_id, epoch)
+
+    def _schedule_governance_precompaction(
+        self,
+        agent: ReActAgent,
+        messages: list[Msg],
+        chat_id: str,
+        decision: ContextBudgetDecision,
+        watermark_key: tuple[str, int],
+    ) -> bool:
+        """Start one new non-blocking precompaction task for a watermark."""
+        watermark = decision.precompaction_watermark
+        if watermark is None:
+            return True
+        if watermark <= self._precompaction_watermarks.get(
+            watermark_key,
+            -1,
+        ):
+            return True
+        task = self._precompaction_tasks.get(watermark_key)
+        if task is not None and not task.done():
+            return True
+        task = asyncio.create_task(
+            self.memory_manager.schedule_precompaction(
+                chat_id=chat_id,
+                watermark=watermark,
+                messages=messages,
+                chat_model=agent.model,
+                formatter=agent.formatter,
+            ),
+        )
+        self._precompaction_tasks[watermark_key] = task
+        self._precompaction_watermarks[watermark_key] = watermark
+        task.add_done_callback(
+            lambda completed: self._record_precompaction_result(
+                completed,
+                watermark_key,
+                watermark,
+            ),
+        )
+        return True
+
+    def _record_precompaction_result(
+        self,
+        completed: asyncio.Task,
+        watermark_key: tuple[str, int],
+        watermark: int,
+    ) -> None:
+        """Clear a failed watermark while leaving newer schedules intact."""
+        if completed.cancelled():
+            return
+        try:
+            if completed.result():
+                return
+        except Exception:
+            logger.exception("Checkpoint precompaction failed")
+        if self._precompaction_watermarks.get(watermark_key) == watermark:
+            self._precompaction_watermarks.pop(watermark_key, None)
+
+    async def _install_checkpoint_stage(
+        self,
+        _agent: ReActAgent,
+        running_config: Any,
+        messages: list[Msg],
+        chat_id: str,
+        decision: ContextBudgetDecision,
+        remeasure_projected_tokens: Callable[[], Awaitable[int]] | None,
+    ) -> bool:
+        """Install ready or degraded state and decide whether legacy flow stops."""
+        installed = await self.memory_manager.install_ready_precompaction(
+            chat_id=chat_id,
+            messages=messages,
+        )
+        if installed:
+            return await self._is_legacy_fallback_avoided(
+                running_config,
+                remeasure_projected_tokens,
+            )
+        if decision.stage != "emergency":
+            return False
+        install_degraded = getattr(
+            self.memory_manager,
+            "install_degraded_checkpoint",
+            None,
+        )
+        if install_degraded is None:
+            return False
+        await install_degraded(chat_id=chat_id, messages=messages)
+        return await self._is_legacy_fallback_avoided(
+            running_config,
+            remeasure_projected_tokens,
+            default_result=False,
+        )
+
+    @staticmethod
+    async def _is_legacy_fallback_avoided(
+        running_config: Any,
+        remeasure_projected_tokens: Callable[[], Awaitable[int]] | None,
+        *,
+        default_result: bool = True,
+    ) -> bool:
+        """Return whether a checkpoint install brought usage below fallback."""
+        if remeasure_projected_tokens is None:
+            return default_result
+        remeasured = await remeasure_projected_tokens()
+        compact_config = running_config.context_compact
+        return decide_context_budget(
+            remeasured,
+            running_config.max_input_length,
+            compact_config,
+        ).stage in ("normal", "governance")
 
     @staticmethod
     async def _print_status_message(
@@ -268,6 +507,53 @@ class MemoryCompactionHook:
                 running_config,
             )
 
+            messages_to_compact = await self._get_messages_to_compact(
+                messages,
+                running_config,
+                token_counter,
+                left_compact_threshold,
+            )
+            candidate_messages = (
+                messages_to_compact
+                or messages[
+                    : max(len(messages) - MEMORY_COMPACT_KEEP_RECENT, 0)
+                ]
+            )
+            while candidate_messages and not check_valid_messages(
+                candidate_messages,
+            ):
+                # Preserve the oldest complete interaction prefix; never split
+                # a tool_use/tool_result transaction at the candidate edge.
+                candidate_messages = candidate_messages[:-1]
+
+            projected_tokens = await token_counter.count(
+                messages=messages,
+                text=(agent.sys_prompt or "")
+                + (memory.get_compressed_summary() or ""),
+            )
+
+            async def remeasure_projected_tokens() -> int:
+                refreshed_messages = await memory.get_memory(
+                    prepend_summary=False,
+                )
+                return await token_counter.count(
+                    messages=refreshed_messages,
+                    text=(agent.sys_prompt or "")
+                    + (memory.get_compressed_summary() or ""),
+                )
+
+            if await self._apply_checkpoint_budget_stage(
+                agent,
+                running_config,
+                candidate_messages,
+                projected_tokens,
+                remeasure_projected_tokens,
+            ):
+                return None
+            # A candidate or emergency record may have changed online memory
+            # during the re-measurement. Derive the one permitted legacy ReMe
+            # fallback from that current snapshot, never a stale prefix.
+            messages = await memory.get_memory(prepend_summary=False)
             messages_to_compact = await self._get_messages_to_compact(
                 messages,
                 running_config,

@@ -50,6 +50,27 @@ class _ConcreteMemoryManager(BaseMemoryManager):
     ) -> str:  # pragma: no cover - test stub
         return ""
 
+    async def archive_checkpoint_messages(self, **kwargs):  # pragma: no cover
+        return None
+
+    async def schedule_precompaction(
+        self,
+        **kwargs,
+    ) -> bool:  # pragma: no cover
+        return False
+
+    async def install_ready_precompaction(
+        self,
+        **kwargs,
+    ) -> bool:  # pragma: no cover
+        return False
+
+    async def recover_evidence(self, **kwargs):  # pragma: no cover
+        return []
+
+    async def reset_context_epoch(self, **kwargs):  # pragma: no cover
+        return None
+
     async def dream_memory(
         self,
         tenant_id: str | None = None,
@@ -214,6 +235,30 @@ async def test_workspace_memory_manager_factory_receives_tenant_id(
             **kwargs,
         ) -> str:  # pragma: no cover - test stub
             return ""
+
+        async def archive_checkpoint_messages(
+            self,
+            **kwargs,
+        ):  # pragma: no cover
+            return None
+
+        async def schedule_precompaction(
+            self,
+            **kwargs,
+        ) -> bool:  # pragma: no cover
+            return False
+
+        async def install_ready_precompaction(
+            self,
+            **kwargs,
+        ) -> bool:  # pragma: no cover
+            return False
+
+        async def recover_evidence(self, **kwargs):  # pragma: no cover
+            return []
+
+        async def reset_context_epoch(self, **kwargs):  # pragma: no cover
+            return None
 
         async def dream_memory(
             self,

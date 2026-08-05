@@ -1,8 +1,7 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { Typography, Card, Spin, Button, Space, Input, message, Tag, Empty, Checkbox, Modal, Popconfirm, Tooltip, Alert, Popover } from "antd";
-import { PlusOutlined, UploadOutlined, ShopOutlined, RightOutlined, DownOutlined, FolderOutlined, FileOutlined, StarOutlined, SearchOutlined, InfoCircleOutlined, ExclamationCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
-import { CheckCircle } from "lucide-react";
+import { Typography, Spin, Button, Input, message, Tag, Checkbox, Modal, Popconfirm, Tooltip, Alert, Popover } from "antd";
+import { UploadOutlined, ShopOutlined, RightOutlined, DownOutlined, FolderOutlined, FileOutlined, SearchOutlined, InfoCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import dayjs from "dayjs";
 import relativeTime from "dayjs/plugin/relativeTime";
 dayjs.extend(relativeTime);
@@ -14,9 +13,8 @@ import { MySkill, mySkillsApi, FileTreeNode } from "../../api/modules/mySkills";
 import { marketApi } from "../../api/modules/market";
 import { PublishModal } from "../Market/PublishModal";
 import { SkillDetailPanel, splitMarkdownFrontmatter, mergeMarkdownFrontmatter } from "./SkillDetailPanel";
-import styles from "./index.module.less";
 
-const { Title, Text } = Typography;
+const { Text } = Typography;
 
 /**
  * 文件树排序：SKILL.md 置顶、templates 目录优先、目录优先于文件、其余字母排序
@@ -327,7 +325,7 @@ export default function MySkillsPage() {
       const res = await mySkillsApi.readSkillFile(skill.skill_name, filePath);
       setFileContent(res.content);
       setFileType(res.file_type);
-    } catch (err) {
+    } catch {
       message.error("加载文件失败");
       setFileContent("");
     }
@@ -384,7 +382,7 @@ export default function MySkillsPage() {
         delete next[skill.skill_name];
         return next;
       });
-    } catch (err) {
+    } catch {
       message.error("删除失败");
     }
   }, [refresh]);
@@ -414,7 +412,7 @@ export default function MySkillsPage() {
       setSelectedForBatch(new Set());
       setBatchMode(false);
       refresh();
-    } catch (err) {
+    } catch {
       message.error("批量删除失败");
     }
   }, [selectedForBatch, refresh]);
@@ -428,7 +426,7 @@ export default function MySkillsPage() {
       setSelectedForBatch(new Set());
       setBatchMode(false);
       refresh();
-    } catch (err) {
+    } catch {
       message.error("批量启用失败");
     }
   }, [selectedForBatch, refresh]);
@@ -442,7 +440,7 @@ export default function MySkillsPage() {
       setSelectedForBatch(new Set());
       setBatchMode(false);
       refresh();
-    } catch (err) {
+    } catch {
       message.error("批量禁用失败");
     }
   }, [selectedForBatch, refresh]);
@@ -492,7 +490,7 @@ export default function MySkillsPage() {
       if (updatedSkill) {
         setSelectedSkill(updatedSkill);
       }
-    } catch (err) {
+    } catch {
       message.error("保存失败");
     } finally {
       setIsSaving(false);
@@ -564,7 +562,7 @@ export default function MySkillsPage() {
         cnName: skill.cn_name, // 传递 cn_name，直接从用户数据取
       });
       setPublishModalOpen(true);
-    } catch (err) {
+    } catch {
       message.error({ content: "读取技能文件失败", key: "sync" });
     }
   }, []);
@@ -693,7 +691,7 @@ export default function MySkillsPage() {
               textDecoration: isDisabled ? "line-through" : "none",
             }}
           >
-            {skill.display_name || skill.skill_name}
+            {skill.cn_name || skill.skill_name}
           </Text>
           {skill.is_received && (
             <Tag color="orange" style={{ fontSize: 10, margin: 0, borderRadius: 4 }}>接收的</Tag>

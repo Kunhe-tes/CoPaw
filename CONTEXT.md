@@ -20,6 +20,58 @@ _Avoid_: subagent creation
 The user-facing agent that owns global task understanding, user interaction, mode decisions, and final responses.
 _Avoid_: parent bot, orchestrator bot
 
+**Chat Checkpoint**:
+A Chat-scoped recoverable state container that identifies the current task and retains a compact index of earlier completed tasks in the same Chat. Starting an explicit new task replaces its current task; `/new` resets the Chat Checkpoint.
+_Avoid_: global task state, session summary, cross-chat checkpoint
+
+**Checkpoint Record**:
+The versioned, structured source of truth for a Chat Checkpoint. A Checkpoint Record distinguishes confirmed state from unresolved work and retains references to its supporting evidence.
+_Avoid_: free-form summary, model-only memory, untraceable state
+
+**Evidence Recovery**:
+The on-demand, Chat-scoped restoration of an original conversation or tool-result fragment identified by a Checkpoint Record. Exact evidence references take precedence; a bounded current-epoch lookup may otherwise narrow by text, kind, and time interval. It adds only the evidence needed for the Current Task and does not replace the checkpoint state.
+_Avoid_: cross-chat history search, automatic full-history injection, summary reconstruction
+
+**Checkpoint Update**:
+The validated replacement of a Checkpoint Record from deterministic conversation facts and semantic task-state interpretation. It cannot discard evidence before the replacement record has passed validation.
+_Avoid_: markdown-only rewrite, unvalidated summarization, destructive compaction
+
+**Compaction Transaction**:
+The per-Chat operation that validates and durably installs a Checkpoint Update together with its archived source history. It either exposes a recoverable checkpoint or retains enough pending state to finish safely after recovery.
+_Avoid_: overwrite-in-place compaction, archive-without-state, lost concurrent event
+
+**Checkpoint Event Journal**:
+The ordered, append-only Chat-scoped record of deterministic events that occurred after the event sequence incorporated by the active Checkpoint Record. It preserves the current-state delta until a later Checkpoint Update incorporates it.
+_Avoid_: second free-form summary, mutable progress list, discarded pre-compaction event
+
+**Recent Event Delta**:
+The budget-bounded model-context projection of unincorporated entries from the Checkpoint Event Journal. It supplies current deterministic facts without duplicating the original interaction or becoming another semantic summary.
+_Avoid_: all event history, raw tool output duplication, per-turn resummarization
+
+**Context Budget Stage**:
+One of the ordered context-capacity states—Lightweight Governance, Active Compaction, or Emergency Degradation—that determines how a Chat Checkpoint and its online history are reduced before a model call.
+_Avoid_: single hard truncation threshold, post-overflow-only compaction
+
+**Proactive Incremental Compaction**:
+The asynchronous, non-blocking preparation and validation of a bounded Chat Checkpoint update before an Active Compaction threshold is reached. Its prepared candidate is installed only when its snapshot remains valid at an Active Compaction or Emergency Degradation threshold.
+_Avoid_: threshold-only bulk compaction, blocking reply-path compression, per-message full resummarization
+
+**Precompaction Candidate**:
+A validated but inactive Checkpoint Update derived from a stable Chat snapshot and its exact source-message prefix. It may be installed without another ReMe call only when its base record revision, event sequence, and source prefix remain valid.
+_Avoid_: stale summary cache, immediately active checkpoint, overwrite of newer events
+
+**Elastic Context Budget**:
+The allocatable capacity remaining after permanent context and model-output safety space are protected. Checkpoint projection, recent original interaction, and recovered evidence compete within it according to the Current Task rather than occupying fixed partitions.
+_Avoid_: fixed percentage partition, unused reserved context, unbounded recovery injection
+
+**Context Epoch**:
+The portion of a Chat's context history eligible for default model-context assembly after a `/new` or `/clear` boundary. Earlier epochs remain durable Chat evidence but require explicit user intent before they may be recovered.
+_Avoid_: automatic pre-reset recovery, physical deletion on context reset, cross-epoch default context
+
+**Task Transition**:
+The explicit change of the Current Task within a Chat Checkpoint. It occurs only when the user introduces an independent goal after completion, explicitly starts a new task, or resets the Chat; corrective and incremental requests remain part of the Current Task.
+_Avoid_: every user turn is a new task, inferred task split, destructive history reset
+
 **Agent Profile**:
 A tenant-owned runtime configuration and workspace identity for one runnable Agent. An **Agent Profile** is distinct from a **SubAgent Definition**, which is a versioned delegation worker description.
 _Avoid_: agent-level config, subagent profile, worker profile
@@ -503,6 +555,10 @@ _Avoid_: trusted skill directive, tool call, execution proof
 A **Skill Runtime View** member that a user explicitly selects for a single chat turn and remains available when that turn starts. A turn may contain repeated **User-Selected Skills**; their **Skill Use Directives** are injected in selection order after duplicate runtime identifiers are removed. Each selection records user intent as structured turn context with a readable message marker, but is not evidence that the skill actually executed.
 _Avoid_: skill mention, forced tool call, permanently active skill, single selected skill
 
+**Explicit Skill Selection Activation**:
+The session-scoped activation of a **User-Selected Skill** after the server validates its structured selection against the current **Skill Runtime View** and resolves its readable `SKILL.md`. It loads that skill's Hooks after the current turn's `UserPromptSubmit` and `SessionStart` events, before subsequent tool calls, and persists them for the rest of the session; it does not establish **Actual Skill Use**, set a current skill, create a skill invocation trace, or prove the model read the skill document.
+_Avoid_: plain-text skill mention, filename match, automatic semantic inference, confirmed skill use
+
 **Skill Runtime Identifier**:
 The stable `name` of a skill package in one Workspace: its managed skill-directory name and **Skill Management State** key. It is the identity used for runtime selection, channel availability, and injection de-duplication; a frontmatter or market `skill_id` is not a substitute.
 _Avoid_: display name, frontmatter name, market skill id
@@ -516,8 +572,20 @@ The runtime policy that verifies an Agent followed a **Skill Use Directive** bef
 _Avoid_: prompt injection, tool attribution, guaranteed skill execution
 
 **Actual Skill Use**:
-The runtime-detected participation of a skill in a turn, established by tool or asset evidence. It is distinct from **User-Selected Skill** and is the only basis for tool-call skill attribution.
-_Avoid_: selected skill, requested skill, assumed skill invocation
+The runtime-detected participation of a skill in a turn, established only by reading its resolved `SKILL.md` or by a tool input that targets an asset under its resolved skill directory. It is distinct from **User-Selected Skill** and is the only basis for tool-call skill attribution.
+_Avoid_: selected skill, requested skill, assumed skill invocation, filename suffix match, keyword match
+
+**Non-Authoritative Skill Signal**:
+A file suffix, prose-derived keyword, tool hint, tool sequence, or MCP server name associated with a skill. It may support offline analysis but never activates, continues, attributes, or loads Hooks for a skill at runtime.
+_Avoid_: activation evidence, continuation evidence, attribution evidence, hook trigger
+
+**Skill Asset Evidence**:
+A tool input that resolves to a path inside one enabled skill's effective directory. It may establish **Actual Skill Use**, but loads that skill's Hooks only when the skill was already explicitly selected or its resolved `SKILL.md` was read in the session.
+_Avoid_: extension match, text substring, arbitrary workspace path, hook bootstrap
+
+**Session Skill Hook Order**:
+The deterministic hook order for a session with explicitly selected skills: tenant Hooks, then Agent Profile Hooks, then one deduplicated Hook source for each selected skill in its first-selection order. Later selections append only previously unloaded skills; normal Hook result merging resolves conflicts.
+_Avoid_: arbitrary hook order, repeat-selection duplication, last-selected-first execution
 
 **Unavailable Skill Selection**:
 A user-requested skill choice that is no longer in the **Skill Runtime View** when its chat turn starts. The choice is discarded without skill guidance or selection-based attribution, while other **User-Selected Skills** in the same turn may still apply; the turn is ordinary chat only when none remain.

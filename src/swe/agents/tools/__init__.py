@@ -23,6 +23,7 @@ from .background_process import (
 )
 from .shell import execute_shell_command
 from .memory_search import create_memory_search_tool
+from .recover_evidence import create_recover_evidence_tool
 from .get_current_time import get_current_time
 from .copy_file_to_static import copy_file_to_static
 from .update_task_progress import update_task_progress
@@ -43,6 +44,7 @@ __all__ = [
     "grep_search",
     "glob_search",
     "create_memory_search_tool",
+    "create_recover_evidence_tool",
     "get_current_time",
     "copy_file_to_static",
     "update_task_progress",

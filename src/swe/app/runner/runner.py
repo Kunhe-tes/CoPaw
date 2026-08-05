@@ -175,6 +175,7 @@ class _QueryRuntimeInputs:
     selected_context_directives: list[str]
     auth_token: str | None
     passthrough_headers: dict[str, str]
+    selected_skill_directives: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -1932,6 +1933,8 @@ def _build_cron_merged_state(
             mode="json",
             by_alias=True,
         )
+    else:
+        merged_state.pop("hook_overlay", None)
 
     task_run = _build_task_run_record(
         current_content,
@@ -2954,20 +2957,6 @@ class AgentRunner(Runner):
             allow_one_shot_continuation=True,
         )
 
-    async def _start_declared_session_skill(
-        self,
-        *,
-        runtime: _QueryRuntime,
-        user_message: str,
-    ) -> None:
-        """预热消息级技能候选缓存，不在开局直接启动技能。"""
-        if not user_message:
-            return
-
-        runtime.session_skill_detector.detect_from_user_message(
-            user_message,
-        )
-
     async def _prepare_query_runtime(
         self,
         *,
@@ -3089,6 +3078,7 @@ class AgentRunner(Runner):
                 ),
             ),
             selected_context_directives=[],
+            selected_skill_directives=[],
             auth_token=getattr(request, "auth_token", None),
             passthrough_headers=passthrough_headers,
         )
@@ -3142,12 +3132,17 @@ class AgentRunner(Runner):
                     if name not in selected_context_skill_names
                 ],
             )
+            all_context_directives = [
+                *selected_skill_directives,
+                *context_reference_directives,
+            ]
+            inputs.selected_skill_directives = [
+                directive
+                for directive in all_context_directives
+                if isinstance(directive, SkillUseDirective)
+            ]
             inputs.selected_context_directives = [
-                directive.render()
-                for directive in [
-                    *selected_skill_directives,
-                    *context_reference_directives,
-                ]
+                directive.render() for directive in all_context_directives
             ]
         mcp_clients.extend(
             await _build_and_connect_mcp_clients(
@@ -3178,12 +3173,47 @@ class AgentRunner(Runner):
             env_context=env_context,
         )
         if block_response is None:
+            inputs.hook_overlay = await self._load_selected_skill_hooks(
+                inputs=inputs,
+            )
             return resources, None
         return resources, _RuntimeStartResult(
             block_response=block_response,
             blocked_chat=chat,
             blocked_mcp_clients=mcp_clients,
             blocked_session_id=inputs.session_id,
+        )
+
+    async def _load_selected_skill_hooks(
+        self,
+        *,
+        inputs: _QueryRuntimeInputs,
+    ) -> HookSessionOverlay:
+        """Load validated selected skill hooks after startup hooks complete."""
+        state: HookSessionState = inputs.hook_overlay
+        workspace = Path(self.workspace_dir or WORKING_DIR)
+        approvals = _load_tenant_approved_skill_hook_http_urls(self.tenant_id)
+
+        for directive in inputs.selected_skill_directives:
+            try:
+                next_state = load_skill_hooks_for_session(
+                    skill_name=directive.name,
+                    skill_root=directive.path.parent,
+                    workspace_dir=workspace,
+                    session_state=state,
+                    approved_http_urls=approvals,
+                )
+            except SkillHookLoadError as exc:
+                logger.warning(
+                    "Rejected hooks for explicitly selected skill '%s': %s",
+                    directive.name,
+                    exc,
+                )
+                continue
+            state = next_state
+
+        return HookSessionOverlay.model_validate(
+            state.model_dump(mode="json", by_alias=True),
         )
 
     async def _finalize_query_runtime(
@@ -3239,11 +3269,6 @@ class AgentRunner(Runner):
             selected_context_directives=inputs.selected_context_directives,
         )
         self._attach_session_skill_detector(runtime=runtime, request=request)
-        await self._restore_confirmed_session_skill_context(runtime=runtime)
-        await self._start_declared_session_skill(
-            runtime=runtime,
-            user_message=query or _get_last_user_text(msgs) or "",
-        )
         return runtime
 
     async def _build_turn_plan(
@@ -3416,7 +3441,9 @@ class AgentRunner(Runner):
                 ) or "Stop blocked completion"
                 if (
                     not stop_result.has_blocking_failure
-                    and _should_stop_follow_up(outcome)
+                    and _should_stop_follow_up(
+                        outcome,
+                    )
                 ):
                     outcome.stop_follow_up_turns += 1
                     outcome.automatic_follow_up_turns += 1
@@ -4709,6 +4736,16 @@ class AgentRunner(Runner):
             agent=agent,
         )
         if hook_overlay is None:
+            await self.session.mutate_session_state(
+                session_id=storage_session_id,
+                mutator=lambda state: {
+                    key: value
+                    for key, value in state.items()
+                    if key != "hook_overlay"
+                },
+                user_id=storage_user_id,
+                create_if_not_exist=True,
+            )
             return
 
         await self.session.update_session_state(

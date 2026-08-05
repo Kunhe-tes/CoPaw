@@ -30,6 +30,7 @@ import { useIframeStore } from "../../../stores/iframeStore";
 import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import {
   tracingApi,
+  displaySkillName,
   type BranchMetricItem,
   type ErrorSummary,
   type OverviewStats,
@@ -787,6 +788,9 @@ export default function BusinessOverviewPage() {
   const [selectedUserName, setSelectedUserName] = useState<string | null>(null);
   const [skillModalOpen, setSkillModalOpen] = useState(false);
   const [selectedSkillName, setSelectedSkillName] = useState("");
+  const [selectedSkillDisplayName, setSelectedSkillDisplayName] = useState<
+    string | null
+  >(null);
   const [errorModalOpen, setErrorModalOpen] = useState(false);
 
   const startDateText = useMemo(
@@ -1661,6 +1665,7 @@ export default function BusinessOverviewPage() {
                     : styles.rankBadge;
                 const descLen = skill.skill_description?.length || 0;
                 const tooltipWidth = descLen <= 30 ? 240 : descLen <= 60 ? 320 : descLen <= 100 ? 400 : 520;
+                const skillLabel = displaySkillName(skill);
                 return (
                   <button
                     key={`${skill.skill_name}-${rank}`}
@@ -1668,6 +1673,7 @@ export default function BusinessOverviewPage() {
                     className={styles.skillRankRow}
                     onClick={() => {
                       setSelectedSkillName(skill.skill_name);
+                      setSelectedSkillDisplayName(skill.cn_name ?? null);
                       setSkillModalOpen(true);
                     }}
                   >
@@ -1679,19 +1685,19 @@ export default function BusinessOverviewPage() {
                         skill.skill_description ? (
                           <div className={styles.skillTooltip}>
                             <div className={styles.skillTooltipName}>
-                              {skill.skill_name}
+                              {skillLabel}
                             </div>
                             <div className={styles.skillTooltipDesc}>
                               {skill.skill_description}
                             </div>
                           </div>
                         ) : (
-                          skill.skill_name
+                          skillLabel
                         )
                       }
                     >
                       <span className={styles.rankUser}>
-                        {truncateName(skill.skill_name, 20)}
+                        {truncateName(skillLabel, 20)}
                       </span>
                     </Tooltip>
                     <span className={styles.skillRankCalls}>
@@ -1810,11 +1816,13 @@ export default function BusinessOverviewPage() {
       <SkillDetailModal
         open={skillModalOpen}
         skillName={selectedSkillName}
+        skillDisplayName={selectedSkillDisplayName ?? undefined}
         startDate={startDateText}
         endDate={endDateText}
         onClose={() => {
           setSkillModalOpen(false);
           setSelectedSkillName("");
+          setSelectedSkillDisplayName(null);
         }}
       />
 

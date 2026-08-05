@@ -11,6 +11,7 @@ const DEFAULT_TRACE_PAGE_SIZE = 10;
 interface SkillDetailModalProps {
   open: boolean;
   skillName: string;
+  skillDisplayName?: string;
   startDate: string;
   endDate: string;
   onClose: () => void;
@@ -19,6 +20,7 @@ interface SkillDetailModalProps {
 export default function SkillDetailModal({
   open,
   skillName,
+  skillDisplayName,
   startDate,
   endDate,
   onClose,
@@ -180,7 +182,7 @@ export default function SkillDetailModal({
       title={
         <span>
           <Wrench size={18} style={{ marginRight: 8 }} />
-          技能「{skillName}」调用记录
+          技能「{skillDisplayName || skillName}」调用记录
         </span>
       }
       open={open}
