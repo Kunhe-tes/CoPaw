@@ -27,15 +27,9 @@ vi.mock("../../../../Chat/components/RuntimeResponseCard", () => ({
 }));
 
 vi.mock("../../../../../components/ConversationQuickNav", () => ({
-  default: ({
-    messages,
-    placement,
-  }: {
-    messages?: unknown[];
-    placement?: string;
-  }) => (
+  default: ({ messages }: { messages?: unknown[] }) => (
     <div data-testid="conversation-quick-nav">
-      {messages?.length ?? 0}:{placement}
+      {messages?.length ?? 0}
     </div>
   ),
 }));
@@ -91,9 +85,9 @@ describe("ReadOnlySessionChat", () => {
         "chat-uuid-1",
       );
     });
-    expect(
-      await screen.findByTestId("conversation-quick-nav"),
-    ).toHaveTextContent("rail");
+    expect(await screen.findByTestId("conversation-quick-nav")).toHaveTextContent(
+      "1",
+    );
     expect(
       screen.getByTestId("html-preview-tracking-provider"),
     ).toBeInTheDocument();

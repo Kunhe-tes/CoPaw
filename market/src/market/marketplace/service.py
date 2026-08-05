@@ -3533,6 +3533,12 @@ class MarketplaceService:
     ) -> bool:
         """仅更新 manifest 中的 cn_name 字段."""
         now = datetime.now(timezone.utc).isoformat()
+        manifest_path = get_user_skill_manifest_path(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
 
         def _update(payload: dict) -> bool:
             entry = payload.get("skills", {}).get(skill_name)
@@ -3545,13 +3551,36 @@ class MarketplaceService:
             entry["updated_at"] = now
             return True
 
-        return mutate_user_skill_manifest(
+        updated = mutate_user_skill_manifest(
             self.swe_root,
             user_id,
             agent_id,
             _update,
             source_id,
         )
+        if updated:
+            logger.info(
+                "Updated user skill manifest cn_name: "
+                "user=%s source=%s agent=%s skill=%s path=%s cn_name=%s",
+                user_id,
+                source_id,
+                agent_id,
+                skill_name,
+                manifest_path,
+                cn_name,
+            )
+        else:
+            logger.warning(
+                "Skipped user skill manifest cn_name update: "
+                "user=%s source=%s agent=%s skill=%s path=%s "
+                "reason=skill_entry_not_found",
+                user_id,
+                source_id,
+                agent_id,
+                skill_name,
+                manifest_path,
+            )
+        return updated
 
     def _sync_cn_name_to_user_workspace(
         self,
@@ -3570,10 +3599,19 @@ class MarketplaceService:
             )
             skill_dir = skills_dir / skill_name
             if not skill_dir.exists():
+                logger.warning(
+                    "Skipped user skill file cn_name sync: "
+                    "user=%s source=%s skill=%s path=%s "
+                    "reason=skill_dir_not_found",
+                    tenant_id,
+                    source_id,
+                    skill_name,
+                    skill_dir,
+                )
                 return False
 
             # 更新 manifest
-            self._update_skill_manifest_cn_name_only(
+            manifest_updated = self._update_skill_manifest_cn_name_only(
                 tenant_id,
                 skill_name,
                 cn_name,
@@ -3581,8 +3619,23 @@ class MarketplaceService:
                 source_id,
             )
             # 条件更新 SKILL.md
-            self._update_frontmatter_cn_name_if_exists(skill_dir, cn_name)
-            return True
+            frontmatter_updated = self._update_frontmatter_cn_name_if_exists(
+                skill_dir,
+                cn_name,
+            )
+            logger.info(
+                "Synced user skill cn_name files: "
+                "user=%s source=%s skill=%s skill_dir=%s "
+                "manifest_updated=%s frontmatter_updated=%s cn_name=%s",
+                tenant_id,
+                source_id,
+                skill_name,
+                skill_dir,
+                manifest_updated,
+                frontmatter_updated,
+                cn_name,
+            )
+            return manifest_updated
         except Exception as e:
             logger.warning(
                 "Failed to sync cn_name to user %s: %s",

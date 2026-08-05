@@ -154,21 +154,18 @@ export default function ReadOnlySessionChat({
             cards={READONLY_CARDS}
           >
             <div ref={chatContentRef} className={styles.readonlyChatBubbleList}>
-              <div className={styles.readonlyChatBubbleViewport}>
-                <Bubble.List
-                  pagination={false}
-                  order="asc"
-                  items={chatMessages}
-                  classNames={{
-                    wrapper: styles.readonlyBubbleWrapper,
-                    list: styles.readonlyBubbleList,
-                  }}
-                />
-              </div>
+              <Bubble.List
+                pagination={false}
+                order="asc"
+                items={chatMessages}
+                classNames={{
+                  wrapper: styles.readonlyBubbleWrapper,
+                  list: styles.readonlyBubbleList,
+                }}
+              />
               <ConversationQuickNav
                 messages={chatMessages}
                 scrollRootRef={chatContentRef}
-                placement="rail"
               />
             </div>
           </AgentScopeRuntimeWebUIComposedProvider>
