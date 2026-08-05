@@ -75,6 +75,32 @@ async def test_governance_schedules_only_new_watermarks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_governance_scheduling_is_side_effect_only() -> None:
+    from inspect import signature
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    manager = SimpleNamespace(schedule_precompaction=AsyncMock())
+    hook = MemoryCompactionHook(manager)
+    agent = SimpleNamespace(model=object(), formatter=object())
+    decision = ContextBudgetDecision(65, 0.65, "governance", 0)
+
+    hook._schedule_governance_precompaction(
+        agent,
+        [],
+        "chat-1",
+        decision,
+        ("chat-1", 1),
+    )
+
+    assert (
+        signature(hook._schedule_governance_precompaction).return_annotation
+        is None
+    )
+    await asyncio.gather(*hook._precompaction_tasks.values())
+
+
+@pytest.mark.asyncio
 async def test_active_stage_installs_ready_candidate_before_reme() -> None:
     from types import SimpleNamespace
     from unittest.mock import AsyncMock

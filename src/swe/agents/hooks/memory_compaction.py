@@ -110,13 +110,14 @@ class MemoryCompactionHook:
         if decision.stage == "normal":
             return True
         if decision.stage == "governance":
-            return self._schedule_governance_precompaction(
+            self._schedule_governance_precompaction(
                 agent,
                 messages,
                 chat_id,
                 decision,
                 watermark_key,
             )
+            return True
         return await self._install_checkpoint_stage(
             agent,
             running_config,
@@ -178,19 +179,19 @@ class MemoryCompactionHook:
         chat_id: str,
         decision: ContextBudgetDecision,
         watermark_key: tuple[str, int],
-    ) -> bool:
+    ) -> None:
         """Start one new non-blocking precompaction task for a watermark."""
         watermark = decision.precompaction_watermark
         if watermark is None:
-            return True
+            return
         if watermark <= self._precompaction_watermarks.get(
             watermark_key,
             -1,
         ):
-            return True
+            return
         task = self._precompaction_tasks.get(watermark_key)
         if task is not None and not task.done():
-            return True
+            return
         task = asyncio.create_task(
             self.memory_manager.schedule_precompaction(
                 chat_id=chat_id,
@@ -209,7 +210,6 @@ class MemoryCompactionHook:
                 watermark,
             ),
         )
-        return True
 
     def _record_precompaction_result(
         self,
