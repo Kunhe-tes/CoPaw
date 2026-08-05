@@ -102,7 +102,6 @@ async def _resolve_command_context(
                 await chat_manager.get_chat_id_by_session(
                     session_id,
                     channel or "console",
-                    user_id,
                 )
                 or ""
             )

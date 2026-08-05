@@ -15,9 +15,16 @@ from swe.app.runner import command_dispatch, daemon_commands
 
 @pytest.mark.asyncio
 async def test_resolve_command_context_finds_chat_from_session() -> None:
-    chat_manager = SimpleNamespace(
-        get_chat_id_by_session=AsyncMock(return_value="chat-1"),
-    )
+    class ChatManagerWithLookupContract:
+        async def get_chat_id_by_session(
+            self,
+            session_id: str,
+            channel: str,
+        ) -> str:
+            assert (session_id, channel) == ("session-1", "console")
+            return "chat-1"
+
+    chat_manager = ChatManagerWithLookupContract()
     runner = SimpleNamespace(_chat_manager=chat_manager)
     request = SimpleNamespace(
         session_id="session-1",
