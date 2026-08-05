@@ -2,6 +2,7 @@ import {
   Bubble,
   useProviderContext,
   IAgentScopeRuntimeWebUIInputData,
+  IAgentScopeRuntimeWebUIMessage,
 } from "@/components/agentscope-chat";
 import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
 import { useContextSelector } from "use-context-selector";
@@ -18,12 +19,110 @@ import useHistoryPreload from "@/components/agentscope-chat/Bubble/hooks/useHist
 import { getScrollTopAfterAnchorOffset } from "@/components/agentscope-chat/Bubble/hooks/scrollAnchor";
 
 const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
+const COMPACTION_REFRESH_DELAYS_MS = [50, 100, 250, 500, 1_000, 2_000] as const;
+const COMPACTION_BOUNDARY_CARD = "ConversationCompactionBoundary";
 
 interface HistoryAnchorTransaction {
   generation: number;
   messageId: string;
   offset: number;
   sessionId: string | undefined;
+}
+
+interface PendingCompactionRefresh {
+  attempts: number;
+  boundaryId?: string;
+  chatId: string;
+  sessionId: string;
+}
+
+function hasGeneratingMessage(
+  messages: IAgentScopeRuntimeWebUIMessage[] | undefined,
+): boolean {
+  return Boolean(
+    messages?.some((message) => message.msgStatus === "generating"),
+  );
+}
+
+function normalizeTailValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeTailValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(
+        ([key]) =>
+          ![
+            "id",
+            "created_at",
+            "completed_at",
+            "sequence_number",
+            "timestamp",
+            "headerMeta",
+          ].includes(key),
+      )
+      .map(([key, nested]) => [key, normalizeTailValue(nested)]),
+  );
+}
+
+function messageTailFingerprint(
+  message: IAgentScopeRuntimeWebUIMessage | undefined,
+): string | null {
+  const cards = message?.cards
+    ?.filter((card) => card.code !== COMPACTION_BOUNDARY_CARD)
+    .map((card) => ({
+      code: card.code,
+      data: normalizeTailValue(card.data),
+    }));
+  if (!message || !cards?.length) return null;
+  return JSON.stringify({ cards, role: message.role });
+}
+
+function latestMessageTailFingerprints(
+  messages: IAgentScopeRuntimeWebUIMessage[] | undefined,
+): string[] {
+  const fingerprints: string[] = [];
+  for (let index = (messages?.length || 0) - 1; index >= 0; index -= 1) {
+    const fingerprint = messageTailFingerprint(messages?.[index]);
+    if (!fingerprint) continue;
+    fingerprints.unshift(fingerprint);
+    if (fingerprints.length === 2) break;
+  }
+  return fingerprints;
+}
+
+function snapshotContainsTail(
+  messages: IAgentScopeRuntimeWebUIMessage[] | undefined,
+  tailFingerprints: string[],
+): boolean {
+  const snapshotTailFingerprints = latestMessageTailFingerprints(messages);
+  return (
+    tailFingerprints.length > 0 &&
+    snapshotTailFingerprints.length === tailFingerprints.length &&
+    tailFingerprints.every(
+      (fingerprint, index) =>
+        snapshotTailFingerprints[index] === fingerprint,
+    )
+  );
+}
+
+function snapshotContainsCompactionBoundary(
+  messages: IAgentScopeRuntimeWebUIMessage[] | undefined,
+  boundaryId: string | undefined,
+): boolean {
+  if (!boundaryId) return true;
+  return Boolean(
+    messages?.some((message) =>
+      message.cards?.some((card) => {
+        if (card.code !== COMPACTION_BOUNDARY_CARD) return false;
+        const data = card.data;
+        return (
+          Boolean(data) &&
+          typeof data === "object" &&
+          (data as { id?: unknown }).id === boundaryId
+        );
+      }),
+    ),
+  );
 }
 
 function getVisibleMessageAnchor(scrollElement: HTMLElement) {
@@ -98,8 +197,12 @@ export default function MessageList(props: {
   const loadedArchiveMessageIdsRef = React.useRef(new Set<string>());
   const loadedBoundaryIdsRef = React.useRef(new Set<string>());
   const historyGenerationRef = React.useRef(0);
-  const compactionRefreshRef = React.useRef(0);
-  const activeSessionRef = React.useRef(currentSessionId);
+  const latestMessagesRef = React.useRef(messages);
+  const messagesRevisionRef = React.useRef(0);
+  const pendingCompactionRefreshRef =
+    React.useRef<PendingCompactionRefresh | null>(null);
+  const compactionRetryTimerRef = React.useRef<number | null>(null);
+  const scheduleCompactionRefreshRef = React.useRef<() => void>(() => {});
   const isPrependingHistoryRef = React.useRef(false);
   const isAtLatestRef = React.useRef(true);
   const pendingHistoryAnchorRef =
@@ -111,9 +214,87 @@ export default function MessageList(props: {
   const backendChatId = sessionApi.getChatIdForSession(currentSessionId || "");
 
   React.useLayoutEffect(() => {
-    activeSessionRef.current = currentSessionId;
-    compactionRefreshRef.current += 1;
-  }, [currentSessionId]);
+    if (latestMessagesRef.current !== messages) {
+      latestMessagesRef.current = messages;
+      messagesRevisionRef.current += 1;
+    }
+  }, [messages]);
+
+  const clearPendingCompactionRefresh = React.useCallback(() => {
+    pendingCompactionRefreshRef.current = null;
+    if (compactionRetryTimerRef.current !== null) {
+      window.clearTimeout(compactionRetryTimerRef.current);
+      compactionRetryTimerRef.current = null;
+    }
+  }, []);
+
+  const scheduleCompactionRefresh = React.useCallback(() => {
+    const pending = pendingCompactionRefreshRef.current;
+    if (
+      !pending ||
+      pending.sessionId !== currentSessionId ||
+      pending.chatId !== backendChatId ||
+      compactionRetryTimerRef.current !== null ||
+      hasGeneratingMessage(latestMessagesRef.current) ||
+      pending.attempts >= COMPACTION_REFRESH_DELAYS_MS.length
+    ) {
+      return;
+    }
+    const tailFingerprints = latestMessageTailFingerprints(
+      latestMessagesRef.current,
+    );
+    if (!tailFingerprints.length) return;
+
+    const messagesRevision = messagesRevisionRef.current;
+    const delay = COMPACTION_REFRESH_DELAYS_MS[pending.attempts];
+    pending.attempts += 1;
+    compactionRetryTimerRef.current = window.setTimeout(() => {
+      compactionRetryTimerRef.current = null;
+      void sessionApi
+        .getSession(pending.sessionId)
+        .then((session) => {
+          const latestPending = pendingCompactionRefreshRef.current;
+          const isConfirmed =
+            latestPending === pending &&
+            session.generating === false &&
+            messagesRevision === messagesRevisionRef.current &&
+            !hasGeneratingMessage(latestMessagesRef.current) &&
+            latestPending.sessionId === currentSessionId &&
+            latestPending.chatId === backendChatId &&
+            snapshotContainsCompactionBoundary(
+              session.messages,
+              pending.boundaryId,
+            ) &&
+            snapshotContainsTail(session.messages, tailFingerprints);
+          if (isConfirmed) {
+            pendingCompactionRefreshRef.current = null;
+            setMessages(session.messages || []);
+            return;
+          }
+          scheduleCompactionRefreshRef.current();
+        })
+        .catch(() => {
+          scheduleCompactionRefreshRef.current();
+        });
+    }, delay);
+  }, [backendChatId, currentSessionId, setMessages]);
+
+  scheduleCompactionRefreshRef.current = scheduleCompactionRefresh;
+
+  React.useEffect(() => {
+    scheduleCompactionRefresh();
+  }, [messages, scheduleCompactionRefresh]);
+
+  React.useEffect(() => {
+    const pending = pendingCompactionRefreshRef.current;
+    if (
+      pending &&
+      (pending.sessionId !== currentSessionId || pending.chatId !== backendChatId)
+    ) {
+      clearPendingCompactionRefresh();
+    }
+    return clearPendingCompactionRefresh;
+  }, [backendChatId, clearPendingCompactionRefresh, currentSessionId]);
 
   React.useEffect(() => {
     historyCursorRef.current = null;
@@ -262,7 +443,9 @@ export default function MessageList(props: {
     {
       type: CONVERSATION_COMPACTION_EVENT,
       callback: (event) => {
-        const detail = event.detail as { chat_id?: unknown } | undefined;
+        const detail = event.detail as
+          | { boundary?: { id?: unknown }; chat_id?: unknown }
+          | undefined;
         if (
           typeof detail?.chat_id !== "string" ||
           detail.chat_id !== backendChatId ||
@@ -271,29 +454,27 @@ export default function MessageList(props: {
           return;
         }
         historyCursorRef.current = null;
+        historyLoadingRef.current = false;
         historyDoneRef.current = false;
+        loadedArchiveMessageIdsRef.current = new Set();
+        loadedBoundaryIdsRef.current = new Set();
         historyGenerationRef.current += 1;
         setHistoryExhausted(false);
         setHistoryLoadState("idle");
-        const refresh = ++compactionRefreshRef.current;
-        const requestedSessionId = currentSessionId;
-        const requestedChatId = detail.chat_id;
-        void sessionApi
-          .getSession(requestedSessionId)
-          .then((session) => {
-            if (
-              refresh === compactionRefreshRef.current &&
-              activeSessionRef.current === requestedSessionId &&
-              sessionApi.getChatIdForSession(requestedSessionId) ===
-                requestedChatId
-            ) {
-              setMessages(session.messages || []);
-            }
-          })
-          .catch(() => undefined);
+        clearPendingCompactionRefresh();
+        pendingCompactionRefreshRef.current = {
+          attempts: 0,
+          boundaryId:
+            typeof detail.boundary?.id === "string"
+              ? detail.boundary.id
+              : undefined,
+          chatId: detail.chat_id,
+          sessionId: currentSessionId,
+        };
+        scheduleCompactionRefreshRef.current();
       },
     },
-    [backendChatId, currentSessionId, setMessages],
+    [backendChatId, clearPendingCompactionRefresh, currentSessionId],
   );
 
   React.useEffect(() => {

@@ -318,6 +318,56 @@ class ConversationArchiveStore:
         self._replace_manifest(manifest_path, manifest)
         return boundary
 
+    async def advance_archived_message_events(
+        self,
+        chat_id: str,
+        messages: Sequence[Msg],
+        boundary_id: str,
+    ) -> CheckpointRecord:
+        """Advance the event cursor for a durably archived legacy prefix."""
+        return await asyncio.to_thread(
+            self._advance_archived_message_events,
+            chat_id,
+            messages,
+            boundary_id,
+        )
+
+    def _advance_archived_message_events(
+        self,
+        chat_id: str,
+        messages: Sequence[Msg],
+        boundary_id: str,
+    ) -> CheckpointRecord:
+        canonical_chat_id = self._validate_chat_id(chat_id)
+        canonical_boundary_id = ConversationArchiveBoundary._canonical_uuid(
+            boundary_id,
+            "boundary_id",
+        )
+        with self._chat_lock(canonical_chat_id):
+            state = self._read_checkpoint_state_locked(canonical_chat_id)
+            if not messages or len(state.events) < len(messages):
+                return state.record
+            for offset, message in enumerate(messages, start=1):
+                event = state.events[offset - 1]
+                if (
+                    event.sequence
+                    != state.record.applied_event_sequence + offset
+                    or event.type != "message_added"
+                    or dict(event.facts)
+                    != {"message_id": message.id, "role": message.role}
+                    or event.source_refs != (f"message:{message.id}",)
+                ):
+                    return state.record
+            record = replace(
+                state.record,
+                applied_event_sequence=state.events[
+                    len(messages) - 1
+                ].sequence,
+                archived_through=canonical_boundary_id,
+            )
+            self._write_checkpoint_locked(canonical_chat_id, record)
+            return record
+
     async def read_checkpoint_state(
         self,
         chat_id: str,
@@ -1612,6 +1662,47 @@ def attach_conversation_archive(
     original_clear_summary = getattr(memory, "clear_compressed_summary", None)
     append_lock = asyncio.Lock()
 
+    def archived_messages_are_online_prefix(messages: Sequence[Msg]) -> bool:
+        """Return whether selected objects are the current memory prefix."""
+        if len(messages) > len(memory.content):
+            return False
+        if all(
+            online is archived
+            for (online, _marks), archived in zip(memory.content, messages)
+        ):
+            return True
+        online_ids = [message.id for message, _marks in memory.content]
+        return len(online_ids) == len(set(online_ids)) and all(
+            online.id == archived.id
+            for (online, _marks), archived in zip(memory.content, messages)
+        )
+
+    def remove_archived_online_messages(messages: Sequence[Msg]) -> None:
+        """Remove only the concrete online occurrences just archived."""
+        entries = list(memory.content)
+        selected_indexes: set[int] = set()
+        unresolved: list[Msg] = []
+        for archived in messages:
+            for index, (online, _marks) in enumerate(entries):
+                if index not in selected_indexes and online is archived:
+                    selected_indexes.add(index)
+                    break
+            else:
+                unresolved.append(archived)
+        for archived in unresolved:
+            candidates = [
+                index
+                for index, (online, _marks) in enumerate(entries)
+                if index not in selected_indexes and online.id == archived.id
+            ]
+            if len(candidates) == 1:
+                selected_indexes.add(candidates[0])
+        memory.content = [
+            entry
+            for index, entry in enumerate(entries)
+            if index not in selected_indexes
+        ]
+
     async def add(*args: Any, **kwargs: Any) -> Any:
         """Append an event only after ReMe has accepted the message."""
         if original_add is None:
@@ -1651,13 +1742,15 @@ def attach_conversation_archive(
     async def archive_compacted_messages(
         messages: Sequence[Msg],
     ) -> ConversationArchiveBoundary:
+        advances_event_cursor = archived_messages_are_online_prefix(messages)
         boundary = await archive_store.commit(canonical_chat_id, messages)
-        archived_ids = {message.id for message in messages}
-        memory.content = [
-            (message, marks)
-            for message, marks in memory.content
-            if message.id not in archived_ids
-        ]
+        if advances_event_cursor:
+            await archive_store.advance_archived_message_events(
+                canonical_chat_id,
+                messages,
+                boundary.id,
+            )
+        remove_archived_online_messages(messages)
         return boundary
 
     async def archive_checkpoint_messages(
@@ -1670,12 +1763,7 @@ def attach_conversation_archive(
             messages,
             candidate_id,
         )
-        archived_ids = {message.id for message in messages}
-        memory.content = [
-            (message, marks)
-            for message, marks in memory.content
-            if message.id not in archived_ids
-        ]
+        remove_archived_online_messages(messages)
         await install_checkpoint_projection(result.record)
         return result
 
@@ -1711,12 +1799,7 @@ def attach_conversation_archive(
         )
         if result is None:
             return False
-        archived_ids = {message.id for message in messages}
-        memory.content = [
-            (message, marks)
-            for message, marks in memory.content
-            if message.id not in archived_ids
-        ]
+        remove_archived_online_messages(messages)
         await install_checkpoint_projection()
         return True
 

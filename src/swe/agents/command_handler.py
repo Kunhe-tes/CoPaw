@@ -494,6 +494,8 @@ class CommandHandler(ConversationCommandHandlerMixin):
                         if len(loaded_messages) >= MAX_LOAD_HISTORY_COUNT:
                             break
 
+            await self._reset_checkpoint_epoch("load_history")
+
             # Clear existing memory
             self.memory.content.clear()
             self.memory.clear_compressed_summary()

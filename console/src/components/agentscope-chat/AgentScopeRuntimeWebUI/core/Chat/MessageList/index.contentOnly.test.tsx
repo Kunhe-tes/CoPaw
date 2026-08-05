@@ -14,7 +14,13 @@ import MessageList from ".";
 const mocks = vi.hoisted(() => ({
   messagesContext: {},
   sessionsContext: {},
-  messages: [] as Array<{ id: string; history?: boolean }>,
+  messages: [] as Array<{
+    id: string;
+    history?: boolean;
+    msgStatus?: "generating" | "finished";
+    role?: "assistant" | "user";
+    cards?: Array<{ code: string; data: unknown }>;
+  }>,
   setMessages: vi.fn(),
   isSessionLoading: false,
   sessionNotFound: false,
@@ -230,6 +236,7 @@ describe("MessageList content-only composition", () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
     cleanup();
   });
@@ -555,10 +562,89 @@ describe("MessageList content-only composition", () => {
     });
   });
 
-  it("refreshes the active session when a compaction boundary arrives", async () => {
-    mocks.messages = [{ id: "old-message" }];
+  it("keeps archive paging available when compaction invalidates an in-flight page", async () => {
+    mocks.messages = [{ id: "online-message" }];
+    let resolveHistory!: (value: {
+      messages: Array<{ id: string }>;
+      boundaries: never[];
+      has_more: boolean;
+      next_cursor: string | null;
+    }) => void;
+    apiMocks.getChatHistory
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveHistory = resolve;
+        }),
+      )
+      .mockResolvedValueOnce({
+        messages: [],
+        boundaries: [],
+        has_more: false,
+        next_cursor: null,
+      });
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    const bubbleList = screen.getByTestId("bubble-list");
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => {
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(1);
+    });
+
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+    expect(apiMocks.getSession).not.toHaveBeenCalled();
+
+    resolveHistory({
+      messages: [{ id: "stale-archived-message" }],
+      boundaries: [],
+      has_more: true,
+      next_cursor: "stale-cursor",
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    bubbleList.scrollTop = -300;
+    fireEvent.scroll(bubbleList);
+    bubbleList.scrollTop = -380;
+    fireEvent.scroll(bubbleList);
+    await waitFor(() => {
+      expect(apiMocks.getChatHistory).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  it("does not replace a finished local turn when the compaction snapshot omits its tail", async () => {
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "local-request",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "current question" } }],
+      },
+      {
+        id: "local-response",
+        role: "assistant",
+        msgStatus: "finished",
+        cards: [{ code: "Response", data: { output: "current answer" } }],
+      },
+    ];
     apiMocks.getSession.mockResolvedValue({
-      messages: [{ id: "conversation-compaction-boundary-1" }],
+      generating: false,
+      messages: [
+        {
+          id: "stale-persisted-message",
+          role: "assistant",
+          cards: [{ code: "Response", data: { output: "older answer" } }],
+        },
+      ],
     });
 
     render(
@@ -573,17 +659,401 @@ describe("MessageList content-only composition", () => {
       }),
     );
 
-    await waitFor(() => {
-      expect(apiMocks.getSession).toHaveBeenCalledWith("chat-1");
+    expect(apiMocks.getSession).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
     });
+    expect(apiMocks.getSession).toHaveBeenCalledWith("chat-1");
     expect(mocks.messages).toEqual([
-      { id: "conversation-compaction-boundary-1" },
+      {
+        id: "local-request",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "current question" } }],
+      },
+      {
+        id: "local-response",
+        role: "assistant",
+        msgStatus: "finished",
+        cards: [{ code: "Response", data: { output: "current answer" } }],
+      },
+    ]);
+    vi.useRealTimers();
+  });
+
+  it("requires the ordered local request-response suffix before accepting a compaction snapshot", async () => {
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "current-request",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "current question" } }],
+      },
+      {
+        id: "current-response",
+        role: "assistant",
+        msgStatus: "finished",
+        cards: [{ code: "Response", data: { output: "same answer" } }],
+      },
+    ];
+    apiMocks.getSession
+      .mockResolvedValueOnce({
+        generating: false,
+        messages: [
+          {
+            id: "old-request",
+            role: "user",
+            cards: [{ code: "Request", data: { input: "older question" } }],
+          },
+          {
+            id: "old-response",
+            role: "assistant",
+            cards: [{ code: "Response", data: { output: "same answer" } }],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        generating: false,
+        messages: [
+          {
+            id: "persisted-request",
+            role: "user",
+            cards: [{ code: "Request", data: { input: "current question" } }],
+          },
+          {
+            id: "persisted-response",
+            role: "assistant",
+            cards: [{ code: "Response", data: { output: "same answer" } }],
+          },
+        ],
+      });
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(mocks.messages.map((message) => message.id)).toEqual([
+      "current-request",
+      "current-response",
+    ]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(mocks.messages.map((message) => message.id)).toEqual([
+      "persisted-request",
+      "persisted-response",
     ]);
   });
 
+  it("requires the compaction boundary in the snapshot when the online tail is unchanged", async () => {
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "current-request",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "current question" } }],
+      },
+      {
+        id: "current-response",
+        role: "assistant",
+        msgStatus: "finished",
+        cards: [{ code: "Response", data: { output: "same answer" } }],
+      },
+    ];
+    apiMocks.getSession
+      .mockResolvedValueOnce({
+        generating: false,
+        messages: [
+          {
+            id: "stale-request",
+            role: "user",
+            cards: [{ code: "Request", data: { input: "current question" } }],
+          },
+          {
+            id: "stale-response",
+            role: "assistant",
+            cards: [{ code: "Response", data: { output: "same answer" } }],
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        generating: false,
+        messages: [
+          {
+            id: "persisted-request",
+            role: "user",
+            cards: [{ code: "Request", data: { input: "current question" } }],
+          },
+          {
+            id: "persisted-response",
+            role: "assistant",
+            cards: [{ code: "Response", data: { output: "same answer" } }],
+          },
+          {
+            id: "conversation-compaction-boundary-1",
+            role: "assistant",
+            cards: [
+              {
+                code: "ConversationCompactionBoundary",
+                data: { id: "boundary-1" },
+              },
+            ],
+          },
+        ],
+      });
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: {
+          chat_id: "chat-real-1",
+          boundary: { id: "boundary-1" },
+        },
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(mocks.messages.map((message) => message.id)).toEqual([
+      "current-request",
+      "current-response",
+    ]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+    });
+    expect(mocks.messages.map((message) => message.id)).toEqual([
+      "persisted-request",
+      "persisted-response",
+      "conversation-compaction-boundary-1",
+    ]);
+  });
+
+  it("keeps retrying compaction refresh until a delayed persisted snapshot confirms the local tail", async () => {
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "current-request",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "current question" } }],
+      },
+    ];
+    apiMocks.getSession
+      .mockResolvedValueOnce({ generating: false, messages: [] })
+      .mockResolvedValueOnce({ generating: false, messages: [] })
+      .mockResolvedValueOnce({ generating: false, messages: [] })
+      .mockResolvedValueOnce({
+        generating: false,
+        messages: [
+          {
+            id: "persisted-request",
+            role: "user",
+            cards: [{ code: "Request", data: { input: "current question" } }],
+          },
+        ],
+      });
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(900);
+    });
+    expect(apiMocks.getSession).toHaveBeenCalledTimes(4);
+    expect(mocks.messages.map((message) => message.id)).toEqual([
+      "persisted-request",
+    ]);
+  });
+
+  it("refreshes a pending stream compaction only after a non-generating snapshot confirms the local tail", async () => {
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "local-response",
+        role: "assistant",
+        msgStatus: "generating",
+        cards: [{ code: "Response", data: { output: "current answer" } }],
+      },
+    ];
+    apiMocks.getSession
+      .mockResolvedValueOnce({ generating: true, messages: [] })
+      .mockResolvedValueOnce({
+        generating: false,
+        messages: [
+          {
+            id: "persisted-response",
+            role: "assistant",
+            cards: [{ code: "Response", data: { output: "current answer" } }],
+          },
+        ],
+      });
+
+    const rendered = render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+    expect(apiMocks.getSession).not.toHaveBeenCalled();
+
+    mocks.messages = [
+      {
+        id: "local-response",
+        role: "assistant",
+        msgStatus: "finished",
+        cards: [{ code: "Response", data: { output: "current answer" } }],
+      },
+    ];
+    rendered.rerender(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+      await Promise.resolve();
+    });
+    expect(apiMocks.getSession).toHaveBeenCalledTimes(1);
+    expect(mocks.messages).toEqual([
+      {
+        id: "local-response",
+        role: "assistant",
+        msgStatus: "finished",
+        cards: [{ code: "Response", data: { output: "current answer" } }],
+      },
+    ]);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(100);
+      await Promise.resolve();
+    });
+    expect(apiMocks.getSession).toHaveBeenCalledTimes(2);
+    expect(mocks.messages).toEqual([
+      {
+        id: "persisted-response",
+        role: "assistant",
+        cards: [{ code: "Response", data: { output: "current answer" } }],
+      },
+    ]);
+    vi.useRealTimers();
+  });
+
+  it("does not replace a new local request when a compaction snapshot is in flight", async () => {
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "existing-message",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "existing" } }],
+      },
+    ];
+    let resolveSession!: (value: { generating: boolean; messages: unknown[] }) => void;
+    apiMocks.getSession.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSession = resolve;
+      }),
+    );
+
+    const rendered = render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
+    });
+    expect(apiMocks.getSession).toHaveBeenCalledWith("chat-1");
+
+    mocks.messages = [
+      {
+        id: "existing-message",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "existing" } }],
+      },
+      {
+        id: "new-local-response",
+        role: "assistant",
+        msgStatus: "generating",
+        cards: [{ code: "Response", data: { output: "new" } }],
+      },
+    ];
+    rendered.rerender(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+    resolveSession({ generating: false, messages: [] });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mocks.messages).toHaveLength(2);
+    expect(mocks.messages[1]?.id).toBe("new-local-response");
+    vi.useRealTimers();
+  });
+
+  it("keeps the current session visible when a compaction boundary arrives", () => {
+    mocks.messages = [{ id: "old-message" }];
+
+    render(
+      <ChatContentOnlyProvider enabled>
+        <MessageList onSubmit={vi.fn()} />
+      </ChatContentOnlyProvider>,
+    );
+
+    document.dispatchEvent(
+      new CustomEvent("conversation_compacted", {
+        detail: { chat_id: "chat-real-1" },
+      }),
+    );
+
+    expect(apiMocks.getSession).not.toHaveBeenCalled();
+    expect(mocks.messages).toEqual([{ id: "old-message" }]);
+  });
+
   it("does not let an earlier compaction refresh overwrite a switched session", async () => {
-    mocks.messages = [{ id: "message-for-chat-1" }];
-    let resolveSession!: (value: { messages: Array<{ id: string }> }) => void;
+    vi.useFakeTimers();
+    mocks.messages = [
+      {
+        id: "message-for-chat-1",
+        role: "user",
+        cards: [{ code: "Request", data: { input: "chat-1" } }],
+      },
+    ];
+    let resolveSession!: (value: { generating: boolean; messages: unknown[] }) => void;
     apiMocks.getSession.mockReturnValue(
       new Promise((resolve) => {
         resolveSession = resolve;
@@ -603,9 +1073,10 @@ describe("MessageList content-only composition", () => {
         detail: { chat_id: "chat-real-1" },
       }),
     );
-    await waitFor(() => {
-      expect(apiMocks.getSession).toHaveBeenCalledWith("chat-1");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(50);
     });
+    expect(apiMocks.getSession).toHaveBeenCalledWith("chat-1");
 
     mocks.currentSessionId = "chat-2";
     mocks.messages = [{ id: "message-for-chat-2" }];
@@ -614,9 +1085,12 @@ describe("MessageList content-only composition", () => {
         <MessageList onSubmit={vi.fn()} />
       </ChatContentOnlyProvider>,
     );
-    resolveSession({ messages: [{ id: "stale-message-for-chat-1" }] });
+    resolveSession({ generating: false, messages: [] });
 
-    await Promise.resolve();
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(mocks.messages).toEqual([{ id: "message-for-chat-2" }]);
+    vi.useRealTimers();
   });
 });
