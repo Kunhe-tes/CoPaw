@@ -611,6 +611,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     ) -> None:
         if request_context.get("agent_role", "main") == "subagent":
             return
+        if not (
+            request_context.get("agent_id")
+            or getattr(self._agent_config, "id", None)
+        ):
+            return
         supervisor = (
             request_context.get(
                 "_subagent_supervisor",
