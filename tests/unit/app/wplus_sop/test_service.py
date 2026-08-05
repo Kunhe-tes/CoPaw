@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -30,13 +32,15 @@ from swe.app.wplus_sop.models import (
 from swe.app.wplus_sop.runtime import WPlusChatRunBusyError
 from swe.app.wplus_sop.service import (
     WPlusCommandError,
-    WPlusOwningChatFinalizingError,
     WPlusOwnershipError,
+    WPlusOwningChatFinalizingError,
     WPlusRuntimeStartError,
     WPlusSopService,
     serialize_session,
+    store_path_for_workspace,
 )
 from swe.app.wplus_sop.store import StaleStateVersionError, WPlusSopStore
+from swe.config.context import resolve_file_url_base
 
 
 class FakeChatManager:
@@ -107,6 +111,19 @@ def _service(tmp_path: Path) -> WPlusSopService:
         ownership=_ownership(),
         store=WPlusSopStore(tmp_path / "wplus-sop.json"),
     )
+
+
+def test_store_path_for_workspace_uses_sop_directory_without_legacy_fallback(
+    tmp_path: Path,
+) -> None:
+    legacy_path = tmp_path / ".copaw" / "wplus-sop.json"
+    legacy_path.parent.mkdir()
+    legacy_path.write_text("{}", encoding="utf-8")
+
+    store_path = store_path_for_workspace(tmp_path)
+
+    assert store_path == tmp_path / ".sop" / "wplus-sop.json"
+    assert store_path != legacy_path
 
 
 def _create_generation_run(
@@ -333,6 +350,112 @@ def _trial_result_payload(run_id: str) -> dict:
     }
 
 
+def _final_result_payload(tmp_path: Path) -> dict:
+    static_dir = tmp_path / "static"
+    static_dir.mkdir(parents=True, exist_ok=True)
+    spec = {"name": "客户经营 SOP"}
+    contents = {
+        "sop_spec.json": json.dumps(
+            spec,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+        "sop_render.md": "# 客户经营 SOP\n\n执行复核。",
+        "sop_render.html": "<article><h1>客户经营 SOP</h1></article>",
+        "example_result.html": "<article><h1>脱敏示例结果</h1></article>",
+    }
+    artifact_ids = {
+        "sop_spec.json": "sop_spec",
+        "sop_render.md": "sop_render_md",
+        "sop_render.html": "sop_render_html",
+        "example_result.html": "example_result_html",
+    }
+    artifacts = []
+    static_access, _ = resolve_file_url_base()
+    for name, content in contents.items():
+        raw = content.encode("utf-8")
+        (static_dir / name).write_bytes(raw)
+        artifacts.append(
+            {
+                "artifact_id": artifact_ids[name],
+                "name": name,
+                "static_file_name": name,
+                "static_url": (
+                    f"{static_access}/static/tenant-1/agent-1/{name}"
+                ),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "copied_by": "copy_file_to_static",
+            },
+        )
+    return {
+        "sop_spec": spec,
+        "readable_sop": contents["sop_render.md"],
+        "html": contents["sop_render.html"],
+        "example_result_html": contents["example_result.html"],
+        "artifacts": artifacts,
+        "validation": {
+            "schema_validator": "scripts/validate_sop.py",
+            "schema_exit_code": 0,
+            "renderers": ["scripts/render_md.py", "scripts/render_sop.py"],
+        },
+    }
+
+
+def test_delivered_artifacts_accept_tool_urls_and_url_result_references(
+    tmp_path: Path,
+) -> None:
+    payload = _final_result_payload(tmp_path)
+    payload["sop_spec"] = {
+        "file_url": "https://files.example.test/static/sop_spec_6.json",
+        "sha256": payload["artifacts"][0]["sha256"],
+    }
+    payload["readable_sop"] = (
+        "https://files.example.test/static/sop_render_6.md"
+    )
+    payload["html"] = "https://files.example.test/static/sop_render_6.html"
+    payload["example_result_html"] = (
+        "https://files.example.test/static/example_result_5.html"
+    )
+    for artifact in payload["artifacts"]:
+        artifact["static_url"] = (
+            "https://files.example.test/tool-output/"
+            f"{artifact['static_file_name']}"
+        )
+
+    service_module._validate_delivered_artifacts(
+        workspace_dir=tmp_path,
+        result=FinalSopResult.model_validate(payload),
+    )
+
+
+def test_delivered_artifacts_reject_missing_local_file(tmp_path: Path) -> None:
+    payload = _final_result_payload(tmp_path)
+    (tmp_path / "static" / "sop_render.md").unlink()
+
+    with pytest.raises(
+        WPlusCommandError,
+        match="delivered artifact is missing: sop_render_md",
+    ):
+        service_module._validate_delivered_artifacts(
+            workspace_dir=tmp_path,
+            result=FinalSopResult.model_validate(payload),
+        )
+
+
+def test_delivered_artifacts_reject_sha256_mismatch(tmp_path: Path) -> None:
+    payload = _final_result_payload(tmp_path)
+    payload["artifacts"][1]["sha256"] = "0" * 64
+
+    with pytest.raises(
+        WPlusCommandError,
+        match="delivered artifact hash mismatch: sop_render_md",
+    ):
+        service_module._validate_delivered_artifacts(
+            workspace_dir=tmp_path,
+            result=FinalSopResult.model_validate(payload),
+        )
+
+
 @pytest.mark.asyncio
 async def test_completed_trial_snapshot_restores_results_and_evidence(
     tmp_path: Path,
@@ -494,14 +617,16 @@ async def test_confirm_persists_session_before_starting_agent_turn(
     proposal = service.create_entry_proposal(
         original_text="请帮我梳理客户经营 SOP",
         mode="explicit",
+        memory_user_scope="anon_scope_123456",
     )
-    observed: dict[str, str] = {}
+    observed: dict[str, object] = {}
 
     async def fake_start(**kwargs):
         record = service.store.get_session(kwargs["sop_session_id"])
         assert record is not None
         assert record.projection.state is SessionState.GENERATING_STAGE_PROPOSAL
         observed["session_id"] = kwargs["sop_session_id"]
+        observed["payload"] = kwargs["payload"]
         return SimpleNamespace(run_id=kwargs["run_id"])
 
     monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
@@ -512,6 +637,11 @@ async def test_confirm_persists_session_before_starting_agent_turn(
     )
 
     assert mutation.record.projection.sop_session_id == observed["session_id"]
+    assert mutation.record.projection.memory_user_scope == "anon_scope_123456"
+    assert observed["payload"] == {
+        "original_request": "请帮我梳理客户经营 SOP",
+        "memory_user_scope": "anon_scope_123456",
+    }
     assert service.get_active_session() is not None
 
     projected = await service.flush_chat_projection_outbox()
@@ -1183,21 +1313,22 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
 
     service.append_agent_event(
         kind="sop_result",
-        payload={
-            "result": {
-                "sop_spec": {"name": "客户经营 SOP", "version": 1},
-                "readable_sop": "# 客户经营 SOP",
-                "html": "<h1>客户经营 SOP</h1>",
-            },
-        },
+        payload={"result": _final_result_payload(tmp_path)},
         event_key="final-result",
     )
-    completed = service.append_agent_event(
+    generated = service.append_agent_event(
         kind="memory_candidates",
         payload={"candidates": []},
         event_key="no-memory-candidates",
     )
 
+    assert generated.record.projection.state is SessionState.OUTPUT_REVIEW
+    completed = await _send(
+        service,
+        session_id,
+        "confirm_outputs",
+        request_id="cmd-confirm-outputs",
+    )
     assert completed.record.projection.state is SessionState.COMPLETED
     nested = completed.record.projection.trial_result_lists[0].rows[0]
     assert nested["details"]["children"][0]["label"] == "子项"
@@ -1218,6 +1349,646 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
         "wplus_sop_session"
     ]["state"] == "Completed"
     assert service.store.pending_outbox() == []
+
+
+@pytest.mark.asyncio
+async def test_output_review_previews_artifacts_then_writes_approved_memory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    starts: list[dict[str, object]] = []
+
+    async def fake_start(**kwargs):
+        starts.append(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    session_id = "sop-output-review"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.FINALIZING_OUTPUTS,
+            state_version=1,
+            title="SOP",
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-finalizing",
+            command="confirm_stage",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+    service.append_agent_event(
+        kind="sop_result",
+        payload={"result": _final_result_payload(tmp_path)},
+        event_key="result",
+    )
+    generated = service.append_agent_event(
+        kind="memory_candidates",
+        payload={
+            "candidates": [
+                {
+                    "candidate_id": "candidate-1",
+                    "summary": "保留复核口径",
+                    "memory_type": "common_wplus_knowledge",
+                    "value": {"rule": "优先复核高风险分组"},
+                    "evidence": "用户确认该页面口径已经验证。",
+                },
+            ],
+        },
+        event_key="memory",
+    )
+
+    assert generated.record.projection.state is SessionState.OUTPUT_REVIEW
+    snapshot = serialize_session(generated.record)
+    assert snapshot["result_preview"] == {
+        "markdown": "# 客户经营 SOP\n\n执行复核。",
+        "html": "<article><h1>客户经营 SOP</h1></article>",
+        "markdown_url": snapshot["artifacts"][1]["download_url"],
+        "html_url": snapshot["artifacts"][2]["download_url"],
+        "markdown_sha256": snapshot["artifacts"][1]["sha256"],
+        "html_sha256": snapshot["artifacts"][2]["sha256"],
+    }
+    assert [artifact["artifact_id"] for artifact in snapshot["artifacts"]] == [
+        "sop_spec",
+        "sop_render_md",
+        "sop_render_html",
+        "example_result_html",
+    ]
+    assert snapshot["artifacts"][0]["download_url"].startswith(
+        resolve_file_url_base()[0] + "/static/tenant-1/agent-1/",
+    )
+    assert snapshot["memory_candidates"][0]["content"] == {
+        "rule": "优先复核高风险分组",
+    }
+    assert snapshot["memory_candidates"][0]["memory_type"] == (
+        "common_wplus_knowledge"
+    )
+    assert snapshot["memory_candidates"][0]["evidence"] == (
+        "用户确认该页面口径已经验证。"
+    )
+    assert snapshot["memory_candidates"][0]["target_file"] == (
+        "memory/common-wplus-knowledge.jsonl"
+    )
+
+    reviewing = await _send(
+        service,
+        session_id,
+        "confirm_outputs",
+        request_id="cmd-confirm-outputs",
+    )
+    assert reviewing.record.projection.state is SessionState.MEMORY_REVIEW
+    writing = await _send(
+        service,
+        session_id,
+        "resolve_memory",
+        {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+        request_id="cmd-approve-memory",
+    )
+
+    candidate = writing.record.projection.memory_candidates[0]
+    assert writing.record.projection.state is SessionState.WRITING_MEMORY
+    assert candidate.status.value == "writing"
+    assert candidate.write_receipt is None
+    assert starts[-1]["target_state"] == "WritingMemory"
+    assert starts[-1]["payload"] == {"candidates": [{
+        "candidate_id": "candidate-1",
+        "type": "common_wplus_knowledge",
+        "content": {"rule": "优先复核高风险分组"},
+        "evidence": "用户确认该页面口径已经验证。",
+        "target_scope": "common",
+        "target_file": "memory/common-wplus-knowledge.jsonl",
+        "script": "scripts/memory_store.py",
+        "approved": True,
+    }]}
+
+    completed = service.append_agent_event(
+        kind="memory_write_batch_result",
+        payload={
+            "results": [{
+                "candidate_id": "candidate-1",
+                "status": "succeeded",
+                "target_scope": "common",
+                "target_file": "memory/common-wplus-knowledge.jsonl",
+                "result": "appended",
+                "script": "scripts/memory_store.py",
+            }],
+        },
+        event_key="memory-write-candidate-1",
+        trusted_sop_session_id=session_id,
+        trusted_run_id=starts[-1]["run_id"],
+        trusted_attempt_id=starts[-1]["attempt_id"],
+    )
+    candidate = completed.record.projection.memory_candidates[0]
+    assert completed.record.projection.state is SessionState.COMPLETED
+    assert candidate.status.value == "approved"
+    assert candidate.write_receipt is not None
+    assert candidate.write_receipt.memory_id == (
+        "wplus-sop/sop-output-review/candidate-1"
+    )
+
+    duplicate = await service.execute_command(
+        sop_session_id=session_id,
+        command="resolve_memory",
+        command_request_id="cmd-approve-memory",
+        expected_state_version=1,
+        payload={
+            "decisions": [
+                {"candidate_id": "candidate-1", "decision": "approve"},
+            ],
+        },
+    )
+    assert duplicate.duplicate is True
+
+
+@pytest.mark.asyncio
+async def test_failed_memory_write_stays_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    starts: list[dict[str, object]] = []
+
+    async def fake_start(**kwargs):
+        starts.append(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    session_id = "sop-memory-retry"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.MEMORY_REVIEW,
+            state_version=1,
+            title="SOP",
+            final_result=FinalSopResult.model_validate(
+                _final_result_payload(tmp_path),
+            ),
+            memory_candidates=[
+                {
+                    "candidate_id": "candidate-1",
+                    "summary": "保存规则",
+                    "memory_type": "sop_case",
+                    "value": {"pattern": "优先执行复核"},
+                    "evidence": "用户确认这是完全脱敏的通用 SOP 模式。",
+                    "target_scope": "cases",
+                    "target_file": "memory/cases/sop-cases.jsonl",
+                },
+            ],
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-memory-review",
+            command="confirm_outputs",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+
+    writing = await _send(
+        service,
+        session_id,
+        "resolve_memory",
+        {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+        request_id="cmd-memory-failed",
+    )
+    failed = service.append_agent_event(
+        kind="memory_write_batch_result",
+        payload={
+            "results": [{
+                "candidate_id": "candidate-1",
+                "status": "failed",
+                "error_code": "memory_store_rejected",
+                "summary": "disk unavailable",
+                "script": "scripts/memory_store.py",
+            }],
+        },
+        event_key="memory-write-failed-candidate-1",
+        trusted_sop_session_id=session_id,
+        trusted_run_id=starts[-1]["run_id"],
+        trusted_attempt_id=starts[-1]["attempt_id"],
+    )
+    candidate = failed.record.projection.memory_candidates[0]
+    assert writing.record.projection.state is SessionState.WRITING_MEMORY
+    assert failed.record.projection.state is SessionState.MEMORY_REVIEW
+    assert candidate.status.value == "failed"
+    assert candidate.failure_reason == "disk unavailable"
+
+    retried = await _send(
+        service,
+        session_id,
+        "resolve_memory",
+        {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+        request_id="cmd-memory-retry",
+    )
+    assert retried.record.projection.state is SessionState.WRITING_MEMORY
+    assert len(starts) == 2
+
+
+def test_memory_write_receipt_cannot_switch_candidate_or_target(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-memory-boundary"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.WRITING_MEMORY,
+            state_version=1,
+            title="SOP",
+            current_run_id="run-memory-boundary",
+            active_memory_candidate_id="candidate-1",
+            final_result=FinalSopResult.model_validate(
+                _final_result_payload(tmp_path),
+            ),
+            memory_candidates=[
+                {
+                    "candidate_id": "candidate-1",
+                    "summary": "保存规则",
+                    "memory_type": "sop_case",
+                    "value": {"pattern": "优先执行复核"},
+                    "evidence": "用户确认这是脱敏模式。",
+                    "target_scope": "cases",
+                    "target_file": "memory/cases/sop-cases.jsonl",
+                    "status": "writing",
+                },
+            ],
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-memory-boundary",
+            command="resolve_memory",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+            starts_run=True,
+            run_id="run-memory-boundary",
+            attempt_id="attempt-memory-boundary",
+        ),
+        run_attempt=RunAttempt(
+            run_id="run-memory-boundary",
+            attempt_id="attempt-memory-boundary",
+            command_request_id="cmd-memory-boundary",
+            command="resolve_memory",
+            status=RunStatus.RUNNING,
+        ),
+    )
+
+    with pytest.raises(WPlusCommandError, match="does not match approved"):
+        service.append_agent_event(
+            kind="memory_write_completed",
+            payload={
+                "candidate_id": "candidate-1",
+                "target_scope": "common",
+                "target_file": "memory/common-wplus-knowledge.jsonl",
+                "result": "appended",
+                "script": "scripts/memory_store.py",
+            },
+            event_key="forged-memory-target",
+            trusted_sop_session_id=session_id,
+            trusted_run_id="run-memory-boundary",
+            trusted_attempt_id="attempt-memory-boundary",
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_decisions_are_atomic_and_approved_candidates_share_one_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    starts: list[dict[str, object]] = []
+
+    async def fake_start(**kwargs):
+        starts.append(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    session_id = "sop-memory-batch"
+    candidates = [
+        {
+            "candidate_id": f"candidate-{index}",
+            "summary": f"保存规则 {index}",
+            "memory_type": "sop_case",
+            "value": {"pattern": f"rule-{index}"},
+            "evidence": f"用户确认脱敏规则 {index}。",
+            "target_scope": "cases",
+            "target_file": "memory/cases/sop-cases.jsonl",
+        }
+        for index in (1, 2)
+    ]
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.MEMORY_REVIEW,
+            state_version=1,
+            title="SOP",
+            final_result=FinalSopResult.model_validate(_final_result_payload(tmp_path)),
+            memory_candidates=candidates,
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-memory-review",
+            command="confirm_outputs",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+
+    with pytest.raises(WPlusCommandError, match="every unresolved"):
+        await _send(
+            service,
+            session_id,
+            "resolve_memory",
+            {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+            request_id="cmd-incomplete-memory",
+        )
+    assert service.store.get_session(session_id).projection.state_version == 1
+    assert starts == []
+
+    writing = await _send(
+        service,
+        session_id,
+        "resolve_memory",
+        {
+            "decisions": [
+                {"candidate_id": "candidate-1", "decision": "approve"},
+                {"candidate_id": "candidate-2", "decision": "approve"},
+            ],
+        },
+        request_id="cmd-batch-memory",
+    )
+    assert len(starts) == 1
+    assert writing.record.projection.active_memory_candidate_ids == [
+        "candidate-1",
+        "candidate-2",
+    ]
+    assert len(starts[0]["payload"]["candidates"]) == 2
+
+    result = service.append_agent_event(
+        kind="memory_write_batch_result",
+        payload={
+            "results": [
+                {
+                    "candidate_id": "candidate-1",
+                    "status": "succeeded",
+                    "target_scope": "cases",
+                    "target_file": "memory/cases/sop-cases.jsonl",
+                    "result": "appended",
+                    "script": "scripts/memory_store.py",
+                },
+                {
+                    "candidate_id": "candidate-2",
+                    "status": "failed",
+                    "error_code": "store_failed",
+                    "summary": "disk unavailable",
+                    "script": "scripts/memory_store.py",
+                },
+            ],
+        },
+        event_key="memory-batch-result",
+        trusted_sop_session_id=session_id,
+        trusted_run_id=starts[0]["run_id"],
+        trusted_attempt_id=starts[0]["attempt_id"],
+    )
+    assert result.record.projection.state is SessionState.MEMORY_REVIEW
+    assert [candidate.status.value for candidate in result.record.projection.memory_candidates] == [
+        "approved",
+        "failed",
+    ]
+    assert result.record.projection.active_memory_candidate_ids == []
+
+
+@pytest.mark.asyncio
+async def test_rejecting_all_memory_candidates_does_not_start_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    starts: list[dict[str, object]] = []
+
+    async def fake_start(**kwargs):
+        starts.append(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    session_id = "sop-memory-reject-all"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.MEMORY_REVIEW,
+            state_version=1,
+            title="SOP",
+            memory_candidates=[{
+                "candidate_id": "candidate-1",
+                "summary": "不保存规则",
+                "memory_type": "sop_case",
+                "value": {"pattern": "rule"},
+                "evidence": "用户审阅该脱敏规则。",
+                "target_scope": "cases",
+                "target_file": "memory/cases/sop-cases.jsonl",
+            }],
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-memory-review",
+            command="confirm_outputs",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+    completed = await _send(
+        service,
+        session_id,
+        "resolve_memory",
+        {"decisions": [{"candidate_id": "candidate-1", "decision": "reject"}]},
+        request_id="cmd-reject-all",
+    )
+    assert completed.record.projection.state is SessionState.COMPLETED
+    assert starts == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_unwritable_memory_candidate_can_only_be_rejected(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-legacy-memory"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:legacy-miner",
+            state=SessionState.MEMORY_REVIEW,
+            state_version=7,
+            title="Legacy SOP",
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-legacy-entry",
+            command="confirm_entry",
+            sop_session_id=session_id,
+            resulting_state_version=7,
+        ),
+    )
+    raw = json.loads(service.store.path.read_text(encoding="utf-8"))
+    raw["sessions"][session_id]["projection"]["memory_candidates"] = [
+        {
+            "candidate_id": "legacy-failed",
+            "summary": "旧版失败候选",
+            "value": "旧版自由文本",
+            "status": "failed",
+        },
+    ]
+    service.store.path.write_text(
+        json.dumps(raw, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    snapshot = serialize_session(service.get_session(session_id))
+    assert snapshot["state"] == "MemoryReview"
+    assert snapshot["memory_candidates"][0]["status"] == "failed"
+    assert snapshot["memory_candidates"][0]["failure_reason"] is None
+    assert snapshot["memory_candidates"][0]["legacy_read_only"] is True
+
+    with pytest.raises(WPlusCommandError, match="read-only legacy"):
+        await _send(
+            service,
+            session_id,
+            "resolve_memory",
+            {
+                "decisions": [
+                    {"candidate_id": "legacy-failed", "decision": "approve"},
+                ],
+            },
+            request_id="cmd-approve-legacy",
+        )
+    unchanged = service.get_session(session_id)
+    assert unchanged.projection.state is SessionState.MEMORY_REVIEW
+    assert unchanged.projection.state_version == 7
+
+    rejected = await _send(
+        service,
+        session_id,
+        "resolve_memory",
+        {
+            "decisions": [
+                {"candidate_id": "legacy-failed", "decision": "reject"},
+            ],
+        },
+        request_id="cmd-reject-legacy",
+    )
+    assert rejected.record.projection.state is SessionState.COMPLETED
+    assert rejected.record.projection.memory_candidates[0].status.value == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_memory_batch_waits_for_prior_agent_then_starts_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    tracker = service.workspace.task_tracker
+    tracker.status = "running"
+    tracker.idle_after_reads = 2
+    starts: list[dict[str, object]] = []
+
+    async def fake_start(**kwargs):
+        assert tracker.status == "idle"
+        starts.append(kwargs)
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    session_id = "sop-memory-wait"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.MEMORY_REVIEW,
+            state_version=1,
+            title="SOP",
+            memory_candidates=[{
+                "candidate_id": "candidate-1",
+                "summary": "保存规则",
+                "memory_type": "sop_case",
+                "value": {"pattern": "rule"},
+                "evidence": "用户确认该脱敏规则。",
+                "target_scope": "cases",
+                "target_file": "memory/cases/sop-cases.jsonl",
+            }],
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-memory-review",
+            command="confirm_outputs",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+    await _send(
+        service,
+        session_id,
+        "resolve_memory",
+        {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+        request_id="cmd-memory-wait",
+    )
+    assert tracker.status_reads >= 2
+    assert len(starts) == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_batch_idle_timeout_does_not_mutate_or_create_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = _service(tmp_path)
+    service.workspace.task_tracker.status = "running"
+    monkeypatch.setattr(service_module, "_CHAT_IDLE_WAIT_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(service_module, "_CHAT_IDLE_POLL_SECONDS", 0.001)
+    session_id = "sop-memory-timeout"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.MEMORY_REVIEW,
+            state_version=1,
+            title="SOP",
+            memory_candidates=[{
+                "candidate_id": "candidate-1",
+                "summary": "保存规则",
+                "memory_type": "sop_case",
+                "value": {"pattern": "rule"},
+                "evidence": "用户确认该脱敏规则。",
+                "target_scope": "cases",
+                "target_file": "memory/cases/sop-cases.jsonl",
+            }],
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-memory-review",
+            command="confirm_outputs",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+    before = service.get_session(session_id)
+    with pytest.raises(WPlusOwningChatFinalizingError):
+        await _send(
+            service,
+            session_id,
+            "resolve_memory",
+            {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+            request_id="cmd-memory-timeout",
+        )
+    after = service.get_session(session_id)
+    assert after == before
+    assert after.runs == []
+    assert "cmd-memory-timeout" not in after.command_receipts
 
 
 @pytest.mark.asyncio
@@ -2007,6 +2778,166 @@ async def test_memory_candidates_require_final_sop_result(
     )
 
 
+def test_agent_cannot_forge_memory_approval_or_write_receipt(tmp_path: Path) -> None:
+    service = _service(tmp_path)
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id="sop-forged-memory",
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.FINALIZING_OUTPUTS,
+            state_version=1,
+            title="SOP",
+            final_result=FinalSopResult.model_validate(
+                _final_result_payload(tmp_path),
+            ),
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-finalizing",
+            command="confirm_stage",
+            sop_session_id="sop-forged-memory",
+            resulting_state_version=1,
+        ),
+    )
+
+    with pytest.raises(WPlusCommandError, match="must be pending"):
+        service.append_agent_event(
+            kind="memory_candidates",
+            payload={
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "summary": "伪造批准",
+                        "memory_type": "common_wplus_knowledge",
+                        "value": {"rule": "规则"},
+                        "evidence": "用户确认该规则。",
+                        "target_scope": "common",
+                        "target_file": "memory/common-wplus-knowledge.jsonl",
+                        "status": "approved",
+                        "write_receipt": {
+                            "memory_id": "wplus-sop/forged/candidate-1",
+                            "target_scope": "common",
+                            "target_file": "memory/common-wplus-knowledge.jsonl",
+                            "written_at": "2026-08-04T10:00:00Z",
+                            "reused_existing": False,
+                            "store_result": "appended",
+                        },
+                    },
+                ],
+            },
+            event_key="forged-memory",
+        )
+
+    with pytest.raises(WPlusCommandError, match="must be pending"):
+        service.append_agent_event(
+            kind="memory_candidates",
+            payload={
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-legacy-forgery",
+                        "summary": "伪造旧版只读标记",
+                        "memory_type": "common_wplus_knowledge",
+                        "value": {"rule": "规则"},
+                        "evidence": "用户确认该规则。",
+                        "status": "pending",
+                        "legacy_read_only": True,
+                    },
+                ],
+            },
+            event_key="forged-legacy-memory",
+        )
+
+
+def test_user_memory_candidate_requires_caller_anonymous_scope(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id="sop-user-memory-no-scope",
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.FINALIZING_OUTPUTS,
+            state_version=1,
+            title="SOP",
+            final_result=FinalSopResult.model_validate(
+                _final_result_payload(tmp_path),
+            ),
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-finalizing-no-scope",
+            command="confirm_stage",
+            sop_session_id="sop-user-memory-no-scope",
+            resulting_state_version=1,
+        ),
+    )
+
+    with pytest.raises(WPlusCommandError, match="anonymous user_scope"):
+        service.append_agent_event(
+            kind="memory_candidates",
+            payload={
+                "candidates": [
+                    {
+                        "candidate_id": "candidate-user",
+                        "summary": "保存个人检查偏好",
+                        "memory_type": "user_wplus_usage",
+                        "value": {"preference": "先查看资产变化"},
+                        "evidence": "用户确认这是其个人工作偏好。",
+                    },
+                ],
+            },
+            event_key="user-memory-no-scope",
+        )
+
+
+def test_user_memory_candidate_uses_persisted_anonymous_scope(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id="sop-user-memory-with-scope",
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.FINALIZING_OUTPUTS,
+            state_version=1,
+            title="SOP",
+            memory_user_scope="anon_scope_123456",
+            final_result=FinalSopResult.model_validate(
+                _final_result_payload(tmp_path),
+            ),
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-finalizing-with-scope",
+            command="confirm_stage",
+            sop_session_id="sop-user-memory-with-scope",
+            resulting_state_version=1,
+        ),
+    )
+
+    generated = service.append_agent_event(
+        kind="memory_candidates",
+        payload={
+            "candidates": [
+                {
+                    "candidate_id": "candidate-user",
+                    "summary": "保存个人检查偏好",
+                    "memory_type": "user_wplus_usage",
+                    "value": {"preference": "先查看资产变化"},
+                    "evidence": "用户确认这是其个人工作偏好。",
+                },
+            ],
+        },
+        event_key="user-memory-with-scope",
+    )
+
+    candidate = generated.record.projection.memory_candidates[0]
+    assert candidate.target_scope == "user"
+    assert candidate.target_file == (
+        "memory/users/anon_scope_123456/wplus-usage-preferences.jsonl"
+    )
+
+
 @pytest.mark.asyncio
 async def test_revise_answer_invalidates_downstream_and_starts_new_run(
     tmp_path: Path,
@@ -2587,10 +3518,8 @@ async def test_finalizing_retry_reports_when_sop_result_is_already_persisted(
                 failed_operation="confirm_stage",
                 failed_run_id=failed_run_id,
             ),
-            final_result=FinalSopResult(
-                sop_spec={"name": "客户经营 SOP"},
-                readable_sop="# 客户经营 SOP",
-                html="<h1>客户经营 SOP</h1>",
+            final_result=FinalSopResult.model_validate(
+                _final_result_payload(tmp_path),
             ),
         ),
         command_receipt=CommandReceipt(
@@ -2628,6 +3557,7 @@ async def test_finalizing_retry_reports_when_sop_result_is_already_persisted(
         "target_state": "FinalizingOutputs",
         "retry_of_run_id": failed_run_id,
         "final_result_persisted": True,
+        "memory_user_scope_available": False,
     }
 
 

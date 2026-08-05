@@ -8,7 +8,9 @@ export type WPlusSopState =
   | "AwaitingTrialFeedback"
   | "AwaitingStageConfirmation"
   | "FinalizingOutputs"
+  | "OutputReview"
   | "MemoryReview"
+  | "WritingMemory"
   | "PendingExit"
   | "Paused"
   | "RecoverableFailure"
@@ -118,13 +120,45 @@ export interface WPlusSopArtifact {
   status: "validated" | "failed";
   download_url?: string | null;
   description?: string | null;
+  sha256?: string | null;
+  copied_by?: "copy_file_to_static" | null;
 }
 
 export interface WPlusSopMemoryCandidate {
   candidate_id: string;
   title: string;
   description?: string | null;
-  status: "pending" | "approved" | "rejected" | "failed";
+  memory_type?:
+    | "common_wplus_knowledge"
+    | "user_wplus_usage"
+    | "sop_case"
+    | null;
+  content: unknown;
+  evidence?: string | null;
+  target_scope?: "common" | "user" | "cases" | null;
+  target_file?: string | null;
+  status: "pending" | "writing" | "approved" | "rejected" | "failed";
+  failure_reason?: string | null;
+  write_receipt?: WPlusSopMemoryWriteReceipt | null;
+  legacy_read_only?: boolean;
+}
+
+export interface WPlusSopMemoryWriteReceipt {
+  memory_id: string;
+  target_scope: "common" | "user" | "cases";
+  target_file: string;
+  written_at: string;
+  reused_existing: boolean;
+  store_result: "appended" | "duplicate";
+}
+
+export interface WPlusSopResultPreview {
+  markdown: string;
+  html: string;
+  markdown_url?: string | null;
+  html_url?: string | null;
+  markdown_sha256?: string | null;
+  html_sha256?: string | null;
 }
 
 export interface WPlusSopFailure {
@@ -163,6 +197,7 @@ export interface WPlusSopSession {
   unknowns?: string[];
   capabilities?: WPlusSopCapabilityEvidence[];
   artifacts?: WPlusSopArtifact[];
+  result_preview?: WPlusSopResultPreview | null;
   memory_candidates?: WPlusSopMemoryCandidate[];
   failure?: WPlusSopFailure | null;
   pending_exit?: WPlusSopPendingExit | null;
@@ -177,6 +212,7 @@ export type WPlusSopCommandType =
   | "submit_trial_feedback"
   | "accept_trial"
   | "confirm_stage"
+  | "confirm_outputs"
   | "save_and_exit"
   | "resume"
   | "retry_current_turn"

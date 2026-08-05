@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from swe.app.wplus_sop.models import (
     EntryDetectionMode,
     EntryProposalStatus,
     EventKind,
+    MemoryCandidateStatus,
     OwnershipTuple,
     RunAttempt,
     RunStatus,
@@ -584,3 +586,110 @@ def test_concurrent_create_allows_only_one_active_or_paused_session(
     active = WPlusSopStore(path).get_active_by_chat(_ownership())
     assert active is not None
     assert active.projection.sop_session_id == outcomes[0]
+
+
+def test_load_preserves_minimal_legacy_memory_history_without_reopening_session(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "wplus-sop.json"
+    store = WPlusSopStore(path)
+    projection = _projection()
+    projection.state = SessionState.COMPLETED
+    store.create_session(projection, command_receipt=_entry_receipt())
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    legacy_candidates = [
+        {
+            "candidate_id": "legacy-approved",
+            "summary": "旧版本曾由用户批准",
+            "value": "旧版自由文本记忆",
+            "status": "approved",
+        },
+        {
+            "candidate_id": "legacy-failed",
+            "summary": "旧版本失败项",
+            "value": {"pattern": "旧版失败记录"},
+            "status": "failed",
+        },
+    ]
+    session = raw["sessions"]["sop_1"]
+    session["projection"]["memory_candidates"] = legacy_candidates
+    session["events"].append(
+        {
+            "object": "structured_interaction",
+            "protocol_version": 1,
+            "interaction": "wplus_sop",
+            "event_id": "evt-legacy-memory",
+            "session_id": "sop_1",
+            "chat_id": "chat_1",
+            "revision": 1,
+            "round": 0,
+            "state_version": 2,
+            "kind": "memory_candidates",
+            "payload": {"candidates": legacy_candidates},
+        },
+    )
+    path.write_text(json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+
+    reloaded_store = WPlusSopStore(path)
+    loaded = reloaded_store.get_session("sop_1")
+
+    assert loaded is not None
+    assert loaded.projection.state is SessionState.COMPLETED
+    assert loaded.projection.state_version == projection.state_version
+    approved, failed = loaded.projection.memory_candidates
+    assert approved.status is MemoryCandidateStatus.APPROVED
+    assert approved.write_receipt is None
+    assert approved.legacy_read_only is True
+    assert failed.status is MemoryCandidateStatus.FAILED
+    assert failed.failure_reason is None
+    assert failed.legacy_read_only is True
+    historical = loaded.events[-1].payload
+    assert historical.candidates[0].status is MemoryCandidateStatus.APPROVED
+    assert historical.candidates[0].value == "旧版自由文本记忆"
+    assert historical.candidates[1].status is MemoryCandidateStatus.FAILED
+    assert historical.candidates[1].failure_reason is None
+
+    before_events = [
+        (
+            event.kind.value,
+            event.state_version,
+            event.payload.model_dump(mode="json", by_alias=True),
+        )
+        for event in loaded.events
+    ]
+    before_receipts = {
+        key: receipt.model_dump(mode="json")
+        for key, receipt in loaded.command_receipts.items()
+    }
+    with reloaded_store._lock:
+        reloaded_store._save_unlocked(reloaded_store._load_unlocked())
+    saved_raw = json.loads(path.read_text(encoding="utf-8"))
+    saved_session = saved_raw["sessions"]["sop_1"]
+    assert saved_session["projection"]["state"] == "Completed"
+    assert saved_session["projection"]["state_version"] == projection.state_version
+    assert saved_session["command_receipts"] == session["command_receipts"]
+    assert saved_session["events"][-1]["payload"]["candidates"][0]["status"] == (
+        "approved"
+    )
+    assert saved_session["events"][-1]["payload"]["candidates"][0]["value"] == (
+        "旧版自由文本记忆"
+    )
+    assert "legacy_read_only" not in json.dumps(saved_raw)
+
+    saved_and_reloaded = reloaded_store.get_session("sop_1")
+    assert saved_and_reloaded is not None
+    assert saved_and_reloaded.projection.state is SessionState.COMPLETED
+    assert saved_and_reloaded.projection.state_version == projection.state_version
+    assert {
+        key: receipt.model_dump(mode="json")
+        for key, receipt in saved_and_reloaded.command_receipts.items()
+    } == before_receipts
+    assert [
+        (
+            event.kind.value,
+            event.state_version,
+            event.payload.model_dump(mode="json", by_alias=True),
+        )
+        for event in saved_and_reloaded.events
+    ] == before_events

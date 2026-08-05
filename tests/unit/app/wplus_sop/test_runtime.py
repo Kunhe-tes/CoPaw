@@ -6,9 +6,11 @@ import pytest
 
 from swe.app.wplus_sop.models import (
     MemoryCandidatesPayload,
+    MemoryWriteBatchResultPayload,
     QuestionBatchPayload,
     SopResultPayload,
     StageProposalPayload,
+    TrialExecutionCompletedPayload,
 )
 from swe.app.wplus_sop.runtime import (
     WPlusChatRunBusyError,
@@ -471,6 +473,8 @@ def test_stage_proposal_command_requires_one_schema_valid_event():
     assert "kind='stage_proposal'" in text
     assert "不得把命令输入中的 payload 原样提交" in text
     assert "不得只输出 Markdown" in text
+    assert "memory/common-wplus-knowledge.jsonl" in text
+    assert "memory/cases/sop-cases.jsonl" in text
     example_marker = "stage_proposal payload 示例：\n"
     example = json.loads(text.split(example_marker, maxsplit=1)[1].splitlines()[0])
     validated = StageProposalPayload.model_validate(example)
@@ -536,6 +540,56 @@ def test_trial_command_requires_same_background_turn_to_emit_terminal_event(
 
 
 @pytest.mark.parametrize(
+    "target_state",
+    ["GeneratingTrial", "ExecutingTrial"],
+)
+def test_trial_command_requires_decision_ready_detailed_results(target_state):
+    text = build_wplus_command_text(
+        command="submit_answers",
+        sop_session_id="sop-1",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        payload={"current_stage_id": "stage-1"},
+        target_state=target_state,
+    )
+
+    assert "不能只复述环节名称、用户输入或预跑目标" in text
+    assert "执行范围、实际关键发现、可执行建议、证据与限制" in text
+    assert "每个对象或分组一行" in text
+    assert "对象分组、关键发现、建议动作、判断依据、影响数量" in text
+    assert "total_count" in text
+    assert "truncated" in text
+    assert "不得为了满足详细度编造" in text
+    assert "trial_execution_completed payload 示例" in text
+    assert '"recommended_action"' in text
+    assert '"evidence"' in text
+    example = json.loads(
+        text.split("真实脱敏结果）：\n", maxsplit=1)[1],
+    )
+    validated = TrialExecutionCompletedPayload.model_validate(example)
+    assert validated.run_id == "run-1"
+    assert validated.result_lists[0].total_count == 1
+
+
+def test_stage_proposal_reads_personal_memory_only_with_anonymous_scope() -> None:
+    text = build_wplus_command_text(
+        command="propose_stage_queue",
+        sop_session_id="sop-1",
+        run_id="run-1",
+        attempt_id="attempt-1",
+        payload={
+            "original_request": "梳理流程",
+            "memory_user_scope": "anon_scope_123456",
+        },
+    )
+
+    assert (
+        "memory/users/anon_scope_123456/wplus-usage-preferences.jsonl" in text
+    )
+    assert "文件不存在表示当前没有对应记忆" in text
+
+
+@pytest.mark.parametrize(
     ("command", "payload", "expected_sequence"),
     [
         (
@@ -572,7 +626,12 @@ def test_finalizing_outputs_has_an_explicit_terminal_event_sequence(
     assert body["expected_event_sequence"] == expected_sequence
     assert "同一个后台 Agent 回合" in text
     assert "不得提交 kind='retry_started'" in text
-    assert "不得调用 copy_file_to_static" in text
+    assert "scripts/validate_sop.py" in text
+    assert "scripts/render_md.py" in text
+    assert "scripts/render_sop.py" in text
+    assert "example_result.html" in text
+    assert "逐个调用 copy_file_to_static" in text
+    assert "不得使用 shell 复制到 static" in text
     assert "工具返回 ok=false" in text
     if payload.get("final_result_persisted"):
         assert "不得重复提交 sop_result" in text
@@ -586,6 +645,79 @@ def test_finalizing_outputs_has_an_explicit_terminal_event_sequence(
         text.split("memory_candidates payload 示例：\n", maxsplit=1)[1].splitlines()[0],
     )
     MemoryCandidatesPayload.model_validate(memory_example)
+    assert "进入 OutputReview" in text
+    assert "用户确认结果后才进入记忆处理" in text
+    assert "不得伪造 approved" in text
+
+
+def test_approved_memory_command_runs_bound_store_script_in_agent_turn() -> None:
+    text = build_wplus_command_text(
+        command="resolve_memory",
+        sop_session_id="sop-1",
+        run_id="run-memory",
+        attempt_id="attempt-memory",
+        target_state="WritingMemory",
+        payload={
+            "candidates": [
+                {
+                    "candidate_id": "candidate-1",
+                    "type": "common_wplus_knowledge",
+                    "content": {"rule": "已确认规则"},
+                    "evidence": "用户明确确认该规则。",
+                    "target_scope": "common",
+                    "target_file": "memory/common-wplus-knowledge.jsonl",
+                    "script": "scripts/memory_store.py",
+                    "approved": True,
+                },
+                {
+                    "candidate_id": "candidate-2",
+                    "type": "sop_case",
+                    "content": {"pattern": "脱敏模式"},
+                    "evidence": "用户确认该模式可复用。",
+                    "target_scope": "cases",
+                    "target_file": "memory/cases/sop-cases.jsonl",
+                    "script": "scripts/memory_store.py",
+                    "approved": True,
+                },
+            ],
+        },
+    )
+    body = json.loads(text.splitlines()[1])
+
+    assert body["expected_event_sequence"] == [
+        "memory_write_batch_result",
+    ]
+    assert "execute_shell_command" in text
+    assert "--approved" in text
+    assert "同一个 Agent 回合" in text
+    assert "candidate-1" in text
+    assert "只提交一次 memory_write_batch_result" in text
+    marker = "memory_write_batch_result 完整调用示例：\n"
+    example = json.loads(text.split(marker, maxsplit=1)[1].splitlines()[0])
+    assert example == {
+        "kind": "memory_write_batch_result",
+        "payload": {
+            "results": [
+                {
+                    "candidate_id": "candidate-1",
+                    "status": "succeeded",
+                    "target_scope": "common",
+                    "target_file": "memory/common-wplus-knowledge.jsonl",
+                    "result": "appended",
+                    "script": "scripts/memory_store.py",
+                },
+                {
+                    "candidate_id": "candidate-2",
+                    "status": "failed",
+                    "error_code": "store_failed",
+                    "summary": "脱敏后的失败原因",
+                    "script": "scripts/memory_store.py",
+                },
+            ],
+        },
+        "event_key": "memory-write-batch-result-run-memory",
+    }
+    MemoryWriteBatchResultPayload.model_validate(example["payload"])
 
 
 @pytest.mark.parametrize(

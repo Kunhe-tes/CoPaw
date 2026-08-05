@@ -8,6 +8,10 @@ from pydantic import ValidationError
 
 from swe.app.wplus_sop.models import (
     EventKind,
+    FinalSopResult,
+    MemoryCandidate,
+    MemoryWriteBatchResultPayload,
+    MemoryWriteReceipt,
     OwnershipTuple,
     Question,
     QuestionBatch,
@@ -231,6 +235,205 @@ def test_trial_completion_rejects_contact_values_in_context_snapshot() -> None:
         )
 
 
+def test_memory_candidate_exposes_fixed_target_and_write_receipt() -> None:
+    candidate = MemoryCandidate(
+        candidate_id="candidate-1",
+        summary="保留复核口径",
+        memory_type="common_wplus_knowledge",
+        value={"rule": "优先复核高风险分组"},
+        evidence="用户在最终确认时明确认可该口径。",
+        target_scope="common",
+        target_file="memory/common-wplus-knowledge.jsonl",
+        status="approved",
+        write_receipt=MemoryWriteReceipt(
+            memory_id="wplus-sop/sop-1/candidate-1",
+            target_scope="common",
+            target_file="memory/common-wplus-knowledge.jsonl",
+            written_at="2026-08-04T10:00:00Z",
+            reused_existing=False,
+            store_result="appended",
+        ),
+    )
+
+    assert candidate.memory_type == "common_wplus_knowledge"
+    assert candidate.target_scope == "common"
+    assert candidate.target_file == "memory/common-wplus-knowledge.jsonl"
+    assert candidate.write_receipt.memory_id.endswith("candidate-1")
+
+
+def test_final_sop_result_requires_four_static_tool_artifacts() -> None:
+    result = FinalSopResult(
+        sop_spec={"name": "SOP"},
+        readable_sop="# SOP",
+        html="<h1>SOP</h1>",
+        example_result_html="<section>示例</section>",
+        artifacts=[
+            {
+                "artifact_id": "sop_spec",
+                "name": "sop_spec.json",
+                "static_file_name": "sop_spec.json",
+                "static_url": "http://localhost/static/tenant/agent/sop_spec.json",
+                "sha256": "a" * 64,
+                "copied_by": "copy_file_to_static",
+            },
+            {
+                "artifact_id": "sop_render_md",
+                "name": "sop_render.md",
+                "static_file_name": "sop_render.md",
+                "static_url": "http://localhost/static/tenant/agent/sop_render.md",
+                "sha256": "b" * 64,
+                "copied_by": "copy_file_to_static",
+            },
+            {
+                "artifact_id": "sop_render_html",
+                "name": "sop_render.html",
+                "static_file_name": "sop_render.html",
+                "static_url": "http://localhost/static/tenant/agent/sop_render.html",
+                "sha256": "c" * 64,
+                "copied_by": "copy_file_to_static",
+            },
+            {
+                "artifact_id": "example_result_html",
+                "name": "example_result.html",
+                "static_file_name": "example_result.html",
+                "static_url": (
+                    "http://localhost/static/tenant/agent/example_result.html"
+                ),
+                "sha256": "d" * 64,
+                "copied_by": "copy_file_to_static",
+            },
+        ],
+        validation={
+            "schema_validator": "scripts/validate_sop.py",
+            "schema_exit_code": 0,
+            "renderers": ["scripts/render_md.py", "scripts/render_sop.py"],
+        },
+    )
+
+    assert len(result.artifacts) == 4
+    assert result.validation.schema_exit_code == 0
+
+    with pytest.raises(ValidationError, match="four required artifacts"):
+        FinalSopResult(
+            sop_spec={"name": "SOP"},
+            readable_sop="# SOP",
+            html="<h1>SOP</h1>",
+            example_result_html="<section>示例</section>",
+            artifacts=result.artifacts[:3],
+            validation=result.validation,
+        )
+
+
+def test_memory_candidate_rejects_approval_without_store_receipt() -> None:
+    with pytest.raises(ValidationError, match="approved memory candidates require"):
+        MemoryCandidate(
+            candidate_id="candidate-1",
+            summary="Approved reusable rule",
+            memory_type="common_wplus_knowledge",
+            value={"rule": "Keep the confirmed review rule"},
+            evidence="The user explicitly approved this reusable rule.",
+            target_scope="common",
+            target_file="memory/common-wplus-knowledge.jsonl",
+            status="approved",
+        )
+
+
+def test_memory_candidate_rejects_failed_status_without_reason() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="failed memory candidates require a failure reason",
+    ):
+        MemoryCandidate(
+            candidate_id="candidate-1",
+            summary="Reusable rule could not be persisted",
+            value={"rule": "Keep the confirmed review rule"},
+            status="failed",
+        )
+
+
+def test_memory_candidate_content_validation_precedes_target_and_status() -> None:
+    with pytest.raises(ValidationError, match="contact values"):
+        MemoryCandidate(
+            candidate_id="candidate-1",
+            summary="Save this contact: 13812345678",
+            value={"rule": "Keep the confirmed review rule"},
+            target_scope="common",
+            status="failed",
+        )
+
+
+def test_memory_candidate_target_validation_precedes_failure_status() -> None:
+    with pytest.raises(
+        ValidationError,
+        match="memory candidate target fields must coexist",
+    ):
+        MemoryCandidate(
+            candidate_id="candidate-1",
+            summary="Reusable rule could not be persisted",
+            value={"rule": "Keep the confirmed review rule"},
+            target_scope="common",
+            status="failed",
+        )
+
+
+def test_memory_receipt_rejects_legacy_target_and_result_values() -> None:
+    with pytest.raises(ValidationError):
+        MemoryWriteReceipt(
+            memory_id="legacy-memory",
+            target_scope="agent",
+            target_file="MEMORY.md",
+            store_result="legacy",
+        )
+
+
+def test_memory_candidate_rejects_sensitive_unsanitized_content() -> None:
+    with pytest.raises(ValidationError, match="contact values"):
+        MemoryCandidate(
+            candidate_id="candidate-1",
+            summary="保存联系人",
+            value={"note": "联系 13812345678"},
+        )
+
+
+def test_memory_batch_result_requires_unique_complete_outcome_fields() -> None:
+    with pytest.raises(ValidationError, match="unique candidates"):
+        MemoryWriteBatchResultPayload.model_validate(
+            {
+                "results": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "status": "failed",
+                        "error_code": "store_failed",
+                        "summary": "disk unavailable",
+                        "script": "scripts/memory_store.py",
+                    },
+                    {
+                        "candidate_id": "candidate-1",
+                        "status": "failed",
+                        "error_code": "store_failed",
+                        "summary": "disk unavailable",
+                        "script": "scripts/memory_store.py",
+                    },
+                ],
+            },
+        )
+
+    with pytest.raises(ValidationError, match="successful memory result"):
+        MemoryWriteBatchResultPayload.model_validate(
+            {
+                "results": [
+                    {
+                        "candidate_id": "candidate-1",
+                        "status": "succeeded",
+                        "target_scope": "common",
+                        "target_file": "memory/common-wplus-knowledge.jsonl",
+                        "script": "scripts/memory_store.py",
+                    },
+                ],
+            },
+        )
+
+
 @pytest.mark.parametrize(
     "field",
     [
@@ -391,6 +594,18 @@ def test_state_machine_accepts_main_path_and_rejects_skips() -> None:
     assert_legal_transition(
         SessionState.AWAITING_STAGE_CONFIRMATION,
         SessionState.GENERATING_TRIAL,
+    )
+    assert_legal_transition(
+        SessionState.FINALIZING_OUTPUTS,
+        SessionState.OUTPUT_REVIEW,
+    )
+    assert_legal_transition(
+        SessionState.OUTPUT_REVIEW,
+        SessionState.MEMORY_REVIEW,
+    )
+    assert_legal_transition(
+        SessionState.OUTPUT_REVIEW,
+        SessionState.COMPLETED,
     )
 
     with pytest.raises(ValueError, match="Illegal W\\+ SOP state transition"):

@@ -12,7 +12,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from starlette.responses import Response, StreamingResponse
+from starlette.responses import RedirectResponse, Response, StreamingResponse
 
 from ...agents.skills_manager import resolve_effective_skill_dir
 from ..agent_context import get_agent_for_request
@@ -238,35 +238,17 @@ async def download_wplus_sop_artifact(
     if result is None:
         raise HTTPException(status_code=404, detail="W+ SOP artifact not found")
 
-    artifacts = {
-        "sop_spec": (
-            "sop_spec.json",
-            "application/json",
-            json.dumps(result.sop_spec, ensure_ascii=False, indent=2),
+    artifact = next(
+        (
+            candidate
+            for candidate in result.artifacts
+            if candidate.artifact_id == artifact_id
         ),
-        "sop_render_md": (
-            "sop_render.md",
-            "text/markdown",
-            result.readable_sop,
-        ),
-        "sop_render_html": (
-            "sop_render.html",
-            "text/html",
-            result.html,
-        ),
-    }
-    artifact = artifacts.get(artifact_id)
+        None,
+    )
     if artifact is None:
         raise HTTPException(status_code=404, detail="W+ SOP artifact not found")
-    filename, media_type, content = artifact
-    return Response(
-        content=content.encode("utf-8"),
-        media_type=media_type,
-        headers={
-            "Content-Disposition": f'attachment; filename="{filename}"',
-            "X-Content-Type-Options": "nosniff",
-        },
-    )
+    return RedirectResponse(url=artifact.static_url)
 
 
 @router.get("/chats/{chat_id}/active-session")

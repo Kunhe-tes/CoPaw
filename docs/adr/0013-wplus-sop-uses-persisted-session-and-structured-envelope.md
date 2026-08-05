@@ -10,8 +10,8 @@
 
 ## 页面与 Chat 的责任边界
 
-- 显式调用 Miner 时，Chat 使用原始消息渲染“进入 W+ SOP 工作台”卡片；用户确认后创建 SOP 会话并跳转，用户不需要重复输入需求。
-- 隐式识别 Miner 时，Chat 先显示说明识别理由、建议环节数和数据边界的“确认进入/继续普通 Chat”卡片。拒绝后继续普通 Chat，并在当前请求中抑制重复识别。
+- 用户通过 Chat 技能选择器选择 `wplus-sop-miner`，或在消息正文手动输入独立、精确的 `@wplus-sop-miner` 提及时，Chat 使用原始消息渲染“进入 W+ SOP 工作台”卡片；用户确认后创建 SOP 会话并跳转，用户不需要重复输入需求。
+- 普通 SOP 文本、裸技能名、近似名称和模糊语义不触发新的 W+ SOP 入口；未显式调用 Miner 的请求继续由普通 Chat 处理。已有活动或暂停会话的返回、恢复入口不受影响。
 - 用户点击进入后，后端必须先完成会话持久化，再返回 `session_id` 和 `/wplus-sop/:sessionId`。页面不得先跳转再依赖前端补建会话。
 - Chat 中的入口卡在会话创建后变为只读状态卡，显示当前环节、运行状态和“继续工作台”按钮；暂停后也通过该卡恢复，不重新创建会话。
 - 工作台是题组回答、预跑启动与重试、预跑反馈、环节确认、历史修订、记忆授权和结束操作的唯一写入口。
@@ -146,13 +146,13 @@ clarifying
 
 ## 最终结果与记忆
 
-所有环节完成澄清、预跑、反馈和确认后，Miner 才能生成结果。工作台展示经过校验的机器可读 SOP、可读 SOP 和 HTML 结果，并通过复用 Session ownership 校验的下载接口返回实际内容；前端不得把无地址的占位项伪装成可交付产物。是否额外交付 `example_result.html` 由 Miner 输出契约和可用模板共同决定，不把缺失模板伪装成成功产物。
+所有环节完成澄清、预跑、反馈和确认后，Miner 才能生成结果。最终化由绑定原 Chat 的 Agent 回合执行：生成 `sop_spec.json`，运行 Miner 校验与渲染脚本，使用模板生成 `example_result.html`，再逐一调用 `copy_file_to_static` 交付 `sop_spec.json`、`sop_render.md`、`sop_render.html` 和 `example_result.html`。`sop_result` 必须携带工具返回的真实 static URL、文件名和哈希；服务端只校验四个文件均位于所属 Workspace static、实际存在且哈希一致后才持久化。服务端不按 ownership 重建或限制 static URL，也不比较文件内容与事件顶层 `sop_spec` / `readable_sop` / `html` / `example_result_html` 是否一致。工作台以 `artifacts` 中 `sop_render_md` 和 `sop_render_html` 的 `static_url` 为预览源，顶层字段仅作内联兼容；当两者不一致时以 artifact URL 为准。下载接口只重定向到已持久化的真实 static URL，不在请求时拼接文件。模板缺失属于可恢复阻塞，不得省略第四个文件或伪造成功。
 
-最终文件生成不立即完成会话。工作台进入 `MemoryReview`，逐项处理记忆候选或选择跳过全部；全部候选处理完成后才进入 `Completed`。第一版只提示结果可以交给 `wplus-skill-builder`，不自动或一键调用 Builder。
+最终文件生成不立即完成会话。`sop_result` 与 `memory_candidates` 持久化后，工作台先进入 `OutputReview`，立即展示 Markdown/HTML 预览和四个真实文件；用户明确确认结果内容后，有候选时进入 `MemoryReview`，无候选时进入 `Completed`。每个记忆候选必须展示类型、完整脱敏内容、准确对话证据和真实 JSONL 目标。用户必须为全部未决候选逐项选择保存或不保存后统一提交；缺项、重复项、未知候选或附带目标篡改都会被原子拒绝。全部拒绝时直接完成且不启动 Agent；至少一项获批时，服务端先等待所属 Chat 的上一轮 Agent 完全结束，再把全部获批候选及目标绑定到同一个 `WritingMemory` Agent 回合。Agent 只能逐项调用当前 Miner 的 `scripts/memory_store.py ... --approved`，处理完后只提交一次 `memory_write_batch_result`。平台不在命令请求线程执行写入，只校验批次候选集合、候选身份、目标和逐项结构化回执。三类目标分别是 `memory/common-wplus-knowledge.jsonl`、`memory/users/{user_scope}/wplus-usage-preferences.jsonl` 和 `memory/cases/sop-cases.jsonl`；不得写 Agent 根目录 `MEMORY.md`。`user_scope` 只能来自调用方结构化提供的匿名范围；缺失时跳过个性化候选。成功项以 appended 或 duplicate 标记 approved；失败项回到 `MemoryReview` 并允许重新批量授权，不影响同批其他成功项。旧单候选 active 字段和 `memory_write_completed` / `memory_write_failed` 只保留持久化历史读取与在途恢复兼容，新命令不再产生。旧版只读候选允许缺少类型、证据和目标，仅能在已完成会话中作为历史状态展示，永不提供操作入口，也不得将“历史已批准”表述为已经写入；没有结构化回执时必须明确标记为不可验证。第一版只提示结果可以交给 `wplus-skill-builder`，不自动调用 Builder。
 
 ## 持久化与一致性
 
-后端至少持久化会话归属、技能版本或内容快照标识、状态版本、修订号、轮次、环节队列、当前有效题组与回答、失效历史、预跑运行 ID、输入快照、步骤进度、脱敏结果摘要、用户反馈、授权记录、命令 receipt、运行 attempt 谱系、幂等请求、待执行退出动作、持久化 Chat 投影 outbox、最终结果和记忆授权状态。
+后端至少持久化会话归属、技能版本或内容快照标识、状态版本、修订号、轮次、环节队列、当前有效题组与回答、失效历史、预跑运行 ID、输入快照、步骤进度、脱敏结果摘要、用户反馈、结果确认记录、调用方匿名 user scope、授权记录、命令 receipt、运行 attempt 谱系、幂等请求、待执行退出动作、持久化 Chat 投影 outbox、最终结果、记忆授权状态和 W+ memory store 写入回执。
 
 所有读写、SSE 订阅、结果下载和 active-session lookup 都校验租户、来源、用户、Agent 与所属 Chat；缺失身份或归属不匹配时 fail closed，并以 404 避免泄露会话是否存在。所有写操作还校验当前状态、预期状态版本和幂等请求。每个用户动作使用稳定的 `command_request_id`；每次真实执行创建新的 `run_id`/`attempt_id`，失败重试或反馈重跑通过 `retry_of_run_id`/`rerun_of_run_id` 关联旧运行。
 

@@ -69,12 +69,47 @@ _SOP_RESULT_EXAMPLE = {
         },
         "readable_sop": "# 客户经营 SOP\n\n按已确认环节执行。",
         "html": "<article><h1>客户经营 SOP</h1></article>",
-        "schema_validated": True,
-        "privacy_validated": True,
+        "example_result_html": "<article><h1>脱敏示例结果</h1></article>",
+        "artifacts": [
+            {
+                "artifact_id": artifact_id,
+                "name": name,
+                "static_file_name": name,
+                "static_url": (
+                    "http://files.example/static/tenant/agent/" + name
+                ),
+                "sha256": "0" * 64,
+                "copied_by": "copy_file_to_static",
+            }
+            for artifact_id, name in (
+                ("sop_spec", "sop_spec.json"),
+                ("sop_render_md", "sop_render.md"),
+                ("sop_render_html", "sop_render.html"),
+                ("example_result_html", "example_result.html"),
+            )
+        ],
+        "validation": {
+            "schema_validator": "scripts/validate_sop.py",
+            "schema_exit_code": 0,
+            "renderers": ["scripts/render_md.py", "scripts/render_sop.py"],
+        },
     },
 }
 
-_MEMORY_CANDIDATES_EXAMPLE = {"candidates": []}
+_MEMORY_CANDIDATES_EXAMPLE = {
+    "candidates": [
+        {
+            "candidate_id": "memory-common-page-fact-1",
+            "summary": "保存已验证的平台事实",
+            "type": "common_wplus_knowledge",
+            "value": {
+                "page": "客户筛选",
+                "fact": "支持按产品到期日筛选",
+            },
+            "evidence": "用户在本次对话中确认该页面能力已验证。",
+        },
+    ],
+}
 
 
 class WPlusChatRunBusyError(RuntimeError):
@@ -512,6 +547,50 @@ def _build_trial_command_contract(
         if requires_plan
         else "1. 这是执行态重试，沿用已持久化的预跑计划，不要重复提交 trial_plan；\n"
     )
+    completion_example = {
+        "run_id": run_id,
+        "summary": (
+            "执行范围：按已确认输入检查目标分组；实际关键发现：示例分组命中"
+            "两项待处理条件；可执行建议：优先执行复核动作；证据与限制："
+            "依据本轮 OpenCLI 脱敏结果，仍有一个口径待确认。"
+        ),
+        "result_lists": [
+            {
+                "list_id": "actionable-findings",
+                "label": "业务发现与建议",
+                "columns": [
+                    {"field": "segment", "label": "对象分组", "type": "string"},
+                    {"field": "finding", "label": "关键发现", "type": "string"},
+                    {
+                        "field": "recommended_action",
+                        "label": "建议动作",
+                        "type": "string",
+                    },
+                    {"field": "evidence", "label": "判断依据", "type": "string"},
+                    {
+                        "field": "affected_count",
+                        "label": "影响数量",
+                        "type": "number",
+                    },
+                ],
+                "rows": [
+                    {
+                        "segment": "示例分组",
+                        "finding": "命中两项待处理条件",
+                        "recommended_action": "优先执行复核动作",
+                        "evidence": "本轮规则命中数为 2",
+                        "affected_count": 2,
+                    },
+                ],
+                "truncated": False,
+                "total_count": 1,
+            },
+        ],
+        "warnings": [],
+        "confirmed_facts": ["本轮已完成目标分组检查"],
+        "unknowns": ["一个业务口径仍待确认"],
+        "schema_validated": True,
+    }
     return (
         "\n本命令必须在同一个后台 Agent 回合内完成预跑闭环，不得在提交 "
         "trial_plan 后停止或等待另一个后台任务。按以下顺序执行：\n"
@@ -530,13 +609,34 @@ def _build_trial_command_contract(
         + json.dumps(attempt_id, ensure_ascii=False)
         + "。trial_execution_completed 还必须用 confirmed_facts 提交截至本轮"
         "的累计已确认事实，并用 unknowns 提交当前明确未知项；这些内容只写"
-        "脱敏业务摘要。结果只保留脱敏摘要、"
-        "计数、schema 校验、警告和失败位置；"
-        "不得把原始客户响应、账户值或自由文本备注写入事件。"
+        "脱敏业务摘要。完成结果必须达到可供用户判断和行动的详细度：summary "
+        "必须依次说明执行范围、实际关键发现、可执行建议、证据与限制，不能只复述"
+        "环节名称、用户输入或预跑目标。只要 OpenCLI 返回了可枚举的业务对象或"
+        "分组，就必须写入 result_lists，并按每个对象或分组一行提供适用的"
+        "对象分组、关键发现、建议动作、判断依据、影响数量；结果天然只有汇总值时"
+        "可使用一个汇总行。每个结果列表必须提供可读 columns，并准确填写 "
+        "total_count 与 truncated；没有命中项时也要用空 rows、total_count=0 和"
+        "具体 summary 说明查询范围，不得省略结果列表。部分数据、降级执行、"
+        "schema 偏差或其他可信度限制写入 warnings，仍未确认的业务信息写入 "
+        "unknowns。不得为了满足详细度编造结果；无法取得可靠证据时提交 "
+        "trial_execution_failed，或把实际限制明确写入 warnings 与 unknowns。"
+        "结果只保留脱敏摘要、计数、schema 校验、警告和失败位置；不得把原始客户"
+        "响应、账户值或自由文本备注写入事件。\n"
+        "trial_execution_completed payload 示例（仅示范结构，必须替换为本轮"
+        "真实脱敏结果）：\n"
+        + json.dumps(
+            completion_example,
+            ensure_ascii=False,
+            sort_keys=True,
+        )
     )
 
 
-def _build_finalizing_command_contract(*, final_result_persisted: bool) -> str:
+def _build_finalizing_command_contract(
+    *,
+    final_result_persisted: bool,
+    memory_user_scope_available: bool,
+) -> str:
     if final_result_persisted:
         sequence = (
             "本次重试检测到 sop_result 已成功持久化；只提交且只提交一个 "
@@ -563,11 +663,29 @@ def _build_finalizing_command_contract(*, final_result_persisted: bool) -> str:
         + "不得提交 kind='retry_started'，该事件不属于 W+ SOP 协议；也不得用 "
         "lifecycle_progress 代替上述业务边界事件。若 emit_wplus_sop_event 工具"
         "返回 ok=false，必须根据返回的 allowed agent events 修正参数后重试。"
-        "最终化阶段不得调用 copy_file_to_static、OpenCLI 或其他业务/文件工具；"
-        "直接把已生成并校验的内容提交到 sop_result。"
-        "终态事件成功持久化前不得结束本回合。sop_result 必须包含通过 schema "
-        "和隐私校验的 sop_spec、readable_sop 与 html；memory_candidates 即使为空"
-        "也必须提交 candidates=[]，由服务端据此进入 Completed 或 MemoryReview。"
+        "最终化阶段由你实际生成文件，不得让平台下载路由临时拼接结果。先写出 "
+        "sop_spec.json，使用 execute_shell_command 调用 "
+        "scripts/validate_sop.py；成功后调用 scripts/render_md.py 和 "
+        "scripts/render_sop.py。必须从 assets/example-result-templates/ 中选择匹配"
+        "模板生成 example_result.html；模板缺失时提交 recoverable_failure，不能"
+        "伪造模板或省略文件。四个文件生成后逐个调用 copy_file_to_static，并只"
+        "使用该工具真实返回的 static URL 和文件名填写 artifacts。不得使用 shell "
+        "复制到 static，也不得手写、猜测 static URL。计算每个 static 文件的 "
+        "SHA-256 后再提交 sop_result。"
+        "终态事件成功持久化前不得结束本回合。sop_result 必须包含 sop_spec、"
+        "readable_sop、html、example_result_html、四项 artifacts 和真实 validation "
+        "证据；memory_candidates 即使为空"
+        "也必须提交 candidates=[]，由服务端据此进入 OutputReview；用户确认结果后"
+        "才进入记忆处理或完成态。候选只能提交 pending 状态，不得伪造 approved、"
+        "failed、写入回执或目标位置。"
+        "每个候选必须提供 type、非空对象 value 和准确对话 evidence；"
+        "type 只能是 common_wplus_knowledge、user_wplus_usage 或 sop_case。"
+        + (
+            "调用方提供了匿名 user_scope，可以在有用户明确证据时提交 "
+            "user_wplus_usage。"
+            if memory_user_scope_available
+            else "调用方没有提供匿名 user_scope，必须跳过 user_wplus_usage 候选。"
+        )
         + sop_example
         + "\nmemory_candidates payload 示例：\n"
         + json.dumps(
@@ -575,6 +693,65 @@ def _build_finalizing_command_contract(*, final_result_persisted: bool) -> str:
             ensure_ascii=False,
             sort_keys=True,
         )
+    )
+
+
+def _build_memory_write_command_contract(
+    payload: dict[str, Any],
+    *,
+    run_id: str,
+) -> str:
+    candidates = payload.get("candidates")
+    bound_candidates = candidates if isinstance(candidates, list) else []
+    example_results: list[dict[str, Any]] = []
+    for index, candidate in enumerate(bound_candidates):
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = candidate.get("candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            continue
+        if index == 0:
+            example_results.append(
+                {
+                    "candidate_id": candidate_id,
+                    "status": "succeeded",
+                    "target_scope": candidate.get("target_scope"),
+                    "target_file": candidate.get("target_file"),
+                    "result": "appended",
+                    "script": "scripts/memory_store.py",
+                },
+            )
+        else:
+            example_results.append(
+                {
+                    "candidate_id": candidate_id,
+                    "status": "failed",
+                    "error_code": "store_failed",
+                    "summary": "脱敏后的失败原因",
+                    "script": "scripts/memory_store.py",
+                },
+            )
+    event_example = {
+        "kind": "memory_write_batch_result",
+        "payload": {"results": example_results},
+        "event_key": f"memory-write-batch-result-{run_id}",
+    }
+    return (
+        "\n这是一次批量记忆写入回合。只能处理服务端绑定的 candidates："
+        + json.dumps(bound_candidates, ensure_ascii=False, sort_keys=True)
+        + "。必须在同一个 Agent 回合内通过 execute_shell_command 逐项调用当前 "
+        "wplus-sop-miner 的 "
+        "scripts/memory_store.py，每项使用绑定的 target_file 和 --approved；不得"
+        "修改目标、补充未授权候选或使用其他写入方式。即使某项失败也继续处理剩余"
+        "候选。全部处理完后，调用 emit_wplus_sop_event 且只提交一次 "
+        "memory_write_batch_result，payload.results 必须按候选逐项给出结果。成功项"
+        "使用 status=succeeded、绑定的 target_scope/target_file、脚本返回的 result "
+        "和 script=scripts/memory_store.py；失败项使用 status=failed、error_code、"
+        "脱敏 summary 和相同 script。批量事件成功持久化前不得结束本回合。"
+        "event_key 必须固定为 memory-write-batch-result- 加本命令 run_id，重试时"
+        "复用同一个值，不得逐候选生成 event_key。\n"
+        "memory_write_batch_result 完整调用示例：\n"
+        + json.dumps(event_example, ensure_ascii=False, sort_keys=True)
     )
 
 
@@ -611,6 +788,8 @@ def _expected_event_sequence(
         if payload.get("final_result_persisted") is True:
             return ["memory_candidates"]
         return ["sop_result", "memory_candidates"]
+    if target_state == "WritingMemory":
+        return ["memory_write_batch_result"]
     return None
 
 
@@ -638,6 +817,7 @@ def build_wplus_command_text(
         "ExecutingTrial",
     }
     is_finalizing_turn = effective_target_state == "FinalizingOutputs"
+    is_memory_write_turn = effective_target_state == "WritingMemory"
     expected_sequence = _expected_event_sequence(
         effective_target_state,
         payload,
@@ -658,8 +838,25 @@ def build_wplus_command_text(
         body["expected_event_sequence"] = expected_sequence
     command_contract = ""
     if expected_event_kind == "stage_proposal":
+        memory_user_scope = payload.get("memory_user_scope")
+        personal_memory = (
+            "memory/users/"
+            + memory_user_scope
+            + "/wplus-usage-preferences.jsonl"
+            if isinstance(memory_user_scope, str) and memory_user_scope
+            else None
+        )
         command_contract = (
-            "\n本回合只允许成功持久化一个业务边界事件。若 "
+            "\n在提出第一个澄清问题或拟定队列前，依次尝试读取 "
+            "memory/common-wplus-knowledge.jsonl、"
+            + (
+                personal_memory + "、"
+                if personal_memory is not None
+                else ""
+            )
+            + "memory/cases/sop-cases.jsonl。文件不存在表示当前没有对应记忆，"
+            "不得仅因缺失而创建文件；没有匿名 user_scope 时不得读取个性化记忆。"
+            "本回合只允许成功持久化一个业务边界事件。若 "
             "emit_wplus_sop_event 工具返回 ok=false，可根据返回的 allowed "
             "agent events 与 current_stage_id 修正参数后重试；失败调用不计入"
             "已持久化事件。不得成功持久化其他 W+ SOP 事件。调用参数必须满足 "
@@ -720,6 +917,14 @@ def build_wplus_command_text(
             final_result_persisted=(
                 payload.get("final_result_persisted") is True
             ),
+            memory_user_scope_available=(
+                payload.get("memory_user_scope_available") is True
+            ),
+        )
+    elif is_memory_write_turn:
+        command_contract = _build_memory_write_command_contract(
+            payload,
+            run_id=run_id,
         )
     return (
         "执行下面由专用 W+ SOP 工作流界面提交的结构化命令。"

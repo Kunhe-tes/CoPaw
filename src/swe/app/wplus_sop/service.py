@@ -5,13 +5,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from uuid import uuid4, uuid5, NAMESPACE_URL
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from .models import (
     AnswerAcceptedPayload,
@@ -21,8 +20,12 @@ from .models import (
     EntryDetectionMode,
     EntryProposalStatus,
     EventKind,
-    MemoryCandidateStatus,
     MemoryCandidatesPayload,
+    MemoryCandidateStatus,
+    MemoryWriteCompletedPayload,
+    MemoryWriteBatchResultPayload,
+    MemoryWriteFailedPayload,
+    MemoryWriteReceipt,
     OwnershipTuple,
     Question,
     QuestionAnswer,
@@ -37,8 +40,8 @@ from .models import (
     SessionStateChangedPayload,
     SopResultPayload,
     Stage,
-    StageConfirmedPayload,
     StageConfirmationRequiredPayload,
+    StageConfirmedPayload,
     StageProposalPayload,
     StageQueue,
     StageQueueConfirmedPayload,
@@ -51,10 +54,13 @@ from .models import (
     TrialPlanPayload,
     WPlusEntryProposal,
 )
+from .memory_policy import (
+    WPlusMemoryPolicyError,
+    normalize_anonymous_user_scope,
+    resolve_memory_target,
+)
 from .runtime import WPlusChatRunBusyError, start_wplus_chat_turn
 from .store import (
-    EntryProposalConflictError,
-    SessionNotFoundError,
     StaleStateVersionError,
     StoreMutation,
     WPlusSopStore,
@@ -82,6 +88,139 @@ class WPlusOwnershipError(LookupError):
 
 class WPlusCommandError(ValueError):
     """Malformed or illegal state command."""
+
+
+def _parse_memory_decisions(
+    payload: dict[str, Any],
+    candidates: list[Any],
+) -> dict[str, str]:
+    raw_decisions = payload.get("decisions")
+    if set(payload) != {"decisions"} or not isinstance(raw_decisions, list):
+        raise WPlusCommandError("Memory decisions must be a complete list")
+    decisions: dict[str, str] = {}
+    for raw in raw_decisions:
+        if not isinstance(raw, dict) or set(raw) != {"candidate_id", "decision"}:
+            raise WPlusCommandError("Invalid memory decision")
+        candidate_id = raw.get("candidate_id")
+        decision = raw.get("decision")
+        if (
+            not isinstance(candidate_id, str)
+            or candidate_id in decisions
+            or decision not in {"approve", "reject"}
+        ):
+            raise WPlusCommandError("Invalid memory decision")
+        candidate = next(
+            (
+                item
+                for item in candidates
+                if item.candidate_id == candidate_id
+            ),
+            None,
+        )
+        if (
+            decision == "approve"
+            and candidate is not None
+            and candidate.legacy_read_only
+        ):
+            raise WPlusCommandError(
+                "Cannot approve a read-only legacy memory candidate",
+            )
+        decisions[candidate_id] = decision
+    unresolved_ids = {
+        candidate.candidate_id
+        for candidate in candidates
+        if candidate.status
+        in {MemoryCandidateStatus.PENDING, MemoryCandidateStatus.FAILED}
+    }
+    if set(decisions) != unresolved_ids:
+        raise WPlusCommandError("Memory decisions must cover every unresolved candidate")
+    return decisions
+
+
+def _memory_runtime_candidate(candidate: Any) -> dict[str, Any]:
+    if candidate.legacy_read_only:
+        raise WPlusCommandError(
+            "Cannot write a read-only legacy memory candidate",
+        )
+    if (
+        candidate.memory_type is None
+        or not isinstance(candidate.value, dict)
+        or not (candidate.evidence or "").strip()
+        or candidate.target_scope is None
+        or candidate.target_file is None
+    ):
+        raise WPlusCommandError("Memory candidate is not ready for an approved run")
+    return {
+        "candidate_id": candidate.candidate_id,
+        "type": candidate.memory_type,
+        "content": candidate.value,
+        "evidence": candidate.evidence,
+        "target_scope": candidate.target_scope,
+        "target_file": candidate.target_file,
+        "script": "scripts/memory_store.py",
+        "approved": True,
+    }
+
+
+def _apply_memory_batch_results(
+    projection: SessionProjection,
+    payload: MemoryWriteBatchResultPayload,
+) -> tuple[list[Any], SessionState]:
+    active_ids = projection.active_memory_candidate_ids or (
+        [projection.active_memory_candidate_id]
+        if projection.active_memory_candidate_id
+        else []
+    )
+    results_by_id = {result.candidate_id: result for result in payload.results}
+    if set(results_by_id) != set(active_ids):
+        raise WPlusCommandError(
+            "Memory batch result must cover every server-bound candidate",
+        )
+    candidates = [candidate.model_copy(deep=True) for candidate in projection.memory_candidates]
+    for index, candidate in enumerate(candidates):
+        result = results_by_id.get(candidate.candidate_id)
+        if result is None:
+            continue
+        if candidate.status is not MemoryCandidateStatus.WRITING:
+            raise WPlusCommandError("Memory candidate is not being written")
+        if result.status == "succeeded":
+            if (
+                result.target_scope != candidate.target_scope
+                or result.target_file != candidate.target_file
+            ):
+                raise WPlusCommandError(
+                    "Memory write receipt does not match approved candidate",
+                )
+            candidates[index] = candidate.model_copy(
+                update={
+                    "status": MemoryCandidateStatus.APPROVED,
+                    "failure_reason": None,
+                    "write_receipt": MemoryWriteReceipt(
+                        memory_id=(
+                            f"wplus-sop/{projection.sop_session_id}/"
+                            f"{candidate.candidate_id}"
+                        ),
+                        target_scope=result.target_scope,
+                        target_file=result.target_file,
+                        reused_existing=(result.result == "duplicate"),
+                        store_result=result.result,
+                    ),
+                },
+            )
+        else:
+            candidates[index] = candidate.model_copy(
+                update={
+                    "status": MemoryCandidateStatus.FAILED,
+                    "failure_reason": (result.summary or "")[:500],
+                    "write_receipt": None,
+                },
+            )
+    target = (
+        SessionState.MEMORY_REVIEW
+        if any(candidate.status is MemoryCandidateStatus.FAILED for candidate in candidates)
+        else SessionState.COMPLETED
+    )
+    return candidates, target
 
 
 class WPlusOwningChatFinalizingError(WPlusCommandError):
@@ -140,6 +279,15 @@ _RUN_EVENT_STATES: dict[EventKind, frozenset[SessionState]] = {
     EventKind.MEMORY_CANDIDATES: frozenset(
         {SessionState.FINALIZING_OUTPUTS},
     ),
+    EventKind.MEMORY_WRITE_COMPLETED: frozenset(
+        {SessionState.WRITING_MEMORY},
+    ),
+    EventKind.MEMORY_WRITE_FAILED: frozenset(
+        {SessionState.WRITING_MEMORY},
+    ),
+    EventKind.MEMORY_WRITE_BATCH_RESULT: frozenset(
+        {SessionState.WRITING_MEMORY},
+    ),
     EventKind.LIFECYCLE_PROGRESS: frozenset(
         {
             SessionState.GENERATING_STAGE_PROPOSAL,
@@ -147,6 +295,7 @@ _RUN_EVENT_STATES: dict[EventKind, frozenset[SessionState]] = {
             SessionState.GENERATING_TRIAL,
             SessionState.EXECUTING_TRIAL,
             SessionState.FINALIZING_OUTPUTS,
+            SessionState.WRITING_MEMORY,
         },
     ),
     EventKind.RECOVERABLE_FAILURE: frozenset(
@@ -156,6 +305,7 @@ _RUN_EVENT_STATES: dict[EventKind, frozenset[SessionState]] = {
             SessionState.GENERATING_TRIAL,
             SessionState.EXECUTING_TRIAL,
             SessionState.FINALIZING_OUTPUTS,
+            SessionState.WRITING_MEMORY,
         },
     ),
 }
@@ -167,6 +317,9 @@ _PENDING_EXIT_BOUNDARIES = frozenset(
         EventKind.TRIAL_EXECUTION_COMPLETED,
         EventKind.TRIAL_EXECUTION_FAILED,
         EventKind.MEMORY_CANDIDATES,
+        EventKind.MEMORY_WRITE_COMPLETED,
+        EventKind.MEMORY_WRITE_FAILED,
+        EventKind.MEMORY_WRITE_BATCH_RESULT,
         EventKind.RECOVERABLE_FAILURE,
     },
 )
@@ -178,6 +331,7 @@ _ORPHAN_RECOVERY_STATES = frozenset(
         SessionState.GENERATING_TRIAL,
         SessionState.EXECUTING_TRIAL,
         SessionState.FINALIZING_OUTPUTS,
+        SessionState.WRITING_MEMORY,
     },
 )
 _ORPHAN_RECOVERY_GRACE = timedelta(seconds=5)
@@ -185,7 +339,54 @@ _ORPHAN_RECOVERY_GRACE = timedelta(seconds=5)
 
 def store_path_for_workspace(workspace_dir: Path | str) -> Path:
     """Return the local single-process W+ store path."""
-    return Path(workspace_dir).expanduser() / ".copaw" / "wplus-sop.json"
+    return Path(workspace_dir).expanduser() / ".sop" / "wplus-sop.json"
+
+
+def _validate_delivered_artifacts(
+    *,
+    workspace_dir: Path | str,
+    result: Any,
+) -> None:
+    """Verify that Agent-declared deliveries are real workspace static files."""
+    static_root = (
+        Path(workspace_dir).expanduser().resolve() / "static"
+    ).resolve()
+    for artifact in result.artifacts:
+        local_file = (static_root / artifact.static_file_name).resolve()
+        try:
+            local_file.relative_to(static_root)
+        except ValueError as exc:
+            raise WPlusCommandError("artifact escaped workspace static") from exc
+        if not local_file.is_file():
+            raise WPlusCommandError(
+                f"delivered artifact is missing: {artifact.artifact_id}",
+            )
+        raw = local_file.read_bytes()
+        if hashlib.sha256(raw).hexdigest() != artifact.sha256:
+            raise WPlusCommandError(
+                f"delivered artifact hash mismatch: {artifact.artifact_id}",
+            )
+
+
+def _result_preview(result: Any) -> dict[str, str | None]:
+    artifacts_by_id = {
+        artifact.artifact_id: artifact
+        for artifact in result.artifacts
+    }
+    markdown_artifact = artifacts_by_id.get("sop_render_md")
+    html_artifact = artifacts_by_id.get("sop_render_html")
+    return {
+        "markdown": result.readable_sop,
+        "html": result.html,
+        "markdown_url": (
+            markdown_artifact.static_url if markdown_artifact else None
+        ),
+        "html_url": html_artifact.static_url if html_artifact else None,
+        "markdown_sha256": (
+            markdown_artifact.sha256 if markdown_artifact else None
+        ),
+        "html_sha256": html_artifact.sha256 if html_artifact else None,
+    }
 
 
 def _same_ownership(left: OwnershipTuple, right: OwnershipTuple) -> bool:
@@ -427,48 +628,53 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
         "facts": projection.confirmed_facts,
         "unknowns": projection.unknowns,
         "capabilities": capabilities,
-        "artifacts": (
-            [
-                {
-                    "artifact_id": "sop_spec",
-                    "name": "sop_spec.json",
-                    "format": "json",
-                    "status": "validated",
-                    "download_url": (
-                        f"/wplus-sop/sessions/{projection.sop_session_id}"
-                        "/artifacts/sop_spec"
-                    ),
-                },
-                {
-                    "artifact_id": "sop_render_md",
-                    "name": "sop_render.md",
-                    "format": "markdown",
-                    "status": "validated",
-                    "download_url": (
-                        f"/wplus-sop/sessions/{projection.sop_session_id}"
-                        "/artifacts/sop_render_md"
-                    ),
-                },
-                {
-                    "artifact_id": "sop_render_html",
-                    "name": "sop_render.html",
-                    "format": "html",
-                    "status": "validated",
-                    "download_url": (
-                        f"/wplus-sop/sessions/{projection.sop_session_id}"
-                        "/artifacts/sop_render_html"
-                    ),
-                },
-            ]
+        "artifacts": [
+            {
+                "artifact_id": artifact.artifact_id,
+                "name": artifact.name,
+                "format": (
+                    "json"
+                    if artifact.name.endswith(".json")
+                    else (
+                        "markdown"
+                        if artifact.name.endswith(".md")
+                        else "html"
+                    )
+                ),
+                "status": "validated",
+                "download_url": artifact.static_url,
+                "sha256": artifact.sha256,
+                "copied_by": artifact.copied_by,
+            }
+            for artifact in (
+                projection.final_result.artifacts
+                if projection.final_result is not None
+                else []
+            )
+        ],
+        "result_preview": (
+            _result_preview(projection.final_result)
             if projection.final_result is not None
-            else []
+            else None
         ),
         "memory_candidates": [
             {
                 "candidate_id": candidate.candidate_id,
                 "title": candidate.summary,
-                "description": None,
+                "description": candidate.summary,
+                "memory_type": candidate.memory_type,
+                "content": candidate.value,
+                "evidence": candidate.evidence,
+                "target_scope": candidate.target_scope,
+                "target_file": candidate.target_file,
                 "status": candidate.status.value,
+                "failure_reason": candidate.failure_reason,
+                "write_receipt": (
+                    candidate.write_receipt.model_dump(mode="json")
+                    if candidate.write_receipt is not None
+                    else None
+                ),
+                "legacy_read_only": candidate.legacy_read_only,
             }
             for candidate in projection.memory_candidates
         ],
@@ -958,13 +1164,18 @@ class WPlusSopService:
         *,
         original_text: str,
         mode: str,
+        memory_user_scope: str | None = None,
     ) -> WPlusEntryProposal:
+        normalized_memory_user_scope = normalize_anonymous_user_scope(
+            memory_user_scope,
+        )
         digest = hashlib.sha256(original_text.encode("utf-8")).hexdigest()
         identity_seed = "|".join(
             (
                 self.ownership.active_chat_key,
                 self.ownership.logical_chat_session_id,
                 digest,
+                normalized_memory_user_scope or "",
             ),
         )
         generation = 0
@@ -991,6 +1202,7 @@ class WPlusSopService:
             logical_chat_session_id=self.ownership.logical_chat_session_id,
             original_request={"text": original_text},
             original_request_digest=f"sha256:{digest}",
+            memory_user_scope=normalized_memory_user_scope,
             detection_mode=EntryDetectionMode(mode),
         )
         return self.store.create_entry_proposal(proposal)
@@ -1095,6 +1307,7 @@ class WPlusSopService:
                 SessionState.GENERATING_TRIAL,
                 SessionState.EXECUTING_TRIAL,
                 SessionState.FINALIZING_OUTPUTS,
+                SessionState.WRITING_MEMORY,
             }:
                 self._record_runtime_failure(
                     sop_session_id=sop_session_id,
@@ -1164,6 +1377,7 @@ class WPlusSopService:
             state=SessionState.GENERATING_STAGE_PROPOSAL,
             state_version=1,
             title="W+ SOP 澄清",
+            memory_user_scope=proposal.memory_user_scope,
             current_run_id=run_id,
         )
         receipt = CommandReceipt(
@@ -1229,7 +1443,10 @@ class WPlusSopService:
                 source_id=self.ownership.source_id,
                 sop_session_id=sop_session_id,
                 command="propose_stage_queue",
-                payload={"original_request": original_text},
+                payload={
+                    "original_request": original_text,
+                    "memory_user_scope": proposal.memory_user_scope,
+                },
                 run_id=run_id,
                 attempt_id=attempt_id,
                 target_state=SessionState.GENERATING_STAGE_PROPOSAL.value,
@@ -1887,6 +2104,7 @@ class WPlusSopService:
                 SessionState.GENERATING_TRIAL,
                 SessionState.EXECUTING_TRIAL,
                 SessionState.FINALIZING_OUTPUTS,
+                SessionState.WRITING_MEMORY,
             }
             target_state = (
                 SessionState.PENDING_EXIT
@@ -1973,6 +2191,7 @@ class WPlusSopService:
                 SessionState.GENERATING_QUESTIONS,
                 SessionState.GENERATING_TRIAL,
                 SessionState.FINALIZING_OUTPUTS,
+                SessionState.WRITING_MEMORY,
             }
         elif command == "retry_current_turn":
             if projection.state is not SessionState.RECOVERABLE_FAILURE:
@@ -2010,6 +2229,20 @@ class WPlusSopService:
                 "retry_of_run_id": failed_run_id,
             }
             starts_run = True
+        elif command == "confirm_outputs":
+            if projection.state is not SessionState.OUTPUT_REVIEW:
+                raise WPlusCommandError("Session outputs are not awaiting confirmation")
+            target_state = (
+                SessionState.MEMORY_REVIEW
+                if projection.memory_candidates
+                else SessionState.COMPLETED
+            )
+            kind = EventKind.SESSION_STATE_CHANGED
+            typed_payload = SessionStateChangedPayload(
+                previous_state=projection.state,
+                state=target_state,
+                reason="outputs_confirmed",
+            )
         elif command in {"resolve_memory", "skip_memory"}:
             if projection.state is not SessionState.MEMORY_REVIEW:
                 raise WPlusCommandError("Session is not reviewing memory")
@@ -2018,40 +2251,48 @@ class WPlusSopService:
                 for candidate in projection.memory_candidates
             ]
             if command == "skip_memory":
-                for candidate in candidates:
-                    if candidate.status is MemoryCandidateStatus.PENDING:
-                        candidate.status = MemoryCandidateStatus.REJECTED
+                decisions = {
+                    candidate.candidate_id: "reject"
+                    for candidate in candidates
+                    if candidate.status
+                    in {MemoryCandidateStatus.PENDING, MemoryCandidateStatus.FAILED}
+                }
             else:
-                candidate_id = str(payload.get("candidate_id", ""))
-                decision = str(payload.get("decision", ""))
-                match = next(
-                    (
-                        candidate
-                        for candidate in candidates
-                        if candidate.candidate_id == candidate_id
-                    ),
-                    None,
+                decisions = _parse_memory_decisions(payload, candidates)
+            approved_payloads: list[dict[str, Any]] = []
+            active_ids: list[str] = []
+            for index, candidate in enumerate(candidates):
+                decision = decisions.get(candidate.candidate_id)
+                if decision is None:
+                    continue
+                if decision == "approve":
+                    approved_payloads.append(_memory_runtime_candidate(candidate))
+                    active_ids.append(candidate.candidate_id)
+                    status = MemoryCandidateStatus.WRITING
+                else:
+                    status = MemoryCandidateStatus.REJECTED
+                candidates[index] = candidate.model_copy(
+                    update={
+                        "status": status,
+                        "failure_reason": None,
+                        "write_receipt": None,
+                    },
                 )
-                if match is None or decision not in {"approve", "reject"}:
-                    raise WPlusCommandError("Invalid memory decision")
-                match.status = (
-                    MemoryCandidateStatus.APPROVED
-                    if decision == "approve"
-                    else MemoryCandidateStatus.REJECTED
-                )
-            unresolved = any(
-                candidate.status
-                in {MemoryCandidateStatus.PENDING, MemoryCandidateStatus.FAILED}
-                for candidate in candidates
-            )
+            starts_run = bool(active_ids)
             target_state = (
-                SessionState.MEMORY_REVIEW
-                if unresolved
+                SessionState.WRITING_MEMORY
+                if starts_run
                 else SessionState.COMPLETED
             )
+            if starts_run:
+                runtime_payload = {"candidates": approved_payloads}
             kind = EventKind.MEMORY_CANDIDATES
             typed_payload = MemoryCandidatesPayload(candidates=candidates)
-            changes = {"memory_candidates": candidates}
+            changes = {
+                "memory_candidates": candidates,
+                "active_memory_candidate_id": None,
+                "active_memory_candidate_ids": active_ids,
+            }
         else:
             raise WPlusCommandError(f"Unsupported command: {command}")
 
@@ -2068,10 +2309,39 @@ class WPlusSopService:
                 **runtime_payload,
                 "current_stage_id": current_stage_id,
             }
+        if (
+            starts_run
+            and target_state is SessionState.WRITING_MEMORY
+            and "candidates" not in runtime_payload
+        ):
+            active_ids = projection.active_memory_candidate_ids or (
+                [projection.active_memory_candidate_id]
+                if projection.active_memory_candidate_id
+                else []
+            )
+            active_candidates = [
+                candidate
+                for candidate in projection.memory_candidates
+                if candidate.candidate_id in active_ids
+            ]
+            if len(active_candidates) != len(active_ids):
+                raise WPlusCommandError(
+                    "Memory run has no server-bound candidates",
+                )
+            runtime_payload = {
+                **runtime_payload,
+                "candidates": [
+                    _memory_runtime_candidate(candidate)
+                    for candidate in active_candidates
+                ],
+            }
         if starts_run and target_state is SessionState.FINALIZING_OUTPUTS:
             runtime_payload = {
                 **runtime_payload,
                 "final_result_persisted": projection.final_result is not None,
+                "memory_user_scope_available": bool(
+                    projection.memory_user_scope,
+                ),
             }
 
         if starts_run:
@@ -2455,6 +2725,10 @@ class WPlusSopService:
         elif event_kind is EventKind.SOP_RESULT:
             target = SessionState.FINALIZING_OUTPUTS
             typed = SopResultPayload.model_validate(payload)
+            _validate_delivered_artifacts(
+                workspace_dir=self.workspace.workspace_dir,
+                result=typed.result,
+            )
             changes["final_result"] = typed.result
         elif event_kind is EventKind.MEMORY_CANDIDATES:
             if record.projection.final_result is None:
@@ -2462,11 +2736,144 @@ class WPlusSopService:
                     "memory_candidates requires a persisted final SOP result",
                 )
             typed = MemoryCandidatesPayload.model_validate(payload)
-            changes["memory_candidates"] = typed.candidates
-            target = (
-                SessionState.MEMORY_REVIEW
-                if typed.candidates
-                else SessionState.COMPLETED
+            if any(
+                candidate.status is not MemoryCandidateStatus.PENDING
+                or candidate.legacy_read_only
+                or candidate.write_receipt is not None
+                or candidate.failure_reason is not None
+                or candidate.target_scope is not None
+                or candidate.target_file is not None
+                for candidate in typed.candidates
+            ):
+                raise WPlusCommandError(
+                    "Agent memory candidates must be pending, unwritten, and untargeted",
+                )
+            targeted_candidates = []
+            for candidate in typed.candidates:
+                if (
+                    candidate.memory_type is None
+                    or not isinstance(candidate.value, dict)
+                    or not (candidate.evidence or "").strip()
+                ):
+                    raise WPlusCommandError(
+                        "Memory candidates require type, object content, and evidence",
+                    )
+                try:
+                    target_scope, target_file = resolve_memory_target(
+                        candidate.memory_type,
+                        user_scope=record.projection.memory_user_scope,
+                    )
+                except WPlusMemoryPolicyError as exc:
+                    raise WPlusCommandError(str(exc)) from exc
+                targeted_candidates.append(
+                    candidate.model_copy(
+                        update={
+                            "target_scope": target_scope,
+                            "target_file": target_file,
+                        },
+                    ),
+                )
+            typed = MemoryCandidatesPayload(candidates=targeted_candidates)
+            changes["memory_candidates"] = targeted_candidates
+            target = SessionState.OUTPUT_REVIEW
+        elif event_kind is EventKind.MEMORY_WRITE_BATCH_RESULT:
+            typed = MemoryWriteBatchResultPayload.model_validate(payload)
+            candidates, target = _apply_memory_batch_results(
+                record.projection,
+                typed,
+            )
+            changes.update(
+                {
+                    "memory_candidates": candidates,
+                    "active_memory_candidate_id": None,
+                    "active_memory_candidate_ids": [],
+                },
+            )
+        elif event_kind in {
+            EventKind.MEMORY_WRITE_COMPLETED,
+            EventKind.MEMORY_WRITE_FAILED,
+        }:
+            candidates = [
+                candidate.model_copy(deep=True)
+                for candidate in record.projection.memory_candidates
+            ]
+            active_id = record.projection.active_memory_candidate_id
+            match_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(candidates)
+                    if candidate.candidate_id == active_id
+                ),
+                -1,
+            )
+            if match_index < 0:
+                raise WPlusCommandError(
+                    "Memory write run has no server-bound candidate",
+                )
+            candidate = candidates[match_index]
+            if candidate.status is not MemoryCandidateStatus.WRITING:
+                raise WPlusCommandError("Memory candidate is not being written")
+            if event_kind is EventKind.MEMORY_WRITE_COMPLETED:
+                completed = MemoryWriteCompletedPayload.model_validate(payload)
+                if (
+                    completed.candidate_id != candidate.candidate_id
+                    or completed.target_scope != candidate.target_scope
+                    or completed.target_file != candidate.target_file
+                ):
+                    raise WPlusCommandError(
+                        "Memory write receipt does not match approved candidate",
+                    )
+                typed = completed
+                candidates[match_index] = candidate.model_copy(
+                    update={
+                        "status": MemoryCandidateStatus.APPROVED,
+                        "failure_reason": None,
+                        "write_receipt": MemoryWriteReceipt(
+                            memory_id=(
+                                f"wplus-sop/{record.projection.sop_session_id}/"
+                                f"{candidate.candidate_id}"
+                            ),
+                            target_scope=completed.target_scope,
+                            target_file=completed.target_file,
+                            reused_existing=(completed.result == "duplicate"),
+                            store_result=completed.result,
+                        ),
+                    },
+                )
+                unresolved = any(
+                    item.status
+                    in {
+                        MemoryCandidateStatus.PENDING,
+                        MemoryCandidateStatus.FAILED,
+                    }
+                    for item in candidates
+                )
+                target = (
+                    SessionState.MEMORY_REVIEW
+                    if unresolved
+                    else SessionState.COMPLETED
+                )
+            else:
+                failure = MemoryWriteFailedPayload.model_validate(payload)
+                if failure.candidate_id != candidate.candidate_id:
+                    raise WPlusCommandError(
+                        "Memory write failure does not match approved candidate",
+                    )
+                typed = failure
+                candidates[match_index] = candidate.model_copy(
+                    update={
+                        "status": MemoryCandidateStatus.FAILED,
+                        "failure_reason": failure.summary[:500],
+                        "write_receipt": None,
+                    },
+                )
+                target = SessionState.MEMORY_REVIEW
+            changes.update(
+                {
+                    "memory_candidates": candidates,
+                    "active_memory_candidate_id": None,
+                    "active_memory_candidate_ids": [],
+                },
             )
         elif event_kind is EventKind.RECOVERABLE_FAILURE:
             target = SessionState.RECOVERABLE_FAILURE

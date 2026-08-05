@@ -7,6 +7,7 @@ source of truth for workflow state or interactive controls.
 
 from __future__ import annotations
 
+import copy
 import re
 from datetime import datetime, timezone
 from enum import Enum
@@ -50,7 +51,9 @@ class SessionState(str, Enum):
     AWAITING_TRIAL_FEEDBACK = "AwaitingTrialFeedback"
     AWAITING_STAGE_CONFIRMATION = "AwaitingStageConfirmation"
     FINALIZING_OUTPUTS = "FinalizingOutputs"
+    OUTPUT_REVIEW = "OutputReview"
     MEMORY_REVIEW = "MemoryReview"
+    WRITING_MEMORY = "WritingMemory"
     COMPLETED = "Completed"
     PENDING_EXIT = "PendingExit"
     PAUSED = "Paused"
@@ -92,6 +95,9 @@ class EventKind(str, Enum):
     REVISION_APPLIED = "revision_applied"
     SOP_RESULT = "sop_result"
     MEMORY_CANDIDATES = "memory_candidates"
+    MEMORY_WRITE_COMPLETED = "memory_write_completed"
+    MEMORY_WRITE_FAILED = "memory_write_failed"
+    MEMORY_WRITE_BATCH_RESULT = "memory_write_batch_result"
     SESSION_STATE_CHANGED = "session_state_changed"
     RECOVERABLE_FAILURE = "recoverable_failure"
     TERMINATION_SUMMARY = "termination_summary"
@@ -118,6 +124,7 @@ class EntryProposalStatus(str, Enum):
 
 class MemoryCandidateStatus(str, Enum):
     PENDING = "pending"
+    WRITING = "writing"
     APPROVED = "approved"
     REJECTED = "rejected"
     FAILED = "failed"
@@ -573,28 +580,172 @@ class TrialStep(_IdentifiedModel):
     _id_fields = ("step_id", "capability_id")
 
 
+class MemoryWriteReceipt(StrictModel):
+    memory_id: str
+    target_scope: Literal["common", "user", "cases"]
+    target_file: str
+    written_at: datetime = Field(default_factory=utc_now)
+    reused_existing: bool = False
+    store_result: Literal["appended", "duplicate"]
+
+
 class MemoryCandidate(_IdentifiedModel):
     candidate_id: str
     summary: str
+    memory_type: Literal[
+        "common_wplus_knowledge",
+        "user_wplus_usage",
+        "sop_case",
+    ] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("type", "memory_type"),
+    )
     value: JsonValue
+    evidence: str | None = None
+    target_scope: Literal["common", "user", "cases"] | None = None
+    target_file: str | None = None
     status: MemoryCandidateStatus = MemoryCandidateStatus.PENDING
     failure_reason: str | None = None
+    write_receipt: MemoryWriteReceipt | None = None
+    legacy_read_only: bool = Field(default=False, exclude=True, repr=False)
 
     _id_fields = ("candidate_id",)
+
+    @model_validator(mode="after")
+    def _validate_sanitized_memory_candidate(self) -> MemoryCandidate:
+        self._validate_sanitized_content()
+        self._validate_target_and_receipt()
+        self._validate_failure_status()
+        return self
+
+    def _validate_sanitized_content(self) -> None:
+        if _contains_sensitive_contact_value(self.summary):
+            raise ValueError("memory candidates cannot contain contact values")
+        sensitive_value = _find_sensitive_result_value(self.value)
+        if sensitive_value is not None:
+            raise ValueError("memory candidates cannot contain contact values")
+        if self.evidence and _contains_sensitive_contact_value(self.evidence):
+            raise ValueError("memory candidates cannot contain contact values")
+        forbidden = _find_forbidden_result_key(self.value)
+        if forbidden is not None:
+            raise ValueError(
+                f"memory candidates cannot contain raw field {forbidden!r}",
+            )
+        if self.memory_type is not None:
+            if not isinstance(self.value, dict) or not self.value:
+                raise ValueError(
+                    "W+ memory candidate content must be a non-empty object",
+                )
+            if not (self.evidence or "").strip():
+                raise ValueError("W+ memory candidate requires evidence")
+
+    def _validate_target_and_receipt(self) -> None:
+        if self.legacy_read_only:
+            if self.write_receipt is not None:
+                raise ValueError(
+                    "read-only legacy memory candidates cannot contain a receipt",
+                )
+            return
+        if (self.target_scope is None) != (self.target_file is None):
+            raise ValueError("memory candidate target fields must coexist")
+        if (
+            self.status is MemoryCandidateStatus.APPROVED
+            and self.write_receipt is None
+        ):
+            raise ValueError(
+                "approved memory candidates require a store receipt",
+            )
+        if (
+            self.status is not MemoryCandidateStatus.APPROVED
+            and self.write_receipt is not None
+        ):
+            raise ValueError(
+                "only approved memory candidates may contain a store receipt",
+            )
+        if self.write_receipt is not None and (
+            self.write_receipt.target_scope != self.target_scope
+            or self.write_receipt.target_file != self.target_file
+        ):
+            raise ValueError("memory write receipt target must match candidate")
+
+    def _validate_failure_status(self) -> None:
+        if self.legacy_read_only:
+            return
+        if (
+            self.status is MemoryCandidateStatus.FAILED
+            and not (self.failure_reason or "").strip()
+        ):
+            raise ValueError("failed memory candidates require a failure reason")
+
+
+class FinalArtifact(StrictModel):
+    artifact_id: Literal[
+        "sop_spec",
+        "sop_render_md",
+        "sop_render_html",
+        "example_result_html",
+    ]
+    name: Literal[
+        "sop_spec.json",
+        "sop_render.md",
+        "sop_render.html",
+        "example_result.html",
+    ]
+    static_file_name: str
+    static_url: str
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    copied_by: Literal["copy_file_to_static"]
+
+    @model_validator(mode="after")
+    def _validate_artifact_identity(self) -> "FinalArtifact":
+        expected_name = {
+            "sop_spec": "sop_spec.json",
+            "sop_render_md": "sop_render.md",
+            "sop_render_html": "sop_render.html",
+            "example_result_html": "example_result.html",
+        }[self.artifact_id]
+        if self.name != expected_name:
+            raise ValueError("artifact id and logical name must match")
+        if (
+            not self.static_file_name.strip()
+            or "/" in self.static_file_name
+            or "\\" in self.static_file_name
+            or self.static_file_name in {".", ".."}
+        ):
+            raise ValueError("static_file_name must be a basename")
+        if not self.static_url.strip():
+            raise ValueError("static_url is required")
+        return self
+
+
+class FinalValidationEvidence(StrictModel):
+    schema_validator: Literal["scripts/validate_sop.py"]
+    schema_exit_code: Literal[0]
+    renderers: tuple[
+        Literal["scripts/render_md.py"],
+        Literal["scripts/render_sop.py"],
+    ]
 
 
 class FinalSopResult(StrictModel):
     sop_spec: dict[str, JsonValue]
     readable_sop: str
     html: str
-    example_result_html: str | None = None
-    schema_validated: bool = True
-    privacy_validated: bool = True
+    example_result_html: str
+    artifacts: list[FinalArtifact]
+    validation: FinalValidationEvidence
 
     @model_validator(mode="after")
-    def _all_declared_results_valid(self) -> "FinalSopResult":
-        if not self.schema_validated or not self.privacy_validated:
-            raise ValueError("final SOP results must pass schema and privacy validation")
+    def _all_required_artifacts_delivered(self) -> "FinalSopResult":
+        required = {
+            "sop_spec",
+            "sop_render_md",
+            "sop_render_html",
+            "example_result_html",
+        }
+        actual = {artifact.artifact_id for artifact in self.artifacts}
+        if len(self.artifacts) != 4 or actual != required:
+            raise ValueError("final SOP result requires four required artifacts")
         return self
 
 
@@ -709,6 +860,61 @@ class MemoryCandidatesPayload(StrictModel):
     candidates: list[MemoryCandidate] = Field(default_factory=list)
 
 
+class MemoryWriteCompletedPayload(StrictModel):
+    candidate_id: str
+    target_scope: Literal["common", "user", "cases"]
+    target_file: str
+    result: Literal["appended", "duplicate"]
+    script: Literal["scripts/memory_store.py"]
+
+
+class MemoryWriteFailedPayload(StrictModel):
+    candidate_id: str
+    error_code: str
+    summary: str
+    script: Literal["scripts/memory_store.py"]
+
+
+class MemoryWriteBatchItem(_IdentifiedModel):
+    candidate_id: str
+    status: Literal["succeeded", "failed"]
+    target_scope: Literal["common", "user", "cases"] | None = None
+    target_file: str | None = None
+    result: Literal["appended", "duplicate"] | None = None
+    error_code: str | None = None
+    summary: str | None = None
+    script: Literal["scripts/memory_store.py"]
+
+    _id_fields = ("candidate_id",)
+
+    @model_validator(mode="after")
+    def _validate_outcome_fields(self) -> "MemoryWriteBatchItem":
+        success_fields = (self.target_scope, self.target_file, self.result)
+        failure_fields = (self.error_code, self.summary)
+        if self.status == "succeeded":
+            if any(value is None for value in success_fields) or any(
+                value is not None for value in failure_fields
+            ):
+                raise ValueError("successful memory result has invalid fields")
+        elif any(value is not None for value in success_fields) or any(
+            not isinstance(value, str) or not value.strip()
+            for value in failure_fields
+        ):
+            raise ValueError("failed memory result has invalid fields")
+        return self
+
+
+class MemoryWriteBatchResultPayload(StrictModel):
+    results: list[MemoryWriteBatchItem] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _validate_unique_candidates(self) -> "MemoryWriteBatchResultPayload":
+        candidate_ids = [result.candidate_id for result in self.results]
+        if len(candidate_ids) != len(set(candidate_ids)):
+            raise ValueError("memory batch results must have unique candidates")
+        return self
+
+
 class SessionStateChangedPayload(StrictModel):
     previous_state: SessionState | None
     state: SessionState
@@ -749,6 +955,9 @@ EventPayload: TypeAlias = (
     | RevisionAppliedPayload
     | SopResultPayload
     | MemoryCandidatesPayload
+    | MemoryWriteCompletedPayload
+    | MemoryWriteFailedPayload
+    | MemoryWriteBatchResultPayload
     | SessionStateChangedPayload
     | RecoverableFailurePayload
     | TerminationSummaryPayload
@@ -772,6 +981,9 @@ _PAYLOAD_MODELS: dict[EventKind, type[StrictModel]] = {
     EventKind.REVISION_APPLIED: RevisionAppliedPayload,
     EventKind.SOP_RESULT: SopResultPayload,
     EventKind.MEMORY_CANDIDATES: MemoryCandidatesPayload,
+    EventKind.MEMORY_WRITE_COMPLETED: MemoryWriteCompletedPayload,
+    EventKind.MEMORY_WRITE_FAILED: MemoryWriteFailedPayload,
+    EventKind.MEMORY_WRITE_BATCH_RESULT: MemoryWriteBatchResultPayload,
     EventKind.SESSION_STATE_CHANGED: SessionStateChangedPayload,
     EventKind.RECOVERABLE_FAILURE: RecoverableFailurePayload,
     EventKind.TERMINATION_SUMMARY: TerminationSummaryPayload,
@@ -911,6 +1123,7 @@ class WPlusEntryProposal(_IdentifiedModel):
     logical_chat_session_id: str
     original_request: JsonValue
     original_request_digest: str
+    memory_user_scope: str | None = None
     detection_mode: EntryDetectionMode
     status: EntryProposalStatus = EntryProposalStatus.PENDING
     suppression_token: str | None = None
@@ -986,6 +1199,7 @@ class SessionProjection(_IdentifiedModel):
     revision: int = Field(default=1, ge=1)
     round: int = Field(default=0, ge=0)
     title: str
+    memory_user_scope: str | None = None
     stages: list[Stage] = Field(default_factory=list)
     current_stage_id: str | None = None
     current_question_batch: QuestionBatch | None = None
@@ -1000,6 +1214,8 @@ class SessionProjection(_IdentifiedModel):
     trial_feedback: list[str] = Field(default_factory=list)
     final_result: FinalSopResult | None = None
     memory_candidates: list[MemoryCandidate] = Field(default_factory=list)
+    active_memory_candidate_id: str | None = None
+    active_memory_candidate_ids: list[str] = Field(default_factory=list)
     resume_state: SessionState | None = None
     pending_exit_action: Literal["pause", "terminate"] | None = None
     last_error: RecoverableFailurePayload | None = None
@@ -1018,6 +1234,32 @@ class SessionProjection(_IdentifiedModel):
             raise ValueError("current_stage_id must reference the stage queue")
         if self.state is SessionState.PAUSED and self.resume_state is None:
             raise ValueError("a paused Session requires resume_state")
+        writing_ids = {
+            candidate.candidate_id
+            for candidate in self.memory_candidates
+            if candidate.status is MemoryCandidateStatus.WRITING
+        }
+        active_ids = set(self.active_memory_candidate_ids)
+        if len(active_ids) != len(self.active_memory_candidate_ids):
+            raise ValueError("active memory candidate IDs must be unique")
+        if self.active_memory_candidate_id is not None:
+            if active_ids and active_ids != {self.active_memory_candidate_id}:
+                raise ValueError("legacy and batch active candidates conflict")
+            active_ids = {self.active_memory_candidate_id}
+        if writing_ids != active_ids:
+            raise ValueError(
+                "active memory candidates must match writing candidates",
+            )
+        if self.state is SessionState.WRITING_MEMORY and (
+            not active_ids
+        ):
+            raise ValueError("WritingMemory requires an active candidate")
+        if (
+            active_ids
+            and self.state is not SessionState.WRITING_MEMORY
+            and self.resume_state is not SessionState.WRITING_MEMORY
+        ):
+            raise ValueError("active memory candidate requires WritingMemory")
         return self
 
     @property
@@ -1056,11 +1298,88 @@ class SessionRecord(StrictModel):
     outbox: list[ChatProjectionOutboxItem] = Field(default_factory=list)
 
 
+def _mark_legacy_memory_candidate_read_only(value: Any) -> None:
+    if not isinstance(value, dict):
+        return
+    status = value.get("status")
+    memory_type = value.get("memory_type", value.get("type"))
+    writable = (
+        memory_type
+        in {
+            "common_wplus_knowledge",
+            "user_wplus_usage",
+            "sop_case",
+        }
+        and isinstance(value.get("value"), dict)
+        and bool(value.get("value"))
+        and bool(str(value.get("evidence") or "").strip())
+        and value.get("target_scope") is not None
+        and value.get("target_file") is not None
+    )
+    lacks_verified_approval = (
+        status == MemoryCandidateStatus.APPROVED.value
+        and not value.get("write_receipt")
+    )
+    unresolved_but_unwritable = status in {
+        MemoryCandidateStatus.PENDING.value,
+        MemoryCandidateStatus.FAILED.value,
+    } and (
+        not writable
+        or (
+            status == MemoryCandidateStatus.FAILED.value
+            and not str(value.get("failure_reason") or "").strip()
+        )
+    )
+    if lacks_verified_approval or unresolved_but_unwritable:
+        value["legacy_read_only"] = True
+
+
+def _annotate_legacy_memory_store(value: Any) -> Any:
+    if not isinstance(value, dict):
+        return value
+    migrated = copy.deepcopy(value)
+    sessions = migrated.get("sessions")
+    if not isinstance(sessions, dict):
+        return migrated
+    for session in sessions.values():
+        if not isinstance(session, dict):
+            continue
+        projection = session.get("projection")
+        if isinstance(projection, dict):
+            candidates = projection.get("memory_candidates")
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    _mark_legacy_memory_candidate_read_only(candidate)
+        events = session.get("events")
+        if not isinstance(events, list):
+            continue
+        for event in events:
+            if not isinstance(event, dict) or event.get("kind") != (
+                EventKind.MEMORY_CANDIDATES.value
+            ):
+                continue
+            payload = event.get("payload")
+            candidates = (
+                payload.get("candidates")
+                if isinstance(payload, dict)
+                else None
+            )
+            if isinstance(candidates, list):
+                for candidate in candidates:
+                    _mark_legacy_memory_candidate_read_only(candidate)
+    return migrated
+
+
 class WPlusSopStoreFile(StrictModel):
     schema_version: Literal[1] = 1
     entry_proposals: dict[str, WPlusEntryProposal] = Field(default_factory=dict)
     sessions: dict[str, SessionRecord] = Field(default_factory=dict)
     command_index: dict[str, CommandReceipt] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _annotate_legacy_memory_state(cls, value: Any) -> Any:
+        return _annotate_legacy_memory_store(value)
 
 
 _MAIN_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
@@ -1092,12 +1411,17 @@ _MAIN_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
         },
     ),
     SessionState.FINALIZING_OUTPUTS: frozenset(
-        {
-            SessionState.MEMORY_REVIEW,
-            SessionState.COMPLETED,
-        },
+        {SessionState.OUTPUT_REVIEW},
     ),
-    SessionState.MEMORY_REVIEW: frozenset({SessionState.COMPLETED}),
+    SessionState.OUTPUT_REVIEW: frozenset(
+        {SessionState.MEMORY_REVIEW, SessionState.COMPLETED},
+    ),
+    SessionState.MEMORY_REVIEW: frozenset(
+        {SessionState.WRITING_MEMORY, SessionState.COMPLETED},
+    ),
+    SessionState.WRITING_MEMORY: frozenset(
+        {SessionState.MEMORY_REVIEW, SessionState.COMPLETED},
+    ),
 }
 
 _GENERATING_STATES = frozenset(
@@ -1107,6 +1431,7 @@ _GENERATING_STATES = frozenset(
         SessionState.GENERATING_TRIAL,
         SessionState.EXECUTING_TRIAL,
         SessionState.FINALIZING_OUTPUTS,
+        SessionState.WRITING_MEMORY,
     },
 )
 _STABLE_WAITING_STATES = frozenset(
@@ -1115,6 +1440,7 @@ _STABLE_WAITING_STATES = frozenset(
         SessionState.AWAITING_ANSWER,
         SessionState.AWAITING_TRIAL_FEEDBACK,
         SessionState.AWAITING_STAGE_CONFIRMATION,
+        SessionState.OUTPUT_REVIEW,
         SessionState.MEMORY_REVIEW,
         SessionState.RECOVERABLE_FAILURE,
     },

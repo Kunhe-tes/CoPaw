@@ -150,6 +150,14 @@ def test_explicit_wplus_selection_returns_card_before_agent_or_session(
     tmp_path,
     monkeypatch,
 ) -> None:
+    legacy_store_path = tmp_path / ".copaw" / "wplus-sop.json"
+    legacy_store_path.parent.mkdir()
+    legacy_store_sentinel = b"legacy W+ store: deliberately invalid JSON\x00\xff"
+    legacy_store_path.write_bytes(legacy_store_sentinel)
+
+    current_store_path = tmp_path / ".sop" / "wplus-sop.json"
+    assert not current_store_path.exists()
+
     client, workspace = _build_client(tmp_path, monkeypatch)
     payload = {
         "input": [
@@ -177,6 +185,14 @@ def test_explicit_wplus_selection_returns_card_before_agent_or_session(
     assert card["mode"] == "explicit"
     assert card["chat_id"] == "chat-1"
     assert workspace.task_tracker.started == 0
+    assert legacy_store_path.read_bytes() == legacy_store_sentinel
+
+    persisted_store = json.loads(current_store_path.read_text(encoding="utf-8"))
+    assert card["proposal_id"] in persisted_store["entry_proposals"]
+    persisted_proposal = persisted_store["entry_proposals"][card["proposal_id"]]
+    assert persisted_proposal["proposal_id"] == card["proposal_id"]
+    assert persisted_proposal["detection_mode"] == "explicit"
+    assert persisted_proposal["ownership"]["chat_id"] == card["chat_id"]
 
     service = WPlusSopService(
         workspace=workspace,
@@ -191,6 +207,120 @@ def test_explicit_wplus_selection_returns_card_before_agent_or_session(
     )
     assert service.store.list_sessions() == []
     assert service.store.get_entry_proposal(card["proposal_id"]) is not None
+
+
+def test_caller_anonymous_user_scope_is_persisted_on_entry_proposal(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client, workspace = _build_client(tmp_path, monkeypatch)
+    payload = {
+        "input": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "创建客户经营 SOP"}],
+            },
+        ],
+        "session_id": "logical-1",
+        "user_id": "user-1",
+        "channel": "console",
+        "channel_meta": {"user_scope": "anon_scope_123456"},
+        "selected_skill_names": ["wplus-sop-miner"],
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "console"},
+        json=payload,
+    ) as response:
+        card = _proposal_from_response(response)
+
+    service = WPlusSopService(
+        workspace=workspace,
+        ownership=OwnershipTuple(
+            tenant_id="tenant-1",
+            source_id="console",
+            user_id="user-1",
+            agent_id="agent-1",
+            chat_id="chat-1",
+            logical_chat_session_id="logical-1",
+        ),
+    )
+    proposal = service.store.get_entry_proposal(card["proposal_id"])
+    assert proposal is not None
+    assert proposal.memory_user_scope == "anon_scope_123456"
+
+
+def test_manual_wplus_mention_returns_card_without_skill_selection(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client, workspace = _build_client(tmp_path, monkeypatch)
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "console"},
+        json={
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "@wplus-sop-miner 帮我梳理客户筛选 SOP",
+                        },
+                    ],
+                },
+            ],
+            "session_id": "logical-1",
+            "user_id": "user-1",
+            "channel": "console",
+            "selected_skill_names": [],
+        },
+    ) as response:
+        card = _proposal_from_response(response)
+
+    assert response.status_code == 200
+    assert card["object"] == "wplus_sop_entry_proposal"
+    assert card["mode"] == "explicit"
+    assert workspace.task_tracker.started == 0
+
+
+def test_unselected_plain_sop_text_continues_as_ordinary_chat(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client, workspace = _build_client(tmp_path, monkeypatch)
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "console"},
+        json={
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "帮我梳理客户筛选 SOP",
+                        },
+                    ],
+                },
+            ],
+            "session_id": "logical-1",
+            "user_id": "user-1",
+            "channel": "console",
+            "selected_skill_names": [],
+        },
+    ) as response:
+        lines = list(response.iter_lines())
+
+    assert response.status_code == 200
+    assert not any("wplus_sop_entry_proposal" in line for line in lines)
+    assert workspace.task_tracker.started == 1
 
 
 def test_explicit_wplus_selection_uses_resolved_workspace_agent_identity(
@@ -274,7 +404,7 @@ def test_rejected_proposal_replays_original_request_without_reinterception(
     monkeypatch,
 ) -> None:
     client, workspace = _build_client(tmp_path, monkeypatch)
-    text = "帮我梳理客户筛选 SOP"
+    text = "@wplus-sop-miner 帮我梳理客户筛选 SOP"
     initial = {
         "input": [
             {
@@ -285,7 +415,7 @@ def test_rejected_proposal_replays_original_request_without_reinterception(
         "session_id": "logical-1",
         "user_id": "user-1",
         "channel": "console",
-        "selected_skill_names": ["wplus-sop-miner"],
+        "selected_skill_names": [],
     }
     with client.stream(
         "POST",
@@ -452,7 +582,7 @@ def test_paused_wplus_session_does_not_lock_ordinary_chat_input(
         chat_id="chat-1",
         logical_chat_session_id="logical-1",
     )
-    WPlusSopStore(tmp_path / ".copaw" / "wplus-sop.json").create_session(
+    WPlusSopStore(tmp_path / ".sop" / "wplus-sop.json").create_session(
         SessionProjection(
             sop_session_id="sop-paused",
             ownership=ownership,
@@ -514,7 +644,7 @@ def test_paused_wplus_session_still_holds_the_single_session_slot(
         chat_id="chat-1",
         logical_chat_session_id="logical-1",
     )
-    store = WPlusSopStore(tmp_path / ".copaw" / "wplus-sop.json")
+    store = WPlusSopStore(tmp_path / ".sop" / "wplus-sop.json")
     store.create_session(
         SessionProjection(
             sop_session_id="sop-paused",
@@ -553,7 +683,7 @@ def test_paused_wplus_session_still_holds_the_single_session_slot(
     assert response.status_code == 409
     assert store.list_sessions()[0].projection.sop_session_id == "sop-paused"
     persisted = json.loads(
-        (tmp_path / ".copaw" / "wplus-sop.json").read_text(encoding="utf-8"),
+        (tmp_path / ".sop" / "wplus-sop.json").read_text(encoding="utf-8"),
     )
     assert persisted["entry_proposals"] == {}
     assert workspace.task_tracker.started == 0

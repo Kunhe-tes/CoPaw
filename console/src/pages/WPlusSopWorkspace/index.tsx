@@ -39,6 +39,7 @@ import type {
   WPlusSopAnswerValue,
   WPlusSopCommandType,
   WPlusSopCustomAnswerValue,
+  WPlusSopMemoryCandidate,
   WPlusSopQuestion,
   WPlusSopSafeStreamTrace,
   WPlusSopSession,
@@ -71,9 +72,177 @@ interface AnswerDraft {
   values: Record<string, WPlusSopAnswerValue>;
 }
 
+type MemoryDecision = "approve" | "reject";
+
+interface MemoryDecisionDraft {
+  scope: string | null;
+  values: Record<string, MemoryDecision>;
+}
+
+function completedMemoryStatus(candidate: WPlusSopMemoryCandidate): {
+  color: string;
+  label: string;
+} {
+  if (candidate.status === "approved") {
+    if (candidate.legacy_read_only) {
+      return {
+        color: "default",
+        label: "历史已批准（无可验证写入回执）",
+      };
+    }
+    return candidate.write_receipt
+      ? { color: "green", label: "已写入" }
+      : { color: "default", label: "已批准（无可验证写入回执）" };
+  }
+  if (candidate.status === "rejected") {
+    return { color: "default", label: "已拒绝" };
+  }
+  if (candidate.status === "failed") {
+    return {
+      color: "red",
+      label: `写入失败${
+        candidate.failure_reason ? `：${candidate.failure_reason}` : ""
+      }`,
+    };
+  }
+  if (candidate.status === "writing") {
+    return { color: "processing", label: "历史状态：写入中" };
+  }
+  return { color: "default", label: "历史状态：待处理" };
+}
+
 interface ActiveSafeStreamTrace extends WPlusSopSafeStreamTrace {
   session_id: string;
   run_id: string;
+}
+
+function ResultPreview({
+  preview,
+}: {
+  preview: WPlusSopSession["result_preview"];
+}) {
+  const [remoteMarkdown, setRemoteMarkdown] = useState<string | null>(null);
+  const [markdownFailed, setMarkdownFailed] = useState(false);
+  const [markdownLoading, setMarkdownLoading] = useState(false);
+  const [remoteHtml, setRemoteHtml] = useState<string | null>(null);
+  const [htmlFailed, setHtmlFailed] = useState(false);
+  const [htmlLoading, setHtmlLoading] = useState(false);
+  const markdownUrl = preview?.markdown_url || null;
+  const htmlUrl = preview?.html_url || null;
+
+  useEffect(() => {
+    setRemoteMarkdown(null);
+    setMarkdownFailed(false);
+    setMarkdownLoading(Boolean(markdownUrl));
+    if (!markdownUrl) return;
+
+    const controller = new AbortController();
+    let disposed = false;
+    void fetch(markdownUrl, { signal: controller.signal, cache: "no-store" })
+      .then((response) => {
+        if (!response.ok) throw new Error("Markdown preview request failed");
+        return response.text();
+      })
+      .then((body) => {
+        if (!disposed) {
+          setRemoteMarkdown(body);
+          setMarkdownLoading(false);
+        }
+      })
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.name === "AbortError") return;
+        if (!disposed) {
+          setMarkdownFailed(true);
+          setMarkdownLoading(false);
+        }
+      });
+    return () => {
+      disposed = true;
+      controller.abort();
+    };
+  }, [markdownUrl, preview?.markdown_sha256]);
+
+  useEffect(() => {
+    setRemoteHtml(null);
+    setHtmlFailed(false);
+    setHtmlLoading(Boolean(htmlUrl));
+    if (!htmlUrl) return;
+
+    const controller = new AbortController();
+    let disposed = false;
+    void fetch(htmlUrl, { signal: controller.signal, cache: "no-store" })
+      .then((response) => {
+        if (!response.ok) throw new Error("HTML preview request failed");
+        return response.text();
+      })
+      .then((body) => {
+        if (!disposed) {
+          setRemoteHtml(body);
+          setHtmlLoading(false);
+        }
+      })
+      .catch((error: unknown) => {
+        if (error instanceof Error && error.name === "AbortError") return;
+        if (!disposed) {
+          setHtmlFailed(true);
+          setHtmlLoading(false);
+        }
+      });
+    return () => {
+      disposed = true;
+      controller.abort();
+    };
+  }, [htmlUrl, preview?.html_sha256]);
+
+  const markdown = preview?.markdown_url
+    ? remoteMarkdown
+    : preview?.markdown || null;
+  const html = preview?.html_url ? remoteHtml : preview?.html || null;
+
+  return (
+    <div className={styles.resultPreviewGrid}>
+      <article
+        aria-busy={markdownLoading}
+        aria-live="polite"
+        className={styles.resultPreviewCard}
+      >
+        <h3>Markdown 预览</h3>
+        <pre>
+          {markdown ||
+            (markdownLoading
+              ? "Markdown 预览加载中…"
+              : markdownFailed
+              ? "Markdown 预览加载失败。"
+              : "暂无 Markdown 结果。")}
+        </pre>
+      </article>
+      <article
+        aria-busy={htmlLoading}
+        aria-live="polite"
+        className={styles.resultPreviewCard}
+      >
+        <h3>HTML 预览</h3>
+        {html ? (
+          <iframe
+            className={styles.htmlPreview}
+            title="HTML 结果预览"
+            sandbox=""
+            srcDoc={html}
+          />
+        ) : (
+          <Empty
+            description={
+              htmlLoading
+                ? "HTML 预览加载中…"
+                : htmlFailed
+                ? "HTML 预览加载失败。"
+                : "暂无 HTML 结果"
+            }
+          />
+        )}
+      </article>
+    </div>
+  );
 }
 
 function LiveRunTranscript({
@@ -240,6 +409,7 @@ function isGenerating(session: WPlusSopSession): boolean {
     "GeneratingTrial",
     "ExecutingTrial",
     "FinalizingOutputs",
+    "WritingMemory",
     "PendingExit",
   ].includes(session.state);
 }
@@ -254,6 +424,31 @@ function stateProgress(session: WPlusSopSession): number {
     94,
     Math.round((confirmed / session.stages.length) * 82) + 12,
   );
+}
+
+function conclusionMilestoneProjection(session: WPlusSopSession): {
+  status: "confirmed" | "current" | "pending";
+  label: string;
+} {
+  if (session.state === "Completed") {
+    return { status: "confirmed", label: "已完成" };
+  }
+  if (session.state === "FinalizingOutputs") {
+    return { status: "current", label: "生成中" };
+  }
+  if (session.state === "OutputReview") {
+    return { status: "current", label: "待确认结果" };
+  }
+  if (session.state === "MemoryReview") {
+    return { status: "current", label: "待确认" };
+  }
+  if (session.state === "WritingMemory") {
+    return { status: "current", label: "写入中" };
+  }
+  if (session.state === "Terminated") {
+    return { status: "pending", label: "未生成" };
+  }
+  return { status: "pending", label: "等待中" };
 }
 
 function StageQueueEditor({
@@ -589,7 +784,7 @@ function QuestionBatchPanel({
       <div className={styles.questionList}>
         {batch.questions.map((question, index) => (
           <fieldset key={question.question_id} className={styles.question}>
-            <legend>
+            <legend className={styles.questionLegend}>
               <span className={styles.questionNumber}>
                 {String(index + 1).padStart(2, "0")}
               </span>
@@ -838,6 +1033,11 @@ export default function WPlusSopWorkspace() {
     values: {},
   });
   const [feedback, setFeedback] = useState("");
+  const [memoryDecisionDraft, setMemoryDecisionDraft] =
+    useState<MemoryDecisionDraft>({
+      scope: null,
+      values: {},
+    });
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [evidenceDrawerOpen, setEvidenceDrawerOpen] = useState(false);
@@ -1080,6 +1280,23 @@ export default function WPlusSopWorkspace() {
     );
   }, [answerScope]);
 
+  const memoryDecisionScope = session?.session_id ?? sessionId;
+  const memoryDecisions = useMemo(
+    () =>
+      memoryDecisionDraft.scope === memoryDecisionScope
+        ? memoryDecisionDraft.values
+        : {},
+    [memoryDecisionDraft, memoryDecisionScope],
+  );
+
+  useEffect(() => {
+    setMemoryDecisionDraft((current) =>
+      current.scope === memoryDecisionScope
+        ? current
+        : { scope: memoryDecisionScope, values: {} },
+    );
+  }, [memoryDecisionScope]);
+
   const downloadArtifact = useCallback(
     async (artifactId: string, filename: string) => {
       if (!session) return;
@@ -1125,6 +1342,13 @@ export default function WPlusSopWorkspace() {
         });
         if (sessionIdRef.current !== session.session_id) return null;
         commitSession(receipt.session);
+        if (command === "resolve_memory") {
+          setMemoryDecisionDraft((current) =>
+            current.scope === session.session_id
+              ? { scope: session.session_id, values: {} }
+              : current,
+          );
+        }
         if (command === "save_and_exit") {
           navigate(`/chat/${encodeURIComponent(receipt.session.chat_id)}`);
         }
@@ -1324,55 +1548,228 @@ export default function WPlusSopWorkspace() {
         </section>
       );
     }
-    if (session.state === "MemoryReview") {
+    if (session.state === "OutputReview") {
+      const preview = session.result_preview;
+      return (
+        <section className={styles.workSection}>
+          <div className={styles.sectionHeading}>
+            <div>
+              <span className={styles.eyebrow}>结果确认</span>
+              <h2>检查最终结果</h2>
+              <p>确认内容和文件无误后，才会进入记忆授权环节。</p>
+            </div>
+            <Tag color="blue">待确认</Tag>
+          </div>
+          <ResultPreview preview={preview} />
+          <div className={styles.artifactList}>
+            {(session.artifacts || []).map((artifact) => (
+              <Button
+                key={artifact.artifact_id}
+                type="text"
+                disabled={!artifact.download_url}
+                loading={downloadingArtifactId === artifact.artifact_id}
+                title={artifact.name}
+                onClick={() =>
+                  void downloadArtifact(artifact.artifact_id, artifact.name)
+                }
+              >
+                <FileCheck2 size={16} />
+                <span className={styles.artifactName}>{artifact.name}</span>
+              </Button>
+            ))}
+          </div>
+          <div className={styles.outputReviewActions}>
+            <Button
+              type="primary"
+              icon={<Check size={16} />}
+              loading={busy}
+              onClick={() => void sendCommand("confirm_outputs")}
+            >
+              确认结果并继续
+            </Button>
+          </div>
+        </section>
+      );
+    }
+    if (session.state === "MemoryReview" || session.state === "WritingMemory") {
+      const memoryWriting = session.state === "WritingMemory";
+      const unresolvedCandidates = (session.memory_candidates || []).filter(
+        (candidate) =>
+          candidate.status === "pending" || candidate.status === "failed",
+      );
+      const allMemoryDecisionsSelected = unresolvedCandidates.every(
+        (candidate) => memoryDecisions[candidate.candidate_id] !== undefined,
+      );
+      const canCompleteResolvedReview =
+        !memoryWriting && unresolvedCandidates.length === 0;
+      const runtimeReady = session.runtime_status?.runtime_ready === true;
       return (
         <section className={styles.workSection}>
           <div className={styles.sectionHeading}>
             <div>
               <span className={styles.eyebrow}>完成前检查</span>
               <h2>选择可复用记忆</h2>
-              <p>只有你明确批准的候选项才会保存。</p>
+              <p>
+                {memoryWriting
+                  ? "Agent 正在一个回合内写入全部获批候选，完成后统一返回结果。"
+                  : "请为每个候选选择是否保存，全部选择后一次提交。"}
+              </p>
             </div>
           </div>
           <div className={styles.memoryList}>
             {(session.memory_candidates || []).map((candidate) => (
               <article key={candidate.candidate_id}>
-                <div>
-                  <strong>{candidate.title}</strong>
-                  {candidate.description && <p>{candidate.description}</p>}
+                <div className={styles.memoryCandidateBody}>
+                  <div>
+                    <strong>{candidate.title}</strong>
+                    <Tag>
+                      {candidate.memory_type === "common_wplus_knowledge"
+                        ? "公共 W+ 知识"
+                        : candidate.memory_type === "user_wplus_usage"
+                        ? "个人使用偏好"
+                        : candidate.memory_type === "sop_case"
+                        ? "脱敏 SOP 模式"
+                        : "历史候选"}
+                    </Tag>
+                  </div>
+                  <pre className={styles.memoryCandidateContent}>
+                    {typeof candidate.content === "string"
+                      ? candidate.content
+                      : JSON.stringify(candidate.content, null, 2)}
+                  </pre>
+                  {candidate.evidence && (
+                    <div className={styles.memoryEvidence}>
+                      <span>准确对话证据</span>
+                      <p>{candidate.evidence}</p>
+                    </div>
+                  )}
+                  <dl className={styles.memoryCandidateMeta}>
+                    <div>
+                      <dt>写入范围</dt>
+                      <dd>
+                        {candidate.target_scope === "common"
+                          ? "公共 W+ 知识"
+                          : candidate.target_scope === "user"
+                          ? "匿名用户偏好"
+                          : candidate.target_scope === "cases"
+                          ? "脱敏 SOP 案例"
+                          : "历史候选"}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>目标位置</dt>
+                      <dd>{candidate.target_file}</dd>
+                    </div>
+                  </dl>
+                  {candidate.failure_reason && (
+                    <Alert
+                      type="error"
+                      showIcon
+                      message="上次写入失败"
+                      description={candidate.failure_reason}
+                    />
+                  )}
+                  {candidate.status === "writing" && (
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="正在调用 memory_store.py"
+                      description="完成后将返回 appended 或 duplicate 回执。"
+                    />
+                  )}
+                  {candidate.write_receipt && (
+                    <div className={styles.memoryReceipt}>
+                      <span>写入回执</span>
+                      <code>{candidate.write_receipt.memory_id}</code>
+                      <small>
+                        {candidate.write_receipt.target_file} ·{" "}
+                        {candidate.write_receipt.store_result === "duplicate" ||
+                        candidate.write_receipt.reused_existing
+                          ? "已复用既有写入"
+                          : "脚本校验并写入"}
+                      </small>
+                    </div>
+                  )}
                 </div>
-                {candidate.status === "pending" ? (
-                  <Space>
-                    <Button
-                      onClick={() =>
-                        void sendCommand("resolve_memory", {
-                          candidate_id: candidate.candidate_id,
-                          decision: "reject",
-                        })
+                {candidate.status === "pending" ||
+                candidate.status === "failed" ? (
+                  <div
+                    role="radiogroup"
+                    aria-label={`记忆候选：${candidate.title}`}
+                  >
+                    <Radio.Group
+                      name={`memory-candidate-${candidate.candidate_id}`}
+                      value={memoryDecisions[candidate.candidate_id]}
+                      optionType="button"
+                      buttonStyle="solid"
+                      disabled={busy || memoryWriting}
+                      onChange={(event) =>
+                        setMemoryDecisionDraft((current) => ({
+                          scope: session.session_id,
+                          values: {
+                            ...(current.scope === session.session_id
+                              ? current.values
+                              : {}),
+                            [candidate.candidate_id]: event.target.value,
+                          },
+                        }))
                       }
                     >
-                      不保存
-                    </Button>
-                    <Button
-                      type="primary"
-                      onClick={() =>
-                        void sendCommand("resolve_memory", {
-                          candidate_id: candidate.candidate_id,
-                          decision: "approve",
-                        })
-                      }
-                    >
-                      保存
-                    </Button>
-                  </Space>
+                      {!candidate.legacy_read_only && (
+                        <Radio value="approve">
+                          {candidate.status === "failed" ? "重试写入" : "保存"}
+                        </Radio>
+                      )}
+                      <Radio value="reject">不保存</Radio>
+                    </Radio.Group>
+                  </div>
+                ) : candidate.status === "writing" ? (
+                  <Tag color="processing">写入中</Tag>
                 ) : (
-                  <Tag>{candidate.status}</Tag>
+                  <Tag
+                    color={
+                      candidate.status === "approved" ? "green" : "default"
+                    }
+                  >
+                    {candidate.status === "approved"
+                      ? candidate.legacy_read_only
+                        ? "历史已批准（无可验证写入回执）"
+                        : "已写入"
+                      : "已拒绝"}
+                  </Tag>
                 )}
               </article>
             ))}
           </div>
-          <Button onClick={() => void sendCommand("skip_memory")}>
-            跳过剩余候选
+          {!memoryWriting && !runtimeReady && (
+            <Alert
+              type="info"
+              showIcon
+              message="正在等待上一轮 Agent 完成"
+              description="运行环境就绪后才能统一提交，当前选择会保留在页面中。"
+            />
+          )}
+          <Button
+            type="primary"
+            loading={busy}
+            disabled={
+              busy ||
+              memoryWriting ||
+              !runtimeReady ||
+              !allMemoryDecisionsSelected
+            }
+            onClick={() =>
+              void (canCompleteResolvedReview
+                ? sendCommand("skip_memory")
+                : sendCommand("resolve_memory", {
+                    decisions: unresolvedCandidates.map((candidate) => ({
+                      candidate_id: candidate.candidate_id,
+                      decision: memoryDecisions[candidate.candidate_id],
+                    })),
+                  }))
+            }
+          >
+            {canCompleteResolvedReview ? "完成" : "统一提交记忆选择"}
           </Button>
         </section>
       );
@@ -1400,6 +1797,28 @@ export default function WPlusSopWorkspace() {
               </Button>
             ))}
           </div>
+          {(session.memory_candidates || []).length > 0 && (
+            <section className={styles.memoryList} aria-label="记忆处理历史">
+              <h3>记忆处理历史</h3>
+              {(session.memory_candidates || []).map((candidate) => {
+                const status = completedMemoryStatus(candidate);
+                return (
+                  <article key={candidate.candidate_id}>
+                    <div>
+                      <strong>{candidate.title}</strong>
+                      {candidate.write_receipt && (
+                        <p>
+                          写入回执：
+                          <code>{candidate.write_receipt.memory_id}</code>
+                        </p>
+                      )}
+                    </div>
+                    <Tag color={status.color}>{status.label}</Tag>
+                  </article>
+                );
+              })}
+            </section>
+          )}
         </section>
       );
     }
@@ -1420,6 +1839,7 @@ export default function WPlusSopWorkspace() {
     downloadArtifact,
     downloadingArtifactId,
     feedback,
+    memoryDecisions,
     sendCommand,
     session,
     stages,
@@ -1468,6 +1888,11 @@ export default function WPlusSopWorkspace() {
       </main>
     );
   }
+
+  const conclusionMilestone = conclusionMilestoneProjection(session);
+  const conclusionMilestoneNumber = session.stages.length
+    ? session.stages.length + 1
+    : 2;
 
   return (
     <main className={styles.workspace} aria-labelledby="wplus-workspace-title">
@@ -1566,6 +1991,13 @@ export default function WPlusSopWorkspace() {
               </div>
             </li>
           )}
+          <li data-status={conclusionMilestone.status}>
+            <span>{String(conclusionMilestoneNumber).padStart(2, "0")}</span>
+            <div>
+              <strong title="生成结论">生成结论</strong>
+              <small>{conclusionMilestone.label}</small>
+            </div>
+          </li>
         </ol>
       </section>
 

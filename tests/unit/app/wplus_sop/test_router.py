@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from types import SimpleNamespace
 
 import pytest
@@ -53,6 +54,37 @@ def _build_client(tmp_path, monkeypatch) -> TestClient:
         fake_get_agent_for_request,
     )
     store = WPlusSopStore(store_path_for_workspace(tmp_path))
+    static_dir = tmp_path / "static"
+    static_dir.mkdir()
+    artifacts = []
+    contents = {
+        "sop_spec.json": json.dumps(
+            {"name": "客户经营 SOP", "version": 1},
+            ensure_ascii=False,
+        ),
+        "sop_render.md": "# 客户经营 SOP",
+        "sop_render.html": "<h1>客户经营 SOP</h1>",
+        "example_result.html": "<h1>脱敏示例</h1>",
+    }
+    artifact_ids = {
+        "sop_spec.json": "sop_spec",
+        "sop_render.md": "sop_render_md",
+        "sop_render.html": "sop_render_html",
+        "example_result.html": "example_result_html",
+    }
+    for name, content in contents.items():
+        raw = content.encode("utf-8")
+        (static_dir / name).write_bytes(raw)
+        artifacts.append(
+            {
+                "artifact_id": artifact_ids[name],
+                "name": name,
+                "static_file_name": name,
+                "static_url": f"http://files.local/static/tenant-1/agent-1/{name}",
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "copied_by": "copy_file_to_static",
+            },
+        )
     store.create_session(
         SessionProjection(
             sop_session_id="sop-1",
@@ -72,6 +104,16 @@ def _build_client(tmp_path, monkeypatch) -> TestClient:
                 sop_spec={"name": "客户经营 SOP", "version": 1},
                 readable_sop="# 客户经营 SOP",
                 html="<h1>客户经营 SOP</h1>",
+                example_result_html="<h1>脱敏示例</h1>",
+                artifacts=artifacts,
+                validation={
+                    "schema_validator": "scripts/validate_sop.py",
+                    "schema_exit_code": 0,
+                    "renderers": [
+                        "scripts/render_md.py",
+                        "scripts/render_sop.py",
+                    ],
+                },
             ),
         ),
         command_receipt=CommandReceipt(
@@ -92,15 +134,19 @@ def test_completed_artifacts_have_authenticated_downloads(
 
     projection = client.get("/wplus-sop/sessions/sop-1")
     spec_url = projection.json()["artifacts"][0]["download_url"]
-    downloaded = client.get(spec_url)
+    downloaded = client.get(
+        "/wplus-sop/sessions/sop-1/artifacts/sop_spec",
+        follow_redirects=False,
+    )
 
     assert projection.status_code == 200
-    assert downloaded.status_code == 200
-    assert downloaded.json() == {"name": "客户经营 SOP", "version": 1}
-    assert downloaded.headers["content-disposition"] == (
-        'attachment; filename="sop_spec.json"'
+    assert spec_url == (
+        "http://files.local/static/tenant-1/agent-1/sop_spec.json"
     )
-    assert downloaded.headers["x-content-type-options"] == "nosniff"
+    assert downloaded.status_code == 307
+    assert downloaded.headers["location"] == (
+        "http://files.local/static/tenant-1/agent-1/sop_spec.json"
+    )
 
 
 def test_artifact_download_is_fail_closed_for_another_user(

@@ -210,6 +210,555 @@ describe("WPlusSopWorkspace", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("appends a read-only conclusion milestone after every business stage", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingAnswer",
+        stages: [
+          {
+            stage_id: "stage-1",
+            title: "初筛存续到期客户名单",
+            status: "confirmed",
+          },
+          {
+            stage_id: "stage-2",
+            title: "查询客户资产总览与实时收支",
+            status: "current",
+          },
+          {
+            stage_id: "stage-3",
+            title: "分析存续到期处理建议",
+            status: "pending",
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    const progressRegion = await screen.findByRole("region", {
+      name: "SOP 环节进度",
+    });
+    const milestones = within(progressRegion).getAllByRole("listitem");
+    const conclusion = milestones[milestones.length - 1];
+
+    expect(milestones).toHaveLength(4);
+    expect(conclusion).toHaveAttribute("data-status", "pending");
+    expect(within(conclusion!).getByText("04")).toBeInTheDocument();
+    expect(within(conclusion!).getByText("生成结论")).toBeInTheDocument();
+    expect(within(conclusion!).getByText("等待中")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["FinalizingOutputs", "current", "生成中"],
+    ["OutputReview", "current", "待确认结果"],
+    ["MemoryReview", "current", "待确认"],
+    ["Completed", "confirmed", "已完成"],
+  ] as const)(
+    "projects %s onto the conclusion milestone as %s",
+    async (state, expectedStatus, expectedLabel) => {
+      apiMock.getSession.mockResolvedValue(makeSession({ state }));
+      renderPage();
+
+      const conclusionTitle = await screen.findByText("生成结论");
+      const conclusion = conclusionTitle.closest("li");
+
+      expect(conclusion).toHaveAttribute("data-status", expectedStatus);
+      expect(within(conclusion!).getByText(expectedLabel)).toBeInTheDocument();
+      if (state === "Completed") {
+        expect(
+          screen.getByRole("progressbar", { name: "SOP 总体进度" }),
+        ).toHaveAttribute("aria-valuenow", "100");
+      }
+    },
+  );
+
+  it("previews and confirms generated outputs before memory review", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "OutputReview",
+        state_version: 20,
+        result_preview: {
+          markdown: "# 客户经营 SOP\n\n执行复核。",
+          html: "<article><h1>客户经营 SOP</h1></article>",
+        },
+        artifacts: [
+          {
+            artifact_id: "sop_render_md",
+            name: "sop_render.md",
+            format: "markdown",
+            status: "validated",
+            download_url: "/download/sop_render_md",
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByRole("heading", { name: "检查最终结果" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText((_, element) =>
+        Boolean(
+          element?.tagName === "PRE" &&
+            element.textContent?.includes("# 客户经营 SOP"),
+        ),
+      ),
+    ).toBeInTheDocument();
+    const htmlPreview = screen.getByTitle("HTML 结果预览");
+    expect(htmlPreview).toHaveAttribute("sandbox", "");
+    expect(htmlPreview).toHaveAttribute(
+      "srcdoc",
+      "<article><h1>客户经营 SOP</h1></article>",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "确认结果并继续" }));
+    await waitFor(() =>
+      expect(apiMock.sendCommand).toHaveBeenCalledWith(
+        "sop-1",
+        expect.objectContaining({ command: "confirm_outputs" }),
+      ),
+    );
+  });
+
+  it("uses artifact URLs for generated output previews", async () => {
+    const markdownUrl =
+      "https://files.example.test/static/sop_render.md?signature=a%2Bb&expires=9#markdown";
+    const htmlUrl =
+      "https://files.example.test/static/sop_render.html?signature=c%2Fd&expires=9#preview";
+    const markdownSha = "a".repeat(64);
+    const htmlSha = "b".repeat(64);
+    const htmlBody = "<article><h1>Fetched HTML</h1></article>";
+    const fetchMock = vi.fn().mockImplementation((url: string) =>
+      Promise.resolve({
+        ok: true,
+        text: vi
+          .fn()
+          .mockResolvedValue(
+            url === htmlUrl ? htmlBody : "# URL-backed SOP\n\nFetched body",
+          ),
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "OutputReview",
+        state_version: 20,
+        result_preview: {
+          markdown: "https://ignored.example.test/sop_render_6.md",
+          html: "https://ignored.example.test/sop_render_6.html",
+          markdown_url: markdownUrl,
+          html_url: htmlUrl,
+          markdown_sha256: markdownSha,
+          html_sha256: htmlSha,
+        },
+      }),
+    );
+
+    renderPage();
+
+    expect(
+      await screen.findByText("Fetched body", { exact: false }),
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      markdownUrl,
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      htmlUrl,
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    const htmlPreview = screen.getByTitle("HTML 结果预览");
+    expect(htmlPreview).toHaveAttribute("sandbox", "");
+    expect(htmlPreview).toHaveAttribute("srcdoc", htmlBody);
+    expect(htmlPreview).not.toHaveAttribute("src");
+  });
+
+  it("refreshes URL-backed previews when artifact hashes change", async () => {
+    const markdownUrl =
+      "https://files.example.test/static/sop_render.md?signature=a%2Bb&expires=9#markdown";
+    const htmlUrl =
+      "https://files.example.test/static/sop_render.html?signature=c%2Fd&expires=9#preview";
+    const firstMarkdownSha = "1".repeat(64);
+    const firstHtmlSha = "2".repeat(64);
+    const nextMarkdownSha = "3".repeat(64);
+    const nextHtmlSha = "4".repeat(64);
+    const markdownBodies = ["# First SOP", "# Updated SOP"];
+    const htmlBodies = [
+      "<article>First HTML</article>",
+      "<article>Updated HTML</article>",
+    ];
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      const bodies = url === htmlUrl ? htmlBodies : markdownBodies;
+      return Promise.resolve({
+        ok: true,
+        text: vi.fn().mockResolvedValue(bodies.shift()),
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const firstSession = makeSession({
+      state: "OutputReview",
+      state_version: 20,
+      result_preview: {
+        markdown: "ignored",
+        html: "ignored",
+        markdown_url: markdownUrl,
+        html_url: htmlUrl,
+        markdown_sha256: firstMarkdownSha,
+        html_sha256: firstHtmlSha,
+      },
+    });
+    apiMock.getSession.mockResolvedValue(firstSession);
+    renderPage();
+
+    expect(
+      await screen.findByText("First SOP", { exact: false }),
+    ).toBeInTheDocument();
+    const firstHtmlPreview = await screen.findByTitle("HTML 结果预览");
+    await waitFor(() =>
+      expect(firstHtmlPreview).toHaveAttribute(
+        "srcdoc",
+        "<article>First HTML</article>",
+      ),
+    );
+
+    act(() => {
+      subscriptionCallbacks[0].onEvent({
+        event_id: "snapshot:sop-1:21",
+        session_id: "sop-1",
+        state_version: 21,
+        kind: "snapshot",
+        snapshot: makeSession({
+          ...firstSession,
+          state_version: 21,
+          result_preview: {
+            ...firstSession.result_preview!,
+            markdown_sha256: nextMarkdownSha,
+            html_sha256: nextHtmlSha,
+          },
+        }),
+      });
+    });
+
+    expect(
+      await screen.findByText("Updated SOP", { exact: false }),
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      htmlUrl,
+      expect.objectContaining({ cache: "no-store" }),
+    );
+    const nextHtmlPreview = screen.getByTitle("HTML 结果预览");
+    await waitFor(() =>
+      expect(nextHtmlPreview).toHaveAttribute(
+        "srcdoc",
+        "<article>Updated HTML</article>",
+      ),
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+  });
+
+  it("shows full memory content, target, failure retry, and write receipt", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "MemoryReview",
+        state_version: 21,
+        memory_candidates: [
+          {
+            candidate_id: "candidate-failed",
+            title: "保存复核规则",
+            memory_type: "common_wplus_knowledge",
+            content: { rule: "优先复核高风险分组" },
+            evidence: "用户确认该页面事实已经验证。",
+            target_scope: "common",
+            target_file: "memory/common-wplus-knowledge.jsonl",
+            status: "failed",
+            failure_reason: "disk unavailable",
+          },
+          {
+            candidate_id: "candidate-approved",
+            title: "保存时间窗口",
+            memory_type: "sop_case",
+            content: { pattern: "默认检查未来 30 天" },
+            evidence: "用户确认这是完全脱敏的 SOP 模式。",
+            target_scope: "cases",
+            target_file: "memory/cases/sop-cases.jsonl",
+            status: "approved",
+            write_receipt: {
+              memory_id: "wplus-sop/sop-1/candidate-approved",
+              target_scope: "cases",
+              target_file: "memory/cases/sop-cases.jsonl",
+              written_at: "2026-08-04T10:00:00Z",
+              reused_existing: false,
+              store_result: "appended",
+            },
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText((_, element) =>
+        Boolean(
+          element?.tagName === "PRE" &&
+            element.textContent?.includes("优先复核高风险分组"),
+        ),
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("公共 W+ 知识")).toHaveLength(2);
+    expect(screen.getByText("脱敏 SOP 模式")).toBeInTheDocument();
+    expect(
+      screen.getByText("用户确认该页面事实已经验证。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("memory/common-wplus-knowledge.jsonl"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("memory/cases/sop-cases.jsonl"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("disk unavailable")).toBeInTheDocument();
+    expect(
+      screen.getByText("wplus-sop/sop-1/candidate-approved"),
+    ).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("radio", { name: "重试写入" }));
+    const retrySubmit = screen.getByRole("button", {
+      name: "统一提交记忆选择",
+    });
+    await waitFor(() => expect(retrySubmit).toBeEnabled());
+    fireEvent.click(retrySubmit);
+    await waitFor(() =>
+      expect(apiMock.sendCommand).toHaveBeenCalledWith(
+        "sop-1",
+        expect.objectContaining({
+          command: "resolve_memory",
+          payload: {
+            decisions: [
+              { candidate_id: "candidate-failed", decision: "approve" },
+            ],
+          },
+        }),
+      ),
+    );
+  });
+
+  it("shows the approved memory candidate as an Agent write in progress", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "WritingMemory",
+        state_version: 22,
+        memory_candidates: [
+          {
+            candidate_id: "candidate-writing",
+            title: "保存已验证事实",
+            memory_type: "common_wplus_knowledge",
+            content: { fact: "支持到期日筛选" },
+            evidence: "用户确认该能力已经验证。",
+            target_scope: "common",
+            target_file: "memory/common-wplus-knowledge.jsonl",
+            status: "writing",
+          },
+        ],
+      }),
+    );
+
+    renderPage();
+
+    expect(
+      await screen.findByText("正在调用 memory_store.py"),
+    ).toBeInTheDocument();
+    expect(screen.getAllByText("写入中")).toHaveLength(2);
+    expect(
+      screen.getByRole("button", { name: "统一提交记忆选择" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("radio", { name: "保存" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("shows legacy memory history as read-only and never offers an impossible approval", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "MemoryReview",
+        state_version: 22,
+        memory_candidates: [
+          {
+            candidate_id: "legacy-approved",
+            title: "旧版已批准候选",
+            content: "旧版自由文本",
+            status: "approved",
+            legacy_read_only: true,
+          },
+          {
+            candidate_id: "legacy-failed",
+            title: "旧版失败候选",
+            content: { rule: "旧版记录" },
+            status: "failed",
+            legacy_read_only: true,
+          },
+        ],
+      }),
+    );
+
+    renderPage();
+
+    expect(
+      await screen.findByText("历史已批准（无可验证写入回执）"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("已写入")).not.toBeInTheDocument();
+    const failedChoices = screen.getByRole("radiogroup", {
+      name: "记忆候选：旧版失败候选",
+    });
+    expect(
+      within(failedChoices).queryByRole("radio", { name: "重试写入" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(failedChoices).getByRole("radio", { name: "不保存" }),
+    ).toBeInTheDocument();
+  });
+
+  it("submits all memory decisions once only after every candidate is selected", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "MemoryReview",
+        state_version: 23,
+        memory_candidates: [
+          {
+            candidate_id: "candidate-1",
+            title: "保存规则一",
+            content: { rule: "one" },
+            status: "pending",
+          },
+          {
+            candidate_id: "candidate-2",
+            title: "保存规则二",
+            content: { rule: "two" },
+            status: "pending",
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    const submit = await screen.findByRole("button", {
+      name: "统一提交记忆选择",
+    });
+    const firstChoices = screen.getByRole("radiogroup", {
+      name: "记忆候选：保存规则一",
+    });
+    const secondChoices = screen.getByRole("radiogroup", {
+      name: "记忆候选：保存规则二",
+    });
+    const approve = within(firstChoices).getByRole("radio", { name: "保存" });
+    expect(submit).toBeDisabled();
+    fireEvent.click(approve);
+    expect(approve).toBeChecked();
+    expect(submit).toBeDisabled();
+    const reject = within(secondChoices).getByRole("radio", {
+      name: "不保存",
+    });
+    fireEvent.click(reject);
+    expect(reject).toBeChecked();
+    await waitFor(() => expect(submit).toBeEnabled());
+    fireEvent.click(submit);
+
+    await waitFor(() =>
+      expect(apiMock.sendCommand).toHaveBeenCalledWith(
+        "sop-1",
+        expect.objectContaining({
+          command: "resolve_memory",
+          payload: {
+            decisions: [
+              { candidate_id: "candidate-1", decision: "approve" },
+              { candidate_id: "candidate-2", decision: "reject" },
+            ],
+          },
+        }),
+      ),
+    );
+  });
+
+  it("clears memory decisions when navigating to a different session with reused candidate IDs", async () => {
+    const memorySession = (sessionId: string, title: string) =>
+      makeSession({
+        session_id: sessionId,
+        title,
+        state: "MemoryReview",
+        state_version: 23,
+        memory_candidates: [
+          {
+            candidate_id: "shared-candidate",
+            title: "共享候选编号",
+            content: { source: sessionId },
+            status: "pending",
+          },
+        ],
+      });
+    apiMock.getSession.mockImplementation(async (requestedSessionId) =>
+      requestedSessionId === "sop-2"
+        ? memorySession("sop-2", "会话 B")
+        : memorySession("sop-1", "会话 A"),
+    );
+    renderPage({ withSessionSwitcher: true });
+
+    const approveInSessionA = await screen.findByRole("radio", {
+      name: /^保\s*存$/,
+    });
+    fireEvent.click(approveInSessionA);
+    expect(approveInSessionA).toBeChecked();
+    expect(
+      screen.getByRole("button", { name: "统一提交记忆选择" }),
+    ).toBeEnabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "切换测试 Session" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "会话 B" }),
+    ).toBeInTheDocument();
+    const sessionBChoices = screen.getByRole("radiogroup", {
+      name: "记忆候选：共享候选编号",
+    });
+    expect(
+      within(sessionBChoices).getByRole("radio", { name: /^保\s*存$/ }),
+    ).not.toBeChecked();
+    expect(
+      within(sessionBChoices).getByRole("radio", { name: "不保存" }),
+    ).not.toBeChecked();
+    expect(
+      screen.getByRole("button", { name: "统一提交记忆选择" }),
+    ).toBeDisabled();
+  });
+
+  it("keeps batch memory submission disabled until the prior Agent is ready", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "MemoryReview",
+        state_version: 24,
+        runtime_status: {
+          status: "running",
+          runtime_ready: false,
+          blocking_run_id: "run-prior",
+        },
+        memory_candidates: [
+          {
+            candidate_id: "candidate-1",
+            title: "保存规则",
+            content: { rule: "one" },
+            status: "pending",
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    fireEvent.click(await screen.findByRole("radio", { name: /^保\s*存$/ }));
+    expect(
+      screen.getByRole("button", { name: "统一提交记忆选择" }),
+    ).toBeDisabled();
+    expect(screen.getByText("正在等待上一轮 Agent 完成")).toBeInTheDocument();
+    expect(apiMock.sendCommand).not.toHaveBeenCalled();
+  });
+
   it("gives the pre-run result table a caption and scoped headers", async () => {
     apiMock.getSession.mockResolvedValue(
       makeSession({
@@ -812,8 +1361,10 @@ describe("WPlusSopWorkspace", () => {
     );
     renderPage();
 
-    expect(await screen.findByText(longPrompt)).toHaveClass(
-      styles.questionPrompt,
+    const renderedLongPrompt = await screen.findByText(longPrompt);
+    expect(renderedLongPrompt).toHaveClass(styles.questionPrompt);
+    expect(renderedLongPrompt.closest("legend")).toHaveClass(
+      styles.questionLegend,
     );
     expect(screen.getByText("单选")).toBeInTheDocument();
     expect(screen.getByText("多选")).toBeInTheDocument();
@@ -1723,6 +2274,73 @@ describe("WPlusSopWorkspace", () => {
     expect(createObjectURL).toHaveBeenCalled();
     expect(click).toHaveBeenCalled();
     expect(revokeObjectURL).toHaveBeenCalledWith("blob:wplus-artifact");
+  });
+
+  it("shows the completed memory snapshot as read-only history", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "Completed",
+        state_version: 24,
+        memory_candidates: [
+          {
+            candidate_id: "legacy-approved",
+            title: "旧版审批记录",
+            content: "旧版自由文本",
+            status: "approved",
+            legacy_read_only: true,
+          },
+          {
+            candidate_id: "modern-approved",
+            title: "已写入的公共规则",
+            memory_type: "common_wplus_knowledge",
+            content: { rule: "复核高风险分组" },
+            evidence: "用户确认该规则可以复用。",
+            target_scope: "common",
+            target_file: "memory/common-wplus-knowledge.jsonl",
+            status: "approved",
+            write_receipt: {
+              memory_id: "wplus-sop/sop-1/modern-approved",
+              target_scope: "common",
+              target_file: "memory/common-wplus-knowledge.jsonl",
+              written_at: "2026-08-04T10:00:00Z",
+              reused_existing: false,
+              store_result: "appended",
+            },
+          },
+          {
+            candidate_id: "rejected",
+            title: "未保存的个人偏好",
+            content: { preference: "只查看摘要" },
+            status: "rejected",
+          },
+          {
+            candidate_id: "failed",
+            title: "写入失败的案例",
+            content: { pattern: "失败案例" },
+            status: "failed",
+            failure_reason: "disk unavailable",
+          },
+        ],
+      }),
+    );
+
+    renderPage();
+
+    expect(
+      await screen.findByRole("region", { name: "记忆处理历史" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("历史已批准（无可验证写入回执）"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("wplus-sop/sop-1/modern-approved"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("已拒绝")).toBeInTheDocument();
+    expect(screen.getByText("写入失败：disk unavailable")).toBeInTheDocument();
+    expect(screen.queryByRole("radio")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "统一提交记忆选择" }),
+    ).not.toBeInTheDocument();
   });
 
   it("offers explicit controls while a safe exit is pending", async () => {

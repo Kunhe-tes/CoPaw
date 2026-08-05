@@ -35,7 +35,7 @@ CoPaw 为 `wplus-sop-miner` 增加专用的 W+ SOP 工作台。工作台通过 `
 
 ```mermaid
 flowchart LR
-    Chat["所属 Chat"] -->|"显式调用或确认隐式识别"| Session["W+ SOP 澄清会话"]
+    Chat["所属 Chat"] -->|"技能选择或精确 @ 提及"| Session["W+ SOP 澄清会话"]
     Session --> Workspace["/wplus-sop/:sessionId"]
     Workspace -->|"结构化回答"| Session
     Session -->|"只读审计投影"| Chat
@@ -61,13 +61,14 @@ flowchart LR
 5. 页面先展示环节生成状态；完整的 2–4 环节提案通过校验并由用户确认或
    调整后，才开始生成第一个澄清题组。
 
-用户不需要再次输入需求。显式和隐式入口都必须先经卡片确认，不得在用户
-确认前创建 SOP 会话或启动 Miner。
+用户不需要再次输入需求。显式入口必须先经卡片确认，不得在用户确认前创建
+SOP 会话或启动 Miner。普通消息文本和模糊语义不触发新的 W+ SOP 入口。
 
-### 隐式识别
+### 显式技能调用
 
-`SkillInvocationDetector` 识别 Miner 候选后，不得静默切换路由或启动
-Miner。Chat 必须显示可点击的确认卡：
+用户通过 Chat 技能选择器选择 `wplus-sop-miner`，或在消息正文手动输入独立、精确的
+`@wplus-sop-miner` 提及时，Chat 显示可点击的确认卡。裸技能名、近似名称和普通 SOP
+语义不构成入口授权。
 
 - `确认进入`：幂等创建空壳会话，复用原始消息并开始生成 2–4 环节提案。
 - `继续普通 Chat`：取消本轮 Miner 调用，将原始请求交回普通 Chat Agent
@@ -366,8 +367,8 @@ V1 支持新增、改名、重排和删除环节。客户端每次提交完整�
 - `console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/useChatRequest.tsx`：扩展结构化 SSE 事件识别和 Chat 卡片投影。
 - `console/src/components/ConversationQuickNav/hooks/useQuestionMessages.ts`：可参考历史问题导航，但 SOP 修订和有效性必须来自 SOP 会话状态。
 - `src/swe/app/routers/console.py::post_console_chat`：继续承载所属 Chat 的 Agent 运行、SSE 和活动运行重连。
-- `src/swe/agents/skill_invocation_detector.py::SkillInvocationDetector`：只负责
-  给入口预检提供候选；显式和隐式调用都先产生进入卡，用户确认后才创建
+- Chat 的受信任技能选择结果或正文中的精确 `@wplus-sop-miner` 提及可以创建新入口；
+  普通文本语义推断不得产生 W+ 进入卡。显式调用先产生进入卡，用户确认后才创建
   Session 并启动 Miner。
 
 实施前必须按仓库规则对所有将修改的符号逐个执行 GitNexus upstream impact 分析；当前设计阶段没有修改业务符号。
@@ -377,7 +378,8 @@ V1 支持新增、改名、重排和删除环节。客户端每次提交完整�
 最终路径命名在实施计划中确认，但后端需要覆盖以下能力：
 
 - 读取一个可访问的 SOP 会话及其当前投影。
-- 确认或拒绝显式/隐式进入提议；确认操作先创建空壳 Session，再启动 Miner。
+- 确认显式进入提议；确认操作先创建空壳 Session，再启动 Miner。历史隐式提议的
+  拒绝与回放协议仅作为已落盘数据的兼容路径保留。
 - 原子确认或调整完整的 2–4 环节队列。
 - 提交一轮结构化回答。
 - 接受预跑结果、提交反馈并关联前次运行重跑、确认当前环节。
@@ -386,7 +388,10 @@ V1 支持新增、改名、重排和删除环节。客户端每次提交完整�
 - 查询或重连当前生成运行。
 - 幂等重试失败回合。
 - 提交记忆候选选择。
-- 下载最终结果包中的单个产物。
+- 预览并明确确认最终结果；结果确认前不得进入记忆处理或完成态。
+- 最终化 Agent 必须生成、校验并通过 `copy_file_to_static` 交付四个结果文件；平台只持久化和验证真实 static 元数据，不在下载时合成文件。
+- 批准记忆候选后启动绑定该候选的 `WritingMemory` Agent 回合，由 Agent 调用 Miner 的 `scripts/memory_store.py ... --approved`；平台校验 appended/duplicate 回执，不在请求线程写 JSONL，不得写根目录 `MEMORY.md`，失败可重试。
+- 下载最终结果包中的四个真实 static 产物。
 
 所有写操作必须校验所属 Chat、当前状态、预期状态版本和幂等请求标识。
 
@@ -394,10 +399,10 @@ V1 支持新增、改名、重排和删除环节。客户端每次提交完整�
 
 ### 进入
 
-- 显式和隐式调用都先显示确认卡；确认前不创建 Session、不启动 Miner。
+- 技能选择或正文精确 `@wplus-sop-miner` 提及显示确认卡；确认前不创建 Session、不启动 Miner。
 - 确认后先持久化 `GeneratingStageProposal` 空壳 Session，再使用原始消息
   启动 Miner；原始消息无需重输。
-- 隐式拒绝后普通 Chat 恰好回答原请求一次，不循环触发，Session 数量为 0。
+- 未显式调用 Miner 的普通消息直接进入普通 Chat，不创建进入提议或 Session。
 - 重复确认同一入口命令返回同一 Session 且只有一个 Agent 回合。
 - 同一 Chat 已有活动或暂停会话时，不能再创建第二个。
 

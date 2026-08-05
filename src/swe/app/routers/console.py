@@ -3,18 +3,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
 import os
 import re
-import asyncio
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator, Literal, Union, Any, Optional, Dict, Callable
+from typing import Any, AsyncGenerator, Callable, Dict, Literal, Optional, Union
 from urllib.parse import quote, unquote, urlparse
 
+from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from fastapi import (
     APIRouter,
     File,
@@ -26,7 +27,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
-from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+from ...config.context import resolve_request_effective_tenant_id
 from ..agent_context import (
     get_agent_and_config_for_request,
     get_agent_for_request,
@@ -635,6 +636,7 @@ def _extract_context_references(
     return request_data.get("context_references")
 
 
+<<<<<<< HEAD
 def _local_path_from_console_attachment_url(url: object) -> Path | None:
     """Resolve the local path encoded in a Console attachment preview URL."""
     if not isinstance(url, str) or not url:
@@ -742,6 +744,21 @@ async def _append_uploaded_attachment_references(
         ]
 
 
+def _extract_wplus_user_scope(
+    request_data: Union[AgentRequest, dict],
+) -> object | None:
+    """Read only caller-owned structured metadata, never visible message text."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        direct = getattr(request_data, "user_scope", None)
+    else:
+        channel_meta = request_data.get("channel_meta") or {}
+        direct = request_data.get("user_scope")
+    if direct is not None:
+        return direct
+    return channel_meta.get("user_scope") if isinstance(channel_meta, dict) else None
+
+
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """Extract run_key (ChatSpec.id), session_id, and native payload.
 
@@ -797,6 +814,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references
+    memory_user_scope = _extract_wplus_user_scope(request_data)
+    if memory_user_scope is not None:
+        native_payload["meta"]["wplus_user_scope"] = memory_user_scope
     if user_name:
         native_payload["meta"]["user_name"] = user_name
     if bbk_id:
@@ -1036,13 +1056,17 @@ async def post_console_chat(
 
     if not is_reconnect:
         # W+ entry interception happens before TaskTracker/Agent execution.
-        # Explicit authority comes from selected_skill_names; implicit
-        # classification reuses the synchronous message inferencer.
+        # Structured selection and an exact user-authored @ mention are the
+        # only authorities for a new entry; fuzzy text inference is excluded.
         from ..wplus_sop.entry import (
             classify_wplus_entry,
             extract_entry_text,
         )
         from ..wplus_sop.models import OwnershipTuple
+        from ..wplus_sop.memory_policy import (
+            WPlusMemoryPolicyError,
+            normalize_anonymous_user_scope,
+        )
         from ..wplus_sop.service import WPlusSopService
 
         get_chat_by_session = getattr(
@@ -1143,13 +1167,11 @@ async def post_console_chat(
             suppression_token = str(suppression.get("token") or "")
 
         classification = classify_wplus_entry(
-            user_message=entry_text,
             selected_skill_names=native_payload["meta"].get(
                 "selected_skill_names",
             ),
-            workspace_dir=Path(getattr(workspace, "workspace_dir", ".")),
-            channel=native_payload["channel_id"],
-            suppress_implicit=suppress_implicit,
+            message_text=entry_text,
+            suppress_entry=suppress_implicit,
         )
         if classification.should_offer:
             if active_session is not None:
@@ -1187,10 +1209,17 @@ async def post_console_chat(
                 workspace=workspace,
                 ownership=ownership,
             )
-            proposal = wplus_service.create_entry_proposal(
-                original_text=entry_text,
-                mode=classification.mode or "implicit",
-            )
+            try:
+                memory_user_scope = normalize_anonymous_user_scope(
+                    native_payload["meta"].get("wplus_user_scope"),
+                )
+                proposal = wplus_service.create_entry_proposal(
+                    original_text=entry_text,
+                    mode=classification.mode or "explicit",
+                    memory_user_scope=memory_user_scope,
+                )
+            except WPlusMemoryPolicyError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
             chat.meta = {
                 **(chat.meta or {}),
                 "wplus_sop_entry_proposal": {

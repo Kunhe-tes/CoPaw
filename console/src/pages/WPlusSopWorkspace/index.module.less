@@ -7,6 +7,7 @@
   --wplus-line: var(--console-management-border, #e5e7eb);
   --wplus-line-strong: var(--console-management-border-strong, #d0d7e2);
   --wplus-surface: var(--console-management-surface-subtle, #f7f9fc);
+  --wplus-soft: var(--console-management-surface-muted, #f3f6fa);
   --wplus-accent: var(--console-conversation-primary, #3769fc);
   --wplus-accent-hover: var(--console-management-primary-hover, #2957dc);
   --wplus-accent-soft: var(--console-management-primary-soft, #eef4ff);
@@ -413,29 +414,31 @@
   border-radius: 8px;
   background: var(--wplus-surface);
 
-  legend {
-    display: flex;
-    max-width: 100%;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: 8px;
-    padding: 0;
-    color: var(--wplus-ink);
-    font-weight: 600;
-
-    em {
-      font-size: 11px;
-      font-style: normal;
-      font-weight: 500;
-    }
-  }
-
   > p {
     margin: 4px 0 11px;
     color: var(--wplus-muted);
     font-size: 12px;
     line-height: 18px;
     overflow-wrap: anywhere;
+  }
+}
+
+.questionLegend {
+  display: grid;
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 8px;
+  padding: 0;
+  color: var(--wplus-ink);
+  font-weight: 600;
+
+  em {
+    font-size: 11px;
+    font-style: normal;
+    font-weight: 500;
   }
 }
 
@@ -448,7 +451,6 @@
 
 .questionPrompt {
   min-width: 0;
-  flex: 1 1 320px;
   overflow-wrap: anywhere;
 }
 
@@ -936,6 +938,136 @@
   }
 }
 
+.resultPreviewGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.resultPreviewCard {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--wplus-line);
+  border-radius: 10px;
+  background: var(--wplus-soft);
+
+  h3 {
+    margin: 0;
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--wplus-line);
+    color: var(--wplus-ink);
+    font-size: 14px;
+  }
+
+  > pre {
+    min-height: 320px;
+    max-height: 520px;
+    margin: 0;
+    padding: 14px;
+    overflow: auto;
+    color: var(--wplus-ink);
+    font-family: var(--console-font-mono, monospace);
+    font-size: 13px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.htmlPreview {
+  display: block;
+  width: 100%;
+  min-height: 348px;
+  border: 0;
+  background: #fff;
+}
+
+.outputReviewActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.memoryCandidateBody {
+  flex: 1;
+}
+
+.memoryCandidateContent {
+  max-height: 240px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border-radius: 8px;
+  background: var(--wplus-soft);
+  color: var(--wplus-ink);
+  font-size: 13px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.memoryEvidence {
+  padding: 12px 14px;
+  border-left: 3px solid var(--wplus-accent);
+  background: var(--wplus-soft);
+
+  span {
+    color: var(--wplus-muted);
+    font-size: 12px;
+  }
+
+  p {
+    margin: 6px 0 0;
+    white-space: pre-wrap;
+  }
+}
+
+.memoryCandidateMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 0 0 10px;
+
+  > div {
+    display: flex;
+    gap: 6px;
+  }
+
+  dt {
+    color: var(--wplus-muted);
+  }
+
+  dd {
+    margin: 0;
+    color: var(--wplus-ink);
+    font-weight: 500;
+  }
+}
+
+.memoryReceipt {
+  display: grid;
+  gap: 3px;
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, var(--wplus-success) 32%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--wplus-success) 7%, transparent);
+
+  code {
+    overflow-wrap: anywhere;
+  }
+
+  small {
+    color: var(--wplus-muted);
+  }
+}
+
+@media (max-width: 900px) {
+  .resultPreviewGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .artifactList button {
   display: flex;
   width: 100%;
@@ -1186,9 +1318,13 @@
   }
 
   .questionMeta {
-    max-width: calc(100% - 24px);
-    margin-right: auto;
-    margin-left: 24px;
+    grid-column: 2;
+    max-width: 100%;
+    margin: 0;
+  }
+
+  .questionLegend {
+    grid-template-columns: 16px minmax(0, 1fr);
   }
 
   .workSection,
