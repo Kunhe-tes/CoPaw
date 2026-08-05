@@ -898,6 +898,7 @@ async def _start_new_chat(
             else None
         ),
     )
+    native_payload["meta"]["chat_id"] = chat.id
     # Inject session_channel from chat record so downstream (e.g. session-end
     # push) can identify the session's original channel (e.g. zhaohu).
     if chat.channel and chat.channel != "console":

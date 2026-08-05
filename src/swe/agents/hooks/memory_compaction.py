@@ -506,6 +506,8 @@ class MemoryCompactionHook:
                 messages,
                 running_config,
             )
+            if not running_config.context_compact.context_compact_enabled:
+                return None
 
             messages_to_compact = await self._get_messages_to_compact(
                 messages,

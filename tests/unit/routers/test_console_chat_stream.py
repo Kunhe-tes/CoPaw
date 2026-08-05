@@ -11,6 +11,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from swe.app.channels.base import ContentType, TextContent
+from swe.app.channels.console.channel import ConsoleChannel
 from src.swe.app.file_manager import FileManagerService
 from src.swe.app.routers import console as console_router
 
@@ -58,6 +60,74 @@ class _FakeTaskTracker:
     async def stream_from_queue(self, _queue, _run_key):
         await asyncio.sleep(0.03)
         yield 'data: {"done": true}\n\n'
+
+
+@pytest.mark.asyncio
+async def test_start_new_chat_propagates_created_chat_id_to_compaction_sse():
+    """A new-chat /compact stream must carry the created chat ID to SSE."""
+
+    class _ChatManager:
+        async def get_or_create_chat(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="chat-created-by-router",
+                channel="console",
+            )
+
+    class _TaskTracker:
+        payload = None
+
+        async def attach_or_start(self, _run_key, payload, _stream_fn):
+            self.payload = payload
+            return object(), True
+
+    async def process(_request):
+        yield SimpleNamespace(
+            object="message",
+            status=None,
+            type="message",
+            output=[],
+            metadata={
+                "conversation_compaction_boundary": {
+                    "id": "boundary-1",
+                    "archived_message_count": 1,
+                },
+            },
+        )
+
+    console_channel = ConsoleChannel(
+        process=process,
+        enabled=True,
+        bot_prefix="Friday",
+    )
+    tracker = _TaskTracker()
+    workspace = SimpleNamespace(
+        agent_id="agent-1",
+        chat_manager=_ChatManager(),
+    )
+    native_payload = {
+        "sender_id": "user-1",
+        "channel_id": "console",
+        "content_parts": [
+            TextContent(type=ContentType.TEXT, text="/compact"),
+        ],
+        "meta": {"session_id": "session-1", "existing": "preserved"},
+    }
+
+    _queue, chat_id, _msgid = await console_router._start_new_chat(
+        workspace,
+        tracker,
+        console_channel,
+        "session-1",
+        native_payload,
+    )
+    events = [
+        event async for event in console_channel.stream_one(tracker.payload)
+    ]
+
+    assert chat_id == "chat-created-by-router"
+    assert tracker.payload["meta"]["chat_id"] == chat_id
+    assert tracker.payload["meta"]["existing"] == "preserved"
+    assert any(f'"chat_id": "{chat_id}"' in event for event in events)
 
 
 def _build_upload_client(monkeypatch, media_dir):
