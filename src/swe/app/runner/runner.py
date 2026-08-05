@@ -4602,8 +4602,27 @@ class AgentRunner(Runner):
 
         if not preflight.approval_consumed and query and _is_command(query):
             logger.info("Command path: %s", query.strip()[:50])
-            async for msg, last in run_command_path(request, msgs, self):
-                yield msg, last
+            trace_id = await self._start_query_trace(request, msgs)
+            try:
+                async for msg, last in run_command_path(request, msgs, self):
+                    yield msg, last
+            except asyncio.CancelledError:
+                await self._end_trace_if_needed(
+                    trace_id,
+                    TraceStatus.CANCELLED,
+                )
+                raise
+            except Exception as exc:
+                await self._end_trace_if_needed(
+                    trace_id,
+                    TraceStatus.ERROR,
+                    str(exc),
+                )
+                raise
+            await self._end_trace_if_needed(
+                trace_id,
+                TraceStatus.COMPLETED,
+            )
             return
 
         async for msg, last in self._stream_query_after_preflight(

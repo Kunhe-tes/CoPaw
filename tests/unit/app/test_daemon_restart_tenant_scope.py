@@ -195,3 +195,68 @@ async def test_run_command_path_passes_chat_id_to_compaction_command(
         "chat_id": chat_id,
         "trace_id": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_run_command_path_returns_readable_error_for_compact_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingCommandHandler:
+        SYSTEM_COMMANDS = {"compact"}
+
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def handle_conversation_command(self, _query: str) -> Msg:
+            raise ValueError("model configuration missing")
+
+    class FakeMemory:
+        def load_state_dict(self, *_args, **_kwargs) -> None:
+            return None
+
+        def state_dict(self) -> dict[str, object]:
+            return {}
+
+    class FakeMemoryManager:
+        def get_in_memory_memory(self, *, chat_id=None):
+            del chat_id
+            return FakeMemory()
+
+    class FakeSession:
+        async def get_session_state_dict(self, **_kwargs):
+            return {}
+
+        async def update_session_state(self, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(
+        command_dispatch,
+        "CommandHandler",
+        FailingCommandHandler,
+    )
+    runner = SimpleNamespace(
+        memory_manager=FakeMemoryManager(),
+        session=FakeSession(),
+        _chat_manager=None,
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    msgs = [SimpleNamespace(get_text_content=lambda: "/compact")]
+
+    results = [
+        item
+        async for item in command_dispatch.run_command_path(
+            request,
+            msgs,
+            runner,
+        )
+    ]
+
+    assert results[0][0].get_text_content() == (
+        "**Command Failed**\n\n"
+        "- `/compact` could not be completed. Please retry or check server logs."
+    )

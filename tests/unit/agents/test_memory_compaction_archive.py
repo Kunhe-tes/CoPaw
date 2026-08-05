@@ -234,8 +234,6 @@ async def test_manual_compact_emits_only_boundary_metadata_for_chat_memory() -> 
         memory_manager=manager,
         request_context={"chat_id": _chat_id()},
     )
-    handler.model = object()
-    handler.formatter = object()
 
     result = await handler._process_compact([_message(1)])
 
