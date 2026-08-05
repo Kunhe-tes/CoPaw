@@ -185,22 +185,26 @@
   gap: 12px;
   min-width: 0;
 
-  strong,
-  span {
-    display: block;
-  }
+  > div {
+    min-width: 0;
 
-  strong {
-    color: #111827;
-    font-size: 14px;
-    font-weight: 600;
-    line-height: 22px;
-  }
+    strong,
+    span {
+      display: block;
+    }
 
-  span {
-    color: #4b5563;
-    font-size: 13px;
-    line-height: 20px;
+    strong {
+      color: #111827;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 22px;
+    }
+
+    span {
+      color: #4b5563;
+      font-size: 13px;
+      line-height: 20px;
+    }
   }
 }
 
@@ -210,21 +214,24 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  position: relative;
   flex: 0 0 auto;
+  overflow: hidden;
   color: #3769fc;
   background: #e7efff;
   border-radius: 50%;
-}
+  line-height: 0;
 
-.analysisSource {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  flex: 0 0 auto;
-  color: #4b5563;
-  font-size: 13px;
-  line-height: 20px;
-  white-space: nowrap;
+  svg {
+    display: block;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    transform: translate(-50%, -50%);
+  }
 }
 
 .analysisResults {
@@ -256,21 +263,37 @@
   background: #ffffff;
 }
 
-.analysisRank {
+.analysisRank,
+.analysisRankGold,
+.analysisRankSilver,
+.analysisRankBronze {
   width: 30px;
   height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #4b5563;
-  background: #f1f5fb;
-  border-radius: 8px;
-  font-weight: 600;
+  border-radius: 50%;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
 }
 
-.analysisRankTop {
+.analysisRank {
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.analysisRankGold {
+  background: #f2b63d;
+}
+
+.analysisRankSilver {
+  background: #6f7f97;
+}
+
+.analysisRankBronze {
   color: #ffffff;
-  background: #f2a33a;
+  background: #bf7b4b;
 }
 
 .analysisTopicContent {
@@ -288,17 +311,19 @@
 
 .analysisQuestions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 4px 18px;
+  flex-direction: column;
+  gap: 4px;
   margin-top: 6px;
   color: #6b7280;
   font-size: 13px;
   line-height: 21px;
 
   span {
-    min-width: 0;
-    max-width: 100%;
-    word-break: break-word;
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
@@ -356,9 +381,5 @@
   .analysisStatusBar {
     align-items: flex-start;
     flex-direction: column;
-  }
-
-  .analysisSource {
-    white-space: normal;
   }
 }

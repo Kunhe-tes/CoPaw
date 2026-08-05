@@ -15,7 +15,7 @@ import {
   Segmented,
   Spin,
 } from "antd";
-import { BarChart3, Clock3, Database, Download, RefreshCw } from "lucide-react";
+import { BarChart3, Clock3, Download, RefreshCw } from "lucide-react";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
 import type { Dayjs } from "dayjs";
@@ -67,6 +67,13 @@ function getPercentClassName(rankNo: number) {
   if (rankNo === 2) return styles.analysisPercentSecond;
   if (rankNo === 3) return styles.analysisPercentThird;
   return styles.analysisPercentDefault;
+}
+
+function getRankClassName(rankNo: number) {
+  if (rankNo === 1) return styles.analysisRankGold;
+  if (rankNo === 2) return styles.analysisRankSilver;
+  if (rankNo === 3) return styles.analysisRankBronze;
+  return styles.analysisRank;
 }
 
 export default function MessagesPage() {
@@ -361,16 +368,6 @@ export default function MessagesPage() {
     ) {
       return (
         <>
-          {analysisResult.state === "AVAILABLE_STALE" && (
-            <Alert
-              className={styles.analysisAlert}
-              type="warning"
-              showIcon
-              message={
-                analysisResult.message || "最近一次更新失败，当前展示历史结果"
-              }
-            />
-          )}
           <div className={styles.analysisStatusBar}>
             <div className={styles.analysisStatusMain}>
               <span className={styles.analysisStatusIcon}>
@@ -384,28 +381,22 @@ export default function MessagesPage() {
                 </span>
               </div>
             </div>
-            <div className={styles.analysisSource}>
-              <Database size={16} />
-              <span>数据来源：{analysisResult.source_id || "-"}</span>
-            </div>
           </div>
           <section className={styles.analysisResults}>
             <h3>高频问题 TOP10</h3>
             <div className={styles.analysisTopicList}>
               {analysisResult.topics.map((topic) => (
                 <article className={styles.analysisTopic} key={topic.rank_no}>
-                  <div
-                    className={`${styles.analysisRank} ${
-                      topic.rank_no <= 3 ? styles.analysisRankTop : ""
-                    }`}
-                  >
+                  <div className={getRankClassName(topic.rank_no)}>
                     {topic.rank_no}
                   </div>
                   <div className={styles.analysisTopicContent}>
                     <strong>{topic.topic_name}</strong>
                     <div className={styles.analysisQuestions}>
                       {topic.sample_questions.slice(0, 3).map((question) => (
-                        <span key={question}>“{question}”</span>
+                        <Tooltip key={question} title={`“${question}”`}>
+                          <span>“{question}”</span>
+                        </Tooltip>
                       ))}
                     </div>
                   </div>
