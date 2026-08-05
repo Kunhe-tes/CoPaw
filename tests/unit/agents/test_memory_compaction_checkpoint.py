@@ -6,6 +6,7 @@ import asyncio
 import pytest
 from agentscope.message import Msg
 
+from swe.agents.hooks.memory_compaction import ContextBudgetDecision
 from swe.agents.hooks.memory_compaction import decide_context_budget
 from swe.agents.hooks.memory_compaction import MemoryCompactionHook
 from swe.agents.memory.chat_checkpoint import CheckpointRecord
@@ -119,6 +120,40 @@ async def test_active_candidate_remeasures_before_one_legacy_fallback() -> (
         [],
         80,
         remeasure,
+    )
+    remeasure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_install_checkpoint_stage_requests_legacy_fallback_when_active() -> (
+    None
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    manager = SimpleNamespace(
+        install_ready_precompaction=AsyncMock(return_value=True),
+    )
+    hook = MemoryCompactionHook(manager)
+    agent = SimpleNamespace(_request_context={"chat_id": "chat-1"})
+    running = SimpleNamespace(
+        max_input_length=100,
+        context_compact=ContextCompactConfig(),
+    )
+    decision = ContextBudgetDecision(80, 0.8, "active", None)
+    remeasure = AsyncMock(return_value=80)
+
+    assert not await hook._install_checkpoint_stage(
+        agent,
+        running,
+        [],
+        "chat-1",
+        decision,
+        remeasure,
+    )
+    manager.install_ready_precompaction.assert_awaited_once_with(
+        chat_id="chat-1",
+        messages=[],
     )
     remeasure.assert_awaited_once()
 

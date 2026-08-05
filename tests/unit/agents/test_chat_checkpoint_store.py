@@ -68,6 +68,21 @@ def _candidate(
     )
 
 
+def test_evidence_query_matches_exact_reference_before_filters(
+    tmp_path: Path,
+) -> None:
+    store = ConversationArchiveStore(tmp_path / "dialog")
+    message = _message(1)
+
+    assert store._matches_evidence_query(
+        message,
+        requested={"message:1"},
+        semantic_query="does not match",
+        kind_filter={"assistant"},
+        time_bounds=None,
+    )
+
+
 @pytest.mark.asyncio
 async def test_commit_checkpoint_archives_messages_and_activates_candidate(
     tmp_path: Path,

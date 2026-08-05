@@ -1560,14 +1560,14 @@ class TestSkillInvocationDetector:
 
         skill1, weights1 = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
         assert skill1 == "fill-metadata"
         assert weights1 == {"fill-metadata": 1.0}
 
         skill2, weights2 = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step2.md"},
+            {"file_path": "skills/fill-metadata/steps/step2.md"},
         )
         assert skill2 == "fill-metadata"
         assert weights2 == {"fill-metadata": 1.0}
@@ -1613,7 +1613,7 @@ class TestSkillInvocationDetector:
 
         skill, weights = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
 
         assert skill == "fill-metadata"
@@ -1665,7 +1665,7 @@ class TestSkillInvocationDetector:
         )
         related_skill, related_weights = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
 
         assert unrelated_skill is None
@@ -1692,7 +1692,7 @@ class TestSkillInvocationDetector:
 
         skill, weights = await detector.on_tool_call(
             "read_file",
-            {"payload": {"paths": ["steps/step1.md"]}},
+            {"payload": {"paths": ["skills/fill-metadata/steps/step1.md"]}},
         )
 
         assert skill == "fill-metadata"
@@ -1725,7 +1725,7 @@ class TestSkillInvocationDetector:
         )
         related_skill, related_weights = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
 
         assert unrelated_skill is None
@@ -1756,7 +1756,7 @@ class TestSkillInvocationDetector:
         )
         related_skill, related_weights = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
 
         assert unrelated_skill is None
@@ -1906,6 +1906,54 @@ class TestSkillInvocationDetector:
         assert skill == "sample"
         assert weights == {"sample": 1.0}
         loader.assert_awaited_once_with("sample")
+
+    @pytest.mark.asyncio
+    async def test_reading_workspace_relative_skill_md_loads_hooks(
+        self,
+        tmp_path,
+    ):
+        """read_file 的 workspace 相对 SKILL.md 路径应被正确归因。"""
+        skill_root = tmp_path / "skills" / "sample"
+        skill_root.mkdir(parents=True)
+        (skill_root / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+        loader = AsyncMock()
+        detector = SkillInvocationDetector(
+            workspace_dir=tmp_path,
+            skill_hook_loader=loader,
+        )
+        detector.set_enabled_skills(["sample"])
+
+        skill, weights = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "skills/sample/SKILL.md"},
+        )
+
+        assert skill == "sample"
+        assert weights == {"sample": 1.0}
+        loader.assert_awaited_once_with("sample")
+
+    @pytest.mark.asyncio
+    async def test_bare_relative_asset_name_does_not_attribute_skill(
+        self,
+        tmp_path,
+    ):
+        """普通命令中的裸相对脚本名不能证明它属于某个 skill。"""
+        skill_root = tmp_path / "skills" / "sample"
+        skill_root.mkdir(parents=True)
+        (skill_root / "run.py").write_text(
+            "print('sample')\n",
+            encoding="utf-8",
+        )
+        detector = SkillInvocationDetector(workspace_dir=tmp_path)
+        detector.set_enabled_skills(["sample"])
+
+        skill, weights = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python run.py"},
+        )
+
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_skill_asset_path_cannot_escape_the_skill_directory(

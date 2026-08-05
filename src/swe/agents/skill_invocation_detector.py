@@ -545,6 +545,7 @@ class SkillInvocationDetector:
         if direct_path and self._matches_skill_asset_candidate(
             direct_path,
             skill_dirs,
+            workspace_dir=self._workspace_dir,
         ):
             return True
 
@@ -552,7 +553,11 @@ class SkillInvocationDetector:
             normalized = self._normalize_candidate_path(token)
             if not normalized:
                 continue
-            if self._matches_skill_asset_candidate(normalized, skill_dirs):
+            if self._matches_skill_asset_candidate(
+                normalized,
+                skill_dirs,
+                workspace_dir=self._workspace_dir,
+            ):
                 return True
         return False
 
@@ -573,6 +578,8 @@ class SkillInvocationDetector:
     def _matches_skill_asset_candidate(
         candidate: str,
         skill_dirs: list[Path],
+        *,
+        workspace_dir: Optional[Path] = None,
     ) -> bool:
         """判断候选路径是否解析到 skill 目录内的真实资产。"""
         candidate_path = Path(candidate)
@@ -581,13 +588,16 @@ class SkillInvocationDetector:
                 continue
             try:
                 resolved_skill_dir = skill_dir.resolve(strict=True)
-                resolved_candidate = (
-                    candidate_path.resolve(strict=True)
-                    if candidate_path.is_absolute()
-                    else (resolved_skill_dir / candidate_path).resolve(
+                if candidate_path.is_absolute():
+                    resolved_candidate = candidate_path.resolve(strict=True)
+                elif workspace_dir is not None:
+                    resolved_candidate = (
+                        workspace_dir / candidate_path
+                    ).resolve(
                         strict=True,
                     )
-                )
+                else:
+                    continue
                 resolved_candidate.relative_to(resolved_skill_dir)
             except (OSError, ValueError):
                 continue
@@ -1276,6 +1286,9 @@ class SkillInvocationDetector:
         path = Path(file_path)
         if path.name != "SKILL.md":
             return None
+
+        if self._workspace_dir and not path.is_absolute():
+            path = self._workspace_dir / path
 
         skill_name = path.parent.name
         if skill_name not in self._enabled_skills:

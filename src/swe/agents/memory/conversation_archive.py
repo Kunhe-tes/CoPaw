@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import cache
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Collection, Sequence
 
 import fcntl
 
@@ -219,6 +219,16 @@ class CheckpointCommitResult:
 
     boundary: ConversationArchiveBoundary
     record: CheckpointRecord
+
+
+@dataclass(frozen=True)
+class _EvidenceRecoveryQuery:
+    """Normalized selectors used while scanning one archive epoch."""
+
+    requested: frozenset[str]
+    semantic_query: str
+    kind_filter: frozenset[str]
+    time_bounds: tuple[datetime, datetime] | None
 
 
 class ConversationArchiveStore:
@@ -730,82 +740,143 @@ class ConversationArchiveStore:
         if limit <= 0:
             return []
         limit = min(limit, 10)
-        requested = {str(ref) for ref in refs if str(ref)}
-        semantic_query = query.strip().casefold() if query else ""
-        kind_filter = {
-            str(kind).strip().casefold()
-            for kind in (kinds or ())
-            if str(kind).strip()
-        }
-        time_bounds = self._parse_evidence_time_range(time_range)
+        recovery_query = self._prepare_evidence_query(
+            refs,
+            query,
+            kinds,
+            time_range,
+        )
         with self._chat_lock(canonical_chat_id):
             state = self._read_checkpoint_state_locked(canonical_chat_id)
             if epoch != state.current_epoch:
                 return []
-            if not requested and not semantic_query:
+            if (
+                not recovery_query.requested
+                and not recovery_query.semantic_query
+            ):
                 return []
             chat_dir = self.path_for(canonical_chat_id)
-            recovered: list[Msg] = []
             manifest = self._read_manifest(chat_dir / _MANIFEST_NAME)
             evidence_epochs_path = self._evidence_epochs_path(chat_dir)
             evidence_epochs = self._read_evidence_epochs(chat_dir)
             is_legacy_epoch_one = (
                 not evidence_epochs_path.exists() and state.current_epoch == 1
             )
-            for boundary in self._visible_boundaries(
+            return self._collect_recovered_evidence(
+                chat_dir,
                 manifest,
                 canonical_chat_id,
-            ):
-                for message_index, message in enumerate(
-                    self._read_batch(
-                        chat_dir / f"{boundary.id}.jsonl",
-                    ),
+                epoch,
+                evidence_epochs,
+                is_legacy_epoch_one,
+                recovery_query,
+                limit,
+            )
+
+    def _prepare_evidence_query(
+        self,
+        refs: Sequence[str],
+        query: str | None,
+        kinds: Sequence[str] | None,
+        time_range: str | None,
+    ) -> _EvidenceRecoveryQuery:
+        """Normalize selectors without changing their precedence rules."""
+        return _EvidenceRecoveryQuery(
+            requested=frozenset(str(ref) for ref in refs if str(ref)),
+            semantic_query=query.strip().casefold() if query else "",
+            kind_filter=frozenset(
+                str(kind).strip().casefold()
+                for kind in (kinds or ())
+                if str(kind).strip()
+            ),
+            time_bounds=self._parse_evidence_time_range(time_range),
+        )
+
+    def _collect_recovered_evidence(
+        self,
+        chat_dir: Path,
+        manifest: dict[str, Any],
+        chat_id: str,
+        epoch: int,
+        evidence_epochs: dict[str, int],
+        is_legacy_epoch_one: bool,
+        recovery_query: _EvidenceRecoveryQuery,
+        limit: int,
+    ) -> list[Msg]:
+        """Scan visible batches and return matching bounded evidence."""
+        recovered: list[Msg] = []
+        for boundary in self._visible_boundaries(manifest, chat_id):
+            messages = self._read_batch(chat_dir / f"{boundary.id}.jsonl")
+            for message_index, message in enumerate(messages):
+                if message is None:
+                    continue
+                evidence_epoch = self._message_epoch_for_recovery(
+                    boundary.id,
+                    message_index,
+                    message,
+                    evidence_epochs,
+                    is_legacy_epoch_one,
+                )
+                if evidence_epoch != epoch:
+                    continue
+                if not self._matches_evidence_query(
+                    message,
+                    requested=recovery_query.requested,
+                    semantic_query=recovery_query.semantic_query,
+                    kind_filter=recovery_query.kind_filter,
+                    time_bounds=recovery_query.time_bounds,
                 ):
-                    if message is None:
-                        continue
-                    evidence_epoch = evidence_epochs.get(
-                        self._evidence_epoch_key(
-                            boundary.id,
-                            message_index,
-                            message.id,
-                        ),
-                    )
-                    if evidence_epoch is None and is_legacy_epoch_one:
-                        evidence_epoch = 1
-                    if evidence_epoch != epoch:
-                        continue
-                    has_exact_ref = any(
-                        message.id in (ref, ref.partition(":")[2])
-                        for ref in requested
-                    )
-                    if requested and not has_exact_ref:
-                        continue
-                    if not requested and semantic_query:
-                        content = message.get_text_content() or ""
-                        if semantic_query not in content.casefold():
-                            continue
-                    if (
-                        not requested
-                        and kind_filter
-                        and not (
-                            str(message.role).casefold() in kind_filter
-                            or str(message.name).casefold() in kind_filter
-                        )
-                    ):
-                        continue
-                    if (
-                        not requested
-                        and time_bounds
-                        and not self._message_in_time_range(
-                            message,
-                            time_bounds,
-                        )
-                    ):
-                        continue
-                    recovered.append(message)
-                    if len(recovered) >= limit:
-                        return recovered
-            return recovered
+                    continue
+                recovered.append(message)
+                if len(recovered) >= limit:
+                    return recovered
+        return recovered
+
+    def _message_epoch_for_recovery(
+        self,
+        boundary_id: str,
+        message_index: int,
+        message: Msg,
+        evidence_epochs: dict[str, int],
+        is_legacy_epoch_one: bool,
+    ) -> int | None:
+        """Resolve persisted epoch metadata with the legacy epoch-one fallback."""
+        evidence_epoch = evidence_epochs.get(
+            self._evidence_epoch_key(boundary_id, message_index, message.id),
+        )
+        if evidence_epoch is None and is_legacy_epoch_one:
+            return 1
+        return evidence_epoch
+
+    def _matches_evidence_query(
+        self,
+        message: Msg,
+        *,
+        requested: Collection[str],
+        semantic_query: str,
+        kind_filter: Collection[str],
+        time_bounds: tuple[datetime, datetime] | None,
+    ) -> bool:
+        """Match exact references or the bounded semantic evidence selectors."""
+        if requested:
+            return any(
+                message.id in (ref, ref.partition(":")[2]) for ref in requested
+            )
+        if semantic_query:
+            content = message.get_text_content() or ""
+            if semantic_query not in content.casefold():
+                return False
+        if kind_filter and not (
+            str(message.role).casefold() in kind_filter
+            or str(message.name).casefold() in kind_filter
+        ):
+            return False
+        if time_bounds and not self._message_in_time_range(
+            message,
+            time_bounds,
+        ):
+            return False
+        return True
 
     @staticmethod
     def _parse_evidence_time_range(
