@@ -20,7 +20,7 @@ from pathlib import Path
 import shlex
 import time
 import uuid as _uuid
-from typing import Any, Literal
+from typing import Any, Literal, NoReturn
 
 from agentscope.message import Msg, ToolResultBlock
 
@@ -28,10 +28,6 @@ from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
 from ..app.runner.tool_output_frames import tool_output_invocation
 from .hook_runtime import HookRuntime
 from .hook_runtime.conversation_snapshot import capture_conversation_snapshot
-from .hook_runtime.messages import (
-    HOOK_ADDITIONAL_CONTEXT_PREFIX,
-    build_hook_additional_context_msg,
-)
 from .hook_runtime.models import (
     HookConfig,
     HookContext,
@@ -86,6 +82,22 @@ _TOOLS_WITH_SPECIFIC_TIMEOUTS = {
     "grep_search",
     "glob_search",
 }
+_PLAN_MODE_ALLOWED_TOOLS = frozenset(
+    {
+        "execute_shell_command",
+        "read_file",
+        "grep_search",
+        "glob_search",
+        "get_current_time",
+        "memory_search",
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+        "start_subagent",
+        "wait_subagent",
+        "get_subagent",
+        "cancel_subagent",
+    },
+)
 _PLAN_INTERACTION_TOOL_NAMES = frozenset(
     {
         "ask_plan_clarification",
@@ -103,24 +115,6 @@ PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY = (
 _PLAN_INTERACTION_TURN_BOUNDARY_ATTR = (
     "_plan_interaction_turn_boundary_reached"
 )
-_APPROVAL_KIND_TOOL_GUARD = "tool_guard"
-_APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
-_PLAN_MODE_ALLOWED_TOOLS = frozenset(
-    {
-        "execute_shell_command",
-        "read_file",
-        "grep_search",
-        "glob_search",
-        "get_current_time",
-        "memory_search",
-        "ask_plan_clarification",
-        "submit_proposed_plan",
-        "start_subagent",
-        "wait_subagent",
-        "get_subagent",
-        "cancel_subagent",
-    },
-)
 _PLAN_MODE_SHELL_META_CHARS = frozenset((";", "|", ">", "<", "&", "`", "$"))
 _PLAN_MODE_GIT_READONLY_SUBCOMMANDS = frozenset(
     ("status", "diff", "grep", "log", "show"),
@@ -128,18 +122,17 @@ _PLAN_MODE_GIT_READONLY_SUBCOMMANDS = frozenset(
 _PLAN_MODE_DENIED_GIT_OPTIONS = frozenset(
     ("--output", "--ext-diff", "--textconv", "-O", "--open-files-in-pager"),
 )
-_PLAN_MODE_DENIED_READONLY_OPTIONS = frozenset(
-    ("--pre",),
-)
+_PLAN_MODE_DENIED_READONLY_OPTIONS = frozenset(("--pre",))
+_APPROVAL_KIND_TOOL_GUARD = "tool_guard"
+_APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
+_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
 
 
 def _has_plan_mode_shell_structure(command: str) -> bool:
-    """识别 shell 复合语法，Plan Mode 下不尝试证明其只读性。"""
     return any(char in command for char in _PLAN_MODE_SHELL_META_CHARS)
 
 
 def _looks_like_env_assignment(token: str) -> bool:
-    """识别 `A=1 cmd` 这类会改变执行环境的 shell 前缀。"""
     name, separator, _value = token.partition("=")
     return bool(separator and name and name.replace("_", "").isalnum())
 
@@ -148,17 +141,14 @@ def _has_denied_option(
     args: list[str],
     denied_options: frozenset[str],
 ) -> bool:
-    """同时覆盖 `--flag value` 与 `--flag=value` 两类写法。"""
-    for arg in args:
-        if arg in denied_options:
-            return True
-        if any(arg.startswith(f"{option}=") for option in denied_options):
-            return True
-    return False
+    return any(
+        arg in denied_options
+        or any(arg.startswith(f"{option}=") for option in denied_options)
+        for arg in args
+    )
 
 
 def _validate_plan_mode_git(tokens: list[str]) -> str | None:
-    """校验 git 子命令和参数是否保持只读。"""
     if len(tokens) < 2:
         return "git command requires a readonly subcommand"
     subcommand = tokens[1]
@@ -172,7 +162,6 @@ def _validate_plan_mode_git(tokens: list[str]) -> str | None:
 
 
 def _validate_plan_mode_readonly_shell(command: str) -> str | None:
-    """对 Plan Mode shell 命令做保守的只读白名单校验。"""
     if not command:
         return "empty shell command"
     if _has_plan_mode_shell_structure(command):
@@ -185,20 +174,23 @@ def _validate_plan_mode_readonly_shell(command: str) -> str | None:
         return "empty shell command"
     if _looks_like_env_assignment(tokens[0]):
         return "environment assignments are unavailable in Plan Mode"
-
-    executable = tokens[0]
-    if executable in {"pwd", "ls"}:
+    if tokens[0] in {"pwd", "ls"}:
         return None
-    if executable in {"rg", "grep"}:
+    if tokens[0] in {"rg", "grep"}:
         if _has_denied_option(tokens[1:], _PLAN_MODE_DENIED_READONLY_OPTIONS):
             return "search command option may execute external helpers"
         return None
-    if executable == "git":
+    if tokens[0] == "git":
         return _validate_plan_mode_git(tokens)
     return "shell command is not in the Plan Mode readonly allowlist"
 
 
-_PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
+class PreToolUseTerminalStop(Exception):
+    """Signal that a PreToolUse hook terminated the current agent turn."""
+
+    def __init__(self, reason: str | None = None) -> None:
+        self.reason = reason or "Hook requested stop"
+        super().__init__(self.reason)
 
 
 class _GuardAction:
@@ -241,10 +233,42 @@ class ToolGuardMixin:
         self._tool_guard_approval_service = get_approval_service()
         self._tool_guard_pending_info: dict | None = None
         self._tool_guard_lock = asyncio.Lock()
+        self._pre_tool_terminal_stop_reason: str | None = None
+        self._active_tool_guard_acting_tasks: set[asyncio.Task[Any]] = set()
 
     def _ensure_tool_guard(self) -> None:
         if not hasattr(self, "_tool_guard_engine"):
             self._init_tool_guard()
+
+    def _ensure_pre_tool_terminal_stop_tracking(self) -> None:
+        if not hasattr(self, "_pre_tool_terminal_stop_reason"):
+            self._pre_tool_terminal_stop_reason = None
+        if not hasattr(self, "_active_tool_guard_acting_tasks"):
+            self._active_tool_guard_acting_tasks = set()
+
+    def consume_pre_tool_terminal_stop(self) -> str | None:
+        """Return and clear the terminal stop state for the completed turn."""
+        self._ensure_pre_tool_terminal_stop_tracking()
+        reason = self._pre_tool_terminal_stop_reason
+        self._pre_tool_terminal_stop_reason = None
+        return reason
+
+    def reset_pre_tool_terminal_stop(self) -> None:
+        """Clear terminal stop state before beginning a new agent turn."""
+        self.consume_pre_tool_terminal_stop()
+
+    def _raise_if_pre_tool_terminal_stop_requested(self) -> None:
+        self._ensure_pre_tool_terminal_stop_tracking()
+        if self._pre_tool_terminal_stop_reason is not None:
+            raise PreToolUseTerminalStop(self._pre_tool_terminal_stop_reason)
+
+    def _request_pre_tool_terminal_stop(self, reason: str) -> None:
+        self._ensure_pre_tool_terminal_stop_tracking()
+        self._pre_tool_terminal_stop_reason = reason
+        stopping_task = asyncio.current_task()
+        for task in tuple(self._active_tool_guard_acting_tasks):
+            if task is not stopping_task and not task.done():
+                task.cancel()
 
     # ------------------------------------------------------------------
     # Helpers
@@ -278,7 +302,7 @@ class ToolGuardMixin:
         tool_call: dict[str, Any],
         tool_name: str,
     ) -> dict | None:
-        """执行计划交互工具并保留卡片 metadata。"""
+        """Execute a plan interaction and preserve its card metadata."""
         tool_res_msg = Msg(
             "system",
             [
@@ -599,8 +623,11 @@ class ToolGuardMixin:
         return result
 
     async def _get_pending_info_for_display(self) -> dict[str, Any]:
-        """Return pending tool info aligned with approval queue head."""
+        """Return pending tool info for the current waiting card."""
         fallback = getattr(self, "_tool_guard_pending_info", None) or {}
+        if fallback.get("request_id"):
+            return fallback
+
         session_id = str(self._request_context.get("session_id") or "")
         if not session_id:
             return fallback
@@ -1213,125 +1240,75 @@ class ToolGuardMixin:
         await self.memory.add(tool_res_msg)
         return None
 
-    async def _acting_subagent_policy_denied(
+    async def _acting_hook_stopped(
         self,
         tool_call: dict[str, Any],
         tool_name: str,
         reason: str,
-    ) -> dict | None:
-        """Return a tool result for hard SubAgent policy denial."""
-        denied_text = (
-            f"Tool `{tool_name}` blocked by SubAgent policy.\n"
-            f"{reason or 'SubAgent policy denied tool execution.'}"
+    ) -> None:
+        stopped_text = (
+            f"Tool `{tool_name}` stopped by hook runtime.\n" f"{reason}"
         )
         tool_res_msg = Msg(
             "system",
             [
                 ToolResultBlock(
-                    type="tool_result",
-                    id=tool_call["id"],
-                    name=tool_name,
-                    output=[{"type": "text", "text": denied_text}],
+                    **build_failed_tool_result_block(
+                        tool_call_id=tool_call["id"],
+                        tool_name=tool_name,
+                        error_type="hook_stopped",
+                        detail=stopped_text,
+                    ),
                 ),
             ],
             "system",
         )
         await self.print(tool_res_msg, True)
         await self.memory.add(tool_res_msg)
-        return None
 
-    async def _acting_plan_mode_policy_denied(
+    async def _stop_pre_tool_hook(
         self,
         tool_call: dict[str, Any],
         tool_name: str,
         reason: str,
-    ) -> dict | None:
-        """Return a tool result for hard Plan Mode policy denial."""
-        denied_text = (
-            f"Tool `{tool_name}` blocked by Plan Mode policy.\n"
-            f"{reason or 'Plan Mode allows planning and readonly tools only.'}"
-        )
-        tool_res_msg = Msg(
-            "system",
-            [
-                ToolResultBlock(
-                    type="tool_result",
-                    id=tool_call["id"],
-                    name=tool_name,
-                    output=[{"type": "text", "text": denied_text}],
-                ),
-            ],
-            "system",
-        )
-        await self.print(tool_res_msg, True)
-        await self.memory.add(tool_res_msg)
-        return None
+    ) -> NoReturn:
+        """Record a terminal pre-tool stop and cancel peer tool calls."""
+        await self._acting_hook_stopped(tool_call, tool_name, reason)
+        self._request_pre_tool_terminal_stop(reason)
+        raise PreToolUseTerminalStop(reason)
 
-    def _plan_mode_policy_denial(
+    async def _stop_post_tool_hook(self, reason: str) -> NoReturn:
+        """End the turn after a post-tool hook without altering its result."""
+        reason = reason or "Hook requested stop"
+        self._discard_forced_tool_replay()
+        self._request_pre_tool_terminal_stop(reason)
+        raise PreToolUseTerminalStop(reason)
+
+    async def _handle_post_tool_use(
         self,
+        *,
+        span_id: str,
         tool_name: str,
         tool_input: dict[str, Any],
-    ) -> str | None:
-        """Return denial reason if Main Agent Plan Mode forbids a call."""
-        request_context = getattr(self, "_request_context", {}) or {}
-        if request_context.get(
-            "agent_role",
-            "main",
-        ) == "subagent" or not request_context.get("plan_mode_enabled"):
-            return None
-        if tool_name not in _PLAN_MODE_ALLOWED_TOOLS:
-            return "tool is unavailable while Plan Mode is active"
-        if tool_name != "execute_shell_command":
-            return None
-
-        command = str(tool_input.get("command") or "").strip()
-        return _validate_plan_mode_readonly_shell(command)
-
-    def _subagent_policy_denial(
-        self,
-        tool_name: str,
-        tool_input: dict[str, Any],
-    ) -> str | None:
-        """Return denial reason if a SubAgent tool call violates hard policy."""
-        request_context = getattr(self, "_request_context", {}) or {}
-        if request_context.get("agent_role") != "subagent":
-            return None
-        policy_payload = request_context.get("subagent_policy")
-        if not isinstance(policy_payload, dict):
-            return "missing SubAgent effective policy"
-        try:
-            from swe.app.subagents import PermissionPolicy, validate_tool_call
-
-            policy = PermissionPolicy.model_validate(policy_payload)
-            decision = validate_tool_call(policy, tool_name, tool_input)
-        except Exception as exc:
-            return f"invalid SubAgent effective policy: {exc}"
-        if decision.allowed:
-            return None
-        return decision.reason
-
-    def _subagent_budget_denial(self) -> str | None:
-        """Consume one SubAgent tool-call budget slot or return denial."""
-        request_context = getattr(self, "_request_context", {}) or {}
-        if request_context.get("agent_role") != "subagent":
-            return None
-        budget = request_context.get("subagent_budget")
-        if not isinstance(budget, dict):
-            return None
-        try:
-            max_tool_calls = int(budget.get("max_tool_calls") or 0)
-            used = int(request_context.get("_subagent_tool_calls_used") or 0)
-        except (TypeError, ValueError):
-            return "invalid SubAgent tool-call budget"
-        if max_tool_calls <= 0:
-            return None
-        if used >= max_tool_calls:
-            return (
-                "SubAgent tool-call budget exceeded "
-                f"({used}/{max_tool_calls})."
-            )
-        request_context["_subagent_tool_calls_used"] = used + 1
-        return None
+        tool_use_id: str,
+        tool_response: dict | str | None,
+        trace_tool_output: dict | str | None,
+    ) -> None:
+        """Record the post-tool hook, trace its outcome, then stop if asked."""
+        post_hook_result = await self._emit_tool_hook(
+            HookEventName.POST_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=tool_use_id,
+            tool_response=tool_response,
+        )
+        await self._record_tool_hook_result(
+            post_hook_result,
+            event_name=HookEventName.POST_TOOL_USE,
+        )
+        await self._emit_tool_trace_end(span_id, trace_tool_output)
+        if post_hook_result.decision == HookDecision.STOP:
+            await self._stop_post_tool_hook(post_hook_result.reason)
 
     async def _record_tool_hook_result(
         self,
@@ -1347,8 +1324,10 @@ class ToolGuardMixin:
             lines.append(f"[{event_name.value}] {result.reason}")
         if not lines:
             return
-        msg = build_hook_additional_context_msg(
-            f"{HOOK_ADDITIONAL_CONTEXT_PREFIX}\n" + "\n".join(lines),
+        msg = Msg(
+            "system",
+            "[Hook additional context]\n" + "\n".join(lines),
+            "system",
         )
         await self.memory.add(msg)
 
@@ -1382,48 +1361,177 @@ class ToolGuardMixin:
             guardians_used=["unified_hook_runtime"],
         )
 
+    async def _acting(self, tool_call) -> dict | None:
+        """Track an active tool call and stop peers after a terminal hook."""
+        self._ensure_pre_tool_terminal_stop_tracking()
+        self._raise_if_pre_tool_terminal_stop_requested()
+        task = asyncio.current_task()
+        if task is None:
+            return await self._acting_impl(tool_call)
+        self._active_tool_guard_acting_tasks.add(task)
+        try:
+            return await self._acting_impl(tool_call)
+        finally:
+            self._active_tool_guard_acting_tasks.discard(task)
+
     async def _acting_policy_denial(
         self,
-        tool_call,
+        tool_call: dict[str, Any],
         tool_name: str,
         tool_input: dict[str, Any],
         *,
         include_budget: bool,
     ) -> bool:
-        plan_mode_denial = self._plan_mode_policy_denial(
-            tool_name,
-            tool_input,
-        )
-        if plan_mode_denial is not None:
-            await self._acting_plan_mode_policy_denied(
-                tool_call,
-                tool_name,
-                plan_mode_denial,
-            )
-            return True
+        """Enforce Plan Mode and SubAgent policy before executing a tool."""
+        request_context = getattr(self, "_request_context", {}) or {}
+        agent_role = request_context.get("agent_role", "main")
+        reason: str | None = None
+        if agent_role != "subagent":
+            reason = self._plan_mode_policy_denial(tool_name, tool_input)
+        elif agent_role == "subagent":
+            policy_payload = request_context.get("subagent_policy")
+            if not isinstance(policy_payload, dict):
+                reason = "missing SubAgent effective policy"
+            else:
+                try:
+                    from swe.app.subagents import (
+                        PermissionPolicy,
+                        validate_tool_call,
+                    )
 
-        subagent_denial = self._subagent_policy_denial(tool_name, tool_input)
-        if subagent_denial is not None:
-            await self._acting_subagent_policy_denied(
-                tool_call,
-                tool_name,
-                subagent_denial,
-            )
-            return True
-        if not include_budget:
+                    decision = validate_tool_call(
+                        PermissionPolicy.model_validate(policy_payload),
+                        tool_name,
+                        tool_input,
+                    )
+                    if not decision.allowed:
+                        reason = decision.reason
+                except Exception as exc:
+                    reason = f"invalid SubAgent effective policy: {exc}"
+            if reason is None and include_budget:
+                budget = request_context.get("subagent_budget")
+                if isinstance(budget, dict):
+                    try:
+                        maximum = int(budget.get("max_tool_calls") or 0)
+                        used = int(
+                            request_context.get("_subagent_tool_calls_used")
+                            or 0,
+                        )
+                    except (TypeError, ValueError):
+                        reason = "invalid SubAgent tool-call budget"
+                    else:
+                        if used >= maximum > 0:
+                            reason = (
+                                "SubAgent tool-call budget exceeded "
+                                f"({used}/{maximum})."
+                            )
+                        elif maximum > 0:
+                            request_context["_subagent_tool_calls_used"] = (
+                                used + 1
+                            )
+        if reason is None:
             return False
+        denied_text = (
+            f"Tool `{tool_name}` blocked by "
+            f"{'SubAgent' if agent_role == 'subagent' else 'Plan Mode'} policy.\n"
+            f"{reason}"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_name,
+                    output=[{"type": "text", "text": denied_text}],
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+        return True
 
-        subagent_budget_denial = self._subagent_budget_denial()
-        if subagent_budget_denial is not None:
-            await self._acting_subagent_policy_denied(
+    def _plan_mode_policy_denial(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> str | None:
+        request_context = getattr(self, "_request_context", {}) or {}
+        if not request_context.get("plan_mode_enabled"):
+            return None
+        if tool_name not in _PLAN_MODE_ALLOWED_TOOLS:
+            return "tool is unavailable while Plan Mode is active"
+        if tool_name != "execute_shell_command":
+            return None
+        return _validate_plan_mode_readonly_shell(
+            str(tool_input.get("command") or "").strip(),
+        )
+
+    async def _apply_pre_tool_hook(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any], bool, dict | None]:
+        """Run the pre-tool hook and return an early response if it decides."""
+        pre_hook_result = await self._emit_tool_hook(
+            HookEventName.PRE_TOOL_USE,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            tool_use_id=str(tool_call.get("id") or ""),
+        )
+        if pre_hook_result.updated_input is not None:
+            tool_call = dict(tool_call)
+            tool_call["input"] = pre_hook_result.updated_input
+            tool_input = pre_hook_result.updated_input
+        if pre_hook_result.decision == HookDecision.STOP:
+            await self._stop_pre_tool_hook(
                 tool_call,
                 tool_name,
-                subagent_budget_denial,
+                pre_hook_result.reason or "Hook requested stop",
             )
-            return True
-        return False
+        if pre_hook_result.decision in {
+            HookDecision.BLOCK,
+            HookDecision.DENY,
+        }:
+            result = await self._acting_hook_denied(
+                tool_call,
+                tool_name,
+                pre_hook_result.reason,
+            )
+            return tool_call, tool_input, True, result
+        if (
+            pre_hook_result.decision == HookDecision.ASK
+            and not self._approved_hook_ask_replay_matches(
+                tool_call,
+                tool_name,
+                tool_input,
+                pre_hook_result,
+            )
+        ):
+            result = await self._acting_with_approval(
+                tool_call,
+                tool_name,
+                self._hook_guard_result(
+                    tool_name,
+                    tool_input,
+                    pre_hook_result.reason,
+                ),
+                approval_kind=_APPROVAL_KIND_HOOK_PRE_TOOL_USE,
+                hook_ask_handler_ids=self._hook_ask_handler_ids(
+                    pre_hook_result,
+                ),
+            )
+            return tool_call, tool_input, True, result
+        if pre_hook_result.decision == HookDecision.ASK:
+            await self._record_tool_hook_result(
+                pre_hook_result,
+                event_name=HookEventName.PRE_TOOL_USE,
+            )
+        return tool_call, tool_input, False, None
 
-    async def _acting(self, tool_call) -> dict | None:  # noqa: C901
+    async def _acting_impl(self, tool_call) -> dict | None:
         """Intercept sensitive tool calls before execution.
 
         1. If tool is in *denied_tools*, auto-deny unconditionally.
@@ -1449,68 +1557,29 @@ class ToolGuardMixin:
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
 
-        policy_denied = await self._acting_policy_denial(
+        if await self._acting_policy_denial(
             tool_call,
             tool_name,
             tool_input,
             include_budget=True,
-        )
-        if policy_denied:
+        ):
             return None
 
-        pre_hook_result = await self._emit_tool_hook(
-            HookEventName.PRE_TOOL_USE,
-            tool_name=tool_name,
-            tool_input=tool_input,
-            tool_use_id=str(tool_call.get("id") or ""),
-        )
-        if pre_hook_result.updated_input is not None:
-            tool_call = dict(tool_call)
-            tool_call["input"] = pre_hook_result.updated_input
-            tool_input = pre_hook_result.updated_input
-            policy_denied = await self._acting_policy_denial(
-                tool_call,
-                tool_name,
-                tool_input,
-                include_budget=False,
-            )
-            if policy_denied:
-                return None
-        if pre_hook_result.decision in {
-            HookDecision.BLOCK,
-            HookDecision.DENY,
-            HookDecision.STOP,
-        }:
-            return await self._acting_hook_denied(
-                tool_call,
-                tool_name,
-                pre_hook_result.reason,
-            )
-        if pre_hook_result.decision == HookDecision.ASK:
-            if self._approved_hook_ask_replay_matches(
-                tool_call,
-                tool_name,
-                tool_input,
-                pre_hook_result,
-            ):
-                await self._record_tool_hook_result(
-                    pre_hook_result,
-                    event_name=HookEventName.PRE_TOOL_USE,
-                )
-            else:
-                return await self._acting_with_approval(
-                    tool_call,
-                    tool_name,
-                    self._hook_guard_result(
-                        tool_name,
-                        tool_input,
-                        pre_hook_result.reason,
-                    ),
-                    approval_kind=_APPROVAL_KIND_HOOK_PRE_TOOL_USE,
-                    hook_ask_handler_ids=self._hook_ask_handler_ids(
-                        pre_hook_result,
-                    ),
-                )
+        (
+            tool_call,
+            tool_input,
+            hook_handled,
+            hook_result,
+        ) = await self._apply_pre_tool_hook(tool_call, tool_name, tool_input)
+        if hook_handled:
+            return hook_result
+        if await self._acting_policy_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+            include_budget=False,
+        ):
+            return None
 
         await self._notify_skill_detector_tool_call(
             tool_name,
@@ -1527,6 +1596,7 @@ class ToolGuardMixin:
         )
 
         action: _GuardAction | None = None
+        guard_check_failed = False
         with self._agent_phase_context(
             "tool_guard",
             tool_name=tool_name,
@@ -1538,58 +1608,77 @@ class ToolGuardMixin:
                     action = await self._decide_guard_action(tool_call)
                 except Exception as exc:
                     logger.warning(
-                        "Tool guard check error (non-blocking): %s",
+                        "Tool guard check error; denying tool execution: %s",
                         exc,
                         exc_info=True,
                     )
+                    guard_check_failed = True
 
-        if action is not None:
+        if guard_check_failed:
+            result = await self._acting_hook_denied(
+                tool_call,
+                tool_name,
+                "Tool guard check failed; execution was denied.",
+            )
+            await self._emit_tool_trace_end(span_id, result)
+            return result
+
+        if action is not None and action.kind != "preapproved":
             result = await self._execute_guard_action(action, tool_call)
             await self._emit_tool_trace_end(span_id, result)
             return result
 
+        return await self._run_guarded_tool_call(
+            action,
+            tool_call,
+            tool_name,
+            tool_input,
+            span_id,
+        )
+
+    async def _run_guarded_tool_call(
+        self,
+        action: "_GuardAction | None",
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        span_id: str,
+    ) -> dict | None:
+        """Execute a permitted tool call and emit its terminal hook events."""
         try:
-            result = await self._run_tool_call_with_hard_timeout(
+            self._raise_if_pre_tool_terminal_stop_requested()
+            result = await self._execute_guard_action_or_tool_call(
+                action,
                 tool_call,
                 tool_name,
                 tool_input,
             )
             tool_use_id = str(tool_call.get("id") or "")
             tool_response = self._extract_current_tool_response(tool_use_id)
-            trace_tool_output = result
-            if trace_tool_output is None:
-                # post hook 不应把结构化失败当作正常结果继续消费，
-                # 但 tracing 仍需要读取原始失败 payload 来提取 error。
-                trace_tool_output = self._extract_current_tool_response(
+            # post hook 不应把结构化失败当作正常结果继续消费，
+            # 但 tracing 仍需要读取原始失败 payload 来提取 error。
+            trace_tool_output = (
+                result
+                if result is not None
+                else self._extract_current_tool_response(
                     tool_use_id,
                     include_structured_failure=True,
                 )
-            post_hook_result = await self._emit_tool_hook(
-                HookEventName.POST_TOOL_USE,
+            )
+            await self._handle_post_tool_use(
+                span_id=span_id,
                 tool_name=tool_name,
                 tool_input=tool_input,
                 tool_use_id=tool_use_id,
                 tool_response=tool_response,
+                trace_tool_output=trace_tool_output,
             )
-            await self._record_tool_hook_result(
-                post_hook_result,
-                event_name=HookEventName.POST_TOOL_USE,
-            )
-            await self._emit_tool_trace_end(span_id, trace_tool_output)
 
-            if getattr(self, "_tool_guard_forced_replay_active", False):
-                self._tool_guard_forced_replay_active = False
-                self._tool_guard_replay_done = {
-                    "tool_name": tool_name,
-                    "tool_input": tool_input,
-                    "remaining_queue": getattr(
-                        self,
-                        "_tool_guard_replay_queue",
-                        [],
-                    ),
-                }
+            self._complete_forced_tool_replay(tool_name, tool_input)
             return result
 
+        except PreToolUseTerminalStop:
+            raise
         except Exception as e:
             failure_hook_result = await self._emit_tool_hook(
                 HookEventName.POST_TOOL_USE_FAILURE,
@@ -1603,6 +1692,8 @@ class ToolGuardMixin:
                 event_name=HookEventName.POST_TOOL_USE_FAILURE,
             )
             await self._emit_tool_trace_end(span_id, None, error=str(e))
+            if failure_hook_result.decision == HookDecision.STOP:
+                await self._stop_post_tool_hook(failure_hook_result.reason)
             raise
 
     async def _decide_guard_action(
@@ -1694,6 +1785,22 @@ class ToolGuardMixin:
             )
         return None
 
+    async def _execute_guard_action_or_tool_call(
+        self,
+        action: "_GuardAction | None",
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
+        """Execute a preapproved action or the ordinary tool-call path."""
+        if action is not None:
+            return await self._execute_guard_action(action, tool_call)
+        return await self._run_tool_call_with_hard_timeout(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
+
     async def _consume_preapproval(
         self,
         tool_name: str,
@@ -1725,24 +1832,33 @@ class ToolGuardMixin:
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> dict | None:
-        """Execute approved call and persist replay state."""
-        result = await self._run_tool_call_with_hard_timeout(
+        """Execute an approved call without advancing a replay queue."""
+        return await self._run_tool_call_with_hard_timeout(
             tool_call,
             tool_name,
             tool_input,
         )
-        if getattr(self, "_tool_guard_forced_replay_active", False):
-            self._tool_guard_forced_replay_active = False
-            self._tool_guard_replay_done = {
-                "tool_name": tool_name,
-                "tool_input": tool_input,
-                "remaining_queue": getattr(
-                    self,
-                    "_tool_guard_replay_queue",
-                    [],
-                ),
-            }
-        return result
+
+    def _complete_forced_tool_replay(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> None:
+        """Record a replay result only after its post-tool hooks finish."""
+        if not getattr(self, "_tool_guard_forced_replay_active", False):
+            return
+        self._tool_guard_forced_replay_active = False
+        self._tool_guard_replay_done = {
+            "tool_name": tool_name,
+            "tool_input": tool_input,
+            "remaining_queue": getattr(self, "_tool_guard_replay_queue", []),
+        }
+
+    def _discard_forced_tool_replay(self) -> None:
+        """Prevent a terminal hook decision from resuming queued replays."""
+        self._tool_guard_forced_replay_active = False
+        self._tool_guard_replay_done = None
+        self._tool_guard_replay_queue = []
 
     # ------------------------------------------------------------------
     # Denied / Approval responses
@@ -1944,13 +2060,6 @@ class ToolGuardMixin:
     # _reasoning override (guard-aware)
     # ------------------------------------------------------------------
 
-    def _consume_plan_interaction_turn_boundary(self) -> bool:
-        """Consume the plan interaction turn-boundary marker once."""
-        if not getattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False):
-            return False
-        setattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False)
-        return True
-
     async def _reasoning(
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,
@@ -1999,8 +2108,15 @@ class ToolGuardMixin:
             tool_choice=tool_choice,
         )
 
+    def _consume_plan_interaction_turn_boundary(self) -> bool:
+        """Consume the plan-card turn boundary marker once."""
+        if not getattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False):
+            return False
+        setattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False)
+        return True
+
     async def _summarizing(self) -> Msg:
-        """Short-circuit max-iteration summarizing after a plan card."""
+        """Avoid a synthetic summary turn immediately after a plan card."""
         if self._consume_plan_interaction_turn_boundary():
             return Msg(
                 self.name,

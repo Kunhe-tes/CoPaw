@@ -41,8 +41,13 @@ def build_tenant_aware_stdio_launch_config(
     args: Sequence[str] | None = None,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
+    *,
+    chat_id: str | None = None,
 ) -> TenantAwareStdioLaunchConfig:
-    """Build the effective stdio launch command for the current tenant."""
+    """Build the effective stdio launch command for the current tenant.
+
+    ``chat_id`` is injected as a runtime-owned claim when supplied.
+    """
     original_args = list(args or [])
     launch_command = command
     launch_args = list(original_args)
@@ -72,7 +77,7 @@ def build_tenant_aware_stdio_launch_config(
             else frozenset()
         ),
     )
-    runtime_env = apply_runtime_claim_env(runtime_env)
+    runtime_env = apply_runtime_claim_env(runtime_env, chat_id=chat_id)
     if policy.should_enforce:
         runtime_env[_WRAPPER_ONLY_DROP_ENV_KEYS] = os.pathsep.join(
             sorted(_WRAPPER_PRESERVED_BOUNDARY_KEYS),

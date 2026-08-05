@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""生成最终输出规范检查 demo 的最小 BeforeStop HookContext 样本。"""
+"""生成最终输出规范检查 demo 的最小 Stop HookContext 样本。"""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def build_payload(*, passing: bool) -> dict[str, object]:
         "transcript_path": "/tmp/demo-session.json",
         "cwd": "/workspace/project",
         "workspace_dir": "/workspace/project",
-        "hook_event_name": "BeforeStop",
+        "hook_event_name": "Stop",
         "tenant_id": "default",
         "effective_tenant_id": "default",
         "user_id": "user-1",

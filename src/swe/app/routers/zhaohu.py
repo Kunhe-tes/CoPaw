@@ -136,6 +136,7 @@ async def _resolve_user_scope(
     request: Request,
     from_id: str,
     to_id: str,
+    source_id_override: str = "",
 ) -> str:
     """Query user info, set request.state for tenant/scope resolution.
 
@@ -148,7 +149,9 @@ async def _resolve_user_scope(
         request.state.user_id = sap_id
 
     source_id = None
-    if sap_id and to_id:
+    if source_id_override:
+        source_id = source_id_override
+    elif sap_id and to_id:
         from ..channels.zhaohu.binding_store import get_zhaohu_binding_store
 
         binding_store = get_zhaohu_binding_store()
@@ -236,31 +239,15 @@ async def _handle_custom_card(
     if agent_id:
         request.state.agent_id = agent_id
 
-    tenant_id = addition.get("tenant_id", "")
-    if tenant_id and not getattr(request.state, "tenant_id", None):
-        request.state.tenant_id = tenant_id
-        request.state.user_id = tenant_id
-
-    source_id = addition.get("source_id", "")
-    if source_id and not getattr(request.state, "source_id", None):
-        request.state.source_id = source_id
-
+    source_id_override = addition.get("source_id", "")
+    user_id = await _resolve_user_scope(
+        request,
+        body.from_id,
+        body.to_id,
+        source_id_override=source_id_override,
+    )
     state_tenant_id = getattr(request.state, "tenant_id", None)
     state_source_id = getattr(request.state, "source_id", None)
-    if (
-        state_tenant_id
-        and state_source_id
-        and not getattr(request.state, "scope_id", None)
-    ):
-        from ...config.context import encode_scope_id
-
-        request.state.scope_id = encode_scope_id(
-            state_tenant_id,
-            state_source_id,
-        )
-        request.state.effective_tenant_id = request.state.scope_id
-
-    user_id = getattr(request.state, "user_id", "")
     state_scope_id = getattr(request.state, "scope_id", None)
 
     from ..tenant_context import bind_tenant_context
@@ -328,7 +315,7 @@ async def zhaohu_callback(
     background_tasks: BackgroundTasks,
 ) -> Response:
     """Zhaohu message callback: receive inbound messages."""
-    # 通用前置：解析用户身份
+    # text 分支：通用前置
     user_id = await _resolve_user_scope(request, body.from_id, body.to_id)
     source_id = getattr(request.state, "source_id", None)
     if source_id:
@@ -343,7 +330,6 @@ async def zhaohu_callback(
     if not source_id:
         return _json_response("error", "source_id not found", status_code=401)
 
-    # 通用前置：获取 channel 并检查可用性
     zhaohu_ch = await _get_zhaohu_channel(request)
     if not zhaohu_ch:
         logger.warning("zhaohu callback received but channel not available")

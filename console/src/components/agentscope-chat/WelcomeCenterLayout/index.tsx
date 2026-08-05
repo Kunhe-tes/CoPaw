@@ -1,24 +1,27 @@
-import React, { useState, useCallback, useRef, useEffect, useMemo } from "react";
-import { Input, Upload, message } from "antd";
+import React, { useState, useCallback, useRef, useEffect } from "react";
+import { Input, Upload, Tooltip, message } from "antd";
 import type { GetRef, UploadFile } from "antd";
 import { SparkAttachmentLine } from "@agentscope-ai/icons";
-import {
-  Attachments,
-  type IAgentScopeRuntimeWebUIInputData,
-  type IAgentScopeRuntimeWebUISenderOptions,
-  useChatAnywhereInput,
-} from "@/components/agentscope-chat";
+import { IconButton } from "@agentscope-ai/design";
+import { Attachments } from "@/components/agentscope-chat";
 import { chatApi } from "@/api/modules/chat";
 import Style from "./style";
 import FeaturedCases from "../FeaturedCases";
 import CaseDetailDrawer from "../CaseDetailDrawer";
 import { featuredCasesApi } from "@/api/modules/featuredCases";
 import type { FeaturedCase } from "@/api/types/featuredCases";
+import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
+import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
 import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
-import ComposerQuickMenu, {
-  ComposerQuickMenuItem,
-} from "@/components/agentscope-chat/ComposerQuickMenu";
+import VoiceRecorderTrigger from "@/components/GlobalVoiceRecorder/VoiceRecorderTrigger";
+import {
+  appendChatInputText,
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+  type ChatInputAppendTextPayload,
+  type ChatInputReplaceTextPayload,
+} from "../chatInputDraft";
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
 const PLACEHOLDER_OPTIONS = [
@@ -29,93 +32,120 @@ const PLACEHOLDER_OPTIONS = [
 
 interface WelcomeCenterLayoutProps {
   greeting?: string;
-  placeholder?: string;
-  beforeSubmit?: IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"];
-  quickMenuItems?: React.ReactNode | React.ReactNode[];
-  prefixItems?: React.ReactNode | React.ReactNode[];
-  onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void;
-}
-
-function isSubmitCancelled(result: unknown): result is {
-  shouldSubmit: false;
-  clearInput?: boolean;
-} {
-  return (
-    Boolean(result) &&
-    typeof result === "object" &&
-    (result as { shouldSubmit?: unknown }).shouldSubmit === false
-  );
+  onSubmit: (data: {
+    query: string;
+    fileList?: UploadFile[];
+  }) => void | Promise<void>;
+  skillMentions?: SkillMentionsData;
+  beforeSubmit?: () => Promise<boolean>;
 }
 
 export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
-  const {
-    greeting,
-    onSubmit,
-    beforeSubmit,
-    placeholder,
-    quickMenuItems,
-    prefixItems,
-  } = props;
+  const { greeting, onSubmit, skillMentions, beforeSubmit } = props;
   const { t } = useTranslation();
-  const inputState = useChatAnywhereInput((value) => ({
-    disabled: Boolean(value.disabled),
-  }));
-  const inputDisabled = Boolean(inputState.disabled);
   const [inputValue, setInputValue] = useState("");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [drawerVisible, setDrawerVisible] = useState(false);
   const [selectedCase, setSelectedCase] = useState<FeaturedCase | null>(null);
   const [randomPlaceholder, setRandomPlaceholder] = useState("");
   const [loadingCase, setLoadingCase] = useState(false);
+  const [mentionMenuContainer, setMentionMenuContainer] =
+    useState<HTMLDivElement | null>(null);
   const uploadRef = useRef<GetRef<typeof Upload>>(null);
+  const inputValueRef = useRef(inputValue);
+  const fileListRef = useRef(fileList);
+  const isSubmittingRef = useRef(false);
+  const setCurrentInputValue = useCallback((value: string) => {
+    inputValueRef.current = value;
+    setInputValue(value);
+  }, []);
+  const setCurrentFileList = useCallback(
+    (
+      nextFileList: UploadFile[] | ((previous: UploadFile[]) => UploadFile[]),
+    ) => {
+      const next =
+        typeof nextFileList === "function"
+          ? nextFileList(fileListRef.current)
+          : nextFileList;
+      fileListRef.current = next;
+      setFileList(next);
+    },
+    [],
+  );
 
+  // 组件挂载时随机选择placeholder文案
   useEffect(() => {
     const randomIndex = Math.floor(Math.random() * PLACEHOLDER_OPTIONS.length);
     setRandomPlaceholder(PLACEHOLDER_OPTIONS[randomIndex]);
   }, []);
 
-  const clearComposer = useCallback(() => {
-    setInputValue("");
-    setFileList([]);
-  }, []);
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatInputAppendTextPayload>).detail;
+      if (typeof detail?.content !== "string" || !detail.content) {
+        return;
+      }
+
+      setCurrentInputValue(
+        appendChatInputText(inputValueRef.current, detail.content),
+      );
+    };
+
+    const replaceHandler = (event: Event) => {
+      const detail = (event as CustomEvent<ChatInputReplaceTextPayload>).detail;
+      if (typeof detail?.content !== "string" || !detail.content) {
+        return;
+      }
+
+      setCurrentInputValue(detail.content);
+    };
+
+    document.addEventListener(CHAT_INPUT_APPEND_TEXT_EVENT, handler);
+    document.addEventListener(CHAT_INPUT_REPLACE_TEXT_EVENT, replaceHandler);
+    return () => {
+      document.removeEventListener(CHAT_INPUT_APPEND_TEXT_EVENT, handler);
+      document.removeEventListener(
+        CHAT_INPUT_REPLACE_TEXT_EVENT,
+        replaceHandler,
+      );
+    };
+  }, [setCurrentInputValue]);
 
   const handleSend = useCallback(async () => {
-    if (inputDisabled) return;
+    if (isSubmittingRef.current) return;
 
-    const trimmed = inputValue.trim();
-    if (!trimmed) return;
+    const submittedInputValue = inputValueRef.current;
+    const query = submittedInputValue.trim();
+    if (!query) return;
+    const uploadedFiles = fileListRef.current.filter((file) =>
+      Boolean(file.response?.url),
+    );
 
-    const uploadedFiles = fileList.filter((f) => f.response?.url);
-    const inputData: IAgentScopeRuntimeWebUIInputData = {
-      query: trimmed,
-      fileList: uploadedFiles,
-    };
-    const next = beforeSubmit ? await beforeSubmit(inputData) : inputData;
+    isSubmittingRef.current = true;
+    setIsSubmitting(true);
 
-    if (!next) {
-      return;
-    }
+    try {
+      if (beforeSubmit && !(await beforeSubmit())) return;
 
-    if (isSubmitCancelled(next)) {
-      if (next.clearInput) {
-        clearComposer();
+      // Submit with file list
+      await Promise.resolve(onSubmit({ query, fileList: uploadedFiles }));
+      if (inputValueRef.current === submittedInputValue) {
+        setCurrentInputValue("");
       }
-      return;
+      setCurrentFileList((currentFiles) =>
+        currentFiles.filter(
+          (file) => !uploadedFiles.some(({ uid }) => uid === file.uid),
+        ),
+      );
+    } finally {
+      isSubmittingRef.current = false;
+      setIsSubmitting(false);
     }
-
-    onSubmit(typeof next === "object" ? next : inputData);
-    clearComposer();
-  }, [
-    beforeSubmit,
-    clearComposer,
-    fileList,
-    inputDisabled,
-    inputValue,
-    onSubmit,
-  ]);
+  }, [beforeSubmit, onSubmit, setCurrentFileList, setCurrentInputValue]);
 
   const handleKeyDown = useCallback(
-    (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    (e: React.KeyboardEvent<HTMLElement>) => {
       if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
         e.preventDefault();
         handleSend();
@@ -124,21 +154,25 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     [handleSend],
   );
 
-  const handleFillInput = useCallback((text: string) => {
-    if (inputDisabled) return;
-    setInputValue(text);
-  }, [inputDisabled]);
+  const handleFillInput = useCallback(
+    (text: string) => {
+      setCurrentInputValue(text);
+    },
+    [setCurrentInputValue],
+  );
 
+  // Handle "看案例" click - fetch detail from API
   const handleViewCase = useCallback(async (id: number) => {
     setLoadingCase(true);
     setDrawerVisible(true);
-    setSelectedCase(null);
+    setSelectedCase(null); // Clear previous case
 
     try {
       const caseData = await featuredCasesApi.getCaseDetail(id);
       setSelectedCase(caseData);
     } catch (error) {
       console.error("Failed to load case detail:", error);
+      // Close drawer on error
       setDrawerVisible(false);
     } finally {
       setLoadingCase(false);
@@ -150,83 +184,69 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     setSelectedCase(null);
   }, []);
 
-  const handleBeforeUpload = useCallback((file: File) => {
-    if (inputDisabled) {
-      return Upload.LIST_IGNORE;
-    }
+  // Handle file upload - use chatApi to upload files (same as bottom Input)
+  const handleBeforeUpload = useCallback(
+    (file: File) => {
+      const uid = `welcome-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2)}`;
+      const uploadFile: UploadFile = {
+        uid,
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        status: "uploading",
+        percent: 0,
+        originFileObj: file as UploadFile["originFileObj"],
+      };
 
-    const uid = `welcome-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const uploadFile: UploadFile = {
-      uid,
-      name: file.name,
-      size: file.size,
-      type: file.type,
-      status: "uploading",
-      percent: 0,
-      originFileObj: file as UploadFile["originFileObj"],
-    };
+      setCurrentFileList((prev) => [...prev, uploadFile]);
 
-    setFileList((prev) => [...prev, uploadFile]);
+      // If it's an image, generate thumbnail for preview
+      if (file.type.startsWith("image/")) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const dataUrl = e.target?.result;
+          if (typeof dataUrl === "string") {
+            setCurrentFileList((prev) =>
+              prev.map((f) =>
+                f.uid === uid ? { ...f, thumbUrl: dataUrl } : f,
+              ),
+            );
+          }
+        };
+        reader.readAsDataURL(file);
+      }
 
-    if (file.type.startsWith("image/")) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const dataUrl = e.target?.result;
-        if (typeof dataUrl === "string") {
-          setFileList((prev) =>
+      // Actually upload the file using chatApi
+      chatApi
+        .uploadFile(file)
+        .then((res) => {
+          // Upload succeeded, update with URL
+          setCurrentFileList((prev) =>
             prev.map((f) =>
-              f.uid === uid ? { ...f, thumbUrl: dataUrl } : f,
+              f.uid === uid
+                ? {
+                    ...f,
+                    status: "done" as const,
+                    percent: 100,
+                    response: { url: chatApi.filePreviewUrl(res.url) },
+                  }
+                : f,
             ),
           );
-        }
-      };
-      reader.readAsDataURL(file);
-    }
+        })
+        .catch((error) => {
+          console.error("File upload failed:", error);
+          message.error(t("chat.attachments.uploadFailed"));
+          // Mark as error and remove from list
+          setCurrentFileList((prev) => prev.filter((f) => f.uid !== uid));
+        });
 
-    chatApi
-      .uploadFile(file)
-      .then((res) => {
-        setFileList((prev) =>
-          prev.map((f) =>
-            f.uid === uid
-              ? {
-                  ...f,
-                  status: "done" as const,
-                  percent: 100,
-                  response: { url: chatApi.filePreviewUrl(res.url) },
-                }
-              : f,
-          ),
-        );
-      })
-      .catch((error) => {
-        console.error("File upload failed:", error);
-        message.error(t("chat.attachments.uploadFailed"));
-        setFileList((prev) => prev.filter((f) => f.uid !== uid));
-      });
-
-    return false;
-  }, [inputDisabled, t]);
-
-  const mergedQuickMenuItems = useMemo(() => {
-    const externalItems = React.Children.toArray(quickMenuItems).filter(Boolean);
-    const uploadItem = (
-      <Upload
-        key="welcome-upload"
-        ref={uploadRef}
-        showUploadList={false}
-        accept="*/*"
-        beforeUpload={handleBeforeUpload}
-      >
-        <ComposerQuickMenuItem
-          icon={<SparkAttachmentLine />}
-          label={t("chat.quickMenu.upload", "上传文件")}
-        />
-      </Upload>
-    );
-
-    return [uploadItem, ...externalItems];
-  }, [handleBeforeUpload, quickMenuItems, t]);
+      return false; // Prevent default upload behavior
+    },
+    [setCurrentFileList, t],
+  );
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -245,50 +265,77 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     <>
       <Style />
       <div className="welcome-center-layout">
+        {/* Greeting */}
         <div className="welcome-greeting">{greeting}</div>
 
-        <div className="welcome-input-card">
+        {/* Input Card with upload */}
+        <div className="welcome-input-card" ref={setMentionMenuContainer}>
+          {/* Attachment preview area */}
           {fileList.length > 0 && (
             <div style={{ marginBottom: -8, marginTop: -8, marginLeft: -20 }}>
               <Attachments
                 items={fileList}
-                disabled={inputDisabled}
-                onChange={(info) => setFileList(info.fileList)}
+                onChange={(info) => setCurrentFileList(info.fileList)}
               />
             </div>
           )}
 
-          <Input.TextArea
-            className="welcome-input-placeholder"
-            disabled={inputDisabled}
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder={placeholder || randomPlaceholder}
-            autoSize={{ minRows: 1, maxRows: 5 }}
-            bordered={false}
-          />
+          {skillMentions ? (
+            <SkillTokenEditor
+              aria-label="消息"
+              className="welcome-input-placeholder welcome-skill-editor"
+              disabled={isSubmitting}
+              mentionMenuContainer={mentionMenuContainer}
+              mentionMenuPlacement="bottom"
+              onKeyDown={handleKeyDown}
+              onValueChange={setCurrentInputValue}
+              placeholder={randomPlaceholder}
+              skillMentions={skillMentions}
+              value={inputValue}
+            />
+          ) : (
+            <Input.TextArea
+              className="welcome-input-placeholder"
+              value={inputValue}
+              onChange={(e) => setCurrentInputValue(e.target.value)}
+              onKeyDown={handleKeyDown}
+              placeholder={randomPlaceholder}
+              autoSize={{ minRows: 1, maxRows: 5 }}
+              bordered={false}
+              disabled={isSubmitting}
+            />
+          )}
           <div className="welcome-input-actions">
             <div className="welcome-input-actions-left">
-              <ComposerQuickMenu
-                disabled={inputDisabled}
-                triggerLabel={t("chat.quickMenu.trigger", "快捷操作")}
-              >
-                {mergedQuickMenuItems}
-              </ComposerQuickMenu>
-              {prefixItems}
+              <VoiceRecorderTrigger />
+              <Tooltip title="上传附件">
+                <div>
+                  <Upload
+                    ref={uploadRef}
+                    showUploadList={false}
+                    accept="*/*"
+                    beforeUpload={handleBeforeUpload}
+                  >
+                    <IconButton
+                      icon={<SparkAttachmentLine />}
+                      bordered={false}
+                    />
+                  </Upload>
+                </div>
+              </Tooltip>
             </div>
             <button
               className="welcome-input-send-btn"
               onClick={handleSend}
-              disabled={inputDisabled || !inputValue.trim()}
+              disabled={isSubmitting || !inputValue.trim()}
               type="button"
             >
-              <img src={sendIcon} alt="发送" width={28} height={28} />
+              <img src={sendIcon} alt="发送" width={24} height={24} />
             </button>
           </div>
         </div>
 
+        {/* Featured Cases */}
         <div className="welcome-cases-area">
           <FeaturedCases
             onFillInput={handleFillInput}
@@ -297,14 +344,14 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         </div>
       </div>
 
+      {/* Case Detail Drawer */}
       <CaseDetailDrawer
         visible={drawerVisible}
         onClose={handleCloseDrawer}
         caseData={selectedCase}
         loading={loadingCase}
         onMakeSimilar={(value) => {
-          if (inputDisabled) return;
-          setInputValue(value);
+          setCurrentInputValue(value);
           handleCloseDrawer();
         }}
       />

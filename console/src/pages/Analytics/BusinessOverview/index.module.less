@@ -92,13 +92,13 @@
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  height: 44px;
+  height: 32px;
   padding: 0 18px;
   border: 1px solid #dbe4f3;
-  border-radius: 12px;
+  border-radius: 8px;
   background: #ffffff;
   color: #2563eb;
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -919,6 +919,10 @@
   border-radius: 50%;
 }
 
+.legendLabelHoverable {
+  cursor: help;
+}
+
 .legendValue {
   color: #475569;
   font-variant-numeric: tabular-nums;
@@ -1040,6 +1044,43 @@
   max-height: 200px;
   overflow-y: auto;
 }
+
+.errorCodeTooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 120px;
+}
+
+.errorCodeTooltipRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.errorCodeTooltipCode {
+  color: #cbd5e1;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.errorCodeTooltipCount {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.errorCodeTooltipEmpty {
+  color: #cbd5e1;
+  font-size: 13px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
 .funnelWrap {
   min-height: 0;
 }

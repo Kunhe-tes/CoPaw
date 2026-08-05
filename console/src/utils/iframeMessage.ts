@@ -174,7 +174,7 @@ async function handleUserDataMessage(
 ): Promise<void> {
   const store = useIframeStore.getState();
   const authHeaders = buildAuthHeaders(message);
-  const nextUserId = message.data.sapId ?? null;
+  const nextUserId = message.data.sapId || message.data.userId || null;
 
   store.setContext({
     userId: nextUserId,
@@ -188,7 +188,8 @@ async function handleUserDataMessage(
     skipPreviewTracking: toBoolean(message.data.skipPreviewTracking),
     authHeaders,
     parentOrigin: origin,
-    bbk: message.data.bbkId ?? null,
+    bbk: message.data.bbkId || message.data.bbkOrgId || null,
+    hideChat: toBoolean(message.data.hideChat),
   });
 
   // 等待 userName 获取完成后再标记初始化完成

@@ -164,6 +164,7 @@ _DISALLOWED_SYSTEM_PATH_PREFIXES = (
     "/sys/",
     "/dev/",
 )
+_ALLOWED_SYSTEM_PATH_TOKENS = frozenset({"/dev/null"})
 
 _SHELL_SLOT_CONDITION = asyncio.Condition()
 _SHELL_SLOT_COUNTS: dict[str, int] = {}
@@ -193,6 +194,11 @@ def _find_disallowed_shell_env_path_reference(command: str) -> Optional[str]:
         if var_name in _DISALLOWED_SHELL_ENV_PATH_VARS:
             return match.group(0)
     return None
+
+
+def _is_allowed_system_path_token(token: str) -> bool:
+    """Return True for narrow system path exceptions used as IO sinks."""
+    return token in _ALLOWED_SYSTEM_PATH_TOKENS
 
 
 def _extract_raw_windows_path_tokens(command: str) -> list[str]:
@@ -352,7 +358,10 @@ def _static_string_value(
     return None
 
 
-def _find_disallowed_system_path_literal(tree: ast.AST) -> Optional[str]:
+def _find_disallowed_system_path_literal(
+    tree: ast.AST,
+    base_dir: Path,
+) -> Optional[str]:
     """查找源码中静态出现的系统路径字面量。"""
     for node in ast.walk(tree):
         if not isinstance(node, ast.Constant) or not isinstance(
@@ -362,8 +371,15 @@ def _find_disallowed_system_path_literal(tree: ast.AST) -> Optional[str]:
             continue
         if node.value.startswith(("http://", "https://")):
             continue
+        if _is_allowed_system_path_token(node.value):
+            continue
         for prefix in _DISALLOWED_SYSTEM_PATH_PREFIXES:
             if prefix in node.value:
+                if is_path_within_tenant_with_base(
+                    node.value,
+                    base_dir=base_dir,
+                ):
+                    continue
                 return node.value
 
     return None
@@ -408,7 +424,7 @@ def _scan_python_source_for_outside_path(
     except SyntaxError:
         return None
 
-    system_path = _find_disallowed_system_path_literal(tree)
+    system_path = _find_disallowed_system_path_literal(tree, base_dir)
     if system_path:
         return system_path
 
@@ -581,6 +597,8 @@ def _validate_shell_paths(command: str, base_dir: Path) -> Optional[str]:
     for token in file_paths:
         # Skip checking if it's clearly not a path
         if not token or token in (".", ".."):
+            continue
+        if _is_allowed_system_path_token(token):
             continue
 
         # Check if the path is within tenant boundary, using base_dir for relative paths
@@ -834,6 +852,46 @@ def _raise_shell_error(error_type: str, detail: str) -> None:
     raise ToolExecutionError(error_type=error_type, detail=detail)
 
 
+def _is_shell_timeout_failure(returncode: int, stderr_lower: str) -> bool:
+    timeout_markers = (
+        "timeouterror",
+        "connecttimeout",
+        "read timed out",
+        "connection timed out",
+    )
+    return returncode in {-1, 28} or any(
+        marker in stderr_lower for marker in timeout_markers
+    )
+
+
+def _is_process_limit_signal(
+    returncode: int,
+    process_limits_enforced: bool,
+) -> bool:
+    if not process_limits_enforced or returncode >= 0:
+        return False
+    process_limit_signals = {
+        getattr(signal, signal_name)
+        for signal_name in ("SIGKILL", "SIGXCPU")
+        if hasattr(signal, signal_name)
+    }
+    return abs(returncode) in process_limit_signals
+
+
+def _is_memory_limit_failure(
+    stderr_str: str,
+    memory_limit_enforced: bool,
+) -> bool:
+    memory_limit_markers = (
+        "MemoryError",
+        "Cannot allocate memory",
+        "Killed",
+    )
+    return memory_limit_enforced and any(
+        marker in stderr_str for marker in memory_limit_markers
+    )
+
+
 def _classify_shell_failure(
     returncode: int,
     stderr_str: str,
@@ -841,24 +899,14 @@ def _classify_shell_failure(
     process_limits_enforced: bool = False,
     memory_limit_enforced: bool = False,
 ) -> str:
-    if returncode == -1 or "TimeoutError:" in stderr_str:
+    stderr_lower = stderr_str.lower()
+    if _is_shell_timeout_failure(returncode, stderr_lower):
         return "tool_timeout"
     if "outside the allowed workspace" in stderr_str:
         return "permission_denied"
-    process_limit_signals = {signal.SIGKILL}
-    if hasattr(signal, "SIGXCPU"):
-        process_limit_signals.add(signal.SIGXCPU)
-    if (
-        process_limits_enforced
-        and returncode < 0
-        and abs(returncode) in process_limit_signals
-    ):
+    if _is_process_limit_signal(returncode, process_limits_enforced):
         return "process_limit_exceeded"
-    if memory_limit_enforced and (
-        "MemoryError" in stderr_str
-        or "Cannot allocate memory" in stderr_str
-        or "Killed" in stderr_str
-    ):
+    if _is_memory_limit_failure(stderr_str, memory_limit_enforced):
         return "process_limit_exceeded"
     return "shell_command_failed"
 
@@ -957,7 +1005,12 @@ def prepare_shell_command(
     cwd: Optional[Path | str] = None,
 ) -> PreparedShellCommand:
     """归一化并校验 Shell 命令，生成可执行启动参数。"""
-    cmd = _collapse_embedded_newlines((command or "").strip())
+    raw_cmd = (command or "").strip()
+    cmd = (
+        _collapse_embedded_newlines(raw_cmd)
+        if sys.platform == "win32"
+        else raw_cmd
+    )
 
     from .shell_interceptor import intercept_command
 

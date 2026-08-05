@@ -25,7 +25,10 @@ export interface ContextCompactConfig {
   token_count_use_mirror: boolean;
   token_count_estimate_divisor: number;
   context_compact_enabled: boolean;
+  lightweight_governance_ratio: number;
+  precompaction_step_ratio: number;
   memory_compact_ratio: number;
+  emergency_compact_ratio: number;
   memory_reserve_ratio: number;
   compact_with_thinking_block: boolean;
 }

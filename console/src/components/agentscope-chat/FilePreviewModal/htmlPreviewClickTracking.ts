@@ -11,6 +11,7 @@ export interface HtmlPreviewClickMetadata {
   listKey?: string | null;
   listName?: string | null;
   defaultCustomerInfo?: Record<string, string> | null;
+  traceId?: string;
 }
 
 export type HtmlPreviewClickReporter = (
@@ -331,6 +332,7 @@ export function buildHtmlPreviewClickPayload(
     customer_name: customerIdentity.customerName,
     customer_info: customerInfo,
     clicked_at: clickedAt.toISOString(),
+    trace_id: metadata.traceId || null,
   };
 }
 

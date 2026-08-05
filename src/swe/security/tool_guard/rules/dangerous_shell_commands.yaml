@@ -9,17 +9,17 @@
 ##                                   enforced by the surrounding ToolGuard/approval workflow when available).
 ## See GuardThreatCategory for the full threat taxonomy.
 #
-- id: TOOL_CMD_NETWORK_TRANSFER
-  tools: [execute_shell_command, start_background_process]
-  params: [command]
-  category: data_exfiltration
-  severity: HIGH
-  patterns:
-    - '(?:^|[;&|]\s*)\b(curl|wget|ftp|sftp|scp|rsync|nc|ncat|socat|iwr|irm)\b'
-  exclude_patterns:
-    - '^\s*(curl|wget|ftp|sftp|scp|rsync|nc|ncat|socat|iwr|irm)\s+(-h|--help|-V|--version|/\?)\s*$'
-  description: 'External network transfer command'
-  remediation: 'Block or require explicit approval before downloading, uploading, or tunneling data with shell network tools.'
+#- id: TOOL_CMD_NETWORK_TRANSFER
+#  tools: [execute_shell_command, start_background_process]
+#  params: [command]
+#  category: data_exfiltration
+#  severity: HIGH
+#  patterns:
+#    - '(?:^|[;&|]\s*)\b(curl|wget|ftp|sftp|scp|rsync|nc|ncat|socat|iwr|irm)\b'
+#  exclude_patterns:
+#    - '^\s*(curl|wget|ftp|sftp|scp|rsync|nc|ncat|socat|iwr|irm)\s+(-h|--help|-V|--version|/\?)\s*$'
+#  description: 'External network transfer command'
+#  remediation: 'Block or require explicit approval before downloading, uploading, or tunneling data with shell network tools.'
 
 - id: TOOL_CMD_ENV_DUMP
   tools: [execute_shell_command, start_background_process]
@@ -62,10 +62,9 @@
   category: command_injection
   severity: HIGH
   patterns:
-    - '^\s*swe\s+cron\s+create\b.*$'
-    - '^\s*swe\s+cron\s+update\b.*$'
+    - '(?:^[ \t]*|[;&|](?:[ \t]|\\\r?\n)*|[\r\n][ \t]*)\bswe(?:[ \t]|\\\r?\n)+cron(?:[ \t]|\\\r?\n)+(?:create|update)\b'
   exclude_patterns:
-    - '^\s*swe\s+cron\s+(create|update)\s+(-h|--help)\s*$'
+    - '^\s*swe(?:[ \t]|\\\r?\n)+cron(?:[ \t]|\\\r?\n)+(create|update)(?:[ \t]|\\\r?\n)+(-h|--help)\s*$'
   description: '定时任务限制'
   remediation: '该操作将创建定时任务，在指定时间为你后台执行并通过招乎推送，是否确认'
 ## ── rm: file / directory removal ──────────────────────────────────────

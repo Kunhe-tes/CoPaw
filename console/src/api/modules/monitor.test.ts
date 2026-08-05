@@ -1,10 +1,21 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   mapCronJobOverviewPageData,
+  monitorApi,
   type CronBranchErrorResponse,
   type CronBranchRankingResponse,
   type CronOverviewStatsResponse,
 } from "./monitor";
+
+const requestMock = vi.hoisted(() => vi.fn());
+
+vi.mock("../request", () => ({
+  request: requestMock,
+}));
+
+beforeEach(() => {
+  requestMock.mockReset();
+});
 
 describe("mapCronJobOverviewPageData", () => {
   it("maps report rate and report detail counts into summary metrics", () => {
@@ -52,5 +63,39 @@ describe("mapCronJobOverviewPageData", () => {
         { key: "phone_count", value: "221" },
       ]),
     );
+  });
+});
+
+describe("monitorApi schedule distribution", () => {
+  it("maps definition_revision to the API expected_revision parameter", async () => {
+    requestMock.mockResolvedValue({
+      items: [],
+      total: 0,
+      page: 2,
+      page_size: 20,
+    });
+
+    await monitorApi.getScheduleDistributionDetails({
+      start_time: "2026-07-27T02:00:00Z",
+      end_time: "2026-07-27T02:15:00Z",
+      task_type: "agent",
+      page: 2,
+      page_size: 20,
+      definition_revision: "revision-1",
+    });
+
+    expect(requestMock).toHaveBeenCalledTimes(1);
+    const path = requestMock.mock.calls[0][0] as string;
+    const url = new URL(path, "http://monitor.test");
+    expect(url.pathname).toBe("/monitor/cron/schedule-distribution/details");
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      start_time: "2026-07-27T02:00:00Z",
+      end_time: "2026-07-27T02:15:00Z",
+      page: "2",
+      page_size: "20",
+      task_type: "agent",
+      expected_revision: "revision-1",
+    });
+    expect(url.searchParams.has("definition_revision")).toBe(false);
   });
 });

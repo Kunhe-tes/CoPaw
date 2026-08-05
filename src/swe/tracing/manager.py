@@ -286,6 +286,7 @@ class TraceManager:
         session_name: Optional[str] = None,
         model_output: Optional[str] = None,
         attach_existing: bool = False,
+        b3_trace_id: Optional[str] = None,
     ) -> str:
         """Start a new trace or attach to an existing one.
 
@@ -302,6 +303,7 @@ class TraceManager:
             model_output: Optional model output (for text-type cron jobs)
             attach_existing: If True and trace_id exists in DB, only set context
                 without creating new database record
+            b3_trace_id: Optional upstream B3 trace identifier
 
         Returns:
             Trace ID
@@ -344,6 +346,7 @@ class TraceManager:
         # 创建 trace 并保存
         trace = Trace(
             trace_id=trace_id,
+            b3_trace_id=b3_trace_id,
             source_id=source_id,
             user_id=user_id,
             user_name=user_name,
@@ -601,23 +604,6 @@ class TraceManager:
             # Attach to context
             ctx.set_skill_detector(detector, enabled_skills)
 
-            # Layer 0: Detect skill from user message
-            if ctx.trace and ctx.trace.user_message:
-                skill, confidence = detector.detect_from_user_message(
-                    ctx.trace.user_message,
-                )
-                if skill:
-                    logger.info(
-                        "Layer 0 result: skill='%s', confidence=%.2f",
-                        skill,
-                        confidence,
-                    )
-                if skill and confidence < 0.7:
-                    logger.info(
-                        "Skill detected but confidence too low: '%s' (confidence: %.2f < 0.5)",
-                        skill,
-                        confidence,
-                    )
         except Exception as e:
             logger.warning("Failed to setup skill detector: %s", e)
 
@@ -719,8 +705,6 @@ class TraceManager:
         tool_name: Optional[str] = None,
         skill_name: Optional[str] = None,
         skill_id: Optional[str] = None,
-        skill_cn_name: Optional[str] = None,
-        skill_description: Optional[str] = None,
         tool_input: Optional[dict[str, Any]] = None,
         start_time: Optional[datetime] = None,
         mcp_server: Optional[str] = None,
@@ -741,7 +725,6 @@ class TraceManager:
             input_tokens: Optional input token count
             tool_name: Optional tool name
             skill_name: Optional skill name
-            skill_description: Optional skill description
             tool_input: Optional tool input (will be sanitized)
             start_time: Optional start time
             mcp_server: Optional MCP server name if this is an MCP tool
@@ -780,8 +763,6 @@ class TraceManager:
             tool_name=tool_name,
             skill_name=skill_name,
             skill_id=skill_id,
-            skill_cn_name=skill_cn_name,
-            skill_description=skill_description,
             tool_input=tool_input,
             mcp_server=mcp_server,
         )
@@ -1045,9 +1026,7 @@ class TraceManager:
         # Determine skill attribution using detector
         ctx = get_current_trace()
         primary_skill: Optional[str] = None
-        skill_description: Optional[str] = None
         skill_id: Optional[str] = None
-        skill_cn_name: Optional[str] = None
 
         if ctx and ctx.trace_id == trace_id:
             try:
@@ -1064,21 +1043,8 @@ class TraceManager:
                             tool_input=tool_input or {},
                             mcp_server=mcp_server,
                         )
-                    # Get skill description from detector cache
-                    if primary_skill and hasattr(
-                        detector,
-                        "get_skill_description",
-                    ):
-                        skill_description = detector.get_skill_description(
-                            primary_skill,
-                        )
-                    # Get skill_id and skill_cn_name from detector cache
                     if primary_skill and hasattr(detector, "_skill_ids"):
                         skill_id = detector._skill_ids.get(primary_skill)
-                    if primary_skill and hasattr(detector, "_skill_cn_names"):
-                        skill_cn_name = detector._skill_cn_names.get(
-                            primary_skill,
-                        )
                     primary_skill = self._resolve_skill_name_for_tool_span(
                         detector=detector,
                         primary_skill=primary_skill,
@@ -1113,8 +1079,6 @@ class TraceManager:
             mcp_server=mcp_server,
             skill_name=primary_skill,
             skill_id=skill_id,
-            skill_cn_name=skill_cn_name,
-            skill_description=skill_description,
             user_name=user_name,
             bbk_id=bbk_id,
         )
@@ -1196,8 +1160,6 @@ class TraceManager:
         user_name: Optional[str] = None,
         bbk_id: Optional[str] = None,
         skill_id: Optional[str] = None,
-        skill_cn_name: Optional[str] = None,
-        skill_description: Optional[str] = None,
     ) -> str:
         """Emit skill invocation event.
 
@@ -1212,8 +1174,6 @@ class TraceManager:
             user_name: Optional user name
             bbk_id: Optional BBK identifier
             skill_id: Optional skill unique identifier
-            cn_name: Optional Chinese display name
-            skill_description: Optional skill description
 
         Returns:
             Span ID
@@ -1228,8 +1188,6 @@ class TraceManager:
             channel=channel,
             skill_name=skill_name,
             skill_id=skill_id,
-            skill_cn_name=skill_cn_name,
-            skill_description=skill_description,
             tool_input=skill_input,
             user_name=user_name,
             bbk_id=bbk_id,

@@ -7,8 +7,8 @@ from agentscope.message import Msg
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from swe.agents.hook_runtime.messages import (
-    build_hook_additional_context_msg,
+from swe.app.runner.hidden_context_injection import (
+    append_hidden_context_to_user_message,
 )
 from src.swe.app.runner.api import (
     get_chat_manager,
@@ -108,43 +108,43 @@ def test_get_chat_exposes_message_timestamp(
     assert payload["chat"]["session_id"] == "default:user-1"
 
 
-def test_get_chat_migrates_developer_role_history_to_system() -> None:
-    """聊天历史中的旧 developer role 应以 system 返回。"""
+def test_get_chat_hides_injected_context_from_response(
+    monkeypatch,
+) -> None:
+    from src.swe.app.runner import api as chat_api_module
 
-    class _DeveloperRoleSession:
-        async def get_session_state_dict(
+    class _HiddenContextMemory(_FakeMemory):
+        async def get_memory(
             self,
-            _session_id: str,
-            _user_id: str,
-        ) -> dict:
-            return {
-                "agent": {
-                    "memory": {
-                        "content": [
-                            [
-                                {
-                                    "id": "msg-1",
-                                    "name": "system",
-                                    "role": "developer",
-                                    "content": (
-                                        "[Hook additional context]\n"
-                                        "remember for next turn"
-                                    ),
-                                    "metadata": {},
-                                },
-                                [],
-                            ],
-                        ],
-                    },
-                },
-            }
+            prepend_summary: bool = False,
+        ) -> list[Msg]:
+            _ = prepend_summary
+            return [
+                append_hidden_context_to_user_message(
+                    Msg(
+                        name="tester",
+                        role="user",
+                        content="hello",
+                        timestamp="2026-04-17T08:00:00Z",
+                    ),
+                    [
+                        "<FILE-REFERENCE>"
+                        "/workspace/static/report.csv"
+                        "</FILE-REFERENCE>",
+                    ],
+                ),
+            ]
 
+    monkeypatch.setattr(
+        chat_api_module,
+        "InMemoryMemory",
+        _HiddenContextMemory,
+    )
     workspace = SimpleNamespace(
         chat_manager=_FakeChatManager(),
-        runner=SimpleNamespace(session=_DeveloperRoleSession()),
+        runner=SimpleNamespace(session=_FakeSession()),
         task_tracker=_FakeTaskTracker(),
     )
-
     app = FastAPI()
     app.include_router(router)
 
@@ -161,11 +161,9 @@ def test_get_chat_migrates_developer_role_history_to_system() -> None:
     app.dependency_overrides[get_chat_manager] = _get_chat_manager_override
     app.dependency_overrides[get_session] = _get_session_override
 
-    client = TestClient(app)
-
-    response = client.get("/chats/chat-1")
+    response = TestClient(app).get("/chats/chat-1")
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["messages"][0]["role"] == "system"
-    assert "original_role" not in payload["messages"][0]["metadata"]
+    assert payload["messages"][0]["content"][0]["text"] == "hello"
+    assert "<FILE-REFERENCE>" not in str(payload)

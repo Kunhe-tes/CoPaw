@@ -3,8 +3,103 @@ import asyncio
 import os
 import signal
 import sys
+from contextlib import asynccontextmanager, nullcontext
+from types import SimpleNamespace
 
 import pytest
+
+
+@pytest.mark.asyncio
+async def test_shell_terminal_result_is_not_truncated_before_central_compaction(
+    monkeypatch,
+    tmp_path,
+):
+    from swe.agents.tools import shell
+
+    raw_output = "head\n" + ("middle\n" * 20_000) + "tail\n"
+
+    async def fake_subprocess(*_args, **_kwargs):
+        return 0, raw_output, ""
+
+    @asynccontextmanager
+    async def no_execution_slot(_policy):
+        yield
+
+    monkeypatch.setattr(
+        shell,
+        "prepare_shell_command",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            command="echo ignored",
+            working_dir=tmp_path,
+            env=os.environ.copy(),
+            python_runtime_guard=nullcontext(),
+        ),
+    )
+    monkeypatch.setattr(
+        shell,
+        "resolve_current_process_limit_policy",
+        lambda _tool_name: SimpleNamespace(build_preexec_fn=lambda: None),
+    )
+    monkeypatch.setattr(
+        shell,
+        "_tenant_shell_execution_slot",
+        no_execution_slot,
+    )
+    monkeypatch.setattr(shell, "_execute_platform_subprocess", fake_subprocess)
+    monkeypatch.setattr(
+        shell,
+        "_format_process_limit_diagnostic",
+        lambda text, _policy: text,
+    )
+
+    result = await shell.execute_shell_command("echo ignored")
+
+    assert result.content[0]["text"] == raw_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured_budget", "expected_budget"),
+    [(80, 80), (None, 50 * 1024)],
+)
+async def test_live_frame_uses_current_recent_tool_result_budget(
+    configured_budget,
+    expected_budget,
+):
+    from swe.app.runner.tool_output_frames import (
+        bind_tool_output_emitter,
+        emit_tool_output_text,
+        tool_output_invocation,
+    )
+    from swe.config.context import set_current_recent_max_bytes
+
+    frames = []
+
+    async def collect(frame):
+        frames.append(frame)
+
+    set_current_recent_max_bytes(configured_budget)
+    try:
+        with (
+            bind_tool_output_emitter(collect),
+            tool_output_invocation(
+                tool_call_id="call-1",
+                tool_name="execute_shell_command",
+            ),
+        ):
+            await emit_tool_output_text(
+                "stdout",
+                "x" * (expected_budget + 1),
+            )
+    finally:
+        set_current_recent_max_bytes(None)
+
+    assert sum(len(frame["text"].encode("utf-8")) for frame in frames) <= (
+        expected_budget
+    )
+    assert frames[-1]["budget_bytes"] == expected_budget
+    assert frames[-1]["truncated"] is True
+    assert "[早期实时输出已省略]" in frames[-1]["text"]
 
 
 @pytest.mark.asyncio

@@ -56,25 +56,36 @@ interface SessionOptions {
 interface LoadSessionMessagesOptions {
   requestedSessionId: string | undefined;
   clearBeforeLoad: boolean;
+  finishLoadingWithoutSession?: boolean;
   options: SessionOptions;
   setMessages: (messages: IAgentScopeRuntimeWebUIMessage[]) => void;
   getCurrentSessionId: () => string | undefined;
   setSessionLoading?: (loading: boolean) => void;
+  setSessionNotFound?: (notFound: boolean) => void;
 }
 
-async function loadSessionMessages({
+// Exported for focused loader regression coverage.
+// eslint-disable-next-line react-refresh/only-export-components
+export async function loadSessionMessages({
   requestedSessionId,
   clearBeforeLoad,
+  finishLoadingWithoutSession = false,
   options,
   setMessages,
   getCurrentSessionId,
   setSessionLoading,
+  setSessionNotFound,
 }: LoadSessionMessagesOptions): Promise<boolean> {
   if (!requestedSessionId || !options.api) {
     if (clearBeforeLoad) {
       ReactDOM.flushSync(() => {
+        if (finishLoadingWithoutSession) {
+          setSessionLoading?.(false);
+        }
         setMessages([]);
       });
+    } else if (finishLoadingWithoutSession) {
+      setSessionLoading?.(false);
     }
     return false;
   }
@@ -124,6 +135,26 @@ async function loadSessionMessages({
     }
 
     return true;
+  } catch (error) {
+    const status =
+      error && typeof error === "object"
+        ? (error as { status?: unknown }).status
+        : undefined;
+    if (status !== 404) {
+      throw error;
+    }
+
+    if (
+      !shouldApplySessionLoadResult({
+        requestedSessionId,
+        currentSessionId: getCurrentSessionId(),
+      })
+    ) {
+      return false;
+    }
+
+    setSessionNotFound?.(true);
+    return false;
   } finally {
     // 只有当请求成功应用时才清除 loading
     // 竞态失败的请求不应清除 loading，让获胜的请求来清除
@@ -234,6 +265,8 @@ export const ChatAnywhereSessionsContext =
     getCurrentSessionId: () => "",
     isSessionLoading: false,
     setSessionLoading: () => {},
+    sessionNotFound: false,
+    setSessionNotFound: () => {},
     isSessionsListLoading: true,
     setSessionsListLoading: () => {},
   });
@@ -248,6 +281,7 @@ export function ChatAnywhereSessionsContextProvider(props: {
   const [currentSessionId, setCurrentSessionId, getCurrentSessionId] =
     useGetState<string | undefined>(undefined);
   const [isSessionLoading, setSessionLoading] = useGetState<boolean>(false);
+  const [sessionNotFound, setSessionNotFound] = useGetState<boolean>(false);
   const [isSessionsListLoading, setSessionsListLoading] =
     useGetState<boolean>(true);
   const sessionApi = options.api;
@@ -290,6 +324,8 @@ export function ChatAnywhereSessionsContextProvider(props: {
         getCurrentSessionId,
         isSessionLoading,
         setSessionLoading,
+        sessionNotFound,
+        setSessionNotFound,
         isSessionsListLoading,
         setSessionsListLoading,
       }}
@@ -302,7 +338,11 @@ export function ChatAnywhereSessionsContextProvider(props: {
 /**
  * 会话切换时加载消息和判断重连的 hook，必须保证只挂载一次
  */
-export const useChatAnywhereSessionLoader = () => {
+export const useChatAnywhereSessionLoader = ({
+  finishLoadingWithoutSession = false,
+}: {
+  finishLoadingWithoutSession?: boolean;
+} = {}) => {
   const currentSessionId = useContextSelector(
     ChatAnywhereSessionsContext,
     (v) => v.currentSessionId,
@@ -320,17 +360,23 @@ export const useChatAnywhereSessionLoader = () => {
     ChatAnywhereSessionsContext,
     (v) => v.setSessionLoading,
   );
+  const setSessionNotFound = useContextSelector(
+    ChatAnywhereSessionsContext,
+    (v) => v.setSessionNotFound,
+  );
 
   useAsyncEffect(async () => {
     await loadSessionMessages({
       requestedSessionId: currentSessionId,
       clearBeforeLoad: true,
+      finishLoadingWithoutSession,
       options,
       setMessages,
       getCurrentSessionId,
       setSessionLoading,
+      setSessionNotFound,
     });
-  }, [currentSessionId]);
+  }, [currentSessionId, finishLoadingWithoutSession]);
 };
 
 /**

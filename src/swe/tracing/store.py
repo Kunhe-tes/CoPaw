@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 from .config import TracingConfig
 from ..database import DatabaseConnection
+from ..utils.bbk import normalize_bbk_id_to_primary
 from .models import (
     EventType,
     MCPToolUsage,
@@ -123,14 +124,15 @@ class TraceStore:
 
         query = """
             INSERT INTO swe_tracing_traces (
-                trace_id, source_id, user_id, session_id, session_name, channel, start_time,
+                trace_id, b3_trace_id, source_id, user_id, session_id, session_name, channel, start_time,
                 end_time, duration_ms, model_name, total_input_tokens,
                 total_output_tokens, total_tokens, tools_used, skills_used,
                 status, error, user_message, user_name, bbk_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             trace.trace_id,
+            trace.b3_trace_id,
             trace.source_id,
             trace.user_id,
             trace.session_id,
@@ -153,7 +155,7 @@ class TraceStore:
             trace.error,
             trace.user_message,
             trace.user_name,
-            trace.bbk_id,
+            normalize_bbk_id_to_primary(trace.bbk_id),
         )
         await self.db.execute(query, params)
 
@@ -357,9 +359,9 @@ class TraceStore:
                 span_id, trace_id, source_id, name, event_type,
                 start_time, end_time, duration_ms, user_id, session_id, channel,
                 model_name, input_tokens, output_tokens, tool_name, skill_name,
-                skill_id, skill_cn_name, skill_description, mcp_server,
+                skill_id, mcp_server,
                 tool_input, tool_output, error, user_name, bbk_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params = (
             span.span_id,
@@ -383,14 +385,12 @@ class TraceStore:
             span.tool_name,
             span.skill_name,
             span.skill_id,
-            span.skill_cn_name,
-            span.skill_description,
             span.mcp_server,
             json.dumps(span.tool_input) if span.tool_input else None,
             span.tool_output,
             span.error,
             span.user_name,
-            span.bbk_id,
+            normalize_bbk_id_to_primary(span.bbk_id),
         )
         await self.db.execute(query, params)
 
@@ -468,9 +468,9 @@ class TraceStore:
                 span_id, trace_id, source_id, name, event_type,
                 start_time, end_time, duration_ms, user_id, session_id, channel,
                 model_name, input_tokens, output_tokens, tool_name, skill_name,
-                skill_id, skill_cn_name, skill_description, mcp_server,
+                skill_id, mcp_server,
                 tool_input, tool_output, error, user_name, bbk_id
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         params_list = []
         for span in spans:
@@ -497,14 +497,12 @@ class TraceStore:
                     span.tool_name,
                     span.skill_name,
                     span.skill_id,
-                    span.skill_cn_name,
-                    span.skill_description,
                     span.mcp_server,
                     json.dumps(span.tool_input) if span.tool_input else None,
                     span.tool_output,
                     span.error,
                     span.user_name,
-                    span.bbk_id,
+                    normalize_bbk_id_to_primary(span.bbk_id),
                 ),
             )
         rowcount = await self.db.execute_many(query, params_list)
@@ -2901,6 +2899,7 @@ class TraceStore:
         """Convert database row to Trace model."""
         return Trace(
             trace_id=row["trace_id"],
+            b3_trace_id=row.get("b3_trace_id"),
             source_id=row["source_id"],
             user_id=row["user_id"],
             session_id=row["session_id"],
@@ -2949,8 +2948,6 @@ class TraceStore:
             tool_name=row["tool_name"],
             skill_name=row["skill_name"],
             skill_id=row.get("skill_id"),
-            skill_cn_name=row.get("skill_cn_name"),
-            skill_description=row.get("skill_description"),
             mcp_server=row.get("mcp_server"),
             tool_input=(
                 json.loads(row["tool_input"]) if row["tool_input"] else None

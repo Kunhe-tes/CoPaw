@@ -5,6 +5,7 @@
 
 import importlib
 import importlib.metadata
+import copy
 import json
 import logging
 import os
@@ -13,9 +14,10 @@ import shutil
 import sys
 import types
 import uuid
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from agentscope.agent import ReActAgent
 from agentscope.message import Msg, TextBlock
@@ -26,6 +28,10 @@ from swe.agents.memory.base_memory_manager import BaseMemoryManager
 from swe.agents.model_factory import create_model_and_formatter
 from swe.agents.tools import read_file, write_file, edit_file
 from swe.agents.utils import get_swe_token_counter
+from swe.agents.utils.tool_output_compaction import (
+    cleanup_expired_artifacts,
+    compact_tool_result_messages,
+)
 from swe.app.source_system_config import resolve_tool_result_compact_config
 from swe.tracing import capture_current_trace_context
 from swe.config import load_config
@@ -42,6 +48,73 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _EXPECTED_REME_VERSION = "0.3.1.8"
+
+
+def _clone_unbound_chat_memory(memory: Any) -> Any:
+    """Create an empty Chat-local memory when a backend returns a singleton."""
+    try:
+        clone = copy.copy(memory)
+    except (TypeError, copy.Error) as exc:
+        raise RuntimeError(
+            "ReMe memory backend returned a non-isolatable Chat memory",
+        ) from exc
+
+    if hasattr(clone, "content"):
+        clone.content = []
+    if hasattr(clone, "_compressed_summary"):
+        clone._compressed_summary = ""
+    # These are instance attributes installed by attach_conversation_archive;
+    # removing them lets the class' original methods bind to the clone.
+    for name in (
+        "add",
+        "get_memory",
+        "clear_content",
+        "clear_compressed_summary",
+        "conversation_archive_store",
+        "chat_checkpoint_store",
+        "_chat_checkpoint_chat_id",
+        "_chat_checkpoint_epoch",
+        "_checkpoint_original_add",
+        "_checkpoint_original_get_memory",
+        "_checkpoint_original_clear_content",
+        "_checkpoint_original_clear_compressed_summary",
+    ):
+        try:
+            delattr(clone, name)
+        except AttributeError:
+            pass
+    if not hasattr(type(clone), "add"):
+
+        async def add(message: Msg) -> None:
+            clone.content.append((message, []))
+
+        clone.add = add
+    if not hasattr(type(clone), "get_memory"):
+
+        async def get_memory(*, prepend_summary: bool = True) -> list[Msg]:
+            del prepend_summary
+            return [message for message, _marks in clone.content]
+
+        clone.get_memory = get_memory
+    if not hasattr(type(clone), "clear_content"):
+
+        def clear_content() -> None:
+            clone.content.clear()
+
+        clone.clear_content = clear_content
+    if not hasattr(type(clone), "clear_compressed_summary"):
+
+        def clear_compressed_summary() -> None:
+            clone._compressed_summary = ""
+
+        clone.clear_compressed_summary = clear_compressed_summary
+    if not callable(getattr(clone, "add", None)) or not callable(
+        getattr(clone, "get_memory", None),
+    ):
+        raise RuntimeError(
+            "ReMe memory clone does not expose Chat memory operations",
+        )
+    return clone
 
 
 def _exception_chain_messages(exc: Exception) -> list[str]:
@@ -200,6 +273,7 @@ class ReMeLightMemoryManager(BaseMemoryManager):
         )
         self._reme_version_ok: bool = self._check_reme_version()
         self._reme = None
+        self._chat_memory_cache: dict[str, Any] = {}
 
         logger.info(
             f"ReMeLightMemoryManager init: "
@@ -389,12 +463,31 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         )
         return result
 
-    async def compact_tool_result(self, **kwargs):
-        """Compact tool results by truncating large outputs."""
+    async def compact_tool_result(
+        self,
+        *,
+        messages: list[Msg],
+        old_max_bytes: int,
+        recent_max_bytes: int,
+        recent_n: int,
+        retention_days: int,
+    ) -> list[Msg]:
+        """Compact recoverable tool-result text in native message history."""
         self._warn_if_version_mismatch()
-        if self._reme is None:
-            return None
-        return await self._reme.compact_tool_result(**kwargs)
+        workspace_dir = Path(self.working_dir)
+        artifact_dir = workspace_dir / "tool_result"
+        cleanup_expired_artifacts(
+            artifact_dir,
+            retention_days=retention_days,
+        )
+        return compact_tool_result_messages(
+            messages,
+            old_max_bytes=old_max_bytes,
+            recent_max_bytes=recent_max_bytes,
+            recent_n=recent_n,
+            artifact_dir=artifact_dir,
+            workspace_dir=workspace_dir,
+        )
 
     async def check_context(self, **kwargs):
         """Check context size and determine if compaction is needed."""
@@ -537,15 +630,170 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             min_score=min_score,
         )
 
-    def get_in_memory_memory(self, **_kwargs) -> "ReMeInMemoryMemory | None":
+    def get_in_memory_memory(
+        self,
+        chat_id: str | None = None,
+        **_kwargs,
+    ) -> "ReMeInMemoryMemory | None":
         """Retrieve the in-memory memory object with token counting support."""
         self._warn_if_version_mismatch()
         if self._reme is None:
             return None
+        if chat_id:
+            cached_memory = getattr(
+                self,
+                "_chat_memory_cache",
+                {},
+            ).get(chat_id)
+            if cached_memory is not None:
+                return cached_memory
         agent_config = self._load_agent_config()
-        return self._reme.get_in_memory_memory(
+        memory = self._reme.get_in_memory_memory(
             as_token_counter=get_swe_token_counter(agent_config),
         )
+        if not chat_id:
+            return memory
+
+        attached_chat_id = getattr(memory, "_chat_checkpoint_chat_id", None)
+        if attached_chat_id is not None and attached_chat_id != chat_id:
+            memory = _clone_unbound_chat_memory(memory)
+
+        from .conversation_archive import attach_conversation_archive
+
+        attached_memory = attach_conversation_archive(
+            memory,
+            Path(self.working_dir) / "dialog",
+            chat_id,
+        )
+        if not hasattr(self, "_chat_memory_cache"):
+            self._chat_memory_cache = {}
+        self._chat_memory_cache[chat_id] = attached_memory
+        return attached_memory
+
+    async def archive_checkpoint_messages(
+        self,
+        *,
+        chat_id: str,
+        messages: list[Msg],
+        candidate_id: str,
+    ) -> Any:
+        """Archive source messages and install the selected Chat checkpoint."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            raise RuntimeError("ReMe in-memory memory is unavailable")
+        return await memory.archive_checkpoint_messages(messages, candidate_id)
+
+    async def schedule_precompaction(
+        self,
+        *,
+        chat_id: str,
+        watermark: int,
+        messages: list[Msg],
+        **kwargs,
+    ) -> bool:
+        """Persist a revision-bound candidate without changing live memory."""
+        del watermark, kwargs
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            return False
+        from .chat_checkpoint import EvidenceItem, PrecompactionCandidate
+
+        state = await memory.chat_checkpoint_store.read_checkpoint_state(
+            chat_id,
+        )
+        source_refs = {f"message:{message.id}" for message in messages}
+        selected_events = []
+        for event in state.events:
+            if not any(ref in source_refs for ref in event.source_refs):
+                break
+            selected_events.append(event)
+        if not selected_events:
+            return False
+        applied_event_sequence = selected_events[-1].sequence
+        event_context = tuple(
+            EvidenceItem(
+                text=(
+                    f"{event.type}: "
+                    + json.dumps(
+                        event.to_dict()["facts"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    )
+                ),
+                evidence_refs=event.source_refs,
+            )
+            for event in selected_events
+        )
+        candidate_record = replace(
+            state.record,
+            revision=state.record.revision + 1,
+            source_revision=state.record.revision,
+            applied_event_sequence=applied_event_sequence,
+            critical_context=(
+                *state.record.critical_context,
+                *event_context,
+            ),
+        )
+        candidate = PrecompactionCandidate.new(
+            record=candidate_record,
+            base_revision=state.record.revision,
+            applied_event_sequence=applied_event_sequence,
+            source_message_ids=[message.id for message in messages],
+        )
+        await memory.chat_checkpoint_store.write_pending_candidate(
+            chat_id,
+            candidate,
+        )
+        return True
+
+    async def install_ready_precompaction(
+        self,
+        *,
+        chat_id: str,
+        messages: list[Msg] | None = None,
+    ) -> bool:
+        """Install a still-valid candidate and refresh its Markdown projection."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            return False
+        if not messages:
+            # Installing a cursor-advancing candidate without atomically
+            # archiving its source prefix can hide journal evidence.
+            return False
+        return await memory.commit_ready_precompaction(messages)
+
+    async def install_degraded_checkpoint(
+        self,
+        *,
+        chat_id: str,
+        messages: list[Msg],
+    ) -> bool:
+        """Install a reference-only record before one emergency retry."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            return False
+        await memory.install_degraded_checkpoint(messages)
+        return True
+
+    async def recover_evidence(
+        self,
+        *,
+        chat_id: str,
+        epoch: int,
+        **kwargs,
+    ) -> Any:
+        """Delegate request-bound recovery to the Chat-attached memory."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            return []
+        return await memory.recover_evidence(epoch=epoch, **kwargs)
+
+    async def reset_context_epoch(self, *, chat_id: str, reason: str) -> Any:
+        """Reset the Chat epoch while retaining physical archive evidence."""
+        memory = self.get_in_memory_memory(chat_id=chat_id)
+        if memory is None:
+            raise RuntimeError("ReMe in-memory memory is unavailable")
+        return await memory.reset_context_epoch(reason=reason)
 
     # ------------------------------------------------------------------
     # Dream-based memory optimization

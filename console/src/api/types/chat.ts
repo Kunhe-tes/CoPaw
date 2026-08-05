@@ -23,6 +23,25 @@ export interface ChatHistory {
   chat?: ChatSpec | null;
   messages: Message[];
   status?: ChatStatus; // Conversation status: idle, running, or stopping
+  archive?: ChatArchiveMetadata;
+}
+
+export interface ChatCompactionBoundary {
+  id: string;
+  archived_message_count: number;
+  first_message_id: string;
+  last_message_id: string;
+  created_at: string;
+}
+
+export interface ChatArchiveMetadata {
+  has_more: boolean;
+  boundaries: ChatCompactionBoundary[];
+}
+
+export interface ChatArchivePage extends ChatArchiveMetadata {
+  messages: Message[];
+  next_cursor?: string | null;
 }
 
 export interface ChatPage {

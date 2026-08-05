@@ -23,6 +23,7 @@ async def create_chat_service(ws: "Workspace", service):
         service: Existing ChatManager if reused, None if creating new
     """
     # pylint: disable=protected-access
+    from ...agents.memory.conversation_archive import ConversationArchiveStore
     from ..runner.manager import ChatManager
     from ..runner.repo.json_repo import JsonChatRepository
 
@@ -35,13 +36,64 @@ async def create_chat_service(ws: "Workspace", service):
         # Create new ChatManager
         chats_path = str(ws.workspace_dir / "chats.json")
         chat_repo = JsonChatRepository(chats_path)
-        cm = ChatManager(repo=chat_repo)
+        cm = ChatManager(
+            repo=chat_repo,
+            archive_store=ConversationArchiveStore(
+                ws.workspace_dir / "dialog",
+            ),
+        )
         ws._service_manager.services["chat_manager"] = cm
         logger.info(f"ChatManager created: {chats_path}")
 
     # Always wire to new runner
     ws._service_manager.services["runner"].set_chat_manager(cm)
     # pylint: enable=protected-access
+
+
+async def _init_zhaohu_binding(ws: "Workspace", zhaohu_cfg):
+    """招乎渠道绑定初始化：source_id 无值时跳过，仅无已有记录时插入。"""
+    from ..channels.zhaohu.binding_store import get_zhaohu_binding_store
+    from ...config.context import get_current_source_id, decode_scope_id
+
+    store = get_zhaohu_binding_store()
+    if store is None:
+        return
+    robot_id = getattr(zhaohu_cfg, "robot_open_id", "") or ""
+    if not robot_id:
+        return
+    try:
+        effective_source_id = get_current_source_id()
+        if not effective_source_id:
+            logger.debug(
+                "zhaohu binding skip on channel init: no source_id in context, tenant=%s",
+                ws.tenant_id,
+            )
+            return
+        # tenant_id 解码：MDAw.MDAw -> 取前半段 MDAw -> 解码为 000
+        try:
+            decoded_parts = decode_scope_id(ws.tenant_id)
+            effective_tenant_id = (
+                decoded_parts[0] if decoded_parts else ws.tenant_id
+            )
+        except Exception:
+            effective_tenant_id = ws.tenant_id
+        # 仅在无已有记录时插入，避免热加载覆盖用户更新的 priority
+        existing = await store.get_binding(
+            effective_tenant_id,
+            effective_source_id,
+        )
+        if existing is None:
+            await store.upsert_binding(
+                tenant_id=effective_tenant_id,
+                source_id=effective_source_id,
+                robot_id=robot_id,
+                priority=30,
+            )
+    except Exception:
+        logger.warning(
+            "zhaohu binding persist failed on channel init: tenant=%s",
+            ws.tenant_id,
+        )
 
 
 async def create_channel_service(ws: "Workspace", service):
@@ -95,42 +147,7 @@ async def create_channel_service(ws: "Workspace", service):
     # 招乎渠道配置创建时将绑定信息落库
     zhaohu_cfg = getattr(ws._config.channels, "zhaohu", None)
     if zhaohu_cfg is not None and ws.tenant_id:
-        from ..channels.zhaohu.binding_store import get_zhaohu_binding_store
-
-        store = get_zhaohu_binding_store()
-        if store is not None:
-            robot_id = getattr(zhaohu_cfg, "robot_open_id", "") or ""
-            if robot_id:
-                try:
-                    # source_id 从 tenant_context 获取（请求头 X-Source-Id）
-                    from ...config.context import (
-                        get_current_source_id,
-                        decode_scope_id,
-                    )
-
-                    effective_source_id = (
-                        get_current_source_id()
-                        or getattr(zhaohu_cfg, "channel", None)
-                        or "zhaohu"
-                    )
-                    # tenant_id 解码：MDAw.MDAw -> 取前半段 MDAw -> 解码为 000
-                    try:
-                        decoded_parts = decode_scope_id(ws.tenant_id)
-                        effective_tenant_id = (
-                            decoded_parts[0] if decoded_parts else ws.tenant_id
-                        )
-                    except Exception:
-                        effective_tenant_id = ws.tenant_id
-                    await store.upsert_binding(
-                        tenant_id=effective_tenant_id,
-                        source_id=effective_source_id,
-                        robot_id=robot_id,
-                    )
-                except Exception:
-                    logger.warning(
-                        "zhaohu binding persist failed on channel init: tenant=%s",
-                        ws.tenant_id,
-                    )
+        await _init_zhaohu_binding(ws, zhaohu_cfg)
 
     # Inject workspace into ChannelManager and all channels
     cm.set_workspace(ws)

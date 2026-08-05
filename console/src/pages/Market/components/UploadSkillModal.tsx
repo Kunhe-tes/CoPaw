@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Modal, Upload, Select, Input, message, Spin, Button, Tooltip, Alert, Popover } from "antd";
+import { Modal, Upload, Select, Input, message, Spin, Button, Tooltip, Alert, Popover, Checkbox } from "antd";
 import { InboxOutlined, PlusOutlined, InfoCircleOutlined, QuestionCircleOutlined } from "@ant-design/icons";
 import type { UploadProps } from "antd";
 import { marketApi, type Category } from "../../../api/modules/market";
@@ -39,6 +39,7 @@ export default function UploadSkillModal({
   const [addCategoryModalOpen, setAddCategoryModalOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
   const [addingCategory, setAddingCategory] = useState(false);
+  const [includeInStatistics, setIncludeInStatistics] = useState(false);  // 是否纳入统计，默认不纳入
 
   const loadCategories = async () => {
     setLoadingCategories(true);
@@ -66,8 +67,9 @@ export default function UploadSkillModal({
       setSkillIdUsedCount(0);
       setSkillIdUsedBy([]);
       setSelectedCategory(null);
-      setSelectedBbkIds([]);
+      setSelectedBbkIds([BBK_ID_MAP[0].value]);  // 默认选择第一个分行
       setSkillExists(false);
+      setIncludeInStatistics(false);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
@@ -156,6 +158,7 @@ export default function UploadSkillModal({
           cn_name: cnName.trim(),
           skill_id: skillId,  // 传入 parse-zip 生成的 skill_id
           bbk_ids: selectedBbkIds,
+          include_in_statistics: includeInStatistics,
         }
       );
 
@@ -218,7 +221,7 @@ export default function UploadSkillModal({
         disabled: !file || selectedCategory === null || skillIdUsedCount > 0,
       }}
       cancelText="取消"
-      destroyOnClose
+      destroyOnHidden
     >
       <div style={{ marginBottom: 16 }}>
         <Dragger {...uploadProps} style={{ marginBottom: 16 }}>
@@ -320,6 +323,19 @@ export default function UploadSkillModal({
         />
       </div>
 
+      {/* 统计配置复选框 */}
+      <div style={{ marginBottom: 16 }}>
+        <Checkbox
+          checked={includeInStatistics}
+          onChange={(e) => setIncludeInStatistics(e.target.checked)}
+        >
+          是否纳入统计
+          <Tooltip title="勾选后，该技能的使用数据将纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。">
+            <InfoCircleOutlined style={{ marginLeft: 4, color: "#8c8c8c" }} />
+          </Tooltip>
+        </Checkbox>
+      </div>
+
       {skillId && !parsingZip && (
         <div style={{ marginBottom: 16 }}>
           <label style={{ display: "block", marginBottom: 8 }}>
@@ -353,7 +369,7 @@ export default function UploadSkillModal({
         confirmLoading={addingCategory}
         okText="创建"
         cancelText="取消"
-        destroyOnClose
+        destroyOnHidden
       >
         <Input
           placeholder="请输入分类名称"

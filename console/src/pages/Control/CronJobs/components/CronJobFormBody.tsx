@@ -9,20 +9,21 @@ import {
 import { TimePicker } from "antd";
 import type { FormInstance } from "antd";
 import { useTranslation } from "react-i18next";
-import type { CronJobSpecOutput } from "../../../../api/types";
 import type { ExecutionModelOption } from "@/hooks/useExecutionModelOptions";
 import { DEFAULT_EXECUTION_MODEL_KEY } from "@/hooks/useExecutionModelOptions";
-import { normalizeSkillIdsInput } from "../helpers";
+import { normalizeSkillIdsInput, type CronJobFormValues } from "../helpers";
 import { TIMEZONE_OPTIONS } from "./constants";
 import styles from "../index.module.less";
 
-type CronJob = CronJobSpecOutput;
+type SelectOption = { value: string; label: string };
 
 interface CronJobFormBodyProps {
-  form: FormInstance<CronJob>;
+  form: FormInstance<CronJobFormValues>;
   executionModelOptions: ExecutionModelOption[];
   executionModelLoading: boolean;
   tenantDefaultModelLabel: string;
+  skillOptions?: SelectOption[];
+  skillOptionsLoading?: boolean;
   idDisabled?: boolean;
 }
 
@@ -31,10 +32,12 @@ export function CronJobFormBody({
   executionModelOptions,
   executionModelLoading,
   tenantDefaultModelLabel,
+  skillOptions = [],
+  skillOptionsLoading = false,
   idDisabled = false,
 }: CronJobFormBodyProps) {
   const { t } = useTranslation();
-  const validateSkillIds = (_: unknown, value: string) => {
+  const validateSkillIds = (_: unknown, value: unknown) => {
     try {
       normalizeSkillIdsInput(value);
       return Promise.resolve();
@@ -267,7 +270,15 @@ export function CronJobFormBody({
         label="绑定技能ID"
         rules={[{ validator: validateSkillIds }]}
       >
-        <Input.TextArea rows={2} placeholder="skill-a, skill_b" />
+        <Select
+          mode="multiple"
+          allowClear
+          showSearch
+          loading={skillOptionsLoading}
+          placeholder="请选择绑定技能ID"
+          optionFilterProp="label"
+          options={skillOptions}
+        />
       </Form.Item>
 
       <Form.Item
@@ -394,9 +405,7 @@ export function CronJobFormBody({
       <Form.Item
         name={["dispatch", "channel"]}
         label={t("cronJobs.dispatchChannel")}
-        rules={[
-          { required: true, message: t("cronJobs.pleaseInputChannel") },
-        ]}
+        rules={[{ required: true, message: t("cronJobs.pleaseInputChannel") }]}
         tooltip={t("cronJobs.dispatchChannelTooltip")}
       >
         <Input placeholder="console" />

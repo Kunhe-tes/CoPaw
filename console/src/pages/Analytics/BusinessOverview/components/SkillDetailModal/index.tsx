@@ -6,9 +6,12 @@ import { tracingApi, TraceListItem, TraceDetail } from "../../../../../api/modul
 import { getBbkDisplayName } from "../../../../../constants/bbk";
 import styles from "./index.module.less";
 
+const DEFAULT_TRACE_PAGE_SIZE = 10;
+
 interface SkillDetailModalProps {
   open: boolean;
   skillName: string;
+  skillDisplayName?: string;
   startDate: string;
   endDate: string;
   onClose: () => void;
@@ -17,6 +20,7 @@ interface SkillDetailModalProps {
 export default function SkillDetailModal({
   open,
   skillName,
+  skillDisplayName,
   startDate,
   endDate,
   onClose,
@@ -25,7 +29,7 @@ export default function SkillDetailModal({
   const [traces, setTraces] = useState<TraceListItem[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
-  const [pageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(DEFAULT_TRACE_PAGE_SIZE);
   const [loading, setLoading] = useState(false);
 
   // 选中的对话
@@ -52,27 +56,26 @@ export default function SkillDetailModal({
   };
 
   // 获取对话列表
-  const fetchTraces = useCallback(async (pageNum: number) => {
+  const fetchTraces = useCallback(async (pageNum: number, pageSizeNum: number) => {
     if (!skillName) return;
     setLoading(true);
     try {
-      const data = await tracingApi.getSkillTraces(skillName, pageNum, pageSize, {
+      const data = await tracingApi.getSkillTraces(skillName, pageNum, pageSizeNum, {
         start_date: startDate,
         end_date: endDate,
       });
       setTraces(data.items || []);
       setTotal(data.total || 0);
       // 默认选中第一个对话
-      if (data.items && data.items.length > 0 && !selectedTraceId) {
-        setSelectedTraceId(data.items[0].trace_id);
-      }
+      setTraceDetail(null);
+      setSelectedTraceId(data.items?.[0]?.trace_id ?? null);
     } catch (error) {
       console.error("Failed to fetch skill traces:", error);
       message.error("获取技能对话列表失败");
     } finally {
       setLoading(false);
     }
-  }, [skillName, startDate, endDate, pageSize]);
+  }, [skillName, startDate, endDate]);
 
   // 获取对话详情
   const fetchTraceDetail = useCallback(async (traceId: string) => {
@@ -92,10 +95,10 @@ export default function SkillDetailModal({
   // Modal 打开时加载数据
   useEffect(() => {
     if (open && skillName) {
-      fetchTraces(1);
       setPage(1);
-      setSelectedTraceId(null);
+      setPageSize(DEFAULT_TRACE_PAGE_SIZE);
       setTraceDetail(null);
+      fetchTraces(1, DEFAULT_TRACE_PAGE_SIZE);
     }
   }, [open, skillName, fetchTraces]);
 
@@ -111,15 +114,18 @@ export default function SkillDetailModal({
     setTraces([]);
     setTotal(0);
     setPage(1);
+    setPageSize(DEFAULT_TRACE_PAGE_SIZE);
     setSelectedTraceId(null);
     setTraceDetail(null);
     onClose();
   };
 
   // 分页变化
-  const handlePageChange = (newPage: number) => {
-    setPage(newPage);
-    fetchTraces(newPage);
+  const handlePageChange = (newPage: number, newPageSize: number) => {
+    const nextPage = newPageSize !== pageSize ? 1 : newPage;
+    setPage(nextPage);
+    setPageSize(newPageSize);
+    fetchTraces(nextPage, newPageSize);
   };
 
   // 选择对话
@@ -176,7 +182,7 @@ export default function SkillDetailModal({
       title={
         <span>
           <Wrench size={18} style={{ marginRight: 8 }} />
-          技能「{skillName}」调用记录
+          技能「{skillDisplayName || skillName}」调用记录
         </span>
       }
       open={open}
@@ -235,6 +241,8 @@ export default function SkillDetailModal({
                     simple
                     current={page}
                     pageSize={pageSize}
+                    showSizeChanger
+                    pageSizeOptions={["5", "10", "20", "50"]}
                     total={total}
                     onChange={handlePageChange}
                   />

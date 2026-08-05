@@ -5,6 +5,7 @@ import time
 from types import SimpleNamespace
 from typing import Any
 
+import logging
 import pytest
 
 from swe.app.approvals.service import ApprovalService
@@ -41,6 +42,47 @@ def _runner_with_zhaohu_workspace() -> tuple[AgentRunner, _ZhaohuChannel]:
     channel_manager = _ChannelManager()
     runner.set_workspace(SimpleNamespace(channel_manager=channel_manager))
     return runner, channel_manager.zhaohu
+
+
+@pytest.mark.asyncio
+async def test_approval_lookup_logs_in_memory_request_ids(caplog) -> None:
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        completed = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+        )
+        await service.resolve_request(
+            completed.request_id,
+            ApprovalDecision.APPROVED,
+        )
+
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="swe.app.approvals.service"):
+            found = await service.get_request(pending.request_id)
+
+    assert found is pending
+    assert any(
+        "Approval lookup state:" in record.message
+        and f"pending_request_ids=['{pending.request_id}']" in record.message
+        and (
+            f"completed_request_ids=['{completed.request_id}']"
+            in record.message
+        )
+        and record.pending_request_ids == [pending.request_id]
+        and record.completed_request_ids == [completed.request_id]
+        for record in caplog.records
+    )
 
 
 @pytest.mark.asyncio

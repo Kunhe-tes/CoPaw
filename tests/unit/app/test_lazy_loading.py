@@ -63,7 +63,7 @@ class TestMinimalStartup:
 
         assert hasattr(app_module, "ensure_default_agent_exists")
 
-    def test_async_thread_pool_config_defaults_to_16(
+    def test_async_thread_pool_config_defaults_to_32(
         self,
         monkeypatch,
     ):
@@ -101,8 +101,8 @@ class TestMinimalStartup:
 
         app_module._configure_async_thread_pools()
 
-        assert limiter.total_tokens == 16
-        assert executor_workers == [16]
+        assert limiter.total_tokens == 32
+        assert executor_workers == [32]
         fake_loop.set_default_executor.assert_called_once()
 
     def test_async_thread_pool_config_uses_env_overrides(

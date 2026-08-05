@@ -86,10 +86,18 @@ export interface ToolUsage {
 
 export interface SkillUsage {
   skill_name: string;
+  skill_id?: string;
+  cn_name?: string;
   skill_description?: string;
   count: number;
   avg_duration_ms: number;
 }
+
+/** 技能展示名优先返回中文 cn_name（自动 trim），回退原始 skill_name. */
+export const displaySkillName = (skill: SkillUsage): string => {
+  const cn = skill.cn_name?.trim();
+  return cn || skill.skill_name;
+};
 
 export interface MCPToolUsage {
   tool_name: string;
@@ -118,6 +126,12 @@ export interface ErrorSummary {
   total_errors: number;
   model_errors: number;
   tool_errors: number;
+  model_error_codes: ModelErrorCodeCount[];
+}
+
+export interface ModelErrorCodeCount {
+  code: string;
+  count: number;
 }
 
 export interface ErrorItem {

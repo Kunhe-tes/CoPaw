@@ -411,6 +411,34 @@ describe("BusinessOverview trend chart", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows unified loading placeholders for dashboard cards while summary requests are pending", async () => {
+    const pending = new Promise<never>(() => {});
+    tracingApiMock.getOverview.mockReturnValueOnce(pending);
+    tracingApiMock.getGrowthStats.mockReturnValueOnce(pending);
+    tracingApiMock.getHourlyTrend.mockReturnValueOnce(pending);
+    tracingApiMock.getTaskStatusSummary.mockReturnValueOnce(pending);
+    tracingApiMock.getDepthSummary.mockReturnValueOnce(pending);
+
+    renderBusinessOverview();
+
+    const loadingPlaceholders = await screen.findAllByTestId(
+      "overview-panel-loading",
+    );
+    expect(loadingPlaceholders.length).toBeGreaterThanOrEqual(7);
+    expect(screen.queryByText("调用量趋势加载中...")).not.toBeInTheDocument();
+    expect(screen.queryByText("任务执行概览加载中...")).not.toBeInTheDocument();
+  });
+
+  it("hides stale error summary content while error card is loading", async () => {
+    const pending = new Promise<never>(() => {});
+    tracingApiMock.getErrorSummary.mockReturnValueOnce(pending);
+
+    renderBusinessOverview();
+
+    expect(await screen.findByTestId("overview-panel-loading")).toBeInTheDocument();
+    expect(screen.queryByText("报错总数")).not.toBeInTheDocument();
+  });
+
   it("auto-loads more skills when the first page does not fill a scrollable viewport", async () => {
     tracingApiMock.getSkills
       .mockResolvedValueOnce({

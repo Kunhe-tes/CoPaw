@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,10 @@ import httpx
 from .auth_state import resolve_auth_token_for_execution
 from .model_slot_context import bind_model_slot_override
 from .models import CronJobSpec
+from ..b3_headers import (
+    B3_TRACE_ID_META_KEY,
+    PASSTHROUGH_HEADERS_META_KEY,
+)
 from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
 from ...config.llm_workload import LLM_WORKLOAD_CRON, bind_llm_workload
@@ -108,6 +113,72 @@ class _ExecutionContext:
     scope_id: str | None
 
 
+def _dispatch_b3_trace_id(dispatch_meta: Dict[str, Any]) -> str | None:
+    trace_id = dispatch_meta.get(B3_TRACE_ID_META_KEY)
+    if trace_id is None:
+        return None
+    trace_id = str(trace_id).strip()
+    return trace_id or None
+
+
+def _is_dispatch_service_batch(dispatch_meta: Dict[str, Any]) -> bool:
+    intent_id = dispatch_meta.get("intent_id")
+    batch_id = dispatch_meta.get("batch_id")
+    dispatch_attempt = dispatch_meta.get("dispatch_attempt")
+    return (
+        str(dispatch_meta.get("source") or "").strip() == "dispatch_service"
+        and isinstance(intent_id, int)
+        and not isinstance(intent_id, bool)
+        and intent_id > 0
+        and isinstance(batch_id, str)
+        and bool(batch_id.strip())
+        and isinstance(dispatch_attempt, int)
+        and not isinstance(dispatch_attempt, bool)
+        and dispatch_attempt > 0
+    )
+
+
+def _resolve_dispatch_trace_ids(
+    dispatch_meta: Dict[str, Any],
+) -> tuple[str | None, str | None]:
+    b3_trace_id = _dispatch_b3_trace_id(dispatch_meta)
+    requested_trace_id = (
+        str(uuid.uuid4())
+        if _is_dispatch_service_batch(dispatch_meta)
+        else b3_trace_id
+    )
+    return requested_trace_id, b3_trace_id
+
+
+def _dispatch_passthrough_headers(
+    dispatch_meta: Dict[str, Any],
+) -> dict[str, str]:
+    raw_headers = dispatch_meta.get(PASSTHROUGH_HEADERS_META_KEY)
+    if not isinstance(raw_headers, dict):
+        return {}
+    headers: dict[str, str] = {}
+    for name, value in raw_headers.items():
+        if value is None:
+            continue
+        header_name = str(name).strip()
+        header_value = str(value).strip()
+        if header_name and header_value:
+            headers[header_name] = header_value
+    return headers
+
+
+def _apply_dispatch_passthrough_headers(
+    req: Dict[str, Any],
+    dispatch_meta: Dict[str, Any],
+) -> None:
+    headers = _dispatch_passthrough_headers(dispatch_meta)
+    if headers:
+        req[PASSTHROUGH_HEADERS_META_KEY] = headers
+    trace_id = _dispatch_b3_trace_id(dispatch_meta)
+    if trace_id:
+        req[B3_TRACE_ID_META_KEY] = trace_id
+
+
 @dataclass
 class AgentStreamState:
     """记录 Agent 流式执行边界，用于区分真实取消和完成后取消。"""
@@ -183,7 +254,11 @@ class CronExecutor:
         self._runner = runner
         self._channel_manager = channel_manager
 
-    async def execute(self, job: CronJobSpec) -> ExecutionResult:
+    async def execute(
+        self,
+        job: CronJobSpec,
+        dispatch_meta: Optional[Dict[str, Any]] = None,
+    ) -> ExecutionResult:
         """Execute one job once with tenant context.
 
         - task_type text: send fixed text to channel
@@ -195,7 +270,7 @@ class CronExecutor:
         Returns:
             ExecutionResult containing trace_id and output_preview
         """
-        context = self._prepare_execution_context(job)
+        context = self._prepare_execution_context(job, dispatch_meta)
         resolved_model = self._resolve_execution_model(job, context.scope_id)
 
         logger.info(
@@ -235,8 +310,10 @@ class CronExecutor:
     def _prepare_execution_context(
         self,
         job: CronJobSpec,
+        execution_dispatch_meta: Optional[Dict[str, Any]] = None,
     ) -> _ExecutionContext:
         dispatch_meta: Dict[str, Any] = dict(job.dispatch.meta or {})
+        dispatch_meta.update(execution_dispatch_meta or {})
         workspace_dir_value = dispatch_meta.get("workspace_dir")
         workspace_dir = (
             Path(workspace_dir_value) if workspace_dir_value else None
@@ -521,10 +598,15 @@ class CronExecutor:
         )
 
         # 保留抽出的 helper，同时继续传递 scope 级租户标识。
-        trace_id = await self._create_trace_for_text_job(
+        requested_trace_id, b3_trace_id = _resolve_dispatch_trace_ids(
+            dispatch_meta,
+        )
+        created_trace_id = await self._create_trace_for_text_job(
             job,
             target_user_id,
             target_session_id,
+            trace_id=requested_trace_id,
+            b3_trace_id=b3_trace_id,
         )
 
         try:
@@ -536,7 +618,9 @@ class CronExecutor:
                 runtime_tenant_id,
             )
         finally:
-            await self._end_trace_for_text_job(trace_id)
+            await self._end_trace_for_text_job(created_trace_id)
+
+        internal_trace_id = created_trace_id or requested_trace_id
 
         # 返回执行结果
         output_preview = (job.text or "").strip()[:100]
@@ -544,7 +628,7 @@ class CronExecutor:
             {"text": (job.text or "").strip()} if job.text else None
         )
         return {
-            "trace_id": trace_id or "",
+            "trace_id": internal_trace_id or "",
             "output_preview": output_preview,
             "input_snapshot": input_snapshot,
             "executor_leader": "",
@@ -555,6 +639,8 @@ class CronExecutor:
         job: CronJobSpec,
         target_user_id: str,
         target_session_id: str,
+        trace_id: str | None = None,
+        b3_trace_id: str | None = None,
     ) -> Optional[str]:
         """为 text 类型任务创建 trace 记录。
 
@@ -591,6 +677,8 @@ class CronExecutor:
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=job.name,
+                trace_id=trace_id,
+                b3_trace_id=b3_trace_id,
             )
             # 写入 model_output 到 ES
             if trace_id and job.text:
@@ -655,6 +743,8 @@ class CronExecutor:
         job: CronJobSpec,
         target_user_id: str,
         target_session_id: str,
+        trace_id: str | None = None,
+        b3_trace_id: str | None = None,
     ) -> Optional[str]:
         """为 agent 任务创建 trace 记录。
 
@@ -691,6 +781,8 @@ class CronExecutor:
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=job.name,
+                trace_id=trace_id,
+                b3_trace_id=b3_trace_id,
             )
             logger.info(
                 "cron agent: created trace_id=%s for job_id=%s",
@@ -958,24 +1050,35 @@ class CronExecutor:
         )
         assert job.request is not None
         req = self._build_agent_request(job, target_user_id, target_session_id)
-        trace_id = await self._create_trace_for_agent_job(
+        _apply_dispatch_passthrough_headers(req, dispatch_meta)
+        requested_trace_id, b3_trace_id = _resolve_dispatch_trace_ids(
+            dispatch_meta,
+        )
+        created_trace_id = await self._create_trace_for_agent_job(
             job,
             target_user_id,
             target_session_id,
+            trace_id=requested_trace_id,
+            b3_trace_id=b3_trace_id,
         )
+        internal_trace_id = created_trace_id or requested_trace_id
 
         try:
             self._apply_auth_token(job, dispatch_meta, req)
         except Exception as exc:
-            await self._handle_agent_generic_exception(job, trace_id, exc)
-            setattr(exc, "cron_trace_id", trace_id)
+            await self._handle_agent_generic_exception(
+                job,
+                created_trace_id,
+                exc,
+            )
+            setattr(exc, "cron_trace_id", internal_trace_id)
             raise
 
-        if trace_id:
-            req["trace_id"] = trace_id
+        if internal_trace_id:
+            req["trace_id"] = internal_trace_id
             req["trace_attach_existing"] = True
 
-        return runtime_tenant_id, trace_id, req, AgentStreamState()
+        return runtime_tenant_id, internal_trace_id, req, AgentStreamState()
 
     async def _run_agent_stream_with_timeout(
         self,

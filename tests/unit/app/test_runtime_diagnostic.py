@@ -72,6 +72,15 @@ def _payload(message: str) -> dict[str, object]:
     return json.loads(message.removeprefix(prefix))
 
 
+def _symlink_or_skip(link, target: str) -> None:
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        if sys.platform == "win32" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is not available")
+        raise
+
+
 def _manager(**overrides) -> RuntimeDiagnosticManager:
     messages: list[str] = overrides.pop("messages", [])
     options = {
@@ -229,8 +238,8 @@ def test_collect_inotify_diagnostic_summarizes_proc_fdinfo(tmp_path) -> None:
     fdinfo_dir = proc_dir / "fdinfo"
     fd_dir.mkdir(parents=True)
     fdinfo_dir.mkdir()
-    (fd_dir / "3").symlink_to("anon_inode:inotify")
-    (fd_dir / "4").symlink_to("socket:[1]")
+    _symlink_or_skip(fd_dir / "3", "anon_inode:inotify")
+    _symlink_or_skip(fd_dir / "4", "socket:[1]")
     (fdinfo_dir / "3").write_text(
         "pos:\t0\n"
         "flags:\t02000000\n"
@@ -287,7 +296,7 @@ def test_collect_inotify_diagnostic_counts_before_fdinfo_truncation(
     fdinfo_dir = proc_dir / "fdinfo"
     fd_dir.mkdir(parents=True)
     fdinfo_dir.mkdir()
-    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    _symlink_or_skip(fd_dir / "3", "anon_inode:inotify")
     (fdinfo_dir / "3").write_text(
         "pos:\t0\n"
         "inotify wd:1 ino:abc sdev:01 mask:00000800 ignored_mask:0\n"
@@ -321,7 +330,7 @@ def test_collect_inotify_diagnostic_can_redact_details(
     fdinfo_dir = proc_dir / "fdinfo"
     fd_dir.mkdir(parents=True)
     fdinfo_dir.mkdir()
-    (fd_dir / "3").symlink_to("anon_inode:inotify")
+    _symlink_or_skip(fd_dir / "3", "anon_inode:inotify")
     (fdinfo_dir / "3").write_text(
         "pos:\t0\n"
         "inotify wd:1 ino:abc sdev:01 mask:00000800 ignored_mask:0\n",

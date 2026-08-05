@@ -1,7 +1,7 @@
 import { Card, Tag, Typography, Button, Space, Popconfirm, Dropdown, Popover, type MenuProps } from "antd";
 import { MarketSkill } from "../../api/modules/market";
 import { BBK_ID_TO_NAME_MAP } from "../../constants/bbk";
-import { Users, PhoneCall, Calendar, GitBranch, CheckCircle, Sparkles, Tag as TagIcon, Eye, Trash2, Send, MoreVertical, Archive, Building2 } from "lucide-react";
+import { Users, PhoneCall, Calendar, GitBranch, CheckCircle, Sparkles, Tag as TagIcon, Eye, Trash2, Send, MoreVertical, Archive, Building2, BarChart3 } from "lucide-react";
 
 const { Text } = Typography;
 
@@ -90,6 +90,8 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
         backgroundColor: "#fff",
         cursor: "pointer",
         transition: "all 0.2s ease",
+        display: "flex",
+        flexDirection: "column",
       }}
       onClick={onClick}
       onMouseEnter={(e) => {
@@ -104,7 +106,7 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
       }}
     >
       {/* Header: name + badges */}
-      <div style={{ marginBottom: 12 }}>
+      <div style={{ marginBottom: 12, flex: 1 }}>
         <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
@@ -230,6 +232,26 @@ export function SkillCard({ skill, onClick, onDistribute, onLookupOwners, onUnpu
                 >
                   <CheckCircle size={12} />
                   已安装
+                </Tag>
+              )}
+              {/* 统计徽章：仅管理员可见，且技能已纳入统计时显示 */}
+              {isManager && skill.include_in_statistics && (
+                <Tag
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 500,
+                    backgroundColor: "#e6f4ff",
+                    color: "#1677ff",
+                    border: "1px solid #91caff",
+                    borderRadius: 999,
+                    padding: "0 8px",
+                    display: "inline-flex",
+                    alignItems: "center",
+                    gap: 4,
+                  }}
+                >
+                  <BarChart3 size={12} />
+                  纳入统计
                 </Tag>
               )}
             </div>

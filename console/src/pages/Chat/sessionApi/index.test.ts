@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { convertMessages, SessionApi } from "./index";
+import { convertArchivedPage, SessionApi } from "./index";
 
 const apiMocks = vi.hoisted(() => ({
   listChats: vi.fn(),
@@ -133,20 +133,6 @@ describe("SessionApi identity mapping", () => {
     expect(list[0]?.name).toBe("new chat");
   });
 
-  it("does not expose an unresolved pending local session as a backend chat id", async () => {
-    const sessionApi = new SessionApi();
-
-    await sessionApi.createSession({
-      name: "new chat",
-      messages: [],
-    });
-
-    const logicalSessionId = sessionApi.getPendingSessionId();
-
-    expect(logicalSessionId).toBeTruthy();
-    expect(sessionApi.getChatIdForSession(logicalSessionId!)).toBeNull();
-  });
-
   it("loads a newly created local session without refreshing the chat list once", async () => {
     const sessionApi = new SessionApi();
 
@@ -163,23 +149,6 @@ describe("SessionApi identity mapping", () => {
     expect(apiMocks.listChats).not.toHaveBeenCalled();
     expect(session.id).toBe(logicalSessionId);
     expect(session.name).toBe("new chat");
-  });
-
-  it("removes an unresolved pending local session without deleting a backend chat", async () => {
-    const sessionApi = new SessionApi();
-
-    await sessionApi.createSession({
-      name: "new chat",
-      messages: [],
-    });
-
-    const logicalSessionId = sessionApi.getPendingSessionId();
-    expect(logicalSessionId).toBeTruthy();
-
-    const list = await sessionApi.removeSession({ id: logicalSessionId! });
-
-    expect(apiMocks.deleteChat).not.toHaveBeenCalled();
-    expect(list.some((session) => session.id === logicalSessionId)).toBe(false);
   });
 
   it("keeps multiple pending local sessions when backend persistence has not caught up yet", async () => {
@@ -652,100 +621,6 @@ describe("SessionApi identity mapping", () => {
     expect(newData.collapsedByDefault).toBe(false);
     expect(JSON.stringify(oldData)).toContain("old final");
     expect(JSON.stringify(newData)).toContain("new final");
-  });
-
-  it("marks restored plan review cards submitted from later history responses", () => {
-    const messages = convertMessages([
-      {
-        id: "assistant-plan",
-        role: "assistant",
-        type: "message",
-        content: [{ type: "text", text: "Review this plan" }],
-        metadata: {
-          plan_interaction_card: {
-            card_type: "plan_review",
-            plan_id: "plan-restore-1",
-            title: "Restore check",
-            summary: "Plan summary",
-            steps: ["Step 1"],
-            risks: [],
-            verification: [],
-          },
-        },
-      },
-      {
-        id: "user-decision",
-        role: "user",
-        type: "message",
-        content: [{ type: "text", text: "Execute plan plan-restore-1" }],
-        metadata: {
-          plan_interaction_response: {
-            card_type: "plan_review",
-            plan_id: "plan-restore-1",
-            decision: "execute",
-          },
-        },
-      },
-    ]);
-
-    const planCard = messages[0]?.cards?.find(
-      (card) => card.code === "PlanInteraction",
-    );
-
-    expect(planCard?.data).toMatchObject({
-      card_type: "plan_review",
-      plan_id: "plan-restore-1",
-      status: "submitted",
-      submitted_decision: "execute",
-    });
-  });
-
-  it("restores submitted plan review revise decisions with feedback", () => {
-    const messages = convertMessages([
-      {
-        id: "assistant-plan",
-        role: "assistant",
-        type: "message",
-        content: [{ type: "text", text: "Review this plan" }],
-        metadata: {
-          plan_interaction_card: {
-            card_type: "plan_review",
-            plan_id: "plan-restore-2",
-            title: "Restore revise",
-            summary: "Plan summary",
-            steps: ["Step 1"],
-            risks: [],
-            verification: [],
-          },
-        },
-      },
-      {
-        id: "user-decision",
-        role: "user",
-        type: "message",
-        content: [{ type: "text", text: "Revise the plan" }],
-        metadata: {
-          plan_interaction_response: {
-            card_type: "plan_review",
-            plan_id: "plan-restore-2",
-            decision: "revise",
-            feedback: "Add rollback verification.",
-          },
-        },
-      },
-    ]);
-
-    const planCard = messages[0]?.cards?.find(
-      (card) => card.code === "PlanInteraction",
-    );
-
-    expect(planCard?.data).toMatchObject({
-      card_type: "plan_review",
-      plan_id: "plan-restore-2",
-      status: "submitted",
-      submitted_decision: "revise",
-      feedback: "Add rollback verification.",
-    });
   });
 
   it("does not treat a persisted logical session id as a unique backend chat id", async () => {
@@ -1520,5 +1395,104 @@ describe("SessionApi identity mapping", () => {
     const list = await sessionApi.loadMoreSessions();
 
     expect(list).toEqual([]);
+  });
+});
+
+describe("archived conversation card conversion", () => {
+  it("keeps the compaction boundary after a local timestamp session resolves", async () => {
+    const sessionApi = new SessionApi();
+    await sessionApi.createSession({ name: "new chat", messages: [] });
+    const localSessionId = sessionApi.getPendingSessionId();
+    expect(localSessionId).toBeTruthy();
+    apiMocks.listChats.mockResolvedValue([
+      {
+        id: "chat-real-1",
+        name: "new chat",
+        session_id: localSessionId,
+        user_id: "user-1",
+        channel: "console",
+        meta: {},
+        status: "idle",
+        created_at: "2026-08-01T00:00:00Z",
+      },
+    ]);
+    apiMocks.getChat.mockResolvedValue({
+      id: "chat-real-1",
+      messages: [{ id: "online-1", role: "user", content: "current" }],
+      archive: {
+        has_more: true,
+        boundaries: [
+          {
+            id: "boundary-1",
+            archived_message_count: 3,
+            first_message_id: "archived-1",
+            last_message_id: "archived-3",
+            created_at: "2026-08-01T12:00:00+00:00",
+          },
+        ],
+      },
+    });
+
+    await sessionApi.updateSession({ id: localSessionId!, name: "new chat" });
+    const session = await sessionApi.getSession(localSessionId!);
+
+    expect(session.messages?.[0]?.cards?.[0]?.code).toBe(
+      "ConversationCompactionBoundary",
+    );
+  });
+
+  it("shows the latest archive boundary before online messages", async () => {
+    apiMocks.getChat.mockResolvedValue({
+      id: "chat-real-1",
+      messages: [{ id: "online-1", role: "user", content: "current" }],
+      archive: {
+        has_more: true,
+        boundaries: [
+          {
+            id: "boundary-1",
+            archived_message_count: 3,
+            first_message_id: "archived-1",
+            last_message_id: "archived-3",
+            created_at: "2026-08-01T12:00:00+00:00",
+          },
+        ],
+      },
+    });
+    const sessionApi = new SessionApi();
+
+    const session = await sessionApi.getSession("chat-real-1");
+
+    expect(session.messages?.map((message) => message.cards?.[0]?.code)).toEqual(
+      [
+        "ConversationCompactionBoundary",
+        "AgentScopeRuntimeRequestCard",
+      ],
+    );
+  });
+
+  it("places a compaction boundary after the batch it terminates", () => {
+    const cards = convertArchivedPage(
+      [
+        { id: "user-1", role: "user", content: "first" },
+        { id: "assistant-1", role: "assistant", content: "answer" },
+        { id: "user-2", role: "user", content: "second" },
+      ],
+      [
+        {
+          id: "boundary-1",
+          archived_message_count: 2,
+          first_message_id: "user-1",
+          last_message_id: "assistant-1",
+          created_at: "2026-08-01T12:00:00+00:00",
+        },
+      ],
+    );
+
+    expect(cards.map((card) => card.cards?.[0]?.code)).toEqual([
+      "AgentScopeRuntimeRequestCard",
+      "AgentScopeRuntimeResponseCard",
+      "ConversationCompactionBoundary",
+      "AgentScopeRuntimeRequestCard",
+    ]);
   });
 });

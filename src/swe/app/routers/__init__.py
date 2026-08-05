@@ -30,6 +30,7 @@ _ROUTER_MODULES = (
     (".tracing", "router"),
     (".auth", "router"),
     (".files", "router"),
+    (".hook_management", "router"),
     (".settings", "router"),
     (".subagents", "router"),
     ("..instance", "instance_router"),
@@ -47,6 +48,7 @@ _ROUTER_MODULES = (
     (".internal", "public_router"),
     (".system_check", "router"),
     ("..source_system_config", "router"),
+    ("..source_tools", "router"),
     ("..skill_readiness.router", "router"),
     ("..asset_upload_record", "router"),
 )
@@ -61,6 +63,7 @@ _MODULE_EXPORTS = {
     "dream_logs",
     "envs",
     "files",
+    "hook_management",
     "internal",
     "local_models",
     "mcp",

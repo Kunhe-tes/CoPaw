@@ -10,6 +10,11 @@ import type { UploadFile } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import Input from "./index";
 import { RUNTIME_INPUT_SET_CONTENT_EVENT } from "../hooks/followUpSubmit";
+import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
+import {
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+} from "@/components/agentscope-chat/chatInputDraft";
 
 const attachmentState = {
   currentFileList: [] as UploadFile[],
@@ -18,23 +23,38 @@ const attachmentState = {
     attachmentState.currentFileList = next;
   }),
   handlePasteFile: vi.fn<(file: File) => void>(),
-  handleUploadMenuClick: vi.fn<() => void>(),
 };
+
+vi.mock("@/components/GlobalVoiceRecorder/VoiceRecorderTrigger", () => ({
+  default: () => null,
+}));
+
+function renderActiveInput(onSubmit = vi.fn()) {
+  return render(
+    <ChatAnywhereMessagesContext.Provider
+      value={{
+        messages: [{ id: "message-1" } as never],
+        setMessages: vi.fn(),
+        getMessages: () => [],
+      }}
+    >
+      <Input onCancel={vi.fn()} onSubmit={onSubmit} />
+    </ChatAnywhereMessagesContext.Provider>,
+  );
+}
 
 vi.mock("@/components/agentscope-chat", () => ({
   ChatInput: (props: {
     value?: string;
     onChange?: (value: string) => void;
     onSubmit?: () => void;
-    prefix?: React.ReactNode;
   }) => (
     <div>
-      <input
+      <textarea
         data-testid="chat-input"
         value={props.value || ""}
         onChange={(event) => props.onChange?.(event.target.value)}
       />
-      <div data-testid="chat-prefix">{props.prefix}</div>
       <button type="button" onClick={() => props.onSubmit?.()}>
         submit
       </button>
@@ -47,26 +67,14 @@ vi.mock("@/components/agentscope-chat", () => ({
 }));
 
 vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
-  useChatAnywhereOptions: (
-    selector: (value: { sender: Record<string, unknown> }) => unknown,
-  ) => selector({ sender: senderOptions.current }),
+  useChatAnywhereOptions: (selector: (value: { sender: object }) => unknown) =>
+    selector({ sender: {} }),
 }));
-
-const senderOptions = {
-  current: {} as Record<string, unknown>,
-};
-
-const inputState = {
-  current: {
-    disabled: false,
-    loading: false,
-  },
-};
 
 vi.mock("../../Context/ChatAnywhereInputContext", () => ({
   useChatAnywhereInput: (
     selector: (value: { disabled: boolean; loading: boolean }) => unknown,
-  ) => selector(inputState.current),
+  ) => selector({ disabled: false, loading: false }),
 }));
 
 vi.mock("./useAttachments", () => ({
@@ -75,22 +83,13 @@ vi.mock("./useAttachments", () => ({
     getFileList: attachmentState.getFileList,
     setFileList: attachmentState.setFileList,
     handlePasteFile: attachmentState.handlePasteFile,
-    uploadQuickMenuItem: (
-      <button type="button" onClick={() => attachmentState.handleUploadMenuClick()}>
-        上传文件
-      </button>
-    ),
+    uploadIconButton: null,
     uploadFileListHeader: null,
   }),
 }));
 
 describe("Chat Input restore flow", () => {
   beforeEach(() => {
-    senderOptions.current = {};
-    inputState.current = {
-      disabled: false,
-      loading: false,
-    };
     attachmentState.currentFileList = [];
     attachmentState.getFileList.mockImplementation(
       () => attachmentState.currentFileList,
@@ -98,7 +97,6 @@ describe("Chat Input restore flow", () => {
     attachmentState.getFileList.mockClear();
     attachmentState.setFileList.mockClear();
     attachmentState.handlePasteFile.mockClear();
-    attachmentState.handleUploadMenuClick.mockClear();
   });
 
   afterEach(() => {
@@ -248,174 +246,55 @@ describe("Chat Input restore flow", () => {
     expect(attachmentState.handlePasteFile).toHaveBeenCalledWith(file);
   });
 
-  it("ignores files dispatched by the chat drag-and-drop bridge when disabled", () => {
-    const file = new File(["hello"], "demo.txt", { type: "text/plain" });
-    inputState.current = {
-      disabled: true,
-      loading: false,
-    };
+  it("appends transcribed text to the active conversation draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    renderActiveInput(onSubmit);
 
-    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
-
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "已有草稿" },
+    });
     document.dispatchEvent(
-      new CustomEvent("pasteFile", {
-        detail: { file },
+      new CustomEvent(CHAT_INPUT_APPEND_TEXT_EVENT, {
+        detail: { content: "语音转写" },
       }),
     );
 
-    expect(attachmentState.handlePasteFile).not.toHaveBeenCalled();
-  });
-
-  it("allows beforeSubmit to inspect and transform the submitted input", async () => {
-    const onSubmit = vi.fn();
-    senderOptions.current = {
-      beforeSubmit: vi.fn(async (data) => ({
-        ...data,
-        query: "transformed",
-        biz_params: {
-          ...(data.biz_params || {}),
-          mode: "plan",
-        },
-      })),
-    };
-
-    render(<Input onCancel={vi.fn()} onSubmit={onSubmit} />);
-
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "/plan transformed" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "submit", hidden: true }),
-    );
-
     await waitFor(() => {
-      expect(senderOptions.current.beforeSubmit).toHaveBeenCalledWith({
-        query: "/plan transformed",
-        fileList: [],
-        biz_params: undefined,
-      });
-      expect(onSubmit).toHaveBeenCalledWith({
-        query: "transformed",
-        fileList: [],
-        biz_params: { mode: "plan" },
-      });
-    });
-  });
-
-  it("allows beforeSubmit to clear input without submitting a request", async () => {
-    const onSubmit = vi.fn();
-    senderOptions.current = {
-      beforeSubmit: vi.fn(async () => ({
-        shouldSubmit: false,
-        clearInput: true,
-      })),
-    };
-
-    render(<Input onCancel={vi.fn()} onSubmit={onSubmit} />);
-
-    fireEvent.change(screen.getByTestId("chat-input"), {
-      target: { value: "/plan" },
-    });
-    fireEvent.click(
-      screen.getByRole("button", { name: "submit", hidden: true }),
-    );
-
-    await waitFor(() => {
-      expect(onSubmit).not.toHaveBeenCalled();
-      expect((screen.getByTestId("chat-input") as HTMLInputElement).value).toBe(
-        "",
+      expect(screen.getByTestId("chat-input")).toHaveValue(
+        "已有草稿\n语音转写",
       );
     });
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 
-  it("shows upload and custom quick actions inside the plus menu", async () => {
-    const onPlanModeClick = vi.fn();
-    senderOptions.current = {
-      quickMenuItems: [
-        <button key="plan" type="button" onClick={onPlanModeClick}>
-          计划模式
-        </button>,
-      ],
-    };
-
+  it("ignores transcribed text while the conversation input is hidden", () => {
     render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
 
-    fireEvent.click(screen.getByRole("button", { name: "快捷操作", hidden: true }));
-
-    fireEvent.click(
-      await screen.findByRole("button", { name: "上传文件", hidden: true }),
-    );
-    fireEvent.click(screen.getByRole("button", { name: "快捷操作", hidden: true }));
-    fireEvent.click(
-      await screen.findByRole("button", { name: "计划模式", hidden: true }),
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_APPEND_TEXT_EVENT, {
+        detail: { content: "欢迎页负责接收" },
+      }),
     );
 
-    expect(attachmentState.handleUploadMenuClick).toHaveBeenCalledTimes(1);
-    expect(onPlanModeClick).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId("chat-input")).toHaveValue("");
   });
 
-  it("renders sender.prefix controls in the bottom action row and dispatches clicks", () => {
-    const onDisable = vi.fn();
-    senderOptions.current = {
-      prefix: (
-        <button type="button" onClick={onDisable}>
-          计划模式
-        </button>
-      ),
-    };
+  it("replaces the active conversation draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    renderActiveInput(onSubmit);
 
-    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
-
-    fireEvent.click(
-      screen.getByRole("button", { name: "计划模式", hidden: true }),
+    fireEvent.change(screen.getByTestId("chat-input"), {
+      target: { value: "需要清空的原草稿" },
+    });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_REPLACE_TEXT_EVENT, {
+        detail: { content: "完整 SOP 提示词" },
+      }),
     );
 
-    expect(screen.getByTestId("chat-prefix")).toHaveTextContent("计划模式");
-    expect(onDisable).toHaveBeenCalledTimes(1);
-  });
-
-  it("lets sender.renderComposer replace the default composer controls", () => {
-    senderOptions.current = {
-      prefix: <button type="button">计划模式</button>,
-      quickMenuItems: [<button key="custom" type="button">自定义菜单</button>],
-      renderComposer: vi.fn(() => (
-        <section data-testid="composer-replacement">
-          <button type="button">提交卡片</button>
-        </section>
-      )),
-    };
-
-    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
-
-    expect(screen.getByTestId("composer-replacement")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "提交卡片", hidden: true }),
-    ).toBeInTheDocument();
-    expect(screen.queryByTestId("chat-input")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "快捷操作", hidden: true }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "计划模式", hidden: true }),
-    ).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("button", { name: "submit", hidden: true }),
-    ).not.toBeInTheDocument();
-    expect(senderOptions.current.renderComposer).toHaveBeenCalledTimes(1);
-  });
-
-  it("keeps the normal composer when sender.renderComposer returns the default composer", () => {
-    senderOptions.current = {
-      renderComposer: vi.fn(
-        (defaultComposer: React.ReactElement) => defaultComposer,
-      ),
-    };
-
-    render(<Input onCancel={vi.fn()} onSubmit={vi.fn()} />);
-
-    expect(screen.getByTestId("chat-input")).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: "submit", hidden: true }),
-    ).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByTestId("chat-input")).toHaveValue("完整 SOP 提示词");
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
   });
 });

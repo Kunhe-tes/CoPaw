@@ -18,6 +18,11 @@ from swe.app.crons.models import (
     JobRuntimeSpec,
     ScheduleSpec,
 )
+from swe.app.source_system_config.models import (
+    EffectiveSourceSystemConfig,
+    SourceSystemConfig,
+)
+from swe.app.source_system_config.runtime import bind_source_system_config
 from swe.providers.models import ModelSlotConfig
 from swe.tracing.models import TraceStatus
 
@@ -244,6 +249,176 @@ def test_invalid_notification_delay_defaults_to_immediate():
     record = asyncio.run(_run())
 
     assert record["notification_due_at"] is None
+
+
+def test_weekend_notification_due_time_is_suppressed_when_enabled():
+    """Source 开启周末抑制时，原始通知时间落到周末不再入队。"""
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "schedule": ScheduleSpec(
+                    cron="* * * * *",
+                    timezone="Asia/Shanghai",
+                ),
+                "meta": {"notification_delay_minutes": 60},
+            },
+        )
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ),
+            version=3,
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 5, 15, 30, tzinfo=timezone.utc)
+
+        with bind_source_system_config(effective):
+            await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+                job=job,
+                exec_status="success",
+                actual_time=actual_time,
+                end_time=actual_time,
+                duration_ms=100,
+                error_message="",
+                output_preview="done",
+                is_manual=False,
+            )
+
+        return monitor.records[-1]
+
+    record = asyncio.run(_run())
+
+    assert record["notification_due_at"] is None
+    assert record["notification_timezone"] == ""
+    assert record["suppress_notification"] is True
+
+
+def test_weekend_notification_uses_task_timezone_when_enabled():
+    """周末抑制按任务时区判断，不按北京时间强制判断。"""
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "schedule": ScheduleSpec(
+                    cron="* * * * *",
+                    timezone="UTC",
+                ),
+                "meta": {"notification_delay_minutes": 60},
+            },
+        )
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ),
+            version=3,
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 5, 15, 30, tzinfo=timezone.utc)
+
+        with bind_source_system_config(effective):
+            await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+                job=job,
+                exec_status="success",
+                actual_time=actual_time,
+                end_time=actual_time,
+                duration_ms=100,
+                error_message="",
+                output_preview="done",
+                is_manual=False,
+            )
+
+        return monitor.records[-1], actual_time
+
+    record, actual_time = asyncio.run(_run())
+
+    assert record["notification_due_at"] == actual_time + timedelta(minutes=60)
+    assert record["notification_timezone"] == "UTC"
+    assert record["suppress_notification"] is False
+
+
+def test_weekend_notification_due_time_is_kept_by_default():
+    """默认不改变存量定时任务的周末完成通知行为。"""
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "schedule": ScheduleSpec(
+                    cron="* * * * *",
+                    timezone="Asia/Shanghai",
+                ),
+                "meta": {"notification_delay_minutes": 60},
+            },
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 5, 15, 30, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=False,
+        )
+
+        return monitor.records[-1], actual_time
+
+    record, actual_time = asyncio.run(_run())
+
+    assert record["notification_due_at"] == actual_time + timedelta(minutes=60)
+    assert record["notification_timezone"] == "Asia/Shanghai"
+    assert record["suppress_notification"] is False
 
 
 def test_completed_agent_output_cancelled_before_stream_close_keeps_success(
@@ -811,3 +986,131 @@ def test_automatic_broadcast_execution_stacks_notification_delay():
         minutes=140,
     )
     assert record["notification_timezone"] == "Asia/Shanghai"
+
+
+def test_dispatch_managed_broadcast_notification_uses_parent_fire_time():
+    """Dispatch-managed batch children ignore broadcast offset for notification."""
+
+    async def _run():
+        job = _build_broadcast_agent_job().model_copy(
+            update={
+                "meta": {
+                    **_build_broadcast_agent_job().meta,
+                    "notification_delay_minutes": 120,
+                    "broadcast_dispatch_intents_enabled": True,
+                },
+            },
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 4, 10, 20, tzinfo=timezone.utc)
+        parent_fire_at = datetime(2026, 6, 4, 10, 0, tzinfo=timezone.utc)
+
+        await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+            job=job,
+            exec_status="success",
+            actual_time=actual_time,
+            end_time=actual_time,
+            duration_ms=100,
+            error_message="",
+            output_preview="done",
+            is_manual=False,
+            execution_meta={
+                "cron_dispatch": {
+                    "intent_id": 7,
+                    "batch_id": "batch-1",
+                    "parent_scheduled_fire_at": parent_fire_at.isoformat(),
+                },
+            },
+        )
+
+        return monitor.records[-1], parent_fire_at
+
+    record, parent_fire_at = asyncio.run(_run())
+
+    assert record["notification_due_at"] == parent_fire_at + timedelta(
+        minutes=120,
+    )
+    assert record["notification_timezone"] == "Asia/Shanghai"
+
+
+def test_dispatch_managed_weekend_notification_uses_task_timezone():
+    """Scheduler 回写路径也按任务时区判断周末抑制。"""
+
+    async def _run():
+        base_job = _build_broadcast_agent_job()
+        job = base_job.model_copy(
+            update={
+                "meta": {
+                    **base_job.meta,
+                    "notification_delay_minutes": 60,
+                    "broadcast_dispatch_intents_enabled": True,
+                    "broadcast_original_timezone": "UTC",
+                },
+            },
+        )
+        effective = EffectiveSourceSystemConfig(
+            source_id="portal",
+            config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ).merged_with_defaults(),
+            raw_config=SourceSystemConfig.model_validate(
+                {
+                    "cron_notifications": {
+                        "skip_weekend_zhaohu_enabled": True,
+                    },
+                },
+            ),
+            version=3,
+        )
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_Runner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
+        actual_time = datetime(2026, 6, 5, 15, 45, tzinfo=timezone.utc)
+        parent_fire_at = datetime(2026, 6, 5, 15, 30, tzinfo=timezone.utc)
+
+        with bind_source_system_config(effective):
+            await manager._sync_execution_to_monitor(  # pylint: disable=protected-access
+                job=job,
+                exec_status="success",
+                actual_time=actual_time,
+                end_time=actual_time,
+                duration_ms=100,
+                error_message="",
+                output_preview="done",
+                is_manual=False,
+                execution_meta={
+                    "cron_dispatch": {
+                        "intent_id": 7,
+                        "batch_id": "batch-1",
+                        "parent_scheduled_fire_at": parent_fire_at.isoformat(),
+                    },
+                },
+            )
+
+        return monitor.records[-1], parent_fire_at
+
+    record, parent_fire_at = asyncio.run(_run())
+
+    assert record["notification_due_at"] == parent_fire_at + timedelta(
+        minutes=60,
+    )
+    assert record["notification_timezone"] == "UTC"
+    assert record["suppress_notification"] is False

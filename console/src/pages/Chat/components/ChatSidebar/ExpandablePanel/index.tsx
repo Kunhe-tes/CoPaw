@@ -206,13 +206,6 @@ function TasksContent({
             sidebarMeta.canDelete ||
             (onTaskEdit && sidebarMeta.canEdit)) && (
             <div className="expandable-panel-task-trailing">
-              {sidebarMeta.unreadCount > 0 && (
-                <span className="expandable-panel-task-badge">
-                  {sidebarMeta.unreadCount > 99
-                    ? "99+"
-                    : sidebarMeta.unreadCount}
-                </span>
-              )}
               {(sidebarMeta.canPause ||
                 sidebarMeta.canRun ||
                 sidebarMeta.canResume ||
@@ -230,6 +223,13 @@ function TasksContent({
                     onTaskEdit={onTaskEdit}
                   />
                 </div>
+              )}
+              {sidebarMeta.unreadCount > 0 && (
+                <span className="expandable-panel-task-badge">
+                  {sidebarMeta.unreadCount > 99
+                    ? "99+"
+                    : sidebarMeta.unreadCount}
+                </span>
               )}
             </div>
           )}

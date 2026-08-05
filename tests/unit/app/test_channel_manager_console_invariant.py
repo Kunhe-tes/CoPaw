@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from swe.app.channels.console.channel import ConsoleChannel
 from swe.app.channels.manager import ChannelManager
+from swe.app.channels.base import ContentType, TextContent
 from swe.config.config import ChannelConfig, Config, ConsoleConfig
 
 
@@ -113,6 +114,31 @@ def test_console_channel_from_config_ignores_disabled_config(tmp_path):
     )
 
     assert channel.enabled is True
+
+
+def test_console_channel_copies_b3_trace_id_from_meta_to_request(tmp_path):
+    channel = ConsoleChannel(
+        process=Mock(),
+        enabled=True,
+        bot_prefix="",
+        media_dir=str(tmp_path),
+    )
+
+    request = channel.build_agent_request_from_native(
+        {
+            "channel_id": "console",
+            "sender_id": "user-1",
+            "content_parts": [
+                TextContent(type=ContentType.TEXT, text="hello"),
+            ],
+            "meta": {
+                "session_id": "session-1",
+                "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+            },
+        },
+    )
+
+    assert request.b3_trace_id == "8267fd70bacf497704fec30eaa353979"
 
 
 class _ReloadableFakeChannel:

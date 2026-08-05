@@ -49,12 +49,13 @@ from .channels.registry import register_custom_channel_routes
 from ..tracing import init_trace_manager, close_trace_manager
 from ..database import get_database_config
 from .service_heartbeat import start_service_heartbeat, stop_service_heartbeat
-from .crons.monitor_sync_client import get_monitor_sync_client
 from .crons.notification_worker import CronNotificationWorker
 from .runtime_diagnostic import RuntimeDiagnosticManager
 
 # Apply log level on load so reload child process gets same level as CLI.
 logger = setup_logger(os.environ.get(LOG_LEVEL_ENV, "info"))
+
+_SKILL_SCAN_HISTORY_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 
 
 # Ensure static assets are served with browser-compatible MIME types across
@@ -421,6 +422,22 @@ def _initialize_source_system_config(
                     lambda: tenant_workspace_pool.init_source_store
                 ),
                 multi_agent_manager=multi_agent_manager,
+                tenant_dir_resolver=(
+                    tenant_workspace_pool.get_tenant_workspace_dir
+                ),
+                continuous_governance_service_factory=(
+                    lambda: getattr(
+                        app.state,
+                        "continuous_governance_service",
+                        None,
+                    )
+                ),
+                source_config_resolver=(
+                    lambda source_id: source_config_service.resolve_config(
+                        source_id,
+                        force_refresh=True,
+                    )
+                ),
                 agent_id="default",
             )
         else:
@@ -436,6 +453,25 @@ def _initialize_source_system_config(
         logger.info("SourceSystemConfig module initialized")
     except Exception as e:
         logger.warning("Failed to initialize source system config: %s", e)
+
+
+def _initialize_source_tools(app: FastAPI) -> None:
+    """Initialize the source-owned tool catalogue outside tenant workspaces."""
+    try:
+        from ..constant import WORKING_DIR
+        from .source_tools.service import (
+            SourceToolService,
+            install_source_tool_service,
+        )
+        from .source_tools.store import SourceToolStore
+
+        app.state.source_tool_service = SourceToolService(
+            SourceToolStore(WORKING_DIR / "source_tool_library"),
+        )
+        install_source_tool_service(app.state.source_tool_service)
+        logger.info("Source tool library initialized")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Failed to initialize source tool library: %s", exc)
 
 
 async def _initialize_approval_audit_store(
@@ -459,6 +495,43 @@ async def _initialize_approval_audit_store(
             )
     except Exception as e:
         logger.warning("Failed to initialize approval audit storage: %s", e)
+
+
+async def _initialize_skill_scan_history(
+    app: FastAPI,
+    db_connection: Any | None,
+) -> None:
+    """Initialize database-only skill scan history persistence."""
+    from ..security.skill_scanner import install_skill_scan_history_recorder
+    from ..security.skill_scanner.history import (
+        SkillScanHistoryRecorder,
+        SkillScanHistoryStore,
+    )
+
+    store = SkillScanHistoryStore(db_connection)
+    app.state.skill_scan_history_store = store
+    app.state.skill_scan_history_recorder = None
+    install_skill_scan_history_recorder(None)
+    if not store.is_available:
+        logger.warning(
+            "Skill scan history storage skipped: database is not connected",
+        )
+        return
+
+    try:
+        await store.initialize()
+        recorder = SkillScanHistoryRecorder(store)
+        await recorder.start()
+        app.state.skill_scan_history_recorder = recorder
+        install_skill_scan_history_recorder(recorder)
+        logger.info("Skill scan history storage initialized")
+    except Exception as exc:
+        app.state.skill_scan_history_store = SkillScanHistoryStore(None)
+        install_skill_scan_history_recorder(None)
+        logger.warning(
+            "Failed to initialize skill scan history storage: %s",
+            exc,
+        )
 
 
 async def _initialize_cron_broadcast_children_store(
@@ -636,6 +709,7 @@ async def _start_lifespan_background_services(
         logger.warning("Failed to start runtime diagnostic manager: %s", e)
 
 
+# pylint: disable=too-many-statements
 async def _shutdown_lifespan_resources(
     app: FastAPI,
     db_connection: Any | None,
@@ -657,6 +731,23 @@ async def _shutdown_lifespan_resources(
     finally:
         runtime_diagnostic_manager.set_workspace_metrics(None)
 
+    startup_dispatch_task = getattr(
+        app.state,
+        "cron_startup_dispatch_broadcast_children_task",
+        None,
+    )
+    if startup_dispatch_task is not None and not startup_dispatch_task.done():
+        startup_dispatch_task.cancel()
+        try:
+            await startup_dispatch_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(
+                "Error stopping startup dispatch child task: %s",
+                e,
+            )
+
     cron_notification_worker = getattr(
         app.state,
         "cron_notification_worker",
@@ -674,6 +765,41 @@ async def _shutdown_lifespan_resources(
     except Exception as e:
         logger.warning("Error closing tracing manager: %s", e)
 
+    try:
+        await stop_service_heartbeat()
+    except Exception as e:
+        logger.warning("Error stopping service heartbeat: %s", e)
+    await _stop_multi_agent_manager(app)
+    await _stop_tenant_workspace_pool(app)
+
+    history_recorder = getattr(
+        app.state,
+        "skill_scan_history_recorder",
+        None,
+    )
+    if history_recorder is not None:
+        try:
+            await asyncio.wait_for(
+                history_recorder.stop(),
+                timeout=_SKILL_SCAN_HISTORY_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+            logger.info("Skill scan history recorder stopped")
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Timed out stopping skill scan history recorder; "
+                "continuing application shutdown",
+            )
+        except Exception as e:
+            logger.warning("Error stopping skill scan history recorder: %s", e)
+    try:
+        from ..security.skill_scanner import (
+            install_skill_scan_history_recorder,
+        )
+
+        install_skill_scan_history_recorder(None)
+    except Exception as e:
+        logger.warning("Error detaching skill scan history recorder: %s", e)
+
     if db_connection:
         try:
             await db_connection.close()
@@ -681,9 +807,6 @@ async def _shutdown_lifespan_resources(
         except Exception as e:
             logger.warning("Error closing database connection: %s", e)
 
-    await stop_service_heartbeat()
-    await _stop_multi_agent_manager(app)
-    await _stop_tenant_workspace_pool(app)
     logger.info("Application shutdown complete")
 
     shutdown_logger()
@@ -740,6 +863,7 @@ async def lifespan(
 
     # --- Initialize database connection (required for tracing and instance modules) ---
     db_connection = await _initialize_database_connection()
+    app.state.db_connection = db_connection
 
     await _initialize_tracing_manager(db_connection)
     logger.info("Instance module initialized")
@@ -751,9 +875,11 @@ async def lifespan(
         tenant_workspace_pool,
         multi_agent_manager,
     )
+    _initialize_source_tools(app)
 
     # --- 初始化定时任务分发用户反查快照 ---
     await _initialize_approval_audit_store(app, db_connection)
+    await _initialize_skill_scan_history(app, db_connection)
     await _initialize_cron_broadcast_children_store(app, db_connection)
     await _initialize_cron_broadcast_task_store(app, db_connection)
 

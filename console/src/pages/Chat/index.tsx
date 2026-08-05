@@ -10,6 +10,7 @@ import {
 } from "@/components/agentscope-chat";
 import AgentScopeRuntimeRequestCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Request/Card";
 import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/Card";
+import ConversationCompactionBoundary from "./components/ConversationCompactionBoundary";
 // ==================== 组件引入方式变更结束 ====================
 import {
   Children,
@@ -32,6 +33,8 @@ import defaultConfig, { getDefaultConfig } from "./OptionsPanel/defaultConfig";
 import { chatApi } from "../../api/modules/chat";
 import { cronJobApi } from "../../api/modules/cronjob";
 import { feedbackApi } from "../../api/modules/feedback";
+import { contextReferencesApi } from "../../api/modules/contextReferences";
+import type { SkillMentionItem } from "../../components/agentscope-chat/SkillMentions/useSkillMentions";
 import { getApiUrl } from "../../api/config";
 import { buildAuthHeaders } from "../../api/authHeaders";
 import type {
@@ -58,6 +61,7 @@ import { useBrandTheme } from "../../contexts/BrandThemeContext";
 // ==================== 品牌主题结束 ====================
 // ==================== URL 导航参数 (Kun He, 2026-04-15) ====================
 import { useIframeStore } from "../../stores/iframeStore";
+import { useChatPresentationStore } from "../../stores/chatPresentationStore";
 // ==================== URL 导航参数结束 ====================
 import styles from "./index.module.less";
 import { Form, IconButton } from "@agentscope-ai/design";
@@ -69,6 +73,8 @@ import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
 import ChatSidebar from "./components/ChatSidebar";
+import { createWelcomeSkillMentions } from "./welcomeSkillMentions";
+import { selectContextReferences } from "./contextReferenceDefaults";
 // ==================== 首页改版结束 ====================
 // ==================== 自定义工具渲染器 (customToolRenderConfig) ====================
 import CopyFileToStatic from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic";
@@ -88,9 +94,7 @@ import {
   getTaskOpenTarget,
   shouldMarkTaskReadOnOpen,
 } from "./taskJobs";
-import {
-  DEFAULT_FORM_VALUES,
-} from "../Control/CronJobs/components";
+import { DEFAULT_FORM_VALUES } from "../Control/CronJobs/components";
 import { buildCronJobFormValues } from "../Control/CronJobs/helpers";
 import {
   extractTaskContentText,
@@ -134,8 +138,10 @@ import {
   type PlanModeLocalState,
   type PlanModeSessionLike,
 } from "./planMode";
+import FileManager from "./components/FileManager";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
+import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import type {
   ChatApprovalActionCardData,
   ChatPlanReviewCardData,
@@ -162,6 +168,8 @@ import {
   type ChatTaskProgressUpdateDetail,
 } from "./taskProgressEvents";
 import { isChatTaskProgressEnabled } from "./taskProgressConfig";
+import GlobalVoiceRecorder from "@/components/GlobalVoiceRecorder";
+import { shouldShowGlobalVoiceRecorder } from "@/components/GlobalVoiceRecorder/presentation";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
@@ -174,6 +182,7 @@ function useExternalApprovalResolvedRefresh() {
 }
 
 const chatCardRenderers = {
+  ConversationCompactionBoundary,
   AgentScopeRuntimeRequestCard: (props: {
     data: ChatRuntimeRequestCardData;
   }) => <RuntimeRequestCard {...props} />,
@@ -370,7 +379,11 @@ function useIMEComposition(isChatActive: () => boolean) {
     const suppressImeEnter = (e: KeyboardEvent) => {
       if (!isChatActive()) return;
       const target = e.target as HTMLElement;
-      if (target?.tagName === "TEXTAREA" && e.key === "Enter" && !e.shiftKey) {
+      if (
+        (target?.tagName === "TEXTAREA" || target?.isContentEditable) &&
+        e.key === "Enter" &&
+        !e.shiftKey
+      ) {
         // e.isComposing is the standard flag; isComposingRef covers the
         // post-compositionend grace period needed by Safari.
         if (isComposingRef.current || e.isComposing) {
@@ -558,11 +571,18 @@ export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
+  const [isOriginY] = useState(
+    () => new URLSearchParams(location.search).get("origin") === "Y",
+  );
   const { isDark } = useTheme();
+  const showContentOnly = useChatPresentationStore(
+    (state) => state.showContentOnly,
+  );
   // ==================== 品牌主题 (Kun He) ====================
   // 获取动态品牌配置，用于 welcome avatar
   const { theme: brandTheme } = useBrandTheme();
   // ==================== 品牌主题结束 ====================
+  const isContentOnly = showContentOnly;
   const chatId = useMemo(() => {
     const match = location.pathname.match(/^\/chat\/(.+)$/);
     return match?.[1];
@@ -578,6 +598,17 @@ export default function ChatPage() {
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [selectedContextReferences, setSelectedContextReferences] = useState<
+    SkillMentionItem[]
+  >([]);
+  const [contextReferences, setContextReferences] = useState<
+    SkillMentionItem[]
+  >([]);
+  const [contextReferencesLoading, setContextReferencesLoading] =
+    useState(false);
+  const [contextReferencesError, setContextReferencesError] = useState(false);
+  const pendingContextReferencesRef = useRef<SkillMentionItem[]>([]);
+  const contextReferencesRequestIdRef = useRef(0);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
@@ -596,6 +627,11 @@ export default function ChatPage() {
     setSessionLoading,
     currentSessionId: activeSessionId,
   } = useChatAnywhereSessionsState();
+
+  useEffect(() => {
+    setSelectedContextReferences([]);
+    pendingContextReferencesRef.current = [];
+  }, [activeSessionId, chatId]);
   const sourceSystemConfig = useSourceSystemConfigStore(
     (state) => state.config,
   );
@@ -603,6 +639,32 @@ export default function ChatPage() {
     (state) => state.loadActiveModelData,
   );
   const taskProgressEnabled = isChatTaskProgressEnabled(sourceSystemConfig);
+
+  const loadContextReferences = useCallback((query: string) => {
+    const requestId = ++contextReferencesRequestIdRef.current;
+    setContextReferencesLoading(true);
+    setContextReferencesError(false);
+    void contextReferencesApi
+      .discover(query)
+      .then((response) => {
+        if (requestId !== contextReferencesRequestIdRef.current) return;
+        setContextReferences(
+          selectContextReferences(
+            [...response.skills, ...response.mcp_tools, ...response.files],
+            query,
+          ),
+        );
+      })
+      .catch(() => {
+        if (requestId !== contextReferencesRequestIdRef.current) return;
+        setContextReferences([]);
+        setContextReferencesError(true);
+      })
+      .finally(() => {
+        if (requestId === contextReferencesRequestIdRef.current)
+          setContextReferencesLoading(false);
+      });
+  }, []);
 
   // useTransition for non-urgent state updates (badge clearing)
   const [, startTransition] = useTransition();
@@ -899,6 +961,11 @@ export default function ChatPage() {
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const feedbackUserId = useIframeStore((state) => state.userId);
+  const voiceRecorderEnabled = shouldShowGlobalVoiceRecorder(
+    feedbackUserId,
+    showContentOnly,
+    isOriginY,
+  );
   const skipPreviewTracking = useIframeStore(
     (state) => state.skipPreviewTracking,
   );
@@ -1451,17 +1518,13 @@ export default function ChatPage() {
     (task: CronJobSpecOutput) => {
       const formValues = buildCronJobFormValues(task);
       setEditingTask(task);
-      taskEditForm.setFieldsValue(
-        {
-          ...formValues,
-          taskContentText:
-            task.task_type === "text"
-              ? formValues.text || ""
-              : extractTaskContentText(formValues.request?.input),
-        } as Parameters<
-          typeof taskEditForm.setFieldsValue
-        >[0],
-      );
+      taskEditForm.setFieldsValue({
+        ...formValues,
+        taskContentText:
+          task.task_type === "text"
+            ? formValues.text || ""
+            : extractTaskContentText(formValues.request?.input),
+      } as Parameters<typeof taskEditForm.setFieldsValue>[0]);
     },
     [taskEditForm],
   );
@@ -1624,6 +1687,11 @@ export default function ChatPage() {
               },
             ]
           : lastInput;
+      const userText = rewrittenInput
+        .filter((m: InputMessage) => m.role === "user")
+        .map(extractUserMessageText)
+        .join("\n")
+        .trim();
 
       const resolvedLogicalSessionId = resolveLogicalRequestSessionId(
         {
@@ -1645,8 +1713,14 @@ export default function ChatPage() {
         stream: true,
         mode: getPlanModeForRequest(planModeEnabled),
         ...biz_params,
+        context_references:
+          userText.startsWith("/") &&
+          pendingContextReferencesRef.current.length === 0
+            ? []
+            : pendingContextReferencesRef.current,
         file_url_network: resolveCurrentFileUrlNetwork(),
       };
+      pendingContextReferencesRef.current = [];
 
       const backendChatId = resolveRequestChatId(
         {
@@ -1657,11 +1731,6 @@ export default function ChatPage() {
         requestBody.session_id,
       );
       if (backendChatId) {
-        const userText = rewrittenInput
-          .filter((m: InputMessage) => m.role === "user")
-          .map(extractUserMessageText)
-          .join("\n")
-          .trim();
         if (userText) {
           sessionApi.setLastUserMessage(backendChatId, userText);
         }
@@ -1843,11 +1912,27 @@ export default function ChatPage() {
       ...Children.toArray(senderConfig?.prefix),
     ].filter(Boolean);
 
+    const {
+      beforeSubmit: handleSkillMentionsBeforeSubmit,
+      skillMentions,
+    } = createWelcomeSkillMentions({
+      contextReferences,
+      contextReferencesError,
+      contextReferencesLoading,
+      isComposingRef,
+      loadContextReferences,
+      pendingContextReferencesRef,
+      selectedContextReferences,
+      setSelectedContextReferences,
+    });
+
     const handleBeforeSubmit: NonNullable<
       IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
     > = async (data) => {
       if (isComposingRef.current) return false;
-      const prepared = await preparePlanModeSubmit(data, {
+      const skillPrepared = await handleSkillMentionsBeforeSubmit(data);
+      if (skillPrepared === false) return false;
+      const prepared = await preparePlanModeSubmit(skillPrepared, {
         planModeEnabled,
         persistPlanMode,
         setPlanModeEnabled: setPlanModeEnabledForActiveScope,
@@ -1918,8 +2003,8 @@ export default function ChatPage() {
             <RuntimeLoadingBridge bridgeRef={runtimeLoadingBridgeRef} />
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
-            <GeneratedFilesDrawer />
-            <ModelSelector />
+            {!isContentOnly && <FileManager />}
+            {!isContentOnly && <ModelSelector />}
             {/* <ChatActionGroup /> */}
           </>
         ),
@@ -1945,6 +2030,7 @@ export default function ChatPage() {
             quickMenuItems={planModeQuickMenuItems}
             prefixItems={activePlanModeControl}
             onSubmit={(data) => onSubmit(data)}
+            skillMentions={skillMentions}
           />
         ),
         // ==================== 首页改版结束 ====================
@@ -1999,6 +2085,7 @@ export default function ChatPage() {
           label: renderSuggestionLabel(item.command, item.description),
           value: item.value,
         })),
+        skillMentions,
       },
       session: {
         multiple: true,
@@ -2098,6 +2185,7 @@ export default function ChatPage() {
     handleContinueModifyingPlan,
     handlePlanModeDecision,
     isComposingRef,
+    isContentOnly,
     isDark,
     multimodalCaps,
     composerDisabled,
@@ -2107,6 +2195,11 @@ export default function ChatPage() {
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
     setPlanModeEnabledForActiveScope,
+    selectedContextReferences,
+    contextReferences,
+    contextReferencesError,
+    contextReferencesLoading,
+    loadContextReferences,
     taskProgress,
     taskProgressEnabled,
     subAgentMonitorResetKey,
@@ -2143,6 +2236,7 @@ export default function ChatPage() {
             onConsumed={() => setAutoPreviewTriggerKey(0)}
           >
             <div
+              data-chat-shell
               style={{
                 height: "100%",
                 width: "100%",
@@ -2152,31 +2246,40 @@ export default function ChatPage() {
             >
               {/* ==================== 首页改版 (Kun He) ==================== */}
               {/* 聊天专用侧栏：支持折叠为64px工具条 */}
-              <ChatSidebar
-                tasks={tasks}
-                selectedTaskId={currentTask?.id}
-                onCreateSession={handleCreateSessionFromSidebar}
-                onTaskClick={handleTaskOpen}
-                onTaskPause={handleTaskPause}
-                onTaskRun={handleTaskRun}
-                onTaskResume={handleTaskResume}
-                onTaskDelete={handleTaskDelete}
-                onTaskEdit={handleTaskEdit}
-              />
+              {!isContentOnly && (
+                <ChatSidebar
+                  tasks={tasks}
+                  selectedTaskId={currentTask?.id}
+                  onCreateSession={handleCreateSessionFromSidebar}
+                  onTaskClick={handleTaskOpen}
+                  onTaskPause={handleTaskPause}
+                  onTaskRun={handleTaskRun}
+                  onTaskResume={handleTaskResume}
+                  onTaskDelete={handleTaskDelete}
+                  onTaskEdit={handleTaskEdit}
+                />
+              )}
               {/* ==================== 首页改版结束 ==================== */}
               <div
                 className={styles.chatMessagesArea}
+                data-chat-messages-area
                 style={{ flex: 1, minWidth: 0, position: "relative" }}
-                onDragEnter={handleDragEnter}
-                onDragLeave={handleDragLeave}
-                onDragOver={handleDragOver}
-                onDrop={handleDrop}
+                onDragEnter={isContentOnly ? undefined : handleDragEnter}
+                onDragLeave={isContentOnly ? undefined : handleDragLeave}
+                onDragOver={isContentOnly ? undefined : handleDragOver}
+                onDrop={isContentOnly ? undefined : handleDrop}
               >
-                <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                <DragUploadOverlay
-                  visible={isDragging}
-                  onClose={handleDragOverlayClose}
-                />
+                <ChatContentOnlyProvider enabled={isContentOnly}>
+                  <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                    <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                  </GlobalVoiceRecorder>
+                </ChatContentOnlyProvider>
+                {!isContentOnly && (
+                  <DragUploadOverlay
+                    visible={isDragging}
+                    onClose={handleDragOverlayClose}
+                  />
+                )}
                 <ConversationQuickNav />
               </div>
             </div>

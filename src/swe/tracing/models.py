@@ -83,14 +83,6 @@ class Span(BaseModel):
         default=None,
         description="Skill unique identifier",
     )
-    skill_cn_name: Optional[str] = Field(
-        default=None,
-        description="Skill Chinese display name",
-    )
-    skill_description: Optional[str] = Field(
-        default=None,
-        description="Skill description from SKILL.md",
-    )
     mcp_server: Optional[str] = Field(
         default=None,
         description="MCP server name if this tool is from MCP",
@@ -119,6 +111,7 @@ class Trace(BaseModel):
     model_config = ConfigDict(use_enum_values=True)
 
     trace_id: str = Field(description="Unique trace identifier")
+    b3_trace_id: Optional[str] = None
     source_id: str = Field(description="Source identifier for data isolation")
     user_id: str = Field(description="User identifier")
     user_name: Optional[str] = Field(default=None, description="User name")

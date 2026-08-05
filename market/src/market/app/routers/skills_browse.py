@@ -1414,11 +1414,13 @@ async def download_my_skill(
     if skill is None:
         raise HTTPException(status_code=404, detail="Skill not found")
 
-    skill_dir = (
-        get_user_skills_dir(svc.swe_root, x_user_id, agent_id, source_id)
-        / skill_name
+    skill_dir = svc.get_registered_skill_dir(
+        x_user_id,
+        skill_name,
+        agent_id,
+        source_id,
     )
-    if not skill_dir.is_dir():
+    if skill_dir is None or not skill_dir.is_dir():
         raise HTTPException(status_code=404, detail="Skill not found")
 
     with tempfile.TemporaryDirectory(
@@ -1432,11 +1434,17 @@ async def download_my_skill(
         )
         zip_bytes = await asyncio.to_thread(zip_path.read_bytes)
 
+    # RFC 6266: 使用 filename* 参数支持 UTF-8 中文文件名
+    from urllib.parse import quote
+
+    encoded_filename = quote(zip_path.name, safe="")
+    content_disposition = f"attachment; filename=\"skill.zip\"; filename*=UTF-8''{encoded_filename}"
+
     return Response(
         content=zip_bytes,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{zip_path.name}"',
+            "Content-Disposition": content_disposition,
         },
     )
 
@@ -1472,11 +1480,17 @@ async def download_market_skill(
         )
         zip_bytes = await asyncio.to_thread(zip_path.read_bytes)
 
+    # RFC 6266: 使用 filename* 参数支持 UTF-8 中文文件名
+    from urllib.parse import quote
+
+    encoded_filename = quote(zip_path.name, safe="")
+    content_disposition = f"attachment; filename=\"skill.zip\"; filename*=UTF-8''{encoded_filename}"
+
     return Response(
         content=zip_bytes,
         media_type="application/zip",
         headers={
-            "Content-Disposition": f'attachment; filename="{zip_path.name}"',
+            "Content-Disposition": content_disposition,
         },
     )
 
@@ -1919,7 +1933,8 @@ async def migrate_skill_json_to_manifest(
 ):
     """迁移技能目录内 skill.json 字段到 workspace manifest.
 
-    将以下字段从 skills/<技能名>/skill.json 合并到 workspaces/<agent_id>/skill.json:
+    将以下字段从 skills/<技能名>/skill.json 合并到
+    workspaces/<agent_id>/skill.json:
     - creator_id
     - creator_name
     - bbk_id

@@ -28,6 +28,7 @@ RUNTIME_CLAIM_ENV_KEYS = frozenset(
         "SWE_SOURCE_ID",
         "SWE_RUNTIME_SCOPE_ID",
         "SWE_SESSION_ID",
+        "SWE_CHAT_ID",
         "SWE_TRACE_ID",
     },
 )
@@ -37,12 +38,14 @@ _CANONICAL_HEADER_NAMES = {
     "source_id": "x-swe-source-id",
     "runtime_scope_id": "x-swe-runtime-scope-id",
     "session_id": "x-swe-session-id",
+    "chat_id": "x-swe-chat-id",
     "trace_id": "x-swe-trace-id",
 }
 _ALIAS_HEADER_NAMES = {
     "tenant_id": "tenantid",
     "source_id": "sourceid",
     "session_id": "sessionid",
+    "chat_id": "chatid",
     "trace_id": "traceid",
 }
 RUNTIME_CLAIM_HEADER_KEYS = frozenset(
@@ -61,6 +64,7 @@ class RuntimeInvocationClaims:
     source_id: str | None = None
     runtime_scope_id: str | None = None
     session_id: str | None = None
+    chat_id: str | None = None
     trace_id: str | None = None
 
     def as_dict(self) -> dict[str, str]:
@@ -71,6 +75,7 @@ class RuntimeInvocationClaims:
                 "source_id": self.source_id,
                 "runtime_scope_id": self.runtime_scope_id,
                 "session_id": self.session_id,
+                "chat_id": self.chat_id,
                 "trace_id": self.trace_id,
             }.items()
             if value
@@ -107,6 +112,7 @@ def build_runtime_invocation_claims(
     source_id: str | None = None,
     runtime_scope_id: str | None = None,
     session_id: str | None = None,
+    chat_id: str | None = None,
     trace_id: str | None = None,
 ) -> RuntimeInvocationClaims:
     """Build invocation claims from explicit values, context, and tenant scope."""
@@ -138,6 +144,11 @@ def build_runtime_invocation_claims(
         current,
         "session_id",
     )
+    effective_chat_id = _resolve_claim_value(
+        chat_id,
+        current,
+        "chat_id",
+    )
     effective_trace_id = _resolve_claim_value(
         trace_id,
         current,
@@ -148,6 +159,7 @@ def build_runtime_invocation_claims(
         source_id=effective_source_id,
         runtime_scope_id=effective_runtime_scope_id,
         session_id=effective_session_id,
+        chat_id=effective_chat_id,
         trace_id=effective_trace_id,
     )
 
@@ -159,6 +171,7 @@ def runtime_invocation_claims_context(
     source_id: str | None = None,
     runtime_scope_id: str | None = None,
     session_id: str | None = None,
+    chat_id: str | None = None,
     trace_id: str | None = None,
 ) -> Iterator[RuntimeInvocationClaims]:
     """Temporarily set backend-local runtime invocation claims."""
@@ -167,6 +180,7 @@ def runtime_invocation_claims_context(
         source_id=source_id,
         runtime_scope_id=runtime_scope_id,
         session_id=session_id,
+        chat_id=chat_id,
         trace_id=trace_id,
     )
     token: Token = _RUNTIME_CLAIMS_CONTEXT.set(claims)
@@ -183,6 +197,7 @@ def apply_runtime_claim_env(
     source_id: str | None = None,
     runtime_scope_id: str | None = None,
     session_id: str | None = None,
+    chat_id: str | None = None,
     trace_id: str | None = None,
 ) -> dict[str, str]:
     """Return env with runtime-owned claim keys removed and current claims set."""
@@ -196,6 +211,7 @@ def apply_runtime_claim_env(
         source_id=source_id,
         runtime_scope_id=runtime_scope_id,
         session_id=session_id,
+        chat_id=chat_id,
         trace_id=trace_id,
     )
     mapping = {
@@ -203,6 +219,7 @@ def apply_runtime_claim_env(
         "SWE_SOURCE_ID": claims.source_id,
         "SWE_RUNTIME_SCOPE_ID": claims.runtime_scope_id,
         "SWE_SESSION_ID": claims.session_id,
+        "SWE_CHAT_ID": claims.chat_id,
         "SWE_TRACE_ID": claims.trace_id,
     }
     result.update({key: value for key, value in mapping.items() if value})
@@ -217,6 +234,7 @@ def build_runtime_claim_headers(
     source_id: str | None = None,
     runtime_scope_id: str | None = None,
     session_id: str | None = None,
+    chat_id: str | None = None,
     trace_id: str | None = None,
 ) -> dict[str, str]:
     """Return headers with runtime-owned claim names removed and claims set."""
@@ -230,6 +248,7 @@ def build_runtime_claim_headers(
         source_id=source_id,
         runtime_scope_id=runtime_scope_id,
         session_id=session_id,
+        chat_id=chat_id,
         trace_id=trace_id,
     )
     values = claims.as_dict()

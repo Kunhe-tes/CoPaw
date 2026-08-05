@@ -62,6 +62,7 @@ ALL_SKILL_ROUTING_CHANNELS = [
 _RegistryResult = TypeVar("_RegistryResult")
 _MAX_ZIP_BYTES = 200 * 1024 * 1024
 _ZIP_UTF8_FLAG = 0x800
+WORKSPACE_SKILL_LAYOUT_VERSION = 2
 
 
 def _has_cjk_text(text: str) -> bool:
@@ -209,7 +210,82 @@ def resolve_effective_skill_dir(
 
 def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
     """Return the workspace skill manifest path."""
-    return workspace_dir / "skill.json"
+    return Path(workspace_dir) / "skill.json"
+
+
+def get_workspace_disabled_skills_dir(workspace_dir: Path) -> Path:
+    """Return the workspace disabled skill directory."""
+    return Path(workspace_dir) / ".disabled_skills"
+
+
+def resolve_workspace_managed_skill_dir(
+    workspace_dir: Path,
+    skill_name: str,
+    *,
+    enabled: bool,
+) -> Path:
+    """Resolve a managed skill directory from its enablement state."""
+    root = (
+        get_workspace_skills_dir(workspace_dir)
+        if enabled
+        else get_workspace_disabled_skills_dir(workspace_dir)
+    )
+    return root / skill_name
+
+
+def _has_unmanaged_workspace_skill_conflict(
+    workspace_dir: Path,
+    skill_name: str,
+    workspace_manifest: dict[str, Any],
+) -> bool:
+    """Return whether an unregistered package occupies either managed root."""
+    if skill_name in workspace_manifest.get("skills", {}):
+        return False
+    return any(
+        resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            skill_name,
+            enabled=enabled,
+        ).exists()
+        for enabled in (True, False)
+    )
+
+
+def _existing_workspace_download_result(
+    entry: dict[str, Any],
+    existing: dict[str, Any],
+    final_name: str,
+    workspace_identity: dict[str, str],
+) -> dict[str, Any]:
+    """Return the outcome when a download targets an existing skill."""
+    if (
+        entry.get("source") == "builtin"
+        and existing.get("source") == "builtin"
+    ):
+        pool_ver = entry.get("version_text", "")
+        ws_ver = (existing.get("metadata") or {}).get("version_text", "")
+        if pool_ver and ws_ver and pool_ver == ws_ver:
+            return {
+                "success": True,
+                "mode": "unchanged",
+                "name": final_name,
+                "workspace_id": workspace_identity["workspace_id"],
+                "workspace_name": workspace_identity["workspace_name"],
+            }
+        return {
+            "success": False,
+            "reason": "builtin_upgrade",
+            "workspace_id": workspace_identity["workspace_id"],
+            "workspace_name": workspace_identity["workspace_name"],
+            "skill_name": final_name,
+        }
+    return {
+        "success": False,
+        "reason": "conflict",
+        "workspace_id": workspace_identity["workspace_id"],
+        "workspace_name": workspace_identity["workspace_name"],
+        "suggested_name": suggest_conflict_name(final_name),
+    }
 
 
 def get_workspace_identity(workspace_dir: Path) -> dict[str, str]:
@@ -548,6 +624,46 @@ def _copy_skill_dir(source: Path, target: Path) -> None:
     )
 
 
+def _move_skill_dir(source: Path, target: Path) -> None:
+    """Move one managed skill directory into its authoritative root."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(target)
+
+
+def _reconcile_registered_skill_location(
+    workspace_dir: Path,
+    skill_name: str,
+    entry: dict[str, Any],
+) -> Path | None:
+    """Place a registered skill in the root selected by its manifest state."""
+    active = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=True,
+    )
+    disabled = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=False,
+    )
+
+    if active.exists() and disabled.exists():
+        shutil.rmtree(disabled)
+        entry["enabled"] = True
+
+    desired = resolve_workspace_managed_skill_dir(
+        workspace_dir,
+        skill_name,
+        enabled=bool(entry.get("enabled", False)),
+    )
+    current = active if active.exists() else disabled
+    if not current.exists():
+        return None
+    if current != desired:
+        _move_skill_dir(current, desired)
+    return desired
+
+
 def _lock_path_for(json_path: Path) -> Path:
     return json_path.with_name(f".{json_path.name}.lock")
 
@@ -628,9 +744,120 @@ def _mutate_json(
 def _default_workspace_manifest() -> dict[str, Any]:
     return {
         "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": WORKSPACE_SKILL_LAYOUT_VERSION,
         "version": 0,
         "skills": {},
     }
+
+
+def _require_workspace_layout_v2(
+    payload: object,
+    workspace_dir: Path,
+) -> None:
+    """Reject malformed or non-v2 existing workspace manifests."""
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    payload = _require_workspace_manifest_object(payload, manifest_path)
+    _require_workspace_layout_version(payload, workspace_dir)
+    _require_workspace_skill_entries(payload["skills"], manifest_path)
+
+
+def _require_workspace_manifest_object(
+    payload: object,
+    manifest_path: Path,
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} must contain a JSON object "
+            "at the top level.",
+        )
+    if not isinstance(payload.get("skills"), dict):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} field 'skills' must be a "
+            "JSON object.",
+        )
+    return payload
+
+
+def _require_workspace_layout_version(
+    payload: dict[str, Any],
+    workspace_dir: Path,
+) -> None:
+    layout_version = payload.get("layout_version")
+    if (
+        not isinstance(layout_version, int)
+        or isinstance(layout_version, bool)
+        or layout_version != WORKSPACE_SKILL_LAYOUT_VERSION
+    ):
+        rendered_version = (
+            repr(layout_version)
+            if "layout_version" in payload
+            else "<missing>"
+        )
+        raise ValueError(
+            f"Workspace {workspace_dir} has unsupported layout_version "
+            f"{rendered_version}. Run `skills migrate-layout --check` "
+            "then `skills migrate-layout --apply` before using runtime "
+            "skill operations.",
+        )
+
+
+def _require_workspace_skill_entries(
+    skills: dict[str, Any],
+    manifest_path: Path,
+) -> None:
+    for skill_name, entry in skills.items():
+        _require_workspace_skill_name(skill_name, manifest_path)
+        _require_workspace_skill_entry(skill_name, entry, manifest_path)
+
+
+def _require_workspace_skill_name(
+    skill_name: object,
+    manifest_path: Path,
+) -> None:
+    if not isinstance(skill_name, str) or not skill_name:
+        raise ValueError(
+            f"Workspace manifest {manifest_path} skill name "
+            f"{skill_name!r} must be a non-empty string.",
+        )
+    if (
+        Path(skill_name).name != skill_name
+        or skill_name in {".", ".."}
+        or "/" in skill_name
+        or "\\" in skill_name
+        or "\x00" in skill_name
+    ):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} skill name "
+            f"{skill_name!r} must be a safe single path segment.",
+        )
+
+
+def _require_workspace_skill_entry(
+    skill_name: str,
+    entry: object,
+    manifest_path: Path,
+) -> None:
+    if not isinstance(entry, dict):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} skill "
+            f"{skill_name!r} entry must be a JSON object.",
+        )
+    if "enabled" in entry and not isinstance(entry["enabled"], bool):
+        raise ValueError(
+            f"Workspace manifest {manifest_path} skill "
+            f"{skill_name!r} field 'enabled' must be a JSON boolean.",
+        )
+
+
+def _read_workspace_manifest_strict_unlocked(
+    manifest_path: Path,
+) -> dict[str, Any]:
+    """Read one workspace manifest without locking or silent recovery."""
+    if not manifest_path.exists():
+        return _default_workspace_manifest()
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    _require_workspace_layout_v2(payload, manifest_path.parent)
+    return payload
 
 
 def _default_pool_manifest() -> dict[str, Any]:
@@ -1229,63 +1456,132 @@ def reconcile_pool_manifest(
     )
 
 
+class WorkspaceManifestReconciliationError(RuntimeError):
+    """Report a reconciliation failure whose rename rollback also failed."""
+
+    def __init__(
+        self,
+        reconciliation_error: Exception,
+        rollback_errors: tuple[Exception, ...],
+    ) -> None:
+        super().__init__(
+            "Workspace manifest reconciliation and sanitized rename "
+            "rollback both failed",
+        )
+        self.reconciliation_error = reconciliation_error
+        self.rollback_errors = rollback_errors
+
+
+def _mutate_workspace_manifest_strict(
+    manifest_path: Path,
+    mutator: Callable[[dict[str, Any]], _RegistryResult],
+    sanitized_rename_moves: list[tuple[Path, Path]],
+) -> _RegistryResult:
+    """Strictly mutate a workspace manifest and roll back key renames."""
+    with _file_write_lock(_lock_path_for(manifest_path)):
+        if manifest_path.exists():
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        else:
+            payload = _default_workspace_manifest()
+
+        try:
+            result = mutator(payload)
+            _write_json_atomic(manifest_path, payload)
+            return result
+        except Exception as reconcile_error:
+            rollback_errors: list[Exception] = []
+            for original_path, renamed_path in reversed(
+                sanitized_rename_moves,
+            ):
+                try:
+                    _move_skill_dir(renamed_path, original_path)
+                except Exception as rollback_error:
+                    rollback_errors.append(rollback_error)
+            if rollback_errors:
+                raise WorkspaceManifestReconciliationError(
+                    reconcile_error,
+                    tuple(rollback_errors),
+                ) from reconcile_error
+            raise
+
+
 def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
     """Reconcile one workspace manifest with the filesystem.
 
-    This is the bridge between editable files under ``<workspace>/skills`` and
-    runtime-facing state in ``skill.json``.
+    The v2 manifest is authoritative for which workspace packages are managed.
+    Registered enabled packages live under ``<workspace>/skills``; registered
+    disabled packages live under ``<workspace>/.disabled_skills``.
 
     Behavior summary:
-    - Discover every on-disk skill directory with ``SKILL.md``.
+    - Reconcile only registered manifest entries; ignore unmanaged directories.
+    - Move each registered package into the root selected by ``enabled``.
+    - Prefer the runtime copy if a registered package exists in both roots.
     - Preserve user state such as ``enabled``, ``channels``, and ``config``.
-    - Refresh metadata and sync status from the real files.
-    - Remove manifest entries whose directories no longer exist.
+    - Sanitize registered names and refresh metadata from the resolved package.
+    - Remove registered entries whose package is missing from both roots.
 
     Example:
-        if a user deletes ``workspaces/a1/skills/demo_skill`` by hand, the
-        next reconcile removes ``demo_skill`` from
-        ``workspaces/a1/skill.json``.
+        if registered ``demo_skill`` is disabled, the next reconcile moves it
+        from ``skills/demo_skill`` to ``.disabled_skills/demo_skill``.
     """
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-    workspace_skills_dir = get_workspace_skills_dir(workspace_dir)
-    workspace_skills_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
-    if not manifest_path.exists():
-        _write_json_atomic(manifest_path, _default_workspace_manifest())
-    _rename_skill_dirs_to_utf8_safe(
-        workspace_skills_dir,
-        manifest_path,
-        _default_workspace_manifest(),
-    )
-    builtin_sigs = _get_builtin_signatures()
+    sanitized_rename_moves: list[tuple[Path, Path]] = []
 
     def _update(payload: dict[str, Any]) -> dict[str, Any]:
+        _require_workspace_layout_v2(payload, workspace_dir)
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        workspace_skills_dir = get_workspace_skills_dir(workspace_dir)
+        workspace_skills_dir.mkdir(parents=True, exist_ok=True)
         payload.setdefault("skills", {})
         skills = payload["skills"]
-
-        discovered = {
-            path.name: path
-            for path in workspace_skills_dir.iterdir()
-            if path.is_dir() and (path / "SKILL.md").exists()
-        }
-
-        for skill_name, skill_dir in sorted(discovered.items()):
-            existing = skills.get(skill_name) or {}
-            enabled = bool(existing.get("enabled", False))
-            channels = existing.get("channels") or ["all"]
-
-            # Inherit source from manifest when the entry already exists.
-            # For new skills, default to "builtin" if name matches a
-            # packaged builtin, otherwise "customized".
-            if existing:
-                source = existing.get("source", "customized")
-            else:
-                source = (
-                    "builtin" if skill_name in builtin_sigs else "customized"
+        registered = dict(skills)
+        reconciled: dict[str, Any] = {}
+        disabled_skills_dir = get_workspace_disabled_skills_dir(workspace_dir)
+        occupied_names = set(registered)
+        for root in (workspace_skills_dir, disabled_skills_dir):
+            if root.exists():
+                occupied_names.update(
+                    path.name for path in root.iterdir() if path.is_dir()
                 )
 
-            metadata = _build_skill_metadata(
+        for raw_skill_name, raw_entry in sorted(registered.items()):
+            skill_name = _normalize_skill_dir_name(raw_skill_name)
+            existing = raw_entry or {}
+            sanitized = sanitize_fs_text(skill_name)
+            log_sanitized_fs_text(
+                logger,
+                source="skills.reconcile_workspace_manifest",
+                original=skill_name,
+                sanitized=sanitized,
+            )
+            resolved_name = sanitized.value or skill_name
+            occupied_names.discard(skill_name)
+            if resolved_name in occupied_names:
+                resolved_name = suggest_conflict_name(
+                    resolved_name,
+                    occupied_names,
+                )
+
+            skill_dir = _reconcile_registered_skill_location(
+                workspace_dir,
                 skill_name,
+                existing,
+            )
+            if skill_dir is None:
+                continue
+            if resolved_name != skill_name:
+                renamed_dir = skill_dir.with_name(resolved_name)
+                _move_skill_dir(skill_dir, renamed_dir)
+                sanitized_rename_moves.append((skill_dir, renamed_dir))
+                skill_dir = renamed_dir
+            occupied_names.add(resolved_name)
+
+            enabled = bool(existing.get("enabled", False))
+            channels = existing.get("channels") or ["all"]
+            source = existing.get("source", "customized")
+
+            metadata = _build_skill_metadata(
+                resolved_name,
                 skill_dir,
                 source=source,
                 protected=False,
@@ -1306,20 +1602,18 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
             }
             if "config" in existing:
                 next_entry["config"] = existing.get("config")
-            skills[skill_name] = next_entry
-            skills[skill_name].pop("sync_to_hub", None)
-            skills[skill_name].pop("sync_to_pool", None)
+            reconciled[resolved_name] = next_entry
+            reconciled[resolved_name].pop("sync_to_hub", None)
+            reconciled[resolved_name].pop("sync_to_pool", None)
 
-        for skill_name in list(skills):
-            if skill_name not in discovered:
-                skills.pop(skill_name, None)
+        payload["skills"] = reconciled
 
         return payload
 
-    return _mutate_json(
+    return _mutate_workspace_manifest_strict(
         manifest_path,
-        _default_workspace_manifest(),
         _update,
+        sanitized_rename_moves,
     )
 
 
@@ -1425,7 +1719,11 @@ def resolve_effective_skills(
             continue
         channels = entry.get("channels") or ["all"]
         if "all" in channels or channel_name in channels:
-            skill_dir = get_workspace_skills_dir(workspace_dir) / skill_name
+            skill_dir = resolve_workspace_managed_skill_dir(
+                workspace_dir,
+                skill_name,
+                enabled=True,
+            )
             if skill_dir.exists():
                 resolved.append(skill_name)
     return resolved
@@ -1721,12 +2019,23 @@ class SkillService:
             reconcile=False,
         )
 
+    def _registered_skill_dir(
+        self,
+        skill_name: str,
+        entry: dict[str, Any],
+    ) -> Path:
+        """Resolve one registered package from its manifest enablement."""
+        return resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            skill_name,
+            enabled=bool(entry.get("enabled", False)),
+        )
+
     def list_all_skills(self) -> list[SkillInfo]:
         manifest = self._manifest()
-        skill_root = get_workspace_skills_dir(self.workspace_dir)
         skills: list[SkillInfo] = []
         for skill_name, entry in sorted(manifest.get("skills", {}).items()):
-            skill_dir = skill_root / skill_name
+            skill_dir = self._registered_skill_dir(skill_name, entry)
             source = entry.get("source", "workspace")
             skill = _read_skill_from_dir(skill_dir, source)
             if skill is not None:
@@ -1767,11 +2076,35 @@ class SkillService:
     ) -> str | None:
         _validate_skill_content(content)
         skill_name = _normalize_skill_dir_name(name)
-        skill_root = get_workspace_skills_dir(self.workspace_dir)
-        skill_root.mkdir(parents=True, exist_ok=True)
-        skill_dir = skill_root / skill_name
-        if skill_dir.exists() and not overwrite:
+        manifest = self._read_manifest()
+        existing = manifest.get("skills", {}).get(skill_name)
+        active_dir = resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            skill_name,
+            enabled=True,
+        )
+        disabled_dir = resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            skill_name,
+            enabled=False,
+        )
+        if (
+            existing is not None
+            or active_dir.exists()
+            or disabled_dir.exists()
+        ) and not overwrite:
             return None
+        enabled = (
+            bool(existing.get("enabled", False))
+            if existing is not None
+            else bool(enable)
+        )
+        skill_dir = resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            skill_name,
+            enabled=enabled,
+        )
+        other_dir = active_dir if skill_dir == disabled_dir else disabled_dir
 
         with _staged_skill_dir(skill_name) as staged_dir:
             _write_skill_to_dir(
@@ -1783,6 +2116,8 @@ class SkillService:
             )
             _scan_skill_dir_or_raise(staged_dir, skill_name)
             _copy_skill_dir(staged_dir, skill_dir)
+        if other_dir.exists():
+            shutil.rmtree(other_dir)
 
         def _update(payload: dict[str, Any]) -> None:
             payload.setdefault("skills", {})
@@ -1800,7 +2135,7 @@ class SkillService:
                 protected=False,
             )
             payload["skills"][skill_name] = {
-                "enabled": bool(entry.get("enabled", enable)),
+                "enabled": enabled,
                 "channels": entry.get("channels") or ["all"],
                 "source": metadata["source"],
                 "config": (
@@ -1810,6 +2145,7 @@ class SkillService:
                 ),
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
+                "created_at": entry.get("created_at") or _timestamp(),
                 "updated_at": _timestamp(),
             }
 
@@ -1829,15 +2165,44 @@ class SkillService:
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         final_name = _normalize_skill_dir_name(skill_name)
-        target_dir = get_workspace_skills_dir(self.workspace_dir) / final_name
+        manifest = self._read_manifest()
+        if _has_unmanaged_workspace_skill_conflict(
+            self.workspace_dir,
+            final_name,
+            manifest,
+        ):
+            return {
+                "success": False,
+                "reason": "conflict",
+                "suggested_name": suggest_conflict_name(final_name),
+            }
+        existing = manifest.get("skills", {}).get(final_name)
+        enabled = (
+            bool(existing.get("enabled", True))
+            if existing is not None
+            else True
+        )
+        target_dir = resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            final_name,
+            enabled=enabled,
+        )
+        other_dir = resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            final_name,
+            enabled=not enabled,
+        )
 
         with _staged_skill_dir(final_name) as staged_dir:
             _copy_skill_dir(source_dir, staged_dir)
             _scan_skill_dir_or_raise(staged_dir, final_name)
             _copy_skill_dir(staged_dir, target_dir)
+        if other_dir.exists():
+            shutil.rmtree(other_dir)
 
         def _update(payload: dict[str, Any]) -> None:
             payload.setdefault("skills", {})
+            entry = payload["skills"].get(final_name) or {}
             metadata = _build_skill_metadata(
                 final_name,
                 target_dir,
@@ -1845,12 +2210,17 @@ class SkillService:
                 protected=False,
             )
             payload["skills"][final_name] = {
-                "enabled": True,
-                "channels": ["all"],
+                "enabled": enabled,
+                "channels": entry.get("channels") or ["all"],
                 "source": metadata["source"],
-                "config": dict(config or {}),
+                "config": (
+                    dict(entry.get("config") or {})
+                    if existing is not None
+                    else dict(config or {})
+                ),
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
+                "created_at": entry.get("created_at") or _timestamp(),
                 "updated_at": _timestamp(),
             }
 
@@ -1884,9 +2254,7 @@ class SkillService:
             new_config = (
                 config if config is not None else old_entry.get("config") or {}
             )
-            skill_root = get_workspace_skills_dir(self.workspace_dir)
-            skill_root.mkdir(parents=True, exist_ok=True)
-            skill_dir = skill_root / skill_name
+            skill_dir = self._registered_skill_dir(skill_name, old_entry)
 
             with _staged_skill_dir(skill_name) as staged_dir:
                 _write_skill_to_dir(
@@ -1947,15 +2315,33 @@ class SkillService:
                 "name": skill_name,
             }
 
-        skill_root = get_workspace_skills_dir(self.workspace_dir)
-        target_dir = skill_root / final_name
-        old_dir = skill_root / skill_name
-        if target_dir.exists():
-            existing = (
-                {p.name for p in skill_root.iterdir() if p.is_dir()}
-                if skill_root.exists()
-                else set()
-            )
+        enabled = bool(old_entry.get("enabled", False))
+        target_dir = resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            final_name,
+            enabled=enabled,
+        )
+        old_dir = self._registered_skill_dir(skill_name, old_entry)
+        active_target = resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            final_name,
+            enabled=True,
+        )
+        disabled_target = resolve_workspace_managed_skill_dir(
+            self.workspace_dir,
+            final_name,
+            enabled=False,
+        )
+        if active_target.exists() or disabled_target.exists():
+            existing: set[str] = set()
+            for root in (
+                get_workspace_skills_dir(self.workspace_dir),
+                get_workspace_disabled_skills_dir(self.workspace_dir),
+            ):
+                if root.exists():
+                    existing.update(
+                        path.name for path in root.iterdir() if path.is_dir()
+                    )
             return {
                 "success": False,
                 "reason": "conflict",
@@ -1995,12 +2381,13 @@ class SkillService:
         def _rename_entry(payload: dict[str, Any]) -> None:
             payload.setdefault("skills", {})
             payload["skills"][final_name] = {
-                "enabled": bool(old_entry.get("enabled", False)),
+                "enabled": enabled,
                 "channels": old_channels,
                 "source": metadata["source"],
                 "config": old_config,
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
+                "created_at": old_entry.get("created_at") or _timestamp(),
                 "updated_at": _timestamp(),
             }
             payload["skills"].pop(skill_name, None)
@@ -2019,6 +2406,42 @@ class SkillService:
             "name": final_name,
         }
 
+    def _register_imported_skills(
+        self,
+        imported: list[str],
+        enabled_by_name: dict[str, bool],
+        target_by_name: dict[str, Path],
+    ) -> None:
+        """Atomically refresh manifest entries for copied zip imports."""
+
+        def _register(payload: dict[str, Any]) -> None:
+            payload.setdefault("skills", {})
+            for skill_name in imported:
+                entry = payload["skills"].get(skill_name) or {}
+                source = entry.get("source", "customized")
+                metadata = _build_skill_metadata(
+                    skill_name,
+                    target_by_name[skill_name],
+                    source=source,
+                    protected=False,
+                )
+                payload["skills"][skill_name] = {
+                    "enabled": enabled_by_name[skill_name],
+                    "channels": entry.get("channels") or ["all"],
+                    "source": metadata["source"],
+                    "config": dict(entry.get("config") or {}),
+                    "metadata": metadata,
+                    "requirements": metadata["requirements"],
+                    "created_at": entry.get("created_at") or _timestamp(),
+                    "updated_at": _timestamp(),
+                }
+
+        _mutate_json(
+            get_workspace_skill_manifest_path(self.workspace_dir),
+            _default_workspace_manifest(),
+            _register,
+        )
+
     def import_from_zip(
         self,
         data: bytes,
@@ -2027,8 +2450,6 @@ class SkillService:
         target_name: str | None = None,
         rename_map: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        skill_root = get_workspace_skills_dir(self.workspace_dir)
-        skill_root.mkdir(parents=True, exist_ok=True)
         tmp_dir, found = _extract_zip_skills(data)
         renames = rename_map or {}
         try:
@@ -2047,13 +2468,19 @@ class SkillService:
                 (d, _normalize_skill_dir_name(renames.get(n, n)))
                 for d, n in found
             ]
-            existing_on_disk = (
-                {p.name for p in skill_root.iterdir() if p.is_dir()}
-                if skill_root.exists()
-                else set()
-            )
+            manifest = self._read_manifest()
+            entries = manifest.get("skills", {})
+            existing_on_disk = set(entries)
+            for root in (
+                get_workspace_skills_dir(self.workspace_dir),
+                get_workspace_disabled_skills_dir(self.workspace_dir),
+            ):
+                if root.exists():
+                    existing_on_disk.update(
+                        path.name for path in root.iterdir() if path.is_dir()
+                    )
             conflicts: list[dict[str, Any]] = []
-            planned: list[tuple[Path, str]] = []
+            planned: list[tuple[Path, str, bool, Path, Path]] = []
             seen_names: set[str] = set()
             for skill_dir, skill_name in found:
                 _scan_skill_dir_or_raise(skill_dir, skill_name)
@@ -2066,7 +2493,22 @@ class SkillService:
                     )
                     continue
                 seen_names.add(skill_name)
-                exists = (skill_root / skill_name).exists()
+                active_dir = resolve_workspace_managed_skill_dir(
+                    self.workspace_dir,
+                    skill_name,
+                    enabled=True,
+                )
+                disabled_dir = resolve_workspace_managed_skill_dir(
+                    self.workspace_dir,
+                    skill_name,
+                    enabled=False,
+                )
+                existing = entries.get(skill_name)
+                exists = (
+                    existing is not None
+                    or active_dir.exists()
+                    or disabled_dir.exists()
+                )
                 if exists and not overwrite:
                     conflicts.append(
                         _build_import_conflict(
@@ -2075,7 +2517,22 @@ class SkillService:
                         ),
                     )
                     continue
-                planned.append((skill_dir, skill_name))
+                enabled = (
+                    bool(existing.get("enabled", False))
+                    if existing is not None
+                    else bool(enable)
+                )
+                target_dir = active_dir if enabled else disabled_dir
+                other_dir = disabled_dir if enabled else active_dir
+                planned.append(
+                    (
+                        skill_dir,
+                        skill_name,
+                        enabled,
+                        target_dir,
+                        other_dir,
+                    ),
+                )
             if conflicts:
                 return {
                     "imported": [],
@@ -2084,25 +2541,40 @@ class SkillService:
                     "conflicts": conflicts,
                 }
             imported: list[str] = []
-            for skill_dir, skill_name in planned:
+            enabled_by_name: dict[str, bool] = {}
+            target_by_name: dict[str, Path] = {}
+            for (
+                skill_dir,
+                skill_name,
+                enabled,
+                target_dir,
+                other_dir,
+            ) in planned:
+                target_dir.parent.mkdir(parents=True, exist_ok=True)
                 if _import_skill_dir(
                     skill_dir,
-                    skill_root,
+                    target_dir.parent,
                     skill_name,
                     True,
                 ):
                     imported.append(skill_name)
+                    enabled_by_name[skill_name] = enabled
+                    target_by_name[skill_name] = target_dir
+                    if other_dir.exists():
+                        shutil.rmtree(other_dir)
 
             if imported:
-                reconcile_workspace_manifest(self.workspace_dir)
-                if enable:
-                    for skill_name in imported:
-                        self.enable_skill(skill_name)
+                self._register_imported_skills(
+                    imported,
+                    enabled_by_name,
+                    target_by_name,
+                )
 
             return {
                 "imported": imported,
                 "count": len(imported),
-                "enabled": enable and bool(imported),
+                "enabled": bool(imported)
+                and all(enabled_by_name[name] for name in imported),
                 "conflicts": conflicts,
             }
         finally:
@@ -2132,37 +2604,46 @@ class SkillService:
             }
 
         manifest_path = get_workspace_skill_manifest_path(self.workspace_dir)
-        skill_dir = get_workspace_skills_dir(self.workspace_dir) / skill_name
-        if not skill_dir.exists():
-            return {
-                "success": False,
-                "updated_workspaces": [],
-                "failed": [self.workspace_dir.name],
-                "reason": "not_found",
-            }
-        _scan_skill_dir_or_raise(skill_dir, skill_name)
-
-        def _update(payload: dict[str, Any]) -> bool:
+        with _file_write_lock(_lock_path_for(manifest_path)):
+            payload = _read_workspace_manifest_strict_unlocked(manifest_path)
             entry = payload.get("skills", {}).get(skill_name)
             if entry is None:
-                return False
+                return {
+                    "success": False,
+                    "updated_workspaces": [],
+                    "failed": [self.workspace_dir.name],
+                    "reason": "not_found",
+                }
+            skill_dir = self._registered_skill_dir(skill_name, entry)
+            if not skill_dir.exists():
+                return {
+                    "success": False,
+                    "updated_workspaces": [],
+                    "failed": [self.workspace_dir.name],
+                    "reason": "not_found",
+                }
+            _scan_skill_dir_or_raise(skill_dir, skill_name)
+
             entry["enabled"] = True
             entry.setdefault("channels", ["all"])
             entry["updated_at"] = _timestamp()
-            return True
+            _write_json_atomic(manifest_path, payload)
 
-        updated = _mutate_json(
-            manifest_path,
-            _default_workspace_manifest(),
-            _update,
-        )
-        if not updated:
-            return {
-                "success": False,
-                "updated_workspaces": [],
-                "failed": [self.workspace_dir.name],
-                "reason": "not_found",
-            }
+            active_dir = resolve_workspace_managed_skill_dir(
+                self.workspace_dir,
+                skill_name,
+                enabled=True,
+            )
+            if skill_dir != active_dir:
+                try:
+                    _move_skill_dir(skill_dir, active_dir)
+                except OSError:
+                    return {
+                        "success": False,
+                        "updated_workspaces": [],
+                        "failed": [self.workspace_dir.name],
+                        "reason": "move_failed",
+                    }
 
         return {
             "success": True,
@@ -2174,22 +2655,28 @@ class SkillService:
     def disable_skill(self, name: str) -> dict[str, Any]:
         skill_name = str(name or "")
         manifest_path = get_workspace_skill_manifest_path(self.workspace_dir)
-
-        def _update(payload: dict[str, Any]) -> bool:
+        with _file_write_lock(_lock_path_for(manifest_path)):
+            payload = _read_workspace_manifest_strict_unlocked(manifest_path)
             entry = payload.get("skills", {}).get(skill_name)
             if entry is None:
-                return False
+                return {"success": False, "updated_workspaces": []}
+
+            skill_dir = self._registered_skill_dir(skill_name, entry)
+            if not skill_dir.exists():
+                return {"success": False, "updated_workspaces": []}
+            disabled_dir = resolve_workspace_managed_skill_dir(
+                self.workspace_dir,
+                skill_name,
+                enabled=False,
+            )
+            if skill_dir != disabled_dir:
+                if disabled_dir.exists():
+                    shutil.rmtree(disabled_dir)
+                _move_skill_dir(skill_dir, disabled_dir)
+
             entry["enabled"] = False
             entry["updated_at"] = _timestamp()
-            return True
-
-        updated = _mutate_json(
-            manifest_path,
-            _default_workspace_manifest(),
-            _update,
-        )
-        if not updated:
-            return {"success": False, "updated_workspaces": []}
+            _write_json_atomic(manifest_path, payload)
 
         return {
             "success": True,
@@ -2228,7 +2715,7 @@ class SkillService:
         if entry is None or entry.get("enabled", False):
             return False
 
-        skill_dir = get_workspace_skills_dir(self.workspace_dir) / skill_name
+        skill_dir = self._registered_skill_dir(skill_name, entry)
         if skill_dir.exists():
             shutil.rmtree(skill_dir)
 
@@ -2271,8 +2758,9 @@ class SkillService:
         if resolved_skill_name not in manifest_skills:
             return None
 
-        workspace_base_dir = (
-            get_workspace_skills_dir(self.workspace_dir) / resolved_skill_name
+        workspace_base_dir = self._registered_skill_dir(
+            resolved_skill_name,
+            manifest_skills[resolved_skill_name],
         )
         if not workspace_base_dir.exists():
             return None
@@ -2716,7 +3204,7 @@ class SkillPoolService:
             working_dir=self.working_dir,
         )
         existing = manifest.get("skills", {}).get(final_name)
-        if existing and not overwrite:
+        if existing is not None and not overwrite:
             return {
                 "success": False,
                 "reason": "conflict",
@@ -2805,77 +3293,96 @@ class SkillPoolService:
 
         return {"success": True, "name": final_name}
 
-    def download_to_workspace(
+    def _workspace_download_preflight(
         self,
         skill_name: str,
         workspace_dir: Path,
         *,
-        target_name: str | None = None,
-        overwrite: bool = False,
-    ) -> dict[str, Any]:
+        target_name: str | None,
+        overwrite: bool,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         manifest = read_skill_pool_manifest(
             reconcile=False,
             working_dir=self.working_dir,
         )
         entry = manifest.get("skills", {}).get(skill_name)
         if entry is None:
-            return {"success": False, "reason": "not_found"}
+            return None, {"success": False, "reason": "not_found"}
 
-        source_dir = (
-            get_skill_pool_dir(working_dir=self.working_dir) / skill_name
-        )
         final_name = _normalize_skill_dir_name(target_name or skill_name)
-        target_dir = get_workspace_skills_dir(workspace_dir) / final_name
         workspace_manifest = read_skill_manifest(
             workspace_dir,
             reconcile=False,
         )
         existing = workspace_manifest.get("skills", {}).get(final_name)
         workspace_identity = get_workspace_identity(workspace_dir)
-        if existing and not overwrite:
-            # Both builtin: compare version to decide action.
-            if (
-                entry.get("source") == "builtin"
-                and existing.get("source") == "builtin"
-            ):
-                pool_ver = entry.get("version_text", "")
-                ws_ver = (existing.get("metadata") or {}).get(
-                    "version_text",
-                    "",
-                )
-                if pool_ver and ws_ver and pool_ver == ws_ver:
-                    return {
-                        "success": True,
-                        "mode": "unchanged",
-                        "name": final_name,
-                        "workspace_id": workspace_identity["workspace_id"],
-                        "workspace_name": workspace_identity["workspace_name"],
-                    }
-                return {
-                    "success": False,
-                    "reason": "builtin_upgrade",
-                    "workspace_id": workspace_identity["workspace_id"],
-                    "workspace_name": workspace_identity["workspace_name"],
-                    "skill_name": final_name,
-                }
-            return {
+        if _has_unmanaged_workspace_skill_conflict(
+            workspace_dir,
+            final_name,
+            workspace_manifest,
+        ):
+            return None, {
                 "success": False,
                 "reason": "conflict",
                 "workspace_id": workspace_identity["workspace_id"],
                 "workspace_name": workspace_identity["workspace_name"],
-                "suggested_name": suggest_conflict_name(
-                    final_name,
-                ),
+                "suggested_name": suggest_conflict_name(final_name),
             }
+        if existing is not None and not overwrite:
+            return None, _existing_workspace_download_result(
+                entry,
+                existing,
+                final_name,
+                workspace_identity,
+            )
+        return {
+            "entry": entry,
+            "existing": existing,
+            "final_name": final_name,
+            "workspace_identity": workspace_identity,
+        }, None
 
+    @staticmethod
+    def _install_pool_skill_in_workspace(
+        source_dir: Path,
+        target_dir: Path,
+        other_dir: Path,
+        final_name: str,
+    ) -> None:
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         with _staged_skill_dir(final_name) as staged_dir:
             _copy_skill_dir(source_dir, staged_dir)
             _scan_skill_dir_or_raise(staged_dir, final_name)
             _copy_skill_dir(staged_dir, target_dir)
+        if other_dir.exists():
+            shutil.rmtree(other_dir)
 
-        pool_config = entry.get("config") or {}
+    @staticmethod
+    def _workspace_download_settings(
+        entry: dict[str, Any],
+        existing: dict[str, Any] | None,
+    ) -> tuple[bool, list[str], dict[str, Any], str]:
+        if existing is None:
+            return True, ["all"], dict(entry.get("config") or {}), _timestamp()
+        return (
+            bool(existing.get("enabled", True)),
+            existing.get("channels") or ["all"],
+            dict(existing.get("config") or {}),
+            existing.get("created_at") or _timestamp(),
+        )
 
+    @staticmethod
+    def _write_workspace_download_manifest(
+        workspace_dir: Path,
+        final_name: str,
+        target_dir: Path,
+        entry: dict[str, Any],
+        *,
+        enabled: bool,
+        channels: list[str],
+        config: dict[str, Any],
+        created_at: str,
+    ) -> None:
         def _update(payload: dict[str, Any]) -> None:
             payload.setdefault("skills", {})
             metadata = _build_skill_metadata(
@@ -2889,12 +3396,13 @@ class SkillPoolService:
                 protected=False,
             )
             payload["skills"][final_name] = {
-                "enabled": True,
-                "channels": ["all"],
+                "enabled": enabled,
+                "channels": channels,
                 "source": metadata["source"],
-                "config": pool_config,
+                "config": config,
                 "metadata": metadata,
                 "requirements": metadata["requirements"],
+                "created_at": created_at,
                 "updated_at": _timestamp(),
             }
 
@@ -2902,6 +3410,63 @@ class SkillPoolService:
             get_workspace_skill_manifest_path(workspace_dir),
             _default_workspace_manifest(),
             _update,
+        )
+
+    def download_to_workspace(
+        self,
+        skill_name: str,
+        workspace_dir: Path,
+        *,
+        target_name: str | None = None,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        context, result = self._workspace_download_preflight(
+            skill_name,
+            workspace_dir,
+            target_name=target_name,
+            overwrite=overwrite,
+        )
+        if result is not None:
+            return result
+
+        assert context is not None
+        entry = context["entry"]
+        existing = context["existing"]
+        final_name = context["final_name"]
+        workspace_identity = context["workspace_identity"]
+        settings = self._workspace_download_settings(
+            entry,
+            existing,
+        )
+        enabled, channels, config, created_at = settings
+        source_dir = (
+            get_skill_pool_dir(working_dir=self.working_dir) / skill_name
+        )
+        target_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            final_name,
+            enabled=enabled,
+        )
+        other_dir = resolve_workspace_managed_skill_dir(
+            workspace_dir,
+            final_name,
+            enabled=not enabled,
+        )
+        self._install_pool_skill_in_workspace(
+            source_dir,
+            target_dir,
+            other_dir,
+            final_name,
+        )
+        self._write_workspace_download_manifest(
+            workspace_dir,
+            final_name,
+            target_dir,
+            entry,
+            enabled=enabled,
+            channels=channels,
+            config=config,
+            created_at=created_at,
         )
         return {
             "success": True,
@@ -2918,58 +3483,19 @@ class SkillPoolService:
         target_name: str | None = None,
         overwrite: bool = False,
     ) -> dict[str, Any]:
-        manifest = read_skill_pool_manifest(
-            reconcile=False,
-            working_dir=self.working_dir,
-        )
-        entry = manifest.get("skills", {}).get(skill_name)
-        if entry is None:
-            return {"success": False, "reason": "not_found"}
-
-        final_name = _normalize_skill_dir_name(target_name or skill_name)
-        workspace_manifest = read_skill_manifest(
+        context, result = self._workspace_download_preflight(
+            skill_name,
             workspace_dir,
-            reconcile=False,
+            target_name=target_name,
+            overwrite=overwrite,
         )
-        existing = workspace_manifest.get("skills", {}).get(final_name)
-        workspace_identity = get_workspace_identity(workspace_dir)
-        if existing and not overwrite:
-            if (
-                entry.get("source") == "builtin"
-                and existing.get("source") == "builtin"
-            ):
-                pool_ver = entry.get("version_text", "")
-                ws_ver = (existing.get("metadata") or {}).get(
-                    "version_text",
-                    "",
-                )
-                if pool_ver and ws_ver and pool_ver == ws_ver:
-                    return {
-                        "success": True,
-                        "mode": "unchanged",
-                        "name": final_name,
-                        "workspace_id": workspace_identity["workspace_id"],
-                        "workspace_name": workspace_identity["workspace_name"],
-                    }
-                return {
-                    "success": False,
-                    "reason": "builtin_upgrade",
-                    "workspace_id": workspace_identity["workspace_id"],
-                    "workspace_name": workspace_identity["workspace_name"],
-                    "skill_name": final_name,
-                }
-            return {
-                "success": False,
-                "reason": "conflict",
-                "workspace_id": workspace_identity["workspace_id"],
-                "workspace_name": workspace_identity["workspace_name"],
-                "suggested_name": suggest_conflict_name(
-                    final_name,
-                ),
-            }
+        if result is not None:
+            return result
+
+        assert context is not None
         return {
             "success": True,
-            "workspace_id": workspace_identity["workspace_id"],
-            "workspace_name": workspace_identity["workspace_name"],
-            "name": final_name,
+            "workspace_id": context["workspace_identity"]["workspace_id"],
+            "workspace_name": context["workspace_identity"]["workspace_name"],
+            "name": context["final_name"],
         }

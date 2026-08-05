@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
-  Alert,
   Button,
   DatePicker,
   Descriptions,
@@ -53,6 +52,7 @@ import type {
 import { BBK_ID_MAP, getBbkDisplayName } from "../../../constants/bbk";
 import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { useIframeStore } from "../../../stores/iframeStore";
+import CronScheduleDistribution from "./CronScheduleDistribution";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
@@ -60,7 +60,7 @@ const DEFAULT_AGENT_ID = "default";
 const FILE_DETAIL_DEFAULT_PAGE_SIZE = 10;
 
 type DateRange = [Dayjs, Dayjs] | null;
-type ActiveTab = "governance" | "files";
+type ActiveTab = "governance" | "files" | "schedule";
 type DateShortcutKey = "today" | "last7" | "lastMonth";
 
 const DATE_SHORTCUT_OPTIONS: Array<{
@@ -195,9 +195,7 @@ function getActiveDateShortcut(
   if (!dateRange) return undefined;
   return DATE_SHORTCUT_OPTIONS.find(({ value }) => {
     const [start, end] = buildDateShortcutRange(value);
-    return (
-      dateRange[0].isSame(start, "day") && dateRange[1].isSame(end, "day")
-    );
+    return dateRange[0].isSame(start, "day") && dateRange[1].isSame(end, "day");
   })?.value;
 }
 
@@ -289,6 +287,7 @@ function HealthPanel({
 
 const TREND_CHART_WIDTH = 360;
 const TREND_CHART_HEIGHT = 170;
+const TREND_CHART_MAX_X_LABELS = 6;
 const TREND_CHART_MARGIN = {
   top: 18,
   right: 14,
@@ -320,6 +319,19 @@ function getChartY(value: number, maxValue: number): number {
   );
 }
 
+function getChartXAxisLabelIndexes(count: number): Set<number> {
+  if (count <= TREND_CHART_MAX_X_LABELS) {
+    return new Set(Array.from({ length: count }, (_, index) => index));
+  }
+
+  const lastIndex = count - 1;
+  return new Set(
+    Array.from({ length: TREND_CHART_MAX_X_LABELS }, (_, index) =>
+      Math.round((lastIndex * index) / (TREND_CHART_MAX_X_LABELS - 1)),
+    ),
+  );
+}
+
 function TrendChart({ data }: { data: DreamLogReportTrendPoint[] }) {
   if (!data.length) {
     return (
@@ -329,6 +341,7 @@ function TrendChart({ data }: { data: DreamLogReportTrendPoint[] }) {
 
   const maxValue = Math.max(...data.map((item) => item.executions), 1);
   const ticks = getChartTicks(maxValue);
+  const xAxisLabelIndexes = getChartXAxisLabelIndexes(data.length);
   const axisBottom = TREND_CHART_HEIGHT - TREND_CHART_MARGIN.bottom;
   const barSlotWidth =
     data.length === 1
@@ -409,9 +422,16 @@ function TrendChart({ data }: { data: DreamLogReportTrendPoint[] }) {
                   rx="4"
                 />
               )}
-              <text className={styles.chartXAxisLabel} x={x} y={158}>
-                {dayjs(item.date).format("MM-DD")}
-              </text>
+              {xAxisLabelIndexes.has(index) ? (
+                <text
+                  className={styles.chartXAxisLabel}
+                  x={x}
+                  y={158}
+                  data-testid="governance-trend-date-label"
+                >
+                  {dayjs(item.date).format("MM-DD")}
+                </text>
+              ) : null}
             </g>
           );
         })}
@@ -433,12 +453,16 @@ function TrendChart({ data }: { data: DreamLogReportTrendPoint[] }) {
 function SavingsLineChart({ data }: { data: DreamLogReportTrendPoint[] }) {
   if (!data.length) {
     return (
-      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无节省空间数据" />
+      <Empty
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="暂无节省空间数据"
+      />
     );
   }
 
   const maxValue = Math.max(...data.map((item) => item.total_size_saved), 1);
   const ticks = getChartTicks(maxValue);
+  const xAxisLabelIndexes = getChartXAxisLabelIndexes(data.length);
   const axisBottom = TREND_CHART_HEIGHT - TREND_CHART_MARGIN.bottom;
   const points = data.map((item, index) => ({
     x: getChartX(index, data.length),
@@ -486,20 +510,27 @@ function SavingsLineChart({ data }: { data: DreamLogReportTrendPoint[] }) {
           y2={axisBottom}
         />
         <polyline className={styles.savingsLine} points={pointPath} />
-        {points.map((point) => (
+        {points.map((point, index) => (
           <g key={point.item.date}>
-            <title>{`${dayjs(point.item.date).format("MM-DD")} 节省 ${formatBytes(
-              point.item.total_size_saved,
-            )}`}</title>
+            <title>{`${dayjs(point.item.date).format(
+              "MM-DD",
+            )} 节省 ${formatBytes(point.item.total_size_saved)}`}</title>
             <circle
               className={styles.savingsPoint}
               cx={point.x}
               cy={point.y}
               r="3"
             />
-            <text className={styles.chartXAxisLabel} x={point.x} y={158}>
-              {dayjs(point.item.date).format("MM-DD")}
-            </text>
+            {xAxisLabelIndexes.has(index) ? (
+              <text
+                className={styles.chartXAxisLabel}
+                x={point.x}
+                y={158}
+                data-testid="governance-savings-date-label"
+              >
+                {dayjs(point.item.date).format("MM-DD")}
+              </text>
+            ) : null}
           </g>
         ))}
       </svg>
@@ -611,8 +642,9 @@ export default function ContinuousGovernancePage() {
   const [recordsTotal, setRecordsTotal] = useState(0);
   const [recordsPage, setRecordsPage] = useState(1);
   const [recordsPageSize, setRecordsPageSize] = useState(10);
-  const [detailRecord, setDetailRecord] =
-    useState<DreamLogReportRecord | null>(null);
+  const [detailRecord, setDetailRecord] = useState<DreamLogReportRecord | null>(
+    null,
+  );
   const [bbkOptions, setBbkOptions] = useState<BbkOption[]>(BBK_ID_MAP);
 
   const fetchReport = useCallback(async (params: DreamLogReportParams) => {
@@ -1069,7 +1101,11 @@ export default function ContinuousGovernancePage() {
       key: "expired",
       width: 100,
       render: (expired: boolean) =>
-        expired ? <Tag color="orange">待清理</Tag> : <Tag color="green">可恢复</Tag>,
+        expired ? (
+          <Tag color="orange">待清理</Tag>
+        ) : (
+          <Tag color="green">可恢复</Tag>
+        ),
     },
   ];
 
@@ -1288,10 +1324,7 @@ export default function ContinuousGovernancePage() {
           >
             查询
           </Button>
-          <Button
-            onClick={resetFilters}
-            data-testid="governance-reset-button"
-          >
+          <Button onClick={resetFilters} data-testid="governance-reset-button">
             重置
           </Button>
         </Space>
@@ -1490,6 +1523,12 @@ export default function ContinuousGovernancePage() {
             key: "files",
             label: "文件清理与归档",
             children: renderFileGovernanceTab(),
+          },
+          {
+            key: "schedule",
+            label: "定时任务触发分布",
+            children:
+              activeTab === "schedule" ? <CronScheduleDistribution /> : null,
           },
         ]}
       />

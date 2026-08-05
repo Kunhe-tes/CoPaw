@@ -2,21 +2,16 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
+from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
-
-from src.swe.app.plans import (
-    JsonProposedPlanStore,
-    PlanService,
-    ProposedPlanCreate,
-)
+from src.swe.app.file_manager import FileManagerService
 from src.swe.app.routers import console as console_router
 
 
@@ -35,9 +30,6 @@ class _FakeChannelManager:
 
 
 class _FakeChatManager:
-    def __init__(self) -> None:
-        self.chats = {}
-
     async def get_or_create_chat(
         self,
         session_id: str,
@@ -46,33 +38,18 @@ class _FakeChatManager:
         name: str,
         meta=None,
     ):
-        existing = self.chats.get(session_id)
-        if existing is not None:
-            if meta:
-                existing.meta = {**(existing.meta or {}), **meta}
-            return existing
-        chat = SimpleNamespace(
+        _ = meta
+        return SimpleNamespace(
             id=f"chat:{session_id}",
             session_id=session_id,
             user_id=user_id,
             channel=channel_id,
             name=name,
-            meta=meta or {},
         )
-        self.chats[session_id] = chat
-        return chat
-
-    async def update_chat(self, chat):
-        self.chats[chat.session_id] = chat
-        return chat
 
 
 class _FakeTaskTracker:
-    def __init__(self) -> None:
-        self.started_payloads = []
-
     async def attach_or_start(self, _run_key, _payload, _stream_fn):
-        self.started_payloads.append(_payload)
         return object(), True
 
     async def attach(self, _run_key):
@@ -81,26 +58,6 @@ class _FakeTaskTracker:
     async def stream_from_queue(self, _queue, _run_key):
         await asyncio.sleep(0.03)
         yield 'data: {"done": true}\n\n'
-
-
-class _NoStartTaskTracker(_FakeTaskTracker):
-    async def attach_or_start(self, _run_key, _payload, _stream_fn):
-        raise AssertionError("Main Agent run should not start")
-
-
-class _NoRunningNoStartTaskTracker(_NoStartTaskTracker):
-    async def attach(self, _run_key):
-        return None
-
-
-class _AttachOnlyTaskTracker(_NoStartTaskTracker):
-    def __init__(self) -> None:
-        super().__init__()
-        self.attached_run_keys = []
-
-    async def attach(self, run_key):
-        self.attached_run_keys.append(run_key)
-        return object()
 
 
 def _build_upload_client(monkeypatch, media_dir):
@@ -125,6 +82,424 @@ def _build_upload_client(monkeypatch, media_dir):
         _fake_get_agent_for_request,
     )
     return TestClient(app)
+
+
+def _build_file_manager_client(monkeypatch, workspace_dir):
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    async def _fake_resolve_file_manager_workspace_dir(_request):
+        return workspace_dir
+
+    async def _fail_if_runtime_requested(_request):
+        raise AssertionError("File Manager must not resolve an Agent runtime")
+
+    monkeypatch.setattr(
+        console_router,
+        "resolve_file_manager_workspace_dir",
+        _fake_resolve_file_manager_workspace_dir,
+    )
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fail_if_runtime_requested,
+    )
+    monkeypatch.setattr(
+        console_router,
+        "get_file_manager_service",
+        lambda directory: FileManagerService(
+            directory,
+            cursor_secret=b"test-file-manager-secret",
+        ),
+    )
+    return TestClient(app)
+
+
+def test_file_manager_listing_is_bound_to_request_workspace(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "visible.txt").write_text("visible", encoding="utf-8")
+    (tmp_path / "sessions").mkdir()
+    (tmp_path / "governance").mkdir()
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    response = client.get("/console/file-manager/directories?root=working")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["root"] == "working"
+    assert body["path"] == ""
+    assert [item["name"] for item in body["items"]] == ["visible.txt"]
+    assert str(tmp_path) not in response.text
+
+
+@pytest.mark.parametrize("path", ["../outside", "/etc/passwd"])
+def test_file_manager_rejects_escaping_paths(
+    tmp_path,
+    monkeypatch,
+    path,
+) -> None:
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    response = client.get(
+        "/console/file-manager/directories",
+        params={"root": "working", "path": path},
+    )
+
+    assert response.status_code == 403
+
+
+def test_file_manager_read_returns_bounded_preview_and_revision(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    large_text = "x" * (1024 * 1024 + 1)
+    (tmp_path / "large.txt").write_text(large_text, encoding="utf-8")
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    response = client.get(
+        "/console/file-manager/files/read",
+        params={"root": "working", "path": "large.txt"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["is_text"] is True
+    assert body["is_truncated"] is True
+    assert body["editable"] is False
+    assert len(body["content"].encode("utf-8")) == 1024 * 1024
+    assert body["revision"]
+
+
+def test_file_manager_conversation_can_read_and_download_regular_file(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    (sessions / "chat.txt").write_text("conversation", encoding="utf-8")
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    read_response = client.get(
+        "/console/file-manager/files/read",
+        params={"root": "conversation", "path": "chat.txt"},
+    )
+    download_response = client.get(
+        "/console/file-manager/files/download",
+        params={"root": "conversation", "path": "chat.txt"},
+    )
+
+    assert read_response.status_code == 200
+    assert read_response.json()["content"] == "conversation"
+    assert read_response.json()["editable"] is False
+    assert download_response.status_code == 200
+    assert download_response.content == b"conversation"
+    assert download_response.headers["content-disposition"] == (
+        'attachment; filename="chat.txt"'
+    )
+    assert download_response.headers["content-length"] == str(
+        len(b"conversation"),
+    )
+
+
+def test_file_manager_recycle_is_listable_but_not_available_for_read_or_download(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    assert (
+        client.get(
+            "/console/file-manager/directories?root=recycle",
+        ).status_code
+        == 200
+    )
+    for endpoint in (
+        "/console/file-manager/files/read?root=recycle&path=file.txt",
+        "/console/file-manager/files/download?root=recycle&path=file.txt",
+    ):
+        assert client.get(endpoint).status_code == 403
+
+
+def test_file_manager_text_save_requires_current_revision_and_audits_without_content(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    (tmp_path / "note.md").write_text("before", encoding="utf-8")
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+    preview = client.get(
+        "/console/file-manager/files/read",
+        params={"root": "working", "path": "note.md"},
+    ).json()
+
+    with caplog.at_level("INFO", logger="src.swe.app.routers.console"):
+        saved = client.put(
+            "/console/file-manager/files/text",
+            headers={"X-Actor": "tester"},
+            json={
+                "root": "working",
+                "path": "note.md",
+                "content": "after",
+                "revision": preview["revision"],
+            },
+        )
+
+    assert saved.status_code == 200
+    assert saved.json()["revision"] != preview["revision"]
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "after"
+    assert all("after" not in record.getMessage() for record in caplog.records)
+    audit = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "file_manager.audit"
+    )
+    assert audit.actor == "tester"
+    assert audit.action == "save"
+    assert audit.path == "note.md"
+    assert audit.outcome == "success"
+
+    conflict = client.put(
+        "/console/file-manager/files/text",
+        json={
+            "root": "working",
+            "path": "note.md",
+            "content": "lost update",
+            "revision": preview["revision"],
+        },
+    )
+    assert conflict.status_code == 409
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "after"
+
+
+def test_file_manager_upload_and_delete_enforce_root_and_name_contracts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "media").mkdir()
+    (tmp_path / "media" / "duplicate.txt").write_text("old", encoding="utf-8")
+    (tmp_path / "folder").mkdir()
+    (tmp_path / "sessions").mkdir()
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    uploaded = client.post(
+        "/console/file-manager/files/upload?root=upload&path=",
+        files={"file": ("fresh.txt", b"fresh", "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    assert (tmp_path / "media" / "fresh.txt").read_bytes() == b"fresh"
+    collision = client.post(
+        "/console/file-manager/files/upload?root=upload&path=",
+        files={"file": ("duplicate.txt", b"new", "text/plain")},
+    )
+    assert collision.status_code == 409
+    assert (tmp_path / "media" / "duplicate.txt").read_text(
+        encoding="utf-8",
+    ) == "old"
+    forbidden = client.post(
+        "/console/file-manager/files/upload?root=conversation&path=",
+        files={"file": ("no.txt", b"no", "text/plain")},
+    )
+    assert forbidden.status_code == 403
+
+    directory_delete = client.delete(
+        "/console/file-manager/files",
+        params={"root": "working", "path": "folder"},
+    )
+    assert directory_delete.status_code == 403
+    deleted = client.delete(
+        "/console/file-manager/files",
+        params={"root": "upload", "path": "fresh.txt"},
+    )
+    assert deleted.status_code == 200
+    assert not (tmp_path / "media" / "fresh.txt").exists()
+
+
+def test_file_manager_oversized_upload_audits_failure_without_content(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    (tmp_path / "media").mkdir()
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    with caplog.at_level("INFO", logger="src.swe.app.routers.console"):
+        response = client.post(
+            "/console/file-manager/files/upload?root=upload&path=folder",
+            files={
+                "file": (
+                    "oversized.txt",
+                    b"x" * (console_router.MAX_UPLOAD_BYTES + 1),
+                    "text/plain",
+                ),
+            },
+        )
+
+    assert response.status_code == 400
+    audit = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "file_manager.audit"
+    )
+    assert audit.action == "upload"
+    assert audit.path == "folder/oversized.txt"
+    assert audit.outcome == "failure"
+    assert "x" * 32 not in audit.getMessage()
+
+
+def test_file_manager_recycle_restores_only_original_path_and_purges(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    (tmp_path / "report.txt").write_text("report", encoding="utf-8")
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+    deleted = client.delete(
+        "/console/file-manager/files",
+        params={"root": "working", "path": "report.txt"},
+    )
+    assert deleted.status_code == 200
+    archive_item_id = deleted.json()["archive_item_id"]
+
+    recycle = client.get("/console/file-manager/directories?root=recycle")
+    assert recycle.status_code == 200
+    item = recycle.json()["items"][0]
+    assert item["original_path"] == "report.txt"
+    assert item["archived_at"]
+    assert "archive_path" not in recycle.text
+
+    (tmp_path / "report.txt").write_text("collision", encoding="utf-8")
+    conflict = client.post(
+        f"/console/file-manager/recycle/{archive_item_id}/restore",
+    )
+    assert conflict.status_code == 409
+    (tmp_path / "report.txt").unlink()
+    restored = client.post(
+        f"/console/file-manager/recycle/{archive_item_id}/restore",
+    )
+    assert restored.status_code == 200
+    assert (tmp_path / "report.txt").read_text(encoding="utf-8") == "report"
+
+    second = client.delete(
+        "/console/file-manager/files",
+        params={"root": "working", "path": "report.txt"},
+    ).json()["archive_item_id"]
+    purged = client.delete(f"/console/file-manager/recycle/{second}")
+    assert purged.status_code == 200
+    assert (
+        client.get("/console/file-manager/directories?root=recycle").json()[
+            "items"
+        ]
+        == []
+    )
+
+
+def test_file_manager_download_rejects_symbolic_links(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    outside = tmp_path.parent / "outside-download.txt"
+    outside.write_text("not downloadable", encoding="utf-8")
+    (tmp_path / "outside-link.txt").symlink_to(outside)
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    response = client.get(
+        "/console/file-manager/files/download",
+        params={"root": "working", "path": "outside-link.txt"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_file_manager_download_response_closes_if_response_start_fails() -> (
+    None
+):
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    stream = console_router._FileManagerDownloadStream(read_fd, 1)
+    response = console_router._FileManagerDownloadResponse(stream)
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            raise RuntimeError("response start failed")
+
+    with pytest.raises(RuntimeError, match="response start failed"):
+        asyncio.run(
+            response(
+                {
+                    "type": "http",
+                    "asgi": {"spec_version": "2.4"},
+                    "method": "GET",
+                    "path": "/download",
+                    "headers": [],
+                },
+                receive,
+                send,
+            ),
+        )
+
+    with pytest.raises(OSError):
+        os.fstat(read_fd)
+
+
+def test_file_manager_download_response_closes_if_response_start_is_cancelled() -> (
+    None
+):
+    read_fd, write_fd = os.pipe()
+    os.close(write_fd)
+    response = console_router._FileManagerDownloadResponse(
+        console_router._FileManagerDownloadStream(read_fd, 1),
+    )
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            response(
+                {
+                    "type": "http",
+                    "asgi": {"spec_version": "2.4"},
+                    "method": "GET",
+                    "path": "/download",
+                    "headers": [],
+                },
+                receive,
+                send,
+            ),
+        )
+
+    with pytest.raises(OSError):
+        os.fstat(read_fd)
+
+
+def test_file_manager_download_stream_only_sends_open_snapshot_size(
+    tmp_path,
+) -> None:
+    file_path = tmp_path / "document.txt"
+    file_path.write_bytes(b"before")
+    download = FileManagerService(
+        tmp_path,
+        cursor_secret=b"test-file-manager-secret",
+    ).open_file_for_download("working", "document.txt")
+    with file_path.open("ab") as handle:
+        handle.write(b"-after")
+
+    stream = console_router._FileManagerDownloadStream(
+        download.file_descriptor,
+        download.size_bytes,
+    )
+
+    assert b"".join(stream) == b"before"
+    with pytest.raises(OSError):
+        os.fstat(download.file_descriptor)
 
 
 @pytest.mark.parametrize(
@@ -178,6 +553,75 @@ def test_console_upload_allows_archive_and_document_extensions(
     assert len(stored_files) == 1
     assert stored_files[0].name.endswith(f"_{file_name}")
     assert stored_files[0].read_bytes() == b"content"
+
+
+def test_console_upload_uses_workspace_copy_for_context_reference(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+    custom_media_dir = tmp_path / "custom-media"
+    workspace_dir = tmp_path / "workspace"
+
+    class _FakeUploadChannelManager:
+        async def get_channel(self, name: str):
+            assert name == "console"
+            return SimpleNamespace(media_dir=custom_media_dir)
+
+    workspace = SimpleNamespace(
+        channel_manager=_FakeUploadChannelManager(),
+        workspace_dir=workspace_dir,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/console/upload",
+        files={"file": ("report.pdf", b"content", "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    referenced_path = Path(body["url"])
+    assert referenced_path.parent == workspace_dir / "media"
+    assert referenced_path.read_bytes() == b"content"
+    assert (custom_media_dir / referenced_path.name).read_bytes() == b"content"
+
+    native_payload: dict[str, Any] = {
+        "content_parts": [
+            {"type": "file", "file_url": str(referenced_path)},
+        ],
+        "meta": {
+            "context_references": [
+                {
+                    "type": "skill",
+                    "id": "skill:document_reader",
+                    "name": "document_reader",
+                },
+            ],
+        },
+    }
+    asyncio.run(
+        console_router._append_uploaded_attachment_references(
+            native_payload,
+            workspace,
+        ),
+    )
+    assert native_payload["meta"]["context_references"][-1] == {
+        "type": "workspace_file",
+        "id": f"workspace_file:media/{referenced_path.name}",
+        "root": "media",
+        "relative_path": referenced_path.name,
+    }
 
 
 def test_console_chat_stream_emits_keepalive_and_disables_proxy_buffering(
@@ -245,13 +689,22 @@ def test_console_chat_stream_emits_keepalive_and_disables_proxy_buffering(
             )
 
 
-def test_console_chat_normal_request_does_not_add_plan_metadata(
-    monkeypatch,
-) -> None:
+def test_console_chat_copies_b3_trace_id_to_native_meta(monkeypatch) -> None:
     app = FastAPI()
     app.include_router(console_router.router)
 
-    tracker = _FakeTaskTracker()
+    class _CapturingTaskTracker:
+        def __init__(self) -> None:
+            self.payload = None
+
+        async def attach_or_start(self, _run_key, payload, _stream_fn):
+            self.payload = payload
+            return object(), True
+
+        async def stream_from_queue(self, _queue, _run_key):
+            yield 'data: {"done": true}\n\n'
+
+    tracker = _CapturingTaskTracker()
     workspace = SimpleNamespace(
         channel_manager=_FakeChannelManager(),
         chat_manager=_FakeChatManager(),
@@ -280,26 +733,39 @@ def test_console_chat_normal_request_does_not_add_plan_metadata(
     with client.stream(
         "POST",
         "/console/chat",
-        headers={"X-Source-Id": "src-a"},
+        headers={
+            "X-Source-Id": "src-a",
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        },
         json=payload,
     ) as response:
         assert response.status_code == 200
-        list(response.iter_lines())
+        next(response.iter_lines())
 
-    meta = tracker.started_payloads[0]["meta"]
-    assert "plan_interaction_response" not in meta
-    assert "accepted_plan" not in meta
-    assert "plan_mode_enabled" not in meta
+    assert tracker.payload is not None
+    assert tracker.payload["meta"]["b3_trace_id"] == (
+        "8267fd70bacf497704fec30eaa353979"
+    )
 
 
-def test_console_chat_filters_client_supplied_accepted_plan(
+def test_console_chat_copies_structured_context_references_to_native_meta(
     monkeypatch,
 ) -> None:
-    """客户端不能通过普通请求字段伪造后端已接受计划。"""
     app = FastAPI()
     app.include_router(console_router.router)
 
-    tracker = _FakeTaskTracker()
+    class _CapturingTaskTracker:
+        def __init__(self) -> None:
+            self.payload = None
+
+        async def attach_or_start(self, _run_key, payload, _stream_fn):
+            self.payload = payload
+            return object(), True
+
+        async def stream_from_queue(self, _queue, _run_key):
+            yield 'data: {"done": true}\n\n'
+
+    tracker = _CapturingTaskTracker()
     workspace = SimpleNamespace(
         channel_manager=_FakeChannelManager(),
         chat_manager=_FakeChatManager(),
@@ -314,58 +780,200 @@ def test_console_chat_filters_client_supplied_accepted_plan(
         "get_agent_for_request",
         _fake_get_agent_for_request,
     )
-
     client = TestClient(app)
-    payload = {
-        "input": [
-            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+    references = [
+        {"type": "skill", "id": "skill:writer", "name": "writer"},
+        {
+            "type": "workspace_file",
+            "id": "workspace_file:media/report.txt",
+            "root": "media",
+            "relative_path": "report.txt",
+        },
+    ]
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json={
+            "input": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+            ],
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "context_references": references,
+        },
+    ) as response:
+        assert response.status_code == 200
+        next(response.iter_lines())
+
+    assert tracker.payload is not None
+    assert tracker.payload["meta"]["context_references"] == references
+
+
+def test_console_chat_adds_uploaded_attachment_as_workspace_reference(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """A selected skill must be able to read a file attached in the same turn."""
+
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _CapturingTaskTracker:
+        def __init__(self) -> None:
+            self.payload = None
+
+        async def attach_or_start(self, _run_key, payload, _stream_fn):
+            self.payload = payload
+            return object(), True
+
+        async def stream_from_queue(self, _queue, _run_key):
+            yield 'data: {"done": true}\n\n'
+
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    uploaded_file = media_dir / "stored_report.pdf"
+    uploaded_file.write_bytes(b"report")
+    tracker = _CapturingTaskTracker()
+
+    class _FakeChannelManager:
+        async def get_channel(self, name: str):
+            assert name == "console"
+            channel = _FakeConsoleChannel()
+            channel.media_dir = media_dir
+            return channel
+
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=tracker,
+        workspace_dir=tmp_path,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    client = TestClient(app)
+    skill_reference = {
+        "type": "skill",
+        "id": "skill:document_reader",
+        "name": "document_reader",
+    }
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json={
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请分析附件"},
+                        {
+                            "type": "file",
+                            "file_url": (
+                                "http://testserver/files/preview"
+                                f"{uploaded_file.as_posix()}"
+                            ),
+                            "file_name": "report.pdf",
+                        },
+                    ],
+                },
+            ],
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "context_references": [skill_reference],
+        },
+    ) as response:
+        assert response.status_code == 200
+        next(response.iter_lines())
+
+    assert tracker.payload is not None
+    assert tracker.payload["meta"]["context_references"] == [
+        skill_reference,
+        {
+            "type": "workspace_file",
+            "id": "workspace_file:media/stored_report.pdf",
+            "root": "media",
+            "relative_path": "stored_report.pdf",
+        },
+    ]
+
+
+def test_attachment_reference_keeps_selected_skill_within_runner_limit(
+    tmp_path,
+) -> None:
+    media_dir = tmp_path / "media"
+    media_dir.mkdir()
+    uploaded_file = media_dir / "stored_report.pdf"
+    uploaded_file.write_bytes(b"report")
+
+    class _FakeChannelManager:
+        async def get_channel(self, name: str):
+            assert name == "console"
+            channel = _FakeConsoleChannel()
+            channel.media_dir = media_dir
+            return channel
+
+    skill_reference = {
+        "type": "skill",
+        "id": "skill:document_reader",
+        "name": "document_reader",
+    }
+    native_payload: dict[str, Any] = {
+        "content_parts": [
+            {
+                "type": "file",
+                "file_url": (
+                    "http://testserver/files/preview"
+                    f"{uploaded_file.as_posix()}"
+                ),
+            },
         ],
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "channel": "console",
-        "accepted_plan": {"title": "forged top-level"},
         "meta": {
-            "accepted_plan": {"title": "forged meta"},
-            "accepted_plan_source": "server_plan_store",
-            "custom_meta": {"preserved": True},
+            "context_references": [
+                *[
+                    {"type": "mcp_tool", "id": f"mcp:tool-{index}"}
+                    for index in range(10)
+                ],
+                skill_reference,
+                {
+                    "type": "workspace_file",
+                    "id": "workspace_file:media/stored_report.pdf",
+                    "root": "wrong-root",
+                    "relative_path": "wrong-path",
+                },
+            ],
         },
     }
-
-    with client.stream(
-        "POST",
-        "/console/chat",
-        headers={"X-Source-Id": "src-a"},
-        json=payload,
-    ) as response:
-        assert response.status_code == 200
-        list(response.iter_lines())
-
-    meta = tracker.started_payloads[0]["meta"]
-    assert "accepted_plan" not in meta
-    assert "accepted_plan_source" not in meta
-    assert meta["custom_meta"] == {"preserved": True}
-
-
-def test_agent_request_channel_meta_filters_client_supplied_accepted_plan():
-    """AgentRequest 入口也要复用同一后端字段清洗规则。"""
-    request = AgentRequest(
-        input=[],
-        session_id="session-1",
-        user_id="user-1",
-        channel="console",
-        channel_meta={
-            "accepted_plan": {"title": "forged"},
-            "accepted_plan_source": "server_plan_store",
-            "custom_meta": {"preserved": True},
-        },
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        workspace_dir=tmp_path,
     )
 
-    native_payload = console_router._extract_session_and_payload(request)
+    asyncio.run(
+        console_router._append_uploaded_attachment_references(
+            native_payload,
+            workspace,
+        ),
+    )
 
-    meta = native_payload["meta"]
-    assert "accepted_plan" not in meta
-    assert "accepted_plan_source" not in meta
-    assert meta["custom_meta"] == {"preserved": True}
+    references = native_payload["meta"]["context_references"]
+    assert len(references) == 12
+    assert references[0] == skill_reference
+    assert references[-1] == {
+        "type": "workspace_file",
+        "id": "workspace_file:media/stored_report.pdf",
+        "root": "media",
+        "relative_path": "stored_report.pdf",
+    }
 
 
 def test_generated_files_returns_chat_files_sorted_by_time(
@@ -532,587 +1140,3 @@ def test_generated_files_hides_uploaded_uuid_prefix(
     assert files[0]["name"] == stored_name
     assert files[0]["display_name"] == "report.txt"
     assert files[0]["file_url"].endswith(stored_name)
-
-
-def test_console_chat_preserves_plan_metadata(tmp_path, monkeypatch) -> None:
-    async def _create_plan():
-        service = PlanService(JsonProposedPlanStore(tmp_path))
-        return await service.create_plan(
-            chat_id="chat:session-1",
-            session_id="session-1",
-            turn_id="turn-1",
-            created_by="main-agent",
-            payload=ProposedPlanCreate(
-                title="Plan title",
-                summary="Plan summary",
-                steps=["Inspect"],
-                risks=["None"],
-                verification=["Run tests"],
-            ),
-        )
-
-    plan = asyncio.run(_create_plan())
-    app = FastAPI()
-    app.include_router(console_router.router)
-
-    tracker = _FakeTaskTracker()
-    workspace = SimpleNamespace(
-        workspace_dir=tmp_path,
-        channel_manager=_FakeChannelManager(),
-        chat_manager=_FakeChatManager(),
-        task_tracker=tracker,
-    )
-
-    async def _fake_get_agent_for_request(_request):
-        return workspace
-
-    monkeypatch.setattr(
-        console_router,
-        "get_agent_for_request",
-        _fake_get_agent_for_request,
-    )
-
-    client = TestClient(app)
-    payload = {
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": "revise"}],
-            },
-        ],
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "channel": "console",
-        "mode": "plan",
-        "plan_interaction_response": {
-            "card_type": "plan_review",
-            "plan_id": plan.plan_id,
-            "decision": "revise",
-        },
-        "custom_meta": {"preserved": True},
-    }
-
-    with client.stream(
-        "POST",
-        "/console/chat",
-        headers={"X-Source-Id": "src-a"},
-        json=payload,
-    ) as response:
-        assert response.status_code == 200
-        list(response.iter_lines())
-
-    meta = tracker.started_payloads[0]["meta"]
-    assert meta["mode"] == "plan"
-    assert meta["plan_interaction_response"]["decision"] == "revise"
-    assert meta["custom_meta"] == {"preserved": True}
-    assert meta["source_id"] == "src-a"
-
-
-def test_console_chat_exit_plan_short_circuits_agent_run(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    async def _create_plan():
-        service = PlanService(JsonProposedPlanStore(tmp_path))
-        return await service.create_plan(
-            chat_id="chat:session-1",
-            session_id="session-1",
-            turn_id="turn-1",
-            created_by="main-agent",
-            payload=ProposedPlanCreate(
-                title="Plan title",
-                summary="Plan summary",
-                steps=["Inspect"],
-                risks=["None"],
-                verification=["Run tests"],
-            ),
-        )
-
-    plan = asyncio.run(_create_plan())
-    app = FastAPI()
-    app.include_router(console_router.router)
-
-    chat_manager = _FakeChatManager()
-    workspace = SimpleNamespace(
-        workspace_dir=tmp_path,
-        channel_manager=_FakeChannelManager(),
-        chat_manager=chat_manager,
-        task_tracker=_NoStartTaskTracker(),
-    )
-
-    async def _fake_get_agent_for_request(_request):
-        return workspace
-
-    monkeypatch.setattr(
-        console_router,
-        "get_agent_for_request",
-        _fake_get_agent_for_request,
-    )
-
-    client = TestClient(app)
-    payload = {
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": "exit plan"}],
-            },
-        ],
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "channel": "console",
-        "plan_interaction_response": {
-            "plan_id": plan.plan_id,
-            "decision": "exit_plan",
-            "feedback": "Stop planning",
-        },
-    }
-
-    with client.stream(
-        "POST",
-        "/console/chat",
-        headers={"X-Source-Id": "src-a"},
-        json=payload,
-    ) as response:
-        assert response.status_code == 200
-        lines = list(response.iter_lines())
-
-    exit_payloads = [
-        json.loads(line.removeprefix("data: "))
-        for line in lines
-        if line.startswith("data: ")
-    ]
-    assert any(
-        payload.get("object") == "response"
-        and payload.get("status") == "completed"
-        and payload.get("type") == "exit_plan"
-        for payload in exit_payloads
-    )
-    chat = chat_manager.chats["session-1"]
-    assert chat.meta["plan_mode_enabled"] is False
-
-    async def _load_plan():
-        return await JsonProposedPlanStore(tmp_path).get(
-            "chat:session-1",
-            plan.plan_id,
-        )
-
-    updated_plan = asyncio.run(_load_plan())
-    assert updated_plan is not None
-    assert updated_plan.status == "exited"
-
-
-def test_console_chat_returns_conflict_for_terminal_plan_decision(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """终态计划收到不同决策时，路由应返回 409 而不是覆盖状态。"""
-
-    async def _create_accepted_plan():
-        service = PlanService(JsonProposedPlanStore(tmp_path))
-        plan = await service.create_plan(
-            chat_id="chat:session-1",
-            session_id="session-1",
-            turn_id="turn-1",
-            created_by="main-agent",
-            payload=ProposedPlanCreate(
-                title="Plan title",
-                summary="Plan summary",
-                steps=["Inspect"],
-                risks=["None"],
-                verification=["Run tests"],
-            ),
-        )
-        await service.record_decision(
-            chat_id="chat:session-1",
-            plan_id=plan.plan_id,
-            decision="execute",
-        )
-        return plan
-
-    plan = asyncio.run(_create_accepted_plan())
-    app = FastAPI()
-    app.include_router(console_router.router)
-
-    workspace = SimpleNamespace(
-        workspace_dir=tmp_path,
-        channel_manager=_FakeChannelManager(),
-        chat_manager=_FakeChatManager(),
-        task_tracker=_NoStartTaskTracker(),
-    )
-
-    async def _fake_get_agent_for_request(_request):
-        return workspace
-
-    monkeypatch.setattr(
-        console_router,
-        "get_agent_for_request",
-        _fake_get_agent_for_request,
-    )
-
-    client = TestClient(app)
-    payload = {
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": "revise"}],
-            },
-        ],
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "channel": "console",
-        "plan_interaction_response": {
-            "plan_id": plan.plan_id,
-            "decision": "revise",
-        },
-    }
-
-    response = client.post(
-        "/console/chat",
-        headers={"X-Source-Id": "src-a"},
-        json=payload,
-    )
-
-    assert response.status_code == 409
-
-
-def test_console_chat_execute_uses_persisted_plan_and_ignores_snapshot(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    async def _create_plan():
-        service = PlanService(JsonProposedPlanStore(tmp_path))
-        return await service.create_plan(
-            chat_id="chat:session-1",
-            session_id="session-1",
-            turn_id="turn-1",
-            created_by="main-agent",
-            payload=ProposedPlanCreate(
-                title="Persisted plan",
-                summary="Persisted summary",
-                steps=["Persisted step"],
-                risks=["Persisted risk"],
-                verification=["Persisted verification"],
-            ),
-        )
-
-    plan = asyncio.run(_create_plan())
-    app = FastAPI()
-    app.include_router(console_router.router)
-
-    tracker = _FakeTaskTracker()
-    workspace = SimpleNamespace(
-        workspace_dir=tmp_path,
-        channel_manager=_FakeChannelManager(),
-        chat_manager=_FakeChatManager(),
-        task_tracker=tracker,
-    )
-
-    async def _fake_get_agent_for_request(_request):
-        return workspace
-
-    monkeypatch.setattr(
-        console_router,
-        "get_agent_for_request",
-        _fake_get_agent_for_request,
-    )
-
-    client = TestClient(app)
-    payload = {
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": "execute"}],
-            },
-        ],
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "channel": "console",
-        "plan_interaction_response": {
-            "card_type": "plan_review",
-            "plan_id": plan.plan_id,
-            "decision": "execute",
-            "plan_snapshot": {
-                "title": "Tampered frontend plan",
-                "steps": ["Do something else"],
-            },
-        },
-    }
-
-    with client.stream(
-        "POST",
-        "/console/chat",
-        headers={"X-Source-Id": "src-a"},
-        json=payload,
-    ) as response:
-        assert response.status_code == 200
-        list(response.iter_lines())
-
-    meta = tracker.started_payloads[0]["meta"]
-    assert meta["plan_mode_enabled"] is False
-    assert meta["accepted_plan"]["plan_id"] == plan.plan_id
-    assert meta["accepted_plan"]["title"] == "Persisted plan"
-    assert meta["accepted_plan"]["steps"] == ["Persisted step"]
-    assert "open_questions" not in meta["accepted_plan"]
-    assert "confidence" not in meta["accepted_plan"]
-    assert "Tampered frontend plan" not in str(meta["accepted_plan"])
-
-    async def _load_plan():
-        return await JsonProposedPlanStore(tmp_path).get(
-            "chat:session-1",
-            plan.plan_id,
-        )
-
-    updated_plan = asyncio.run(_load_plan())
-    assert updated_plan is not None
-    assert updated_plan.status == "accepted"
-
-
-def test_console_chat_repeated_execute_without_running_task_completes(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """重复 execute 已处理过时应直接完成，不能再次启动 Main Agent。"""
-
-    async def _create_accepted_plan():
-        service = PlanService(JsonProposedPlanStore(tmp_path))
-        plan = await service.create_plan(
-            chat_id="chat:session-1",
-            session_id="session-1",
-            turn_id="turn-1",
-            created_by="main-agent",
-            payload=ProposedPlanCreate(
-                title="Persisted plan",
-                summary="Persisted summary",
-                steps=["Persisted step"],
-                risks=["Persisted risk"],
-                verification=["Persisted verification"],
-            ),
-        )
-        await service.record_decision(
-            chat_id="chat:session-1",
-            plan_id=plan.plan_id,
-            decision="execute",
-        )
-        return plan
-
-    plan = asyncio.run(_create_accepted_plan())
-    app = FastAPI()
-    app.include_router(console_router.router)
-
-    tracker = _NoRunningNoStartTaskTracker()
-    workspace = SimpleNamespace(
-        workspace_dir=tmp_path,
-        channel_manager=_FakeChannelManager(),
-        chat_manager=_FakeChatManager(),
-        task_tracker=tracker,
-    )
-
-    async def _fake_get_agent_for_request(_request):
-        return workspace
-
-    monkeypatch.setattr(
-        console_router,
-        "get_agent_for_request",
-        _fake_get_agent_for_request,
-    )
-
-    client = TestClient(app)
-    payload = {
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": "execute"}],
-            },
-        ],
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "channel": "console",
-        "plan_interaction_response": {
-            "plan_id": plan.plan_id,
-            "decision": "execute",
-        },
-    }
-
-    with client.stream(
-        "POST",
-        "/console/chat",
-        headers={"X-Source-Id": "src-a"},
-        json=payload,
-    ) as response:
-        assert response.status_code == 200
-        lines = list(response.iter_lines())
-
-    payloads = [
-        json.loads(line.removeprefix("data: "))
-        for line in lines
-        if line.startswith("data: ")
-    ]
-    assert any(
-        payload.get("status") == "completed"
-        and payload.get("type") == "plan_execute_duplicate"
-        for payload in payloads
-    )
-
-
-def test_console_chat_repeated_revise_without_running_task_completes(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """重复 revise 已处理过时应直接完成，不能再次启动 Main Agent。"""
-
-    async def _create_revision_requested_plan():
-        service = PlanService(JsonProposedPlanStore(tmp_path))
-        plan = await service.create_plan(
-            chat_id="chat:session-1",
-            session_id="session-1",
-            turn_id="turn-1",
-            created_by="main-agent",
-            payload=ProposedPlanCreate(
-                title="Persisted plan",
-                summary="Persisted summary",
-                steps=["Persisted step"],
-                risks=["Persisted risk"],
-                verification=["Persisted verification"],
-            ),
-        )
-        await service.record_decision(
-            chat_id="chat:session-1",
-            plan_id=plan.plan_id,
-            decision="revise",
-        )
-        return plan
-
-    plan = asyncio.run(_create_revision_requested_plan())
-    app = FastAPI()
-    app.include_router(console_router.router)
-
-    workspace = SimpleNamespace(
-        workspace_dir=tmp_path,
-        channel_manager=_FakeChannelManager(),
-        chat_manager=_FakeChatManager(),
-        task_tracker=_NoStartTaskTracker(),
-    )
-
-    async def _fake_get_agent_for_request(_request):
-        return workspace
-
-    monkeypatch.setattr(
-        console_router,
-        "get_agent_for_request",
-        _fake_get_agent_for_request,
-    )
-
-    client = TestClient(app)
-    payload = {
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": "revise"}],
-            },
-        ],
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "channel": "console",
-        "plan_interaction_response": {
-            "plan_id": plan.plan_id,
-            "decision": "revise",
-        },
-    }
-
-    with client.stream(
-        "POST",
-        "/console/chat",
-        headers={"X-Source-Id": "src-a"},
-        json=payload,
-    ) as response:
-        assert response.status_code == 200
-        lines = list(response.iter_lines())
-
-    payloads = [
-        json.loads(line.removeprefix("data: "))
-        for line in lines
-        if line.startswith("data: ")
-    ]
-    assert any(
-        payload.get("status") == "completed"
-        and payload.get("type") == "plan_revise_duplicate"
-        for payload in payloads
-    )
-
-
-def test_console_chat_repeated_execute_attaches_running_task(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """重复 execute 仍在运行时应复用已有队列，不能启动新任务。"""
-
-    async def _create_accepted_plan():
-        service = PlanService(JsonProposedPlanStore(tmp_path))
-        plan = await service.create_plan(
-            chat_id="chat:session-1",
-            session_id="session-1",
-            turn_id="turn-1",
-            created_by="main-agent",
-            payload=ProposedPlanCreate(
-                title="Persisted plan",
-                summary="Persisted summary",
-                steps=["Persisted step"],
-                risks=["Persisted risk"],
-                verification=["Persisted verification"],
-            ),
-        )
-        await service.record_decision(
-            chat_id="chat:session-1",
-            plan_id=plan.plan_id,
-            decision="execute",
-        )
-        return plan
-
-    plan = asyncio.run(_create_accepted_plan())
-    app = FastAPI()
-    app.include_router(console_router.router)
-
-    tracker = _AttachOnlyTaskTracker()
-    workspace = SimpleNamespace(
-        workspace_dir=tmp_path,
-        channel_manager=_FakeChannelManager(),
-        chat_manager=_FakeChatManager(),
-        task_tracker=tracker,
-    )
-
-    async def _fake_get_agent_for_request(_request):
-        return workspace
-
-    monkeypatch.setattr(
-        console_router,
-        "get_agent_for_request",
-        _fake_get_agent_for_request,
-    )
-
-    client = TestClient(app)
-    payload = {
-        "input": [
-            {
-                "role": "user",
-                "content": [{"type": "text", "text": "execute"}],
-            },
-        ],
-        "session_id": "session-1",
-        "user_id": "user-1",
-        "channel": "console",
-        "plan_interaction_response": {
-            "plan_id": plan.plan_id,
-            "decision": "execute",
-        },
-    }
-
-    with client.stream(
-        "POST",
-        "/console/chat",
-        headers={"X-Source-Id": "src-a"},
-        json=payload,
-    ) as response:
-        assert response.status_code == 200
-        list(response.iter_lines())
-
-    assert tracker.attached_run_keys == ["chat:session-1"]

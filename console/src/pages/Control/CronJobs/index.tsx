@@ -8,6 +8,7 @@ import {
   Switch,
   Table,
 } from "@agentscope-ai/design";
+import { Segmented } from "antd";
 import type {
   CronBroadcastTaskResponse,
   CronBroadcastTarget,
@@ -28,6 +29,8 @@ import { PageHeader } from "@/components/PageHeader";
 import { TenantSelector } from "@/components/TenantSelector";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import { getUserId } from "../../../utils/identity";
+import { getIframeContext } from "../../../stores/iframeStore";
+import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import {
   buildExecutionModelKey,
   useExecutionModelOptions,
@@ -35,15 +38,35 @@ import {
 import {
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
+  buildSkillSelectOptions,
   getBroadcastResultMessage,
   getBroadcastTaskProgressText,
+  type CronJobFormValues,
+  type SkillSelectOption,
 } from "./helpers";
 import styles from "./index.module.less";
 
 type CronJob = CronJobSpecOutput;
+type BroadcastDispatchMode = "normal" | "batch";
 const DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS = 4;
 const DEFAULT_TABLE_PAGE_SIZE = 10;
 const TABLE_PAGE_SIZE_OPTIONS = ["10", "20", "50", "100"];
+
+function getCurrentSourceId(): string {
+  return getIframeContext().source || DEFAULT_SOURCE_ID;
+}
+
+function isBatchDispatchEnabled(job: CronJob): boolean {
+  return job.meta?.broadcast_dispatch_intents_enabled === true;
+}
+
+function getBatchDispatchOffsetWindowHours(job: CronJob): number {
+  const parsed = Number(job.meta?.batch_dispatch_offset_window_hours);
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS;
+  }
+  return Math.min(24, Math.max(1, Math.round(parsed)));
+}
 
 function CronJobsPage() {
   const { t } = useTranslation();
@@ -51,10 +74,12 @@ function CronJobsPage() {
   const {
     jobs,
     loading,
+    fetchJobs,
     createJob,
     updateJob,
     deleteJob,
     toggleEnabled,
+    setBatchDispatch,
     executeNow,
   } = useCronJobs();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -75,14 +100,18 @@ function CronJobsPage() {
   const [broadcastOffsetWindowHours, setBroadcastOffsetWindowHours] = useState(
     DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS,
   );
+  const [broadcastDispatchMode, setBroadcastDispatchMode] =
+    useState<BroadcastDispatchMode>("normal");
   const [childrenManagementJob, setChildrenManagementJob] =
     useState<CronJob | null>(null);
   const [broadcasting, setBroadcasting] = useState(false);
   const [broadcastRefreshing, setBroadcastRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [skillOptions, setSkillOptions] = useState<SkillSelectOption[]>([]);
+  const [skillOptionsLoading, setSkillOptionsLoading] = useState(false);
   const [tablePage, setTablePage] = useState(1);
   const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
-  const [form] = Form.useForm<CronJob>();
+  const [form] = Form.useForm<CronJobFormValues>();
   const userTimezoneRef = useRef("UTC");
   const currentTenantId = getUserId();
   const {
@@ -91,6 +120,10 @@ function CronJobsPage() {
     tenantDefaultLabel,
   } = useExecutionModelOptions(true);
   const hasVisibleBroadcastTask = Boolean(broadcastTask);
+  const hasBroadcastDispatchModeChange = broadcastingJob
+    ? isBatchDispatchEnabled(broadcastingJob) !==
+      (broadcastDispatchMode === "batch")
+    : false;
 
   useEffect(() => {
     api
@@ -102,6 +135,20 @@ function CronJobsPage() {
   }, []);
 
   useEffect(() => {
+    setSkillOptionsLoading(true);
+    api
+      .listSweSkills(getCurrentSourceId())
+      .then((res) => {
+        setSkillOptions(buildSkillSelectOptions(res.skills ?? []));
+      })
+      .catch((err) => {
+        console.error("Failed to fetch cron skill options:", err);
+        message.error("技能列表加载失败");
+      })
+      .finally(() => setSkillOptionsLoading(false));
+  }, [message]);
+
+  useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(jobs.length / tablePageSize));
     setTablePage((current) => Math.min(current, maxPage));
   }, [jobs.length, tablePageSize]);
@@ -109,20 +156,22 @@ function CronJobsPage() {
   const handleCreate = () => {
     setEditingJob(null);
     form.resetFields();
-    form.setFieldsValue({
+    const nextValues: Partial<CronJobFormValues> = {
       ...DEFAULT_FORM_VALUES,
       schedule: {
         ...DEFAULT_FORM_VALUES.schedule,
         timezone: userTimezoneRef.current,
       },
       execution_model_key: buildExecutionModelKey(undefined),
-    } as any);
+    };
+    form.setFieldsValue(nextValues);
     setDrawerOpen(true);
   };
 
   const handleEdit = (job: CronJob) => {
     setEditingJob(job);
-    form.setFieldsValue(buildCronJobFormValues(job) as any);
+    form.resetFields();
+    form.setFieldsValue(buildCronJobFormValues(job));
     setDrawerOpen(true);
   };
 
@@ -168,7 +217,8 @@ function CronJobsPage() {
     setBroadcastTask(null);
     setBroadcastRefreshing(false);
     setBroadcastOffsetEnabled(true);
-    setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+    setBroadcastOffsetWindowHours(getBatchDispatchOffsetWindowHours(job));
+    setBroadcastDispatchMode(isBatchDispatchEnabled(job) ? "batch" : "normal");
     setBroadcasting(true);
     try {
       const currentTask = await api.getCurrentCronBroadcastTask(job.id);
@@ -202,6 +252,7 @@ function CronJobsPage() {
     setBroadcastRefreshing(false);
     setBroadcastOffsetEnabled(true);
     setBroadcastOffsetWindowHours(DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS);
+    setBroadcastDispatchMode("normal");
   };
 
   const handleBroadcastProgressRefresh = async () => {
@@ -220,6 +271,14 @@ function CronJobsPage() {
       );
       setBroadcastTask(refreshedTask);
       setBroadcastResults(refreshedTask.results);
+      if (refreshedTask.status !== "running") {
+        await fetchJobs();
+        const refreshedJob = await api.getCronJob(broadcastingJob.id);
+        setBroadcastingJob(refreshedJob.spec);
+        setBroadcastDispatchMode(
+          isBatchDispatchEnabled(refreshedJob.spec) ? "batch" : "normal",
+        );
+      }
     } catch (error) {
       console.error("Failed to refresh cron broadcast task", error);
       message.error("刷新分发进度失败");
@@ -261,13 +320,33 @@ function CronJobsPage() {
         bbk_id: target?.bbk_id ?? null,
       };
     });
+    const hasBroadcastTargets = targets.length > 0;
+    const shouldUseBatchDispatch = broadcastDispatchMode === "batch";
+    const dispatchModeChanged =
+      isBatchDispatchEnabled(broadcastingJob) !== shouldUseBatchDispatch;
+    if (!hasBroadcastTargets && !dispatchModeChanged) return;
+
     setBroadcasting(true);
     setBroadcastRefreshing(false);
     setBroadcastTask(null);
     setBroadcastResults([]);
     try {
+      if (!hasBroadcastTargets) {
+        const syncedJob = await setBatchDispatch(
+          broadcastingJob,
+          shouldUseBatchDispatch,
+          { offset_window_hours: broadcastOffsetWindowHours },
+        );
+        if (!syncedJob) {
+          return;
+        }
+        setBroadcastingJob(syncedJob);
+        handleBroadcastCancel();
+        return;
+      }
       const res = await api.broadcastCronJob(broadcastingJob.id, targets, {
         enable_offset: broadcastOffsetEnabled,
+        enable_batch_dispatch: shouldUseBatchDispatch,
         offset_window_hours: broadcastOffsetWindowHours,
       });
       setBroadcastTask(res);
@@ -276,7 +355,7 @@ function CronJobsPage() {
         if (res.reused) {
           message.info("Broadcast task is already running");
         } else {
-          message.info("Broadcast started");
+          message.info(`定时任务分发任务已提交：${res.task_id}`);
         }
         return;
       }
@@ -303,7 +382,7 @@ function CronJobsPage() {
     setEditingJob(null);
   };
 
-  const handleSubmit = async (values: any) => {
+  const handleSubmit = async (values: CronJobFormValues) => {
     let processedValues;
     try {
       processedValues = buildCronJobSubmitPayload(values);
@@ -382,6 +461,8 @@ function CronJobsPage() {
         executionModelOptions={executionModelOptions}
         executionModelLoading={executionModelLoading}
         tenantDefaultModelLabel={tenantDefaultLabel}
+        skillOptions={skillOptions}
+        skillOptionsLoading={skillOptionsLoading}
         onClose={handleDrawerClose}
         onSubmit={handleSubmit}
       />
@@ -400,7 +481,8 @@ function CronJobsPage() {
         confirmLoading={broadcasting}
         okButtonProps={{
           disabled:
-            selectedBroadcastTenantIds.length === 0 ||
+            (selectedBroadcastTenantIds.length === 0 &&
+              !hasBroadcastDispatchModeChange) ||
             broadcasting ||
             hasVisibleBroadcastTask,
         }}
@@ -411,13 +493,27 @@ function CronJobsPage() {
             <div>
               任务：{broadcastingJob.name}；时区：
               {broadcastingJob.schedule?.timezone || "UTC"}；
+              {broadcastDispatchMode === "batch" ? "批调度" : "正常调度"}；
               {broadcastOffsetEnabled
-                ? `优先在原执行时间前 ${broadcastOffsetWindowHours} 小时内均匀错峰，无法安全错峰的 cron 会按原表达式分发。`
-                : "按原执行时间分发，不做错峰。"}
+                ? `散列窗口 ${broadcastOffsetWindowHours} 小时`
+                : "不做散列"}
             </div>
             <div className={styles.broadcastOffsetControls}>
+              <div className={styles.broadcastDispatchMode}>
+                <span>调度方式</span>
+                <Segmented
+                  value={broadcastDispatchMode}
+                  options={[
+                    { label: "正常调度", value: "normal" },
+                    { label: "批调度", value: "batch" },
+                  ]}
+                  onChange={(value) =>
+                    setBroadcastDispatchMode(value as BroadcastDispatchMode)
+                  }
+                />
+              </div>
               <div className={styles.broadcastOffsetSwitch}>
-                <span>启用错峰</span>
+                <span>启用散列</span>
                 <Switch
                   checked={broadcastOffsetEnabled}
                   onChange={(checked) =>
@@ -426,7 +522,7 @@ function CronJobsPage() {
                 />
               </div>
               <div className={styles.broadcastOffsetWindow}>
-                <span>错峰窗口</span>
+                <span>散列窗口</span>
                 <InputNumber
                   min={1}
                   max={24}

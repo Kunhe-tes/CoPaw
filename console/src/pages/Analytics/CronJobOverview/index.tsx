@@ -7,9 +7,7 @@ import {
   Eye,
   FileText,
   Landmark,
-  Phone,
   RefreshCw,
-  Search,
   UserRoundCheck,
   type LucideIcon,
 } from "lucide-react";
@@ -71,28 +69,8 @@ const DRILL_DOWN_TABLE_SCROLL = {
   y: 300,
 } as const;
 
-const SKILL_NAME_MAP: Record<string, string> = {
-  insurance_mkt: "保险营销客户分析技能",
-  deposit_scale_growth_skill: "存款规模增长与产品配置技能",
-  fund_redeem_monitor: "基金赎回实时监控技能",
-  lc_breaking: "单一持仓理财/定期客户破冰方案",
-  "global-market-report": "全球市场复盘报告",
-  存款到期客户经营方案技能: "存款到期客户经营方案技能",
-  高AUM理财低收益客户调仓技能: "高AUM理财低收益客户调仓技能",
-  基金亏损客户关怀陪伴文案: "基金亏损客户关怀陪伴文案",
-  智能推荐保险计划书: "智能推荐保险计划书",
-  黄金持仓客户陪伴技能: "黄金持仓客户陪伴技能",
-  "query-fund-plus-cust": "固收+基金营销技能",
-};
-
-const ALLOWED_SKILLS = new Set([
-  ...Object.keys(SKILL_NAME_MAP),
-  ...Object.values(SKILL_NAME_MAP),
-]);
-
-function formatSkillName(key: string): string {
-  return SKILL_NAME_MAP[key] || key;
-}
+const formatRatioPercent = (value?: number | null) =>
+  `${((value ?? 0) * 100).toFixed(2)}%`;
 
 type SummaryMetricDefinition = {
   key: string;
@@ -454,6 +432,8 @@ function RankingTable({
             <col style={{ width: 80 }} />
             <col style={{ width: 55 }} />
             <col style={{ width: 55 }} />
+            <col style={{ width: 70 }} />
+            <col style={{ width: 80 }} />
           </colgroup>
           <thead>
             <tr>
@@ -472,6 +452,8 @@ function RankingTable({
               <th>被客户经理查看的客户数</th>
               <th>去洞察客户数</th>
               <th>去电访客户数</th>
+              <th>接触客户数</th>
+              <th>接触客户率</th>
             </tr>
           </thead>
           <tbody>
@@ -515,6 +497,8 @@ function RankingTable({
                   <td>{row.viewedCustomers}</td>
                   <td>{row.insightCustomers}</td>
                   <td>{row.phoneCustomers}</td>
+                  <td>{row.contactedCustomers}</td>
+                  <td>{row.contactRate}</td>
                 </tr>
               );
             })}
@@ -930,20 +914,6 @@ export default function CronJobOverviewPage() {
 
   // ===== Task view functions =====
 
-  const fetchTaskBranchRanking = async () => {
-    setTaskBranchRankingLoading(true);
-    try {
-      const response = await monitorApi.getCronBranchTaskBehavior(
-        getOverviewFilters(),
-      );
-      setTaskBranchRankingRows(response.items);
-    } catch (error) {
-      console.warn("Failed to fetch task branch ranking.", error);
-    } finally {
-      setTaskBranchRankingLoading(false);
-    }
-  };
-
   const handleSelectTaskBranch = async (bbkId: string, bbkName: string) => {
     if (selectedTaskBranch?.bbk_id === bbkId) {
       setSelectedTaskBranch(null);
@@ -969,10 +939,7 @@ export default function CronJobOverviewPage() {
         bbk_id: bbkId,
         ...dateParams,
       });
-      const filtered = response.items.filter((item) =>
-        ALLOWED_SKILLS.has(item.skill_name),
-      );
-      setTaskSkills(filtered);
+      setTaskSkills(response.items);
     } catch (error) {
       console.warn("Failed to fetch task skills.", error);
     } finally {
@@ -1192,20 +1159,6 @@ export default function CronJobOverviewPage() {
     } finally {
       setLoading(false);
       setTaskBranchRankingLoading(false);
-    }
-  };
-
-  const fetchOverview = async () => {
-    setLoading(true);
-    try {
-      const response = await monitorApi.getCronJobOverviewPageData(
-        getOverviewFilters(),
-      );
-      setOverviewData(response);
-    } catch (error) {
-      console.warn("Failed to fetch cron job overview page data.", error);
-    } finally {
-      setLoading(false);
     }
   };
 
@@ -1485,7 +1438,7 @@ export default function CronJobOverviewPage() {
               className={styles.refreshButton}
               onClick={handleRefresh}
             >
-              <RefreshCw size={16} />
+              <RefreshCw size={14} />
               刷新
             </button>
           </div>
@@ -1553,7 +1506,6 @@ export default function CronJobOverviewPage() {
                   key: "skill_name",
                   width: 130,
                   align: "center",
-                  render: (v: string) => formatSkillName(v),
                 },
                 {
                   title: "定时任务数",
@@ -1601,7 +1553,7 @@ export default function CronJobOverviewPage() {
               该技能下的客户经理明细
               {selectedTaskSkill && (
                 <span className={styles.drillDownSubTitle}>
-                  （{formatSkillName(selectedTaskSkill)}）
+                  （{selectedTaskSkill}）
                 </span>
               )}
             </h3>
@@ -1832,7 +1784,6 @@ export default function CronJobOverviewPage() {
                     key: "skill_name",
                     width: 130,
                     align: "center",
-                    render: (v: string) => formatSkillName(v),
                   },
                   {
                     title: "定时任务数",
@@ -1881,7 +1832,7 @@ export default function CronJobOverviewPage() {
                 点击客户明细
                 {selectedModalSkill && (
                   <span className={styles.drillDownSubTitle}>
-                    （{formatSkillName(selectedModalSkill)}）
+                    （{selectedModalSkill}）
                   </span>
                 )}
               </h3>
@@ -2053,6 +2004,22 @@ export default function CronJobOverviewPage() {
                   key: "phone_customers",
                   width: 80,
                   align: "center",
+                },
+                {
+                  title: "接触客户数",
+                  dataIndex: "contacted_customers",
+                  key: "contacted_customers",
+                  width: 80,
+                  align: "center",
+                },
+                {
+                  title: "接触客户率",
+                  dataIndex: "contact_rate",
+                  key: "contact_rate",
+                  width: 90,
+                  align: "center",
+                  render: (v: number | null | undefined) =>
+                    formatRatioPercent(v),
                 },
               ]}
             />

@@ -18,6 +18,7 @@ from .models import (
     HookConfig,
     HookContext,
     HookSessionOverlay,
+    HookEventName,
     MergedHookResult,
 )
 from .resolver import HookResolver, once_key

@@ -1,11 +1,7 @@
 import { request } from "../request";
 import { mergeHeaders } from "../mergeHeaders";
 import { getApiUrl } from "../config";
-import type {
-  FileContentResponse,
-  FileTreeNode,
-  MySkill,
-} from "./mySkills";
+import type { FileContentResponse, FileTreeNode, MySkill } from "./mySkills";
 import type { DistributionRecord, RecallResponse } from "../types";
 
 export interface MarketSkill {
@@ -26,6 +22,8 @@ export interface MarketSkill {
   call_count: number;
   user_count: number;
   version_unchanged?: boolean;
+  // 新增字段：是否纳入统计
+  include_in_statistics?: boolean;
 }
 
 export interface MarketSkillDetail extends MarketSkill {
@@ -34,6 +32,33 @@ export interface MarketSkillDetail extends MarketSkill {
     user_name: string;
     call_count: number;
   }>;
+}
+
+// 更新统计配置请求
+export interface UpdateStatisticsConfigRequest {
+  include_in_statistics: boolean;
+}
+
+// 更新统计配置响应
+export interface UpdateStatisticsConfigResponse {
+  success: boolean;
+  message?: string;
+}
+
+// 用户技能状态
+export interface UserSkillStatus {
+  tenant_id: string;
+  tenant_name: string | null;
+  bbk_id: string | null;
+  status: "first_time" | "update" | "conflict";
+  current_version?: string;
+}
+
+// 分发预览响应
+export interface DistributionPreviewResponse {
+  skill_version: string;
+  users: UserSkillStatus[];
+  distributed_user_ids: string[];
 }
 
 export interface Category {
@@ -61,6 +86,8 @@ export interface PublishSkillRequest {
   // 同步模式：直接传递用户已有的 skill_id 和 cn_name，无需再解析
   skill_id?: string;
   cn_name?: string;
+  // 是否纳入统计
+  include_in_statistics?: boolean;
 }
 
 export interface DistributeRequest {
@@ -75,10 +102,13 @@ export interface DistributeConflictItem {
 }
 
 export interface DistributeResponse {
-  distributed_count: number;
-  conflict_count: number;
-  conflicts: DistributeConflictItem[];
-  item_id: string;
+  task_id: string;
+  status: string;
+  reused?: boolean;
+  distributed_count?: number;
+  conflict_count?: number;
+  conflicts?: DistributeConflictItem[];
+  item_id?: string;
 }
 
 export interface DownloadBinaryResponse {
@@ -134,7 +164,8 @@ async function _uploadZipToMarket(
     cn_name?: string;
     skill_id?: string;
     bbk_ids?: string[];
-  }
+    include_in_statistics?: boolean;
+  },
 ): Promise<Record<string, unknown>> {
   const formData = new FormData();
   formData.append("file", file);
@@ -164,6 +195,9 @@ async function _uploadZipToMarket(
   if (options?.bbk_ids && options.bbk_ids.length > 0) {
     params.set("bbk_ids", options.bbk_ids.join(","));
   }
+  if (options?.include_in_statistics !== undefined) {
+    params.set("include_in_statistics", String(options.include_in_statistics));
+  }
   const qs = params.toString();
   const url = getApiUrl(`${endpoint}${qs ? `?${qs}` : ""}`);
 
@@ -189,10 +223,10 @@ export const marketApi = {
   createCategory: async (sourceId: string, name: string): Promise<Category> => {
     const opts: RequestInit = {
       method: "POST",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "Content-Type": "application/json",
         "X-Source-Id": sourceId,
-      })),
+      }),
       body: JSON.stringify({ name }),
     };
     return request<Category>("/market/categories", opts);
@@ -223,10 +257,7 @@ export const marketApi = {
     itemId: string,
   ): Promise<MarketSkillDetail | null> => {
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
-    return request<MarketSkillDetail | null>(
-      `/market/skills/${itemId}`,
-      opts
-    );
+    return request<MarketSkillDetail | null>(`/market/skills/${itemId}`, opts);
   },
 
   downloadSkill: async (
@@ -247,7 +278,9 @@ export const marketApi = {
   ): Promise<DownloadBinaryResponse> => {
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
     return _downloadBinary(
-      `/market/skills/${itemId}/versions/${encodeURIComponent(versionId)}/download`,
+      `/market/skills/${itemId}/versions/${encodeURIComponent(
+        versionId,
+      )}/download`,
       {
         method: "GET",
         headers: opts.headers,
@@ -260,10 +293,7 @@ export const marketApi = {
     itemId: string,
   ): Promise<FileTreeNode[]> => {
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
-    return request<FileTreeNode[]>(
-      `/market/skills/${itemId}/files`,
-      opts,
-    );
+    return request<FileTreeNode[]>(`/market/skills/${itemId}/files`, opts);
   },
 
   readSkillFile: async (
@@ -284,44 +314,38 @@ export const marketApi = {
 
   publishSkill: async (
     sourceId: string,
-    data: PublishSkillRequest
+    data: PublishSkillRequest,
   ): Promise<MarketSkill> => {
     const opts: RequestInit = {
       method: "POST",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "Content-Type": "application/json",
         "X-Source-Id": sourceId,
         "X-Manager": "true",
-      })),
+      }),
       body: JSON.stringify(data),
     };
     return request<MarketSkill>("/market/skills", opts);
   },
 
-  unpublishSkill: async (
-    sourceId: string,
-    itemId: string,
-  ): Promise<void> => {
+  unpublishSkill: async (sourceId: string, itemId: string): Promise<void> => {
     const opts: RequestInit = {
       method: "DELETE",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "X-Source-Id": sourceId,
         "X-Manager": "true",
-      })),
+      }),
     };
     return request<void>(`/market/skills/${itemId}`, opts);
   },
 
-  deleteSkill: async (
-    sourceId: string,
-    itemId: string,
-  ): Promise<void> => {
+  deleteSkill: async (sourceId: string, itemId: string): Promise<void> => {
     const opts: RequestInit = {
       method: "DELETE",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "X-Source-Id": sourceId,
         "X-Manager": "true",
-      })),
+      }),
     };
     return request<void>(`/market/skills/${itemId}/delete`, opts);
   },
@@ -329,27 +353,27 @@ export const marketApi = {
   distributeSkill: async (
     sourceId: string,
     itemId: string,
-    data: DistributeRequest
+    data: DistributeRequest,
   ): Promise<DistributeResponse> => {
     const opts: RequestInit = {
       method: "POST",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "Content-Type": "application/json",
         "X-Source-Id": sourceId,
         "X-Manager": "true",
-      })),
+      }),
       body: JSON.stringify(data),
     };
     return request<DistributeResponse>(
       `/market/skills/${itemId}/distribute`,
-      opts
+      opts,
     );
   },
 
   parseSkillZip: async (
     sourceId: string,
     file: File,
-    marketMode?: boolean
+    marketMode?: boolean,
   ): Promise<{
     skill_name?: string;
     cn_name?: string;
@@ -370,9 +394,11 @@ export const marketApi = {
       url += "?market_mode=true";
     }
     const headers = Object.fromEntries(
-      (mergeHeaders({
-        "X-Source-Id": sourceId,
-      }).headers as Headers).entries(),
+      (
+        mergeHeaders({
+          "X-Source-Id": sourceId,
+        }).headers as Headers
+      ).entries(),
     );
 
     const response = await fetch(url, {
@@ -399,7 +425,7 @@ export const marketApi = {
       rename_map?: Record<string, string>;
       category_id?: number;
       cn_name?: string;
-    }
+    },
   ): Promise<{
     imported: string[];
     count: number;
@@ -416,11 +442,18 @@ export const marketApi = {
     }>;
   }> => {
     const headers = Object.fromEntries(
-      (mergeHeaders({
-        "X-Source-Id": sourceId,
-      }).headers as Headers).entries(),
+      (
+        mergeHeaders({
+          "X-Source-Id": sourceId,
+        }).headers as Headers
+      ).entries(),
     );
-    return _uploadZipToMarket("/market/skills/upload", file, headers, options) as Promise<{
+    return _uploadZipToMarket(
+      "/market/skills/upload",
+      file,
+      headers,
+      options,
+    ) as Promise<{
       imported: string[];
       count: number;
       enabled: boolean;
@@ -445,7 +478,8 @@ export const marketApi = {
       cn_name?: string;
       skill_id?: string;
       bbk_ids?: string[];
-    }
+      include_in_statistics?: boolean;
+    },
   ): Promise<{
     imported: string[];
     count: number;
@@ -459,12 +493,19 @@ export const marketApi = {
     version_unchanged?: boolean;
   }> => {
     const headers = Object.fromEntries(
-      (mergeHeaders({
-        "X-Source-Id": sourceId,
-        "X-Manager": "true",
-      }).headers as Headers).entries(),
+      (
+        mergeHeaders({
+          "X-Source-Id": sourceId,
+          "X-Manager": "true",
+        }).headers as Headers
+      ).entries(),
     );
-    return _uploadZipToMarket("/market/skills/publish-upload", file, headers, options) as Promise<{
+    return _uploadZipToMarket(
+      "/market/skills/publish-upload",
+      file,
+      headers,
+      options,
+    ) as Promise<{
       imported: string[];
       count: number;
       enabled: boolean;
@@ -481,15 +522,19 @@ export const marketApi = {
   // 查询技能分发记录
   getSkillDistributions: async (
     sourceId: string,
-    itemId: string
+    itemId: string,
+    skillName?: string,
   ): Promise<DistributionRecord[]> => {
     const opts = mergeHeaders({
       "X-Source-Id": sourceId,
       "X-Manager": "true",
     });
+    const params = skillName
+      ? `?skill_name=${encodeURIComponent(skillName)}`
+      : "";
     return request<DistributionRecord[]>(
-      `/market/skills/${itemId}/distributions`,
-      opts
+      `/market/skills/${itemId}/distributions${params}`,
+      opts,
     );
   },
 
@@ -497,21 +542,18 @@ export const marketApi = {
   recallSkill: async (
     sourceId: string,
     itemId: string,
-    targetUserIds?: string[]
+    targetUserIds?: string[],
   ): Promise<RecallResponse> => {
     const opts: RequestInit = {
       method: "POST",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "Content-Type": "application/json",
         "X-Source-Id": sourceId,
         "X-Manager": "true",
-      })),
+      }),
       body: JSON.stringify({ target_user_ids: targetUserIds }),
     };
-    return request<RecallResponse>(
-      `/market/skills/${itemId}/recall`,
-      opts
-    );
+    return request<RecallResponse>(`/market/skills/${itemId}/recall`, opts);
   },
 
   // 更新技能中文名
@@ -523,7 +565,7 @@ export const marketApi = {
       chinese_name: string;
       sync_to_users?: boolean;
       target_user_ids?: string[];
-    }
+    },
   ): Promise<{
     success: boolean;
     market_updated: boolean;
@@ -533,11 +575,11 @@ export const marketApi = {
   }> => {
     const opts: RequestInit = {
       method: "PATCH",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "Content-Type": "application/json",
         "X-Source-Id": sourceId,
         "X-Manager": "true",
-      })),
+      }),
       body: JSON.stringify(data),
     };
     return request(`/market/skills/${itemId}`, opts);
@@ -563,5 +605,50 @@ export const marketApi = {
       }
     }
     return Array.from(byName.values());
+  },
+
+  // 获取分发预览
+  getDistributionPreview: async (
+    sourceId: string,
+    itemId: string,
+    tenantIds: string[],
+  ): Promise<DistributionPreviewResponse> => {
+    const opts: RequestInit = {
+      method: "POST",
+      ...mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      }),
+      body: JSON.stringify({
+        source_id: sourceId,
+        tenant_ids: tenantIds,
+      }),
+    };
+    return request<DistributionPreviewResponse>(
+      `/market/skills/${itemId}/distribution-preview`,
+      opts,
+    );
+  },
+
+  // 更新技能统计配置
+  updateSkillStatisticsConfig: async (
+    sourceId: string,
+    itemId: string,
+    data: UpdateStatisticsConfigRequest
+  ): Promise<UpdateStatisticsConfigResponse> => {
+    const opts: RequestInit = {
+      method: "PATCH",
+      ...(mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      })),
+      body: JSON.stringify(data),
+    };
+    return request<UpdateStatisticsConfigResponse>(
+      `/market/skills/${itemId}/statistics`,
+      opts
+    );
   },
 };

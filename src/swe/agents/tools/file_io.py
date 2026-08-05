@@ -24,7 +24,6 @@ from .utils import (
     DEFAULT_MAX_BYTES,
 )
 from ...config.context import (
-    get_current_file_read_max_bytes,
     get_current_recent_max_bytes,
 )
 from ...constant import TRUNCATION_NOTICE_MARKER
@@ -139,9 +138,6 @@ def _content_byte_length(content: str, encoding: str) -> int:
 
 
 def _get_effective_file_read_max_bytes() -> int:
-    file_read_max_bytes = get_current_file_read_max_bytes()
-    if file_read_max_bytes is not None:
-        return file_read_max_bytes
     return get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
 
 
@@ -161,9 +157,13 @@ def _read_file_selection_sync(
     e = min(total, end_line if end_line is not None else total)
 
     if s > total:
-        _raise_file_error(
-            "invalid_arguments",
-            f"Error: start_line {s} exceeds file length ({total} lines).",
+        last_start_line = max(total, 1)
+        return (
+            f"Requested start_line {s} exceeds file length ({total} lines). "
+            "No content was returned.\n"
+            f"Call `read_file` with file_path={file_path} "
+            f"start_line={last_start_line} to read the last available line, "
+            "or omit start_line to read from the beginning."
         )
 
     if s > e:

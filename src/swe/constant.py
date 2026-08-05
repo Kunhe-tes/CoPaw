@@ -540,8 +540,46 @@ CRON_WPLUS_PRIVATE_KEY = EnvVarLoader.get_str(
     "",
 )
 
+# W+ message push configuration
+CRON_WPLUS_MSG_NOTICE_ID = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_NOTICE_ID",
+    "",
+)
+CRON_WPLUS_MSG_APP_ID = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_APP_ID",
+    "",
+)
+CRON_WPLUS_MSG_URL = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_URL",
+    "",
+)
+CRON_WPLUS_PC_MENU_DOMAIN = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_PC_MENU_DOMAIN",
+    "",
+)
+CRON_WPLUS_MSG_HEADER_KEY = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_HEADER_KEY",
+    "",
+)
+CRON_WPLUS_MSG_HEADER_VALUE = EnvVarLoader.get_str(
+    "SWE_CRON_WPLUS_MSG_HEADER_VALUE",
+    "",
+)
+
 # User Info API URL (区分环境的用户信息查询接口地址)
 USER_INFO_API_URL = EnvVarLoader.get_str(
     "SWE_USER_INFO_API_URL",
+    "",
+)
+
+# market 服务内部端点配置。
+# bootstrap 完成后回调 market 同步 swe_skills 表，仅限集群内部访问；
+# token 留空表示 market 侧不校验（开发模式）。
+MARKET_INTERNAL_URL = EnvVarLoader.get_str(
+    "SWE_MARKET_INTERNAL_URL",
+    "http://market:8090",
+)
+MARKET_INTERNAL_TOKEN = EnvVarLoader.get_str(
+    "SWE_MARKET_INTERNAL_TOKEN",
     "",
 )

@@ -131,15 +131,19 @@ def _apply_updated_inputs(
     merged: MergedHookResult,
     updated_inputs: _UpdatedInputs,
 ) -> None:
+    if merged.decision == HookDecision.STOP:
+        merged.updated_input = None
+        return
+
     if len(updated_inputs) == 1:
         merged.updated_input = updated_inputs[0][1]
         return
 
     if len(updated_inputs) > 1:
+        merged.updated_input = None
         ids = ", ".join(handler_id for handler_id, _ in updated_inputs)
         merged.decision = HookDecision.BLOCK
         merged.reason = f"Multiple hooks returned updatedInput: {ids}"
-        merged.updated_input = None
 
 
 def merge_hook_results(
@@ -152,6 +156,10 @@ def merge_hook_results(
     updated_inputs: _UpdatedInputs = []
 
     for result in by_order:
+        if result.failed and result.decision == HookDecision.BLOCK:
+            merged.has_blocking_failure = True
+            if result.reason:
+                merged.blocking_failure_reason = result.reason
         _merge_hook_specific_output(merged, result, updated_inputs)
         _merge_output_flags(merged, result)
         _merge_decision(merged, result)

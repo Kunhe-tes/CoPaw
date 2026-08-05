@@ -2,6 +2,9 @@
 """市场 MCP 管理路由（管理员）。"""
 
 import json
+import asyncio
+import logging
+import uuid
 import re
 from typing import Annotated, Optional
 from urllib.parse import unquote
@@ -19,6 +22,7 @@ from fastapi import (
 )
 
 from ...marketplace.schemas import (
+    AsyncTaskSubmitResponse,
     MCPDistributionRequest,
     MCPDistributionResponse,
     MarketMCPDetail,
@@ -42,6 +46,7 @@ from ..deps import require_source_id
 from .my_mcp import _test_mcp_connection
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 MCP_NOT_FOUND_DETAIL = "MCP not found or already deleted"
 
 
@@ -77,6 +82,128 @@ def _normalize_client_key(value: str) -> str:
     normalized = re.sub(r"[^a-z0-9_-]+", "-", value.strip().lower())
     normalized = re.sub(r"-+", "-", normalized).strip("-_")
     return normalized or "mcp"
+
+
+def _new_async_task_id() -> str:
+    """生成异步任务 ID。"""
+    return str(uuid.uuid4())
+
+
+def _get_async_task_store(request: Request):
+    """创建 Market 异步任务写入器。"""
+    from ..async_tasks import AsyncTaskStore
+
+    db = request.app.state.marketplace.db
+    if db is None or not getattr(db, "is_connected", False):
+        raise HTTPException(
+            status_code=503,
+            detail="Async task database connection is not available",
+        )
+    return AsyncTaskStore(db)
+
+
+def _distribution_summary(kind: str, name: str, target_count: int) -> str:
+    """构造包含分发对象的任务摘要。"""
+    object_name = str(name or "").strip() or "-"
+    return f"分发 {kind}「{object_name}」，目标 {target_count} 个用户"
+
+
+def _find_market_mcp_item(svc, source_id: str, item_ref: str):
+    """按 item_id、client_key 或名称解析市场 MCP 条目。"""
+    items = load_index(svc.marketplace_root, source_id)
+    return next(
+        (
+            candidate
+            for candidate in items
+            if candidate.item_type == "mcp"
+            and item_ref
+            in {
+                candidate.item_id,
+                candidate.client_key,
+                candidate.name,
+            }
+        ),
+        None,
+    )
+
+
+async def _run_mcp_distribution_task(
+    *,
+    task_id: str,
+    store,
+    svc,
+    source_id: str,
+    item_id: str,
+    operator_id: str,
+    operator_name: str,
+    req: MCPDistributionRequest,
+) -> None:
+    """后台执行 MCP 分发并回写任务表。"""
+    try:
+        await store.mark_running(task_id)
+        result = await svc.distribute_mcp(
+            source_id,
+            item_id,
+            operator_id=operator_id,
+            operator_name=operator_name,
+            req=req,
+        )
+        done_count = 0
+        failed_count = 0
+        for item in result.results:
+            await store.record_item_result(
+                task_id=task_id,
+                target_id=item.tenant_id,
+                success=item.success,
+                result=item.model_dump(),
+                error_message=item.error,
+            )
+            if item.success:
+                done_count += 1
+            else:
+                failed_count += 1
+        await store.finish_task(
+            task_id=task_id,
+            status=(
+                "succeeded"
+                if failed_count == 0
+                else ("failed" if done_count == 0 else "partial_failed")
+            ),
+            done_count=done_count,
+            failed_count=failed_count,
+            error_message=None if failed_count == 0 else "部分目标分发失败",
+            result=result.model_dump(),
+        )
+    except Exception as exc:  # pylint: disable=broad-except
+        for tenant_id in req.target_tenant_ids:
+            try:
+                await store.record_item_result(
+                    task_id=task_id,
+                    target_id=tenant_id,
+                    success=False,
+                    error_message=str(exc),
+                )
+            except Exception:
+                logger.warning(
+                    "Failed to record MCP distribution item failure: task_id=%s tenant_id=%s",
+                    task_id,
+                    tenant_id,
+                    exc_info=True,
+                )
+        try:
+            await store.finish_task(
+                task_id=task_id,
+                status="failed",
+                done_count=0,
+                failed_count=len(req.target_tenant_ids),
+                error_message=str(exc),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to finish MCP distribution task: task_id=%s",
+                task_id,
+                exc_info=True,
+            )
 
 
 def _infer_transport(config: dict) -> Optional[str]:
@@ -394,7 +521,7 @@ async def upload_mcp(
 
 @router.post(
     "/market/mcp/{item_id}/distribute",
-    response_model=MCPDistributionResponse,
+    response_model=AsyncTaskSubmitResponse,
 )
 async def distribute_mcp(
     item_id: str,
@@ -404,35 +531,55 @@ async def distribute_mcp(
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
     x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
-):
+) -> AsyncTaskSubmitResponse:
     """分发 MCP（管理员）。"""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
 
-    # 检查条目是否存在
-    items = load_index(svc.marketplace_root, source_id)
-    item = next(
-        (i for i in items if i.item_id == item_id and i.item_type == "mcp"),
-        None,
-    )
+    # 前端可能传市场 item_id，也可能传业务侧 client_key 或名称。
+    item = _find_market_mcp_item(svc, source_id, item_id)
     if item is None:
         raise HTTPException(
             status_code=404,
             detail=MCP_NOT_FOUND_DETAIL,
         )
 
-    try:
-        result = await svc.distribute_mcp(
-            source_id,
-            item_id,
+    if not getattr(svc.db, "is_connected", False):
+        raise HTTPException(
+            status_code=503,
+            detail="Async task database connection is not available",
+        )
+
+    task_id = _new_async_task_id()
+    store = _get_async_task_store(request)
+    await store.start_task(
+        task_id=task_id,
+        service="market",
+        task_type="market.mcp.distribute",
+        source_id=source_id,
+        actor_user_id=x_user_id or "",
+        actor_user_name=unquote(x_user_name or ""),
+        target_ids=req.target_tenant_ids,
+        summary=_distribution_summary(
+            "MCP",
+            item.name or item.client_key or item_id,
+            len(req.target_tenant_ids),
+        ),
+    )
+    asyncio.create_task(
+        _run_mcp_distribution_task(
+            task_id=task_id,
+            store=store,
+            svc=svc,
+            source_id=source_id,
+            item_id=item.item_id,
             operator_id=x_user_id or "",
             operator_name=unquote(x_user_name or ""),
             req=req,
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    return result
+        ),
+    )
+    return AsyncTaskSubmitResponse(task_id=task_id)
 
 
 @router.delete(

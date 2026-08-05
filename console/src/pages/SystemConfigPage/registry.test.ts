@@ -1,17 +1,23 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS,
+  CRON_NOTIFICATION_DEFAULTS,
   CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS,
   CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES,
   clearModelCallPolicyConfig,
   enableModelCallPolicyConfig,
   normalizeSystemPromptInjections,
+  readArchiveMaintenanceConfig,
+  readCronNotificationConfig,
   readCronTaskSessionCleanupConfig,
   readCronUnreadAutoPauseConfig,
   readLlmRateLimiterConfigState,
   readQueryRetryConfigState,
   readSystemPromptInjections,
   validateSourceSystemConfig,
+  writeArchiveMaintenanceValue,
+  writeCronNotificationValue,
   writeCronTaskSessionCleanupValue,
   writeCronUnreadAutoPauseValue,
   writeLlmRateLimiterValue,
@@ -55,6 +61,27 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("writes zhaohu Tool Guard approval notification switch values", () => {
+    const definition = CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.find(
+      (item) => item.key === "approval_notifications.zhaohu_tool_guard_enabled",
+    );
+    if (!definition) {
+      throw new Error(
+        "zhaohu Tool Guard notification switch is not registered",
+      );
+    }
+
+    expect(definition.defaultValue).toBe(false);
+
+    const next = writeRegisteredSwitchValue({}, definition, true);
+
+    expect(next).toEqual({
+      approval_notifications: {
+        zhaohu_tool_guard_enabled: true,
+      },
+    });
+  });
+
   it("preserves nested tool config keys without native structuredClone", () => {
     vi.stubGlobal("structuredClone", undefined);
     const source = {
@@ -82,6 +109,39 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("reads default cron notification settings", () => {
+    expect(readCronNotificationConfig({})).toEqual(
+      CRON_NOTIFICATION_DEFAULTS,
+    );
+  });
+
+  it("writes cron notification settings without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      cron_notifications: {
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeCronNotificationValue(
+      source,
+      "skip_weekend_zhaohu_enabled",
+      true,
+    );
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      cron_notifications: {
+        skip_weekend_zhaohu_enabled: true,
+        unknown_retained: "yes",
+      },
+    });
+    expect(source.cron_notifications).toEqual({
+      unknown_retained: "yes",
+    });
+  });
+
   it("reads default cron task session cleanup settings", () => {
     expect(readCronTaskSessionCleanupConfig({})).toEqual({
       enabled: false,
@@ -95,6 +155,20 @@ describe("SystemConfigPage registry compatibility", () => {
     expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toContain("01:00");
     expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toContain("02:30");
     expect(CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS).toHaveLength(48);
+  });
+
+  it("reads default archive maintenance settings", () => {
+    expect(readArchiveMaintenanceConfig({})).toEqual({
+      enabled: true,
+      run_time: "03:00",
+      cron: "0 3 * * *",
+    });
+  });
+
+  it("offers selectable archive maintenance run times", () => {
+    expect(ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS).toContain("03:00");
+    expect(ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS).toContain("03:30");
+    expect(ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS).toHaveLength(48);
   });
 
   it("writes cron task session cleanup settings without mutating source", () => {
@@ -123,6 +197,32 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("writes archive maintenance settings without mutating source", () => {
+    vi.stubGlobal("structuredClone", undefined);
+    const source = {
+      provider_policy: { default_model: "qwen-max" },
+      archive_maintenance: {
+        enabled: true,
+        unknown_retained: "yes",
+      },
+    };
+
+    const next = writeArchiveMaintenanceValue(source, "run_time", "03:30");
+
+    expect(next).toEqual({
+      provider_policy: { default_model: "qwen-max" },
+      archive_maintenance: {
+        enabled: true,
+        unknown_retained: "yes",
+        cron: "30 3 * * *",
+      },
+    });
+    expect(source.archive_maintenance).toEqual({
+      enabled: true,
+      unknown_retained: "yes",
+    });
+  });
+
   it("rejects invalid cron task session cleanup values", () => {
     expect(
       validateSourceSystemConfig({
@@ -138,6 +238,17 @@ describe("SystemConfigPage registry compatibility", () => {
         cron_task_session_cleanup: {
           enabled: true,
           retention_days: 30,
+          cron: "*/5 * * * *",
+        },
+      }),
+    ).toContain("cron");
+  });
+
+  it("rejects invalid archive maintenance cron values", () => {
+    expect(
+      validateSourceSystemConfig({
+        archive_maintenance: {
+          enabled: true,
           cron: "*/5 * * * *",
         },
       }),

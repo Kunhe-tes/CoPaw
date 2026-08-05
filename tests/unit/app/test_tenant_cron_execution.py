@@ -7,7 +7,9 @@ import importlib
 import importlib.util
 import sys
 import types
+import uuid
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -182,6 +184,326 @@ async def test_prepare_agent_execution_marks_trace_for_attach_existing(
     assert trace_id == "trace-cron"
     assert req["trace_id"] == "trace-cron"
     assert req["trace_attach_existing"] is True
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_uses_b3_dispatch_meta(monkeypatch):
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha")
+    observed = {}
+
+    async def fake_create_trace(*_args, **kwargs):
+        observed["trace_id"] = kwargs.get("trace_id")
+        observed["b3_trace_id"] = kwargs.get("b3_trace_id")
+        return kwargs.get("trace_id") or "trace-cron"
+
+    monkeypatch.setattr(
+        executor,
+        "_create_trace_for_agent_job",
+        fake_create_trace,
+    )
+
+    _runtime_tenant_id, trace_id, req, _stream_state = (
+        await executor._prepare_agent_execution(
+            job,
+            "user-a",
+            "session-a",
+            {
+                "passthrough_headers": {
+                    "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+                    "X-B3-Spanid": "32befd146889a61a",
+                },
+                "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+            },
+        )
+    )
+
+    assert observed["trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert observed["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert trace_id == "8267fd70bacf497704fec30eaa353979"
+    assert req["trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert req["trace_attach_existing"] is True
+    assert req["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert req["passthrough_headers"] == {
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+    }
+
+
+@pytest.mark.asyncio
+async def test_prepare_agent_execution_splits_batch_trace_from_b3(monkeypatch):
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha")
+    observed = {}
+
+    async def fake_create_trace(*_args, **kwargs):
+        observed.update(kwargs)
+        return kwargs.get("trace_id")
+
+    monkeypatch.setattr(
+        executor,
+        "_create_trace_for_agent_job",
+        fake_create_trace,
+    )
+    passthrough_headers = {
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+    }
+
+    _runtime_tenant_id, trace_id, req, _stream_state = (
+        await executor._prepare_agent_execution(
+            job,
+            "user-a",
+            "session-a",
+            {
+                "source": " dispatch_service ",
+                "intent_id": 7,
+                "batch_id": " batch-1 ",
+                "dispatch_attempt": 2,
+                "passthrough_headers": passthrough_headers,
+                "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+            },
+        )
+    )
+
+    assert observed["trace_id"] != "8267fd70bacf497704fec30eaa353979"
+    assert str(uuid.UUID(observed["trace_id"])) == observed["trace_id"]
+    assert observed["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert trace_id == observed["trace_id"]
+    assert req["trace_id"] == observed["trace_id"]
+    assert req["trace_attach_existing"] is True
+    assert req["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert req["passthrough_headers"] == passthrough_headers
+
+
+@pytest.mark.asyncio
+async def test_batch_trace_fallback_ids_are_unique_when_precreate_fails(
+    monkeypatch,
+) -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job("/tmp/tenant-a/workspaces/alpha")
+    observed = []
+
+    async def fake_create_trace(*_args, **kwargs):
+        observed.append(kwargs)
+        return None
+
+    monkeypatch.setattr(
+        executor,
+        "_create_trace_for_agent_job",
+        fake_create_trace,
+    )
+    b3_trace_id = "8267fd70bacf497704fec30eaa353979"
+    passthrough_headers = {
+        "X-B3-Traceid": b3_trace_id,
+        "X-B3-Spanid": "32befd146889a61a",
+    }
+    dispatch_meta = {
+        "source": "dispatch_service",
+        "intent_id": 7,
+        "batch_id": "batch-1",
+        "dispatch_attempt": 2,
+        "passthrough_headers": passthrough_headers,
+        "b3_trace_id": b3_trace_id,
+    }
+
+    executions = [
+        await executor._prepare_agent_execution(
+            job,
+            "user-a",
+            "session-a",
+            dispatch_meta,
+        )
+        for _ in range(2)
+    ]
+
+    internal_trace_ids = [execution[1] for execution in executions]
+    assert all(internal_trace_ids)
+    assert len(set(internal_trace_ids)) == 2
+    assert b3_trace_id not in internal_trace_ids
+    for index, (_runtime_id, trace_id, req, _state) in enumerate(executions):
+        assert str(uuid.UUID(trace_id)) == trace_id
+        assert observed[index]["trace_id"] == trace_id
+        assert observed[index]["b3_trace_id"] == b3_trace_id
+        assert req["trace_id"] == trace_id
+        assert req["trace_attach_existing"] is True
+        assert req["b3_trace_id"] == b3_trace_id
+        assert req["passthrough_headers"] == passthrough_headers
+
+
+@pytest.mark.parametrize(
+    "dispatch_meta",
+    [
+        {
+            "source": "manual",
+            "intent_id": 7,
+            "batch_id": "batch-1",
+            "dispatch_attempt": 2,
+        },
+        {
+            "source": "dispatch_service",
+            "intent_id": True,
+            "batch_id": "batch-1",
+            "dispatch_attempt": 2,
+        },
+        {
+            "source": "dispatch_service",
+            "intent_id": 7,
+            "batch_id": "   ",
+            "dispatch_attempt": 2,
+        },
+        {
+            "source": "dispatch_service",
+            "intent_id": 7,
+            "batch_id": "batch-1",
+            "dispatch_attempt": False,
+        },
+    ],
+)
+def test_malformed_dispatch_identity_is_not_a_batch(dispatch_meta) -> None:
+    b3_trace_id = "8267fd70bacf497704fec30eaa353979"
+    dispatch_meta["b3_trace_id"] = b3_trace_id
+
+    assert executor_module._resolve_dispatch_trace_ids(dispatch_meta) == (
+        b3_trace_id,
+        b3_trace_id,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("dispatch_meta", "is_batch"),
+    [
+        (
+            {
+                "source": "dispatch_service",
+                "intent_id": 7,
+                "batch_id": "batch-1",
+                "dispatch_attempt": 2,
+                "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+            },
+            True,
+        ),
+        (
+            {"b3_trace_id": "8267fd70bacf497704fec30eaa353979"},
+            False,
+        ),
+    ],
+)
+async def test_execute_text_job_resolves_trace_identifiers(
+    monkeypatch,
+    dispatch_meta,
+    is_batch,
+) -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+    trace_manager = types.SimpleNamespace(
+        enabled=True,
+        start_trace=AsyncMock(
+            side_effect=lambda **kwargs: kwargs.get("trace_id"),
+        ),
+        end_trace=AsyncMock(),
+    )
+    monkeypatch.setattr(executor_module, "has_trace_manager", lambda: True)
+    monkeypatch.setattr(
+        executor_module,
+        "get_trace_manager",
+        lambda: trace_manager,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "resolve_user_identity",
+        AsyncMock(
+            return_value=types.SimpleNamespace(user_name=None, bbk_id=None),
+        ),
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "_index_model_output_to_monitor",
+        AsyncMock(),
+    )
+
+    result = await executor._execute_text_job(
+        job,
+        "user-a",
+        "session-a",
+        dispatch_meta,
+    )
+
+    start_kwargs = trace_manager.start_trace.await_args.kwargs
+    if is_batch:
+        assert start_kwargs["trace_id"] != dispatch_meta["b3_trace_id"]
+        assert str(uuid.UUID(start_kwargs["trace_id"])) == start_kwargs[
+            "trace_id"
+        ]
+    else:
+        assert start_kwargs["trace_id"] == dispatch_meta["b3_trace_id"]
+    assert start_kwargs["b3_trace_id"] == (
+        "8267fd70bacf497704fec30eaa353979"
+    )
+    assert result["trace_id"] == start_kwargs["trace_id"]
+
+
+@pytest.mark.asyncio
+async def test_execute_text_job_keeps_batch_id_when_precreate_fails(
+    monkeypatch,
+) -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+    b3_trace_id = "8267fd70bacf497704fec30eaa353979"
+    trace_manager = types.SimpleNamespace(
+        enabled=True,
+        start_trace=AsyncMock(side_effect=RuntimeError("store unavailable")),
+        end_trace=AsyncMock(),
+    )
+    monkeypatch.setattr(executor_module, "has_trace_manager", lambda: True)
+    monkeypatch.setattr(
+        executor_module,
+        "get_trace_manager",
+        lambda: trace_manager,
+    )
+    monkeypatch.setattr(
+        executor_module,
+        "resolve_user_identity",
+        AsyncMock(
+            return_value=types.SimpleNamespace(user_name=None, bbk_id=None),
+        ),
+    )
+
+    result = await executor._execute_text_job(
+        job,
+        "user-a",
+        "session-a",
+        {
+            "source": "dispatch_service",
+            "intent_id": 7,
+            "batch_id": "batch-1",
+            "dispatch_attempt": 2,
+            "b3_trace_id": b3_trace_id,
+        },
+    )
+
+    start_kwargs = trace_manager.start_trace.await_args.kwargs
+    assert result["trace_id"] == start_kwargs["trace_id"]
+    assert result["trace_id"] != b3_trace_id
+    assert str(uuid.UUID(result["trace_id"])) == result["trace_id"]
+    assert start_kwargs["b3_trace_id"] == b3_trace_id
+    trace_manager.end_trace.assert_not_awaited()
 
 
 class _Provider:

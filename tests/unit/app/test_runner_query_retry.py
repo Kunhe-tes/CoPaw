@@ -303,12 +303,55 @@ async def test_start_query_trace_does_not_attach_stale_request_trace_id_by_defau
 
 
 @pytest.mark.asyncio
+async def test_start_query_trace_uses_b3_trace_id_for_new_trace(tmp_path):
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    request = SimpleNamespace(
+        trace_id="trace-stale",
+        b3_trace_id="8267fd70bacf497704fec30eaa353979",
+        user_id="user-1",
+        session_id="session-1",
+        channel="console",
+        source_id="source-1",
+        channel_meta={},
+    )
+    start_trace = AsyncMock(return_value="8267fd70bacf497704fec30eaa353979")
+    trace_manager = SimpleNamespace(enabled=True, start_trace=start_trace)
+
+    with (
+        patch(
+            "src.swe.app.runner.runner.has_trace_manager",
+            return_value=True,
+        ),
+        patch(
+            "src.swe.app.runner.runner.get_trace_manager",
+            return_value=trace_manager,
+        ),
+        patch(
+            "src.swe.app.runner.runner.resolve_user_identity",
+            AsyncMock(
+                return_value=SimpleNamespace(user_name=None, bbk_id=None),
+            ),
+        ),
+    ):
+        trace_id = await runner._start_query_trace(request, [])
+
+    assert trace_id == "8267fd70bacf497704fec30eaa353979"
+    assert request.trace_id == "8267fd70bacf497704fec30eaa353979"
+    start_trace.assert_awaited_once()
+    kwargs = start_trace.await_args.kwargs
+    assert kwargs["trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert kwargs["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
+    assert kwargs["attach_existing"] is False
+
+
+@pytest.mark.asyncio
 async def test_start_query_trace_allows_explicit_attach_existing_trace(
     tmp_path,
 ):
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     request = SimpleNamespace(
         trace_id="trace-existing",
+        b3_trace_id="8267fd70bacf497704fec30eaa353979",
         user_id="user-1",
         session_id="session-1",
         channel="console",
@@ -340,6 +383,7 @@ async def test_start_query_trace_allows_explicit_attach_existing_trace(
     start_trace.assert_awaited_once()
     kwargs = start_trace.await_args.kwargs
     assert kwargs["trace_id"] == "trace-existing"
+    assert kwargs["b3_trace_id"] == "8267fd70bacf497704fec30eaa353979"
     assert kwargs["attach_existing"] is True
 
 

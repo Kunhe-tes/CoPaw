@@ -90,8 +90,8 @@ The global Header and navigation use the Management Console theme even when disp
 The current baseline uses platform fonts so it works without downloading font assets or depending on a runtime font CDN.
 
 ```css
---console-font-ui: "Microsoft YaHei", "PingFang SC",
-  "Helvetica Neue", sans-serif;
+--console-font-ui: "Microsoft YaHei", "PingFang SC", "Helvetica Neue",
+  sans-serif;
 
 --console-font-editorial: Georgia, "Songti SC", "SimSun", serif;
 
@@ -201,6 +201,10 @@ Visual priority for future chat work remains:
 - Preserve its collapse behavior.
 - Future chat redesigns may reuse base accessibility and spacing roles while evolving its visual theme independently from management pages.
 - Future chat redesigns must work both with and without the global navigation.
+
+### Content-Only Conversation Workspace
+
+A content-only Conversation Workspace keeps the existing conversation title, routed message content, message-level actions, typography, and `#3769FC` emphasis. It omits global navigation, the conversation task/history sidebar and collapsed toolbar, model selection, the independent generated-files entry/list, and composer/upload surfaces. Omitted surfaces are not focusable and reserve no width, padding, border, or shell-colored gap; message-level file controls remain part of the conversation content.
 
 ## Management Console
 

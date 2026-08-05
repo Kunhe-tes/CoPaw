@@ -11,12 +11,13 @@ export default createGlobalStyle`
   width: 100%;
   padding: 40px 20px;
   gap: 0;
+  background: url('/chat-bg.png') center/cover no-repeat;
   background: linear-gradient(180deg, #E8EEFF 0%, #F1F2F7 40%, #F5F5FA 100%);
 }
 
 .welcome-greeting {
   font-size: 22px;
-  font-weight: 500;
+  font-weight: 600;
   color: ${DESIGN_TOKENS.colorTextDark};
   line-height: 33px;
   margin-bottom: 40px;
@@ -24,6 +25,7 @@ export default createGlobalStyle`
 }
 
 .welcome-input-card {
+  position: relative;
   width: ${DESIGN_TOKENS.inputCardWidth}px;
   max-width: 100%;
   background-color: ${DESIGN_TOKENS.colorBgCard};
@@ -31,9 +33,9 @@ export default createGlobalStyle`
   padding: 16px 20px;
   display: flex;
   flex-direction: column;
-  gap: 28px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+  gap: 12px;
   margin-bottom: 28px;
+  box-shadow: 0px 0px 8px 0px rgba(0, 0, 0, 0.08);
 }
 
 .welcome-input-placeholder {
@@ -49,6 +51,18 @@ export default createGlobalStyle`
   max-height: 120px;
   font-family: inherit;
   padding: 4px 0;
+  overflow: auto;
+}
+
+.welcome-skill-editor {
+  min-height: 24px;
+  white-space: pre-wrap;
+
+  &:empty::before {
+    color: ${DESIGN_TOKENS.colorTextMuted};
+    content: attr(data-placeholder);
+    pointer-events: none;
+  }
 }
 
 .welcome-input-actions {
@@ -67,7 +81,7 @@ export default createGlobalStyle`
 .welcome-input-send-btn {
   width: 32px;
   height: 32px;
-  border-radius: 8px;
+  border-radius: 50%;
   background-color: ${DESIGN_TOKENS.colorPrimary};
   border: none;
   cursor: pointer;

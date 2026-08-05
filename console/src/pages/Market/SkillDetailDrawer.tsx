@@ -5,11 +5,12 @@ import {
   HistoryOutlined,
   MoreOutlined,
   UserOutlined,
+  DownloadOutlined,
 } from "@ant-design/icons";
-import { Button, Checkbox, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
+import { Button, Collapse, Dropdown, Input, message, Modal, Spin, Table, Tag, Tooltip, Typography, type MenuProps } from "antd";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle } from "lucide-react";
+import { Send, Undo2, Trash2, Archive, Users, PhoneCall, Tag as TagIcon, GitBranch, Calendar, CheckCircle, BarChart3 } from "lucide-react";
 import { marketApi, MarketSkillDetail } from "../../api/modules/market";
 import type { FileContentResponse } from "../../api/modules/mySkills";
 import type { DistributionRecord } from "../../api/types";
@@ -18,6 +19,7 @@ import { VersionHistoryModal } from "./Skills/VersionHistoryModal";
 import styles from "./SkillDetailDrawer.module.less";
 
 const { Text, Title } = Typography;
+const DEFAULT_USAGE_PAGE_SIZE = 5;
 
 interface SkillDetailDrawerProps {
   open: boolean;
@@ -44,9 +46,6 @@ const HEADER_STYLE = {
   padding: "12px 20px",
   backgroundColor: "#fff",
   borderBottom: "1px solid #f0f0f0",
-  display: "flex",
-  justifyContent: "space-between",
-  alignItems: "center",
 } as const;
 
 // 元数据项样式 - 淡色小字
@@ -71,64 +70,79 @@ const SKILL_NAME_STYLE = {
   color: "#8c8c8c",
 } as const;
 
-// 操作按钮样式 - 次要按钮（版本历史）
-const SECONDARY_BUTTON_STYLE = {
-  height: 28,
-  padding: "0 10px",
-  borderRadius: 6,
-  fontSize: 12,
-  fontWeight: 500,
-  display: "inline-flex",
-  alignItems: "center",
-  gap: 4,
-  border: "1px solid #d9d9d9",
-  backgroundColor: "#fafafa",
-  color: "#595959",
-} as const;
-
-// 主要按钮样式（分发）
-const PRIMARY_BUTTON_STYLE = {
-  height: 28,
+// 下载按钮样式 - 深灰蓝（柔和色调）
+const DOWNLOAD_BUTTON_STYLE = {
+  height: 32,
   padding: "0 12px",
   borderRadius: 6,
-  fontSize: 12,
+  fontSize: 13,
   fontWeight: 500,
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
-  backgroundColor: "#3769fc",
+  gap: 6,
+  border: "1px solid #8b9caa",
+  backgroundColor: "#f4f6f8",
+  color: "#5b6b7c",
+} as const;
+
+// 版本历史按钮样式 - 深灰紫（柔和色调）
+const HISTORY_BUTTON_STYLE = {
+  height: 32,
+  padding: "0 12px",
+  borderRadius: 6,
+  fontSize: 13,
+  fontWeight: 500,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  border: "1px solid #9b8baa",
+  backgroundColor: "#f6f4f8",
+  color: "#6b5b7a",
+} as const;
+
+// 主要按钮样式（分发）- 蓝色实心（保持突出）
+const PRIMARY_BUTTON_STYLE = {
+  height: 32,
+  padding: "0 14px",
+  borderRadius: 6,
+  fontSize: 13,
+  fontWeight: 600,
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  backgroundColor: "#1890ff",
   color: "#fff",
   border: "none",
 } as const;
 
-// 信息按钮样式（用户可执行性）
-const INFO_BUTTON_STYLE = {
-  height: 28,
-  padding: "0 10px",
+// 用户查询按钮样式 - 深灰绿（柔和色调）
+const USER_BUTTON_STYLE = {
+  height: 32,
+  padding: "0 12px",
   borderRadius: 6,
-  fontSize: 12,
+  fontSize: 13,
   fontWeight: 500,
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
-  border: "1px solid #3769fc",
-  backgroundColor: "#fff",
-  color: "#3769fc",
+  gap: 6,
+  border: "1px solid #8a9b8a",
+  backgroundColor: "#f4f8f5",
+  color: "#4a7c59",
 } as const;
 
-// 更多按钮样式（下拉）
+// 更多按钮样式（下拉）- 灰色图标
 const MORE_BUTTON_STYLE = {
-  height: 28,
-  padding: "0 8px",
+  height: 32,
+  width: 32,
+  padding: 0,
   borderRadius: 6,
-  fontSize: 12,
-  fontWeight: 500,
+  fontSize: 14,
   display: "inline-flex",
   alignItems: "center",
-  gap: 4,
+  justifyContent: "center",
   border: "1px solid #d9d9d9",
   backgroundColor: "#fff",
-  color: "#595959",
+  color: "#8c8c8c",
 } as const;
 
 // 统计徽章样式
@@ -320,8 +334,12 @@ export function SkillDetailDrawer(
   const [isSaving, setIsSaving] = useState(false);
   const [syncModalOpen, setSyncModalOpen] = useState(false);
   const [distributions, setDistributions] = useState<DistributionRecord[]>([]);
-  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]);
-  const [syncToUsers, setSyncToUsers] = useState(true);
+  const [usagePage, setUsagePage] = useState(1);
+  const [usagePageSize, setUsagePageSize] = useState(DEFAULT_USAGE_PAGE_SIZE);
+
+  // 统计配置相关状态
+  const [includeInStatistics, setIncludeInStatistics] = useState<boolean>(false);
+  const [, setIsUpdatingStatistics] = useState(false);
 
   const triggerBrowserDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -350,7 +368,7 @@ export function SkillDetailDrawer(
     return Array.from(userMap.values());
   }, [distributions]);
 
-  // 按机构分组分发记录
+  // 按机构分组分发记录，只读展示同步影响范围
   const groupedDistributions = useMemo(() => {
     const groups: Record<string, DistributionRecord[]> = {};
     for (const dist of uniqueDistributions) {
@@ -440,9 +458,7 @@ export function SkillDetailDrawer(
     try {
       const dists = await marketApi.getSkillDistributions(sourceId, skill.item_id);
       setDistributions(dists);
-      // 默认选中去重后的用户ID
       const uniqueIds = Array.from(new Set(dists.map((d) => d.target_user_id)));
-      setSelectedUserIds(uniqueIds);
       if (uniqueIds.length > 0) {
         setSyncModalOpen(true);
       } else {
@@ -457,8 +473,34 @@ export function SkillDetailDrawer(
 
   // 同步确认弹窗确认
   const handleSyncConfirm = useCallback(() => {
-    handleSave(syncToUsers, syncToUsers ? selectedUserIds : []);
-  }, [handleSave, syncToUsers, selectedUserIds]);
+    handleSave(true, uniqueDistributions.map((dist) => dist.target_user_id));
+  }, [handleSave, uniqueDistributions]);
+
+  // 初始化统计配置状态
+  useEffect(() => {
+    if (skill) {
+      setIncludeInStatistics(skill.include_in_statistics ?? false);
+    }
+  }, [skill]);
+
+  // 更新统计配置
+  const handleStatisticsConfigChange = useCallback(async (checked: boolean) => {
+    if (!skill || !sourceId) return;
+
+    setIsUpdatingStatistics(true);
+    try {
+      await marketApi.updateSkillStatisticsConfig(sourceId, skill.item_id, {
+        include_in_statistics: checked,
+      });
+      setIncludeInStatistics(checked);
+      message.success(checked ? "已纳入统计" : "已取消统计");
+      onRefresh?.();
+    } catch {
+      message.error("更新失败");
+    } finally {
+      setIsUpdatingStatistics(false);
+    }
+  }, [skill, sourceId, onRefresh]);
 
   const moreMenuItems: MenuProps["items"] = useMemo(() => {
     const items: MenuProps["items"] = [];
@@ -504,8 +546,27 @@ export function SkillDetailDrawer(
         },
       });
     }
+    // 统计配置修改（仅管理员）
+    if (isManager) {
+      items.push({
+        key: "toggle_statistics",
+        icon: <BarChart3 size={12} />,
+        label: includeInStatistics ? "取消纳入统计" : "纳入统计",
+        onClick: () => {
+          Modal.confirm({
+            title: "确认操作",
+            content: includeInStatistics
+              ? "取消后该技能将不再纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。"
+              : "纳入后该技能将纳入统计分析，如：运营看板-技能使用排行榜、定时任务技能详情等。",
+            okText: includeInStatistics ? "取消统计" : "纳入统计",
+            cancelText: "取消",
+            onOk: () => handleStatisticsConfigChange(!includeInStatistics),
+          });
+        },
+      });
+    }
     return items;
-  }, [onRecall, onUnpublish, onDelete]);
+  }, [onRecall, onUnpublish, onDelete, isManager, includeInStatistics, handleStatisticsConfigChange]);
 
   useEffect(() => {
     if (!open || !skill || !sourceId) {
@@ -538,6 +599,11 @@ export function SkillDetailDrawer(
       cancelled = true;
     };
   }, [open, skill, sourceId]);
+
+  useEffect(() => {
+    setUsagePage(1);
+    setUsagePageSize(DEFAULT_USAGE_PAGE_SIZE);
+  }, [open, skill?.item_id]);
 
   const userStatsColumns = useMemo(
     () => [
@@ -576,10 +642,6 @@ export function SkillDetailDrawer(
   const chineseName = skill.chinese_name?.trim() || "";
   const skillName = skill.name;
 
-  // 状态颜色和文字
-  const statusColor = skill.status === "active" ? "#52c41a" : "#ff4d4f";
-  const statusText = skill.status === "active" ? "已发布" : "已下架";
-
   // 简介
   const description = skill.description || "暂无描述";
 
@@ -588,121 +650,144 @@ export function SkillDetailDrawer(
       <div style={{ height: "100%", display: "flex", flexDirection: "column", backgroundColor: "#fafafa" }}>
         {/* 顶栏：固定 */}
         <div style={HEADER_STYLE}>
-          {/* 左侧：元数据 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-            {/* 状态徽章（标题前） */}
-            <Tag
-              bordered={false}
-              style={{
-                margin: 0,
-                borderRadius: 6,
-                padding: "2px 8px",
-                fontSize: 12,
-                backgroundColor: skill.status === "active" ? "#f6ffed" : "#fff1f0",
-                color: statusColor,
-              }}
-            >
-              <CheckCircle size={12} style={{ marginRight: 4 }} />
-              {statusText}
-            </Tag>
+          {/* 单行：状态图标 + 名称 + 元数据 + 操作按钮 */}
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%" }}>
+            {/* 左侧：状态图标 + 名称 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 12, flex: 1, minWidth: 0 }}>
+              {/* 发布状态图标（仅已发布时显示） */}
+              {skill.status === "active" && (
+                <Tooltip title="已发布">
+                  <span style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    backgroundColor: "#52c41a",
+                    cursor: "pointer",
+                  }}>
+                    <CheckCircle size={12} style={{ color: "#fff" }} />
+                  </span>
+                </Tooltip>
+              )}
 
-            {/* 中文名（大号） + 技能名（小号） */}
-            {isEditing ? (
-              <Input
-                value={draftCnName}
-                onChange={(e) => setDraftCnName(e.target.value)}
-                style={{ width: 200, fontSize: 14 }}
-                maxLength={50}
-                showCount
-                placeholder="输入中文名称"
-              />
-            ) : (
-              <span style={CHINESE_NAME_STYLE}>
-                {chineseName}
-                {chineseName && skillName && (
-                  <span style={SKILL_NAME_STYLE}> ({skillName})</span>
-                )}
-                {!chineseName && skillName && (
-                  <span style={CHINESE_NAME_STYLE}>{skillName}</span>
-                )}
-              </span>
-            )}
+              {/* 统计状态图标（仅已纳入统计时显示，仅管理员可见） */}
+              {isManager && includeInStatistics && (
+                <Tooltip title="已纳入统计">
+                  <span style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    width: 22,
+                    height: 22,
+                    borderRadius: "50%",
+                    backgroundColor: "#2f54eb",
+                    cursor: "pointer",
+                  }}>
+                    <BarChart3 size={12} style={{ color: "#fff" }} />
+                  </span>
+                </Tooltip>
+              )}
 
-            {/* 编辑按钮 */}
-            {isManager && !isEditing && (
-              <Tooltip title="编辑中文名">
-                <Button
-                  type="text"
-                  size="small"
-                  icon={<EditOutlined style={{ fontSize: 12, color: "#3769fc" }} />}
-                  onClick={handleEditStart}
-                  style={{ padding: 4 }}
+              {/* 中文名（大号） + 技能名（小号） */}
+              {isEditing ? (
+                <Input
+                  value={draftCnName}
+                  onChange={(e) => setDraftCnName(e.target.value)}
+                  style={{ width: 200, fontSize: 14 }}
+                  maxLength={50}
+                  showCount
+                  placeholder="输入中文名称"
                 />
-              </Tooltip>
-            )}
+              ) : (
+                <span style={CHINESE_NAME_STYLE}>
+                  {chineseName}
+                  {chineseName && skillName && (
+                    <span style={SKILL_NAME_STYLE}> ({skillName})</span>
+                  )}
+                  {!chineseName && skillName && (
+                    <span style={CHINESE_NAME_STYLE}>{skillName}</span>
+                  )}
+                </span>
+              )}
 
-            {/* 编辑时显示保存/取消按钮 */}
-            {isManager && isEditing && (
-              <>
-                <Button
-                  size="small"
-                  onClick={handleEditCancel}
-                  disabled={isSaving}
-                  style={{ height: 24, borderRadius: 4 }}
-                >
-                  取消
-                </Button>
-                <Button
-                  size="small"
-                  type="primary"
-                  onClick={handleSaveClick}
-                  loading={isSaving}
-                  style={{ height: 24, borderRadius: 4 }}
-                >
-                  保存
-                </Button>
-              </>
-            )}
+              {/* 编辑按钮 */}
+              {isManager && !isEditing && (
+                <Tooltip title="编辑中文名">
+                  <Button
+                    type="text"
+                    size="small"
+                    icon={<EditOutlined style={{ fontSize: 12, color: "#3769fc" }} />}
+                    onClick={handleEditStart}
+                    style={{ padding: 4 }}
+                  />
+                </Tooltip>
+              )}
 
-            {/* 分类 */}
-            {normalizedCategoryName && (
+              {/* 编辑时显示保存/取消按钮 */}
+              {isManager && isEditing && (
+                <>
+                  <Button
+                    size="small"
+                    onClick={handleEditCancel}
+                    disabled={isSaving}
+                    style={{ height: 24, borderRadius: 4 }}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    size="small"
+                    type="primary"
+                    onClick={handleSaveClick}
+                    loading={isSaving}
+                    style={{ height: 24, borderRadius: 4 }}
+                  >
+                    保存
+                  </Button>
+                </>
+              )}
+
+              {/* 分类 */}
+              {normalizedCategoryName && (
+                <span style={META_ITEM_STYLE}>
+                  <TagIcon size={12} />
+                  {normalizedCategoryName}
+                </span>
+              )}
+
+              {/* 版本 */}
               <span style={META_ITEM_STYLE}>
-                <TagIcon size={12} />
-                {normalizedCategoryName}
+                <GitBranch size={12} />
+                v{skill.version}
               </span>
-            )}
 
-            {/* 版本 */}
-            <span style={META_ITEM_STYLE}>
-              <GitBranch size={12} />
-              v{skill.version}
-            </span>
+              {/* 创建时间 */}
+              <span style={META_ITEM_STYLE}>
+                <Calendar size={12} />
+                {formatDate(skill.created_at)}
+              </span>
 
-            {/* 创建时间 */}
-            <span style={META_ITEM_STYLE}>
-              <Calendar size={12} />
-              {formatDate(skill.created_at)}
-            </span>
+              {/* 创建人 */}
+              <span style={META_ITEM_STYLE}>
+                <Users size={12} />
+                {skill.creator_name || "未知"}
+              </span>
+            </div>
 
-            {/* 创建人 */}
-            <span style={META_ITEM_STYLE}>
-              <Users size={12} />
-              {skill.creator_name || "未知"}
-            </span>
-          </div>
-
-          {/* 右侧：操作按钮 */}
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {/* 右侧：操作按钮 */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexShrink: 0, marginLeft: "auto" }}>
             <Button
               onClick={handleDownloadCurrentVersion}
               loading={downloadingCurrentVersion}
-              style={SECONDARY_BUTTON_STYLE}
+              style={DOWNLOAD_BUTTON_STYLE}
             >
+              <DownloadOutlined style={{ fontSize: 12 }} />
               下载 ZIP
             </Button>
             <Button
               onClick={() => setVersionHistoryOpen(true)}
-              style={SECONDARY_BUTTON_STYLE}
+              style={HISTORY_BUTTON_STYLE}
             >
               <HistoryOutlined style={{ fontSize: 12 }} />
               版本历史
@@ -720,7 +805,7 @@ export function SkillDetailDrawer(
             {isManager && onLookupOwners && (
               <Button
                 onClick={onLookupOwners}
-                style={INFO_BUTTON_STYLE}
+                style={USER_BUTTON_STYLE}
               >
                 <UserOutlined style={{ fontSize: 12 }} />
                 用户可执行性
@@ -735,6 +820,7 @@ export function SkillDetailDrawer(
             )}
           </div>
         </div>
+      </div>
 
         {/* 主区域：文档 + 用户明细 */}
         <div
@@ -846,7 +932,18 @@ export function SkillDetailDrawer(
                   dataSource={skill.user_stats}
                   columns={userStatsColumns}
                   rowKey="user_id"
-                  pagination={{ pageSize: 5, hideOnSinglePage: true, size: "small" }}
+                  pagination={{
+                    current: usagePage,
+                    pageSize: usagePageSize,
+                    hideOnSinglePage: true,
+                    showSizeChanger: true,
+                    pageSizeOptions: ["5", "10", "20", "50"],
+                    size: "small",
+                    onChange: (nextPage, nextPageSize) => {
+                      setUsagePage(nextPageSize !== usagePageSize ? 1 : nextPage);
+                      setUsagePageSize(nextPageSize);
+                    },
+                  }}
                   size="small"
                   scroll={{ y: 380 }}
                 />
@@ -878,55 +975,20 @@ export function SkillDetailDrawer(
         okButtonProps={{ loading: isSaving }}
         width={520}
       >
-        {/* 同步选项 - 主选项 */}
-        <div style={{ marginBottom: 12 }}>
-          <Checkbox
-            checked={syncToUsers}
-            onChange={(e) => {
-              setSyncToUsers(e.target.checked);
-              if (e.target.checked && selectedUserIds.length === 0) {
-                // 开启同步时，默认全选
-                setSelectedUserIds(uniqueDistributions.map((d) => d.target_user_id));
-              }
-            }}
-          >
-            同步更新已分发用户的技能名称（共 {uniqueDistributions.length} 位用户）
-          </Checkbox>
+        <div style={{ marginBottom: 12, color: "#333", fontSize: 14 }}>
+          将同步更新全部已分发目标的技能名称（共 {uniqueDistributions.length} 位用户）。
         </div>
 
-        {/* 提示 */}
-        {syncToUsers && (
-          <div style={{ color: "#666", fontSize: 12, marginBottom: 12 }}>
-            同步更新后，用户下次会话将看到新名称
-          </div>
-        )}
+        <div style={{ color: "#666", fontSize: 12 }}>
+          同步更新后，用户下次会话将看到新名称。
+        </div>
 
-        {/* 用户列表 - 仅在同步开启时显示 */}
-        {syncToUsers && uniqueDistributions.length > 0 && (
-          <>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+        {uniqueDistributions.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 }}>
               <div style={{ fontWeight: 500 }}>已分发用户</div>
-              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <Checkbox
-                  checked={selectedUserIds.length === uniqueDistributions.length}
-                  indeterminate={selectedUserIds.length > 0 && selectedUserIds.length < uniqueDistributions.length}
-                  onChange={(e) => {
-                    if (e.target.checked) {
-                      setSelectedUserIds(uniqueDistributions.map((d) => d.target_user_id));
-                    } else {
-                      setSelectedUserIds([]);
-                    }
-                  }}
-                >
-                  全选
-                </Checkbox>
-                <a onClick={() => setSelectedUserIds([])} style={{ fontSize: 12 }}>
-                  清空
-                </a>
-              </div>
             </div>
 
-            {/* 按机构分组展示 */}
             <Collapse
               size="small"
               style={{ maxHeight: 280, overflow: "auto" }}
@@ -953,25 +1015,16 @@ export function SkillDetailDrawer(
                       const displayName = dist.target_user_name
                         ? `${dist.target_user_name} (${dist.target_user_id})`
                         : dist.target_user_id;
-                      const selected = selectedUserIds.includes(dist.target_user_id);
                       return (
                         <div
                           key={dist.target_user_id}
-                          onClick={() => {
-                            if (selected) {
-                              setSelectedUserIds((prev) => prev.filter((id) => id !== dist.target_user_id));
-                            } else {
-                              setSelectedUserIds((prev) => [...prev, dist.target_user_id]);
-                            }
-                          }}
                           style={{
                             fontSize: 12,
                             color: "#333",
                             padding: "4px 8px",
                             borderRadius: 4,
-                            cursor: "pointer",
-                            backgroundColor: selected ? "#e6f4ff" : "transparent",
-                            border: selected ? "1px solid #1890ff" : "1px solid transparent",
+                            backgroundColor: "#f5f5f5",
+                            border: "1px solid #e5e7eb",
                             overflow: "hidden",
                             textOverflow: "ellipsis",
                             whiteSpace: "nowrap",
@@ -986,12 +1039,7 @@ export function SkillDetailDrawer(
                 ),
               }))}
             />
-
-            {/* 选择汇总 */}
-            <div style={{ color: "#666", fontSize: 12, marginTop: 8 }}>
-              已选择 {selectedUserIds.length} 位用户
-            </div>
-          </>
+          </div>
         )}
       </Modal>
     </>

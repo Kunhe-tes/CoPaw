@@ -38,6 +38,7 @@ const mocks = vi.hoisted(() => ({
   },
   iframeState: {
     bbk: null as string | null,
+    source: null as string | null,
   },
 }));
 
@@ -114,8 +115,9 @@ vi.mock("@/stores/agentStore", () => ({
 }));
 
 vi.mock("@/stores/iframeStore", () => ({
-  useIframeStore: (selector: (state: { bbk: string | null }) => unknown) =>
-    selector(mocks.iframeState),
+  useIframeStore: (
+    selector: (state: { bbk: string | null; source: string | null }) => unknown,
+  ) => selector(mocks.iframeState),
 }));
 
 vi.mock("@/assets/others/note.png", () => ({ default: "guide-image.png" }));
@@ -150,6 +152,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     mocks.context.setSessionLoading = mocks.setSessionLoading;
     mocks.context.getSessions = mocks.getSessions;
     mocks.iframeState.bbk = null;
+    mocks.iframeState.source = null;
     mocks.hasMoreSessions.mockReturnValue(true);
     mocks.getSessionTotal.mockReturnValue(120);
     mocks.getSessions.mockImplementation(() => mocks.context.sessions);
@@ -287,8 +290,9 @@ describe("ChatSidebar infinite history scrolling", () => {
     });
   });
 
-  it("uses the Shanghai guide image when bbk is 121", () => {
+  it("uses the Shanghai guide image when bbk is 121 and source is RMASSIST", () => {
     mocks.iframeState.bbk = "121";
+    mocks.iframeState.source = "RMASSIST";
 
     const { container } = render(<ChatSidebar tasks={[]} />);
     const guide = container.querySelector(
@@ -296,6 +300,18 @@ describe("ChatSidebar infinite history scrolling", () => {
     ) as HTMLImageElement;
 
     expect(guide).toHaveAttribute("src", "sh-guide-image.png");
+  });
+
+  it("uses the default guide image when source is not RMASSIST", () => {
+    mocks.iframeState.bbk = "121";
+    mocks.iframeState.source = "OTHER";
+
+    const { container } = render(<ChatSidebar tasks={[]} />);
+    const guide = container.querySelector(
+      '[data-testid="guide-image"]',
+    ) as HTMLImageElement;
+
+    expect(guide).toHaveAttribute("src", "guide-image.png");
   });
 
   it("uses the default guide image when bbk is not 121", () => {

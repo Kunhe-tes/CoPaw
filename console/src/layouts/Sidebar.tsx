@@ -75,6 +75,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
   const { isDark } = useTheme();
   const isSuperManager = useIframeStore((state) => state.isSuperManager);
   const manager = useIframeStore((state) => state.manager);
+  const hideChat = useIframeStore((state) => state.hideChat);
   const [authEnabled, setAuthEnabled] = useState(false);
   const [accountModalOpen, setAccountModalOpen] = useState(false);
   const [accountLoading, setAccountLoading] = useState(false);
@@ -281,6 +282,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             path: "/analytics/continuous-governance",
             label: t("nav.analyticsContinuousGovernance", "质量工程看板"),
           },
+          {
+            key: "monitor-cron-batch-dispatch",
+            icon: <SparkRefreshLine size={18} />,
+            path: "/monitor/cron-batch-dispatch",
+            label: t("nav.monitorCronBatchDispatch", "批调度监控"),
+          },
         ]
       : []),
     ...(isRMassistSource
@@ -299,6 +306,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/analytics/messages",
       label: t("nav.analyticsMessages", "Messages"),
     },
+    {
+      key: "monitor-task-center",
+      icon: <SparkSearchLine size={18} />,
+      path: "/monitor/tasks",
+      label: t("nav.monitorTaskCenter", "异步任务中心"),
+    },
     // {
     //   key: "analytics-users",
     //   icon: <SparkUserGroupLine size={18} />,
@@ -311,12 +324,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     //   path: "/analytics/sessions",
     //   label: t("nav.analyticsSessions", "Sessions"),
     // },
-    //     {
-    //       key: "analytics-traces",
-    //       icon: <SparkFileTxtLine size={18} />,
-    //       path: "/analytics/traces",
-    //       label: t("nav.analyticsTraces", "Traces"),
-    //     },
+    // {
+    //   key: "analytics-traces",
+    //   icon: <SparkFileTxtLine size={18} />,
+    //   path: "/analytics/traces",
+    //   label: t("nav.analyticsTraces", "Traces"),
+    // },
     {
       key: "continuous-iteration",
       icon: <SparkRefreshLine size={18} />,
@@ -329,7 +342,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
 
   const menuItems: MenuProps["items"] = [
     // 1. 聊天（单独一级）
-    {
+    !hideChat && {
       key: "chat",
       label: collapsed ? null : t("nav.chat"),
       icon: <SparkChatTabFill size={16} />,
@@ -390,6 +403,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkModifyLine size={16} />,
         },
         {
+          key: "hook-management",
+          label: collapsed ? null : t("nav.hookManagement"),
+          icon: <ShieldCheck size={16} />,
+        },
+        {
           key: "heartbeat",
           label: collapsed ? null : t("nav.heartbeat"),
           icon: <SparkVoiceChat01Line size={16} />,
@@ -409,7 +427,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         },
         {
           key: "featured-cases-management",
-          label: collapsed ? null : t("nav.featuredCasesManagement", "精选案例管理"),
+          label: collapsed
+            ? null
+            : t("nav.featuredCasesManagement", "精选案例管理"),
           icon: <SparkFileTxtLine size={16} />,
         },
         {
@@ -472,6 +492,13 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
                   : t("nav.analyticsContinuousGovernance", "质量工程看板"),
                 icon: <SparkRefreshLine size={16} />,
               },
+              {
+                key: "monitor-cron-batch-dispatch",
+                label: collapsed
+                  ? null
+                  : t("nav.monitorCronBatchDispatch", "批调度监控"),
+                icon: <SparkRefreshLine size={16} />,
+              },
             ]
           : []),
         ...(isRMassistSource
@@ -490,21 +517,26 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           label: collapsed ? null : t("nav.analyticsMessages", "Messages"),
           icon: <SparkSearchLine size={16} />,
         },
+        {
+          key: "monitor-task-center",
+          label: collapsed ? null : t("nav.monitorTaskCenter", "异步任务中心"),
+          icon: <SparkSearchLine size={16} />,
+        },
         // {
-        //   key: "analytics-users",
-        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
-        //   icon: <SparkUserGroupLine size={16} />,
+        //   key: "analytics-users",
+        //   label: collapsed ? null : t("nav.analyticsUsers", "Users"),
+        //   icon: <SparkUserGroupLine size={16} />,
         // },
         // {
-        //   key: "analytics-sessions",
-        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
-        //   icon: <SparkMessageLine size={16} />,
+        //   key: "analytics-sessions",
+        //   label: collapsed ? null : t("nav.analyticsSessions", "Sessions"),
+        //   icon: <SparkMessageLine size={16} />,
         // },
-        //         {
-        //           key: "analytics-traces",
-        //           label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
-        //           icon: <SparkFileTxtLine size={16} />,
-        //         },
+        // {
+        //   key: "analytics-traces",
+        //   label: collapsed ? null : t("nav.analyticsTraces", "Traces"),
+        //   icon: <SparkFileTxtLine size={16} />,
+        // },
       ],
     },
     // 7. 质量工程

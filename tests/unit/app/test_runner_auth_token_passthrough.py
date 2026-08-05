@@ -41,16 +41,19 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
         _mcp,
         passthrough_headers=None,
         session_id=None,
+        chat_id=None,
         trace_id=None,
     ):
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
+        captured["chat_id"] = chat_id
         captured["trace_id"] = trace_id
         return []
 
     class FakeAgent:
         def __init__(self, **kwargs):
             captured["request_context"] = kwargs["request_context"]
+            self.memory = SimpleNamespace(content=[])
 
         async def register_mcp_clients(self):
             return
@@ -90,6 +93,14 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",
         AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.skill_selection.build_skill_use_directives",
+        lambda **kwargs: [],
     )
 
     request = SimpleNamespace(
@@ -210,16 +221,19 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         _mcp,
         passthrough_headers=None,
         session_id=None,
+        chat_id=None,
         trace_id=None,
     ):
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
+        captured["chat_id"] = chat_id
         captured["trace_id"] = trace_id
         return []
 
     class FakeAgent:
         def __init__(self, **kwargs):
             captured["request_context"] = kwargs["request_context"]
+            self.memory = SimpleNamespace(content=[])
 
         async def register_mcp_clients(self):
             return
@@ -261,10 +275,20 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         AsyncMock(),
     )
     monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.skill_selection.build_skill_use_directives",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
         "swe.app.runner.runner.get_current_passthrough_headers",
         lambda: {
             "authorization": "Bearer existing",
             "cookie": "foo=existing",
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
         },
     )
 
@@ -275,6 +299,10 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         trace_id="trace-1",
         auth_token="token-123",
         cookie="foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
+        passthrough_headers={
+            "X-B3-BusinessId": "LQ1303LMES-WEB",
+            "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        },
     )
     msgs = [SimpleNamespace(get_text_content=lambda: "hello")]
 
@@ -286,6 +314,9 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
     assert captured["passthrough_headers"] == {
         "authorization": "Bearer existing",
         "cookie": "foo=bar; com.cmb.dw.rtl.sso.token=auth-123",
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+        "X-B3-BusinessId": "LQ1303LMES-WEB",
     }
     assert captured["session_id"] == "session-1"
     assert captured["trace_id"] == "trace-1"
@@ -311,14 +342,16 @@ async def test_query_handler_injects_identity_into_request_context(
         _mcp,
         passthrough_headers=None,
         session_id=None,
+        chat_id=None,
         trace_id=None,
     ):
-        del _mcp, passthrough_headers, session_id, trace_id
+        del _mcp, passthrough_headers, session_id, chat_id, trace_id
         return []
 
     class FakeAgent:
         def __init__(self, **kwargs):
             captured["request_context"] = kwargs["request_context"]
+            self.memory = SimpleNamespace(content=[])
 
         async def register_mcp_clients(self):
             return
@@ -358,6 +391,14 @@ async def test_query_handler_injects_identity_into_request_context(
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",
         AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.skill_selection.build_skill_use_directives",
+        lambda **kwargs: [],
     )
 
     request = SimpleNamespace(

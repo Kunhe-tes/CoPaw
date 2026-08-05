@@ -154,55 +154,7 @@ export function ModelsSection({
         target_tenant_ids: selectedDistributionTenantIds,
         overwrite: true,
       });
-      const items = Array.isArray(result.results) ? result.results : [];
-      const succeeded = items.filter((item) => item.success);
-      const failed = items.filter((item) => !item.success);
-
-      if (succeeded.length > 0) {
-        const lines = succeeded.map((item) => {
-          const suffix = item.bootstrapped
-            ? ` (${t("models.distributeBootstrapped")})`
-            : "";
-          return `• ${item.tenant_id}${suffix}`;
-        });
-        message.success(
-          t("models.distributeSuccess", { count: succeeded.length }),
-        );
-        Modal.confirm({
-          title: t("models.distributeResultTitle"),
-          content: (
-            <div className={styles.modalResultStack}>
-              <div>{t("models.distributeSuccessList")}</div>
-              <pre className={styles.modalResultPre}>{lines.join("\n")}</pre>
-              {failed.length > 0 ? (
-                <div>{t("models.distributeFailureInlineHint")}</div>
-              ) : null}
-            </div>
-          ),
-          okText: t("common.close"),
-          cancelButtonProps: { style: { display: "none" } },
-        });
-      }
-
-      if (failed.length > 0) {
-        const failureLines = failed.map(
-          (item) =>
-            `• ${item.tenant_id}: ${
-              item.error || t("models.distributeFailed")
-            }`,
-        );
-        Modal.confirm({
-          title: t("models.distributePartialFailureTitle"),
-          content: (
-            <pre className={styles.modalResultPre}>
-              {failureLines.join("\n")}
-            </pre>
-          ),
-          okText: t("common.close"),
-          cancelButtonProps: { style: { display: "none" } },
-        });
-      }
-
+      message.success(`模型分发任务已提交：${result.task_id}`);
       setDistributionOpen(false);
       setSelectedDistributionTenantIds([]);
     } catch (error) {

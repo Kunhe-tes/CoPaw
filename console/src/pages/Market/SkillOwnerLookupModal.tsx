@@ -282,12 +282,12 @@ export function SkillOwnerLookupModal({
               ),
             },
             {
-              title: "版本",
+              title: "版本差异",
               dataIndex: "has_update",
               key: "has_update",
               render: (hasUpdate) => (
                 <Tag color={hasUpdate ? "orange" : "blue"}>
-                  {hasUpdate ? "可更新" : "已同步"}
+                  {hasUpdate ? "版本不同" : "已一致"}
                 </Tag>
               ),
             },

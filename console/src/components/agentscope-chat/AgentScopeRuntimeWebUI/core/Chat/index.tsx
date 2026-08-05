@@ -6,11 +6,15 @@ import useChatController from "./hooks/useChatController";
 import { useChatAnywhereSessionLoader } from "../Context/ChatAnywhereSessionsContext";
 import { ChatAnywhereMessagesContext } from "../Context/ChatAnywhereMessagesContext";
 import { useContextSelector } from "use-context-selector";
+import { useChatContentOnly } from "@/components/agentscope-chat/ChatContentOnlyContext";
 
 export default function Chat() {
+  const isContentOnly = useChatContentOnly();
   const prefixCls = useProviderContext().getPrefixCls("chat-anywhere-chat");
   const { handleSubmit, handleCancel } = useChatController();
-  useChatAnywhereSessionLoader();
+  useChatAnywhereSessionLoader({
+    finishLoadingWithoutSession: isContentOnly,
+  });
   // ==================== 首页改版 (Kun He) ====================
   // 当无消息时（欢迎态），隐藏底部输入框，因为欢迎页自带输入卡片
   const messages = useContextSelector(
@@ -26,9 +30,11 @@ export default function Chat() {
       <div className={prefixCls}>
         <MessageList onSubmit={handleSubmit} />
         {/* Input always rendered to handle pasteFile events, visually hidden when no messages */}
-        <div style={{ display: hasMessages ? "block" : "none" }}>
-          <Input onCancel={handleCancel} onSubmit={handleSubmit} />
-        </div>
+        {!isContentOnly && (
+          <div style={{ display: hasMessages ? "block" : "none" }}>
+            <Input onCancel={handleCancel} onSubmit={handleSubmit} />
+          </div>
+        )}
       </div>
     </>
   );

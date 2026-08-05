@@ -31,11 +31,14 @@ from .fs import (
     copy_skill_to_user,
     get_mcp_dir,
     get_skill_dir,
+    get_user_disabled_skills_dir,
+    get_user_skill_manifest_path,
     get_user_skills_dir,
     load_index,
     migrate_legacy_scope_dir_if_needed,
     mutate_user_skill_manifest,
     read_user_skill_manifest,
+    resolve_registered_skill_path,
     load_mcp_config,
     normalize_mcp_config_data,
     resolve_effective_user_id,
@@ -221,6 +224,20 @@ _QUERY_DISTRIBUTIONS_SQL = """
     ORDER BY created_at DESC
 """
 
+# 查询用户技能持有状态
+_QUERY_USER_SKILL_STATUS_SQL = """
+SELECT tenant_id, tenant_name, bbk_id, source, version_text
+FROM swe_skills
+WHERE skill_name = %s AND source_id = %s AND tenant_id IN ({placeholders})
+"""
+
+# 查询已分发用户（从技能表，只统计当前实际持有的）
+_QUERY_DISTRIBUTED_USERS_SQL = """
+SELECT tenant_id, tenant_name, bbk_id
+FROM swe_skills
+WHERE skill_name = %s AND source_id = %s AND source LIKE 'marketplace:%%'
+"""
+
 
 def _sort_items_by_updated_at_desc(
     items: list[MarketItem],
@@ -382,6 +399,7 @@ def _upsert_skill_item(
         existing.creator_name = req.creator_name
         existing.category_id = req.category_id
         existing.bbk_ids = req.bbk_ids
+        existing.include_in_statistics = req.include_in_statistics
         # 直接使用请求中的 skill_id
         if req.skill_id:
             existing.skill_id = req.skill_id
@@ -407,6 +425,7 @@ def _upsert_skill_item(
         status="active",
         created_at=now,
         updated_at=now,
+        include_in_statistics=req.include_in_statistics,
     )
     items.append(item)
     return item
@@ -580,6 +599,7 @@ class MarketplaceService:
         enabled: bool = True,
         source: str = "customized",
         extra_metadata: dict | None = None,
+        package_path: Path | None = None,
     ) -> bool:
         """注册技能到 manifest（用于上传/分发时记录）。
 
@@ -603,17 +623,25 @@ class MarketplaceService:
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
+        skill_dir = package_path or skills_dir / skill_name
 
         def _update(payload: dict) -> bool:
             skills_dict = payload.setdefault("skills", {})
             existing = skills_dict.get(skill_name) or {}
 
             # 构建 metadata（从 SKILL.md 和 skill.json 读取）
-            metadata = _build_skill_metadata_for_manifest(
-                skill_dir,
-                skill_name,
-                source=source,
+            existing_metadata = existing.get("metadata")
+            metadata = (
+                dict(existing_metadata)
+                if isinstance(existing_metadata, dict)
+                else {}
+            )
+            metadata.update(
+                _build_skill_metadata_for_manifest(
+                    skill_dir,
+                    skill_name,
+                    source=source,
+                ),
             )
 
             # 合并额外的 metadata（上传时传入的 creator_id、name 等）
@@ -633,24 +661,26 @@ class MarketplaceService:
             ):
                 metadata["version_text"] = extra_metadata["received_version"]
 
-            # 保留已有的 config 和 channels
-            existing_config = existing.get("config")
+            # 保留已有的 channels
             existing_channels = existing.get("channels") or ["all"]
 
             now = datetime.now(timezone.utc).isoformat()
 
-            entry = {
-                "enabled": enabled,
-                "channels": existing_channels,
-                "source": source,
-                "metadata": metadata,
-                "requirements": metadata["requirements"],
-                "updated_at": now,
-            }
+            entry = dict(existing)
+            entry.update(
+                {
+                    "enabled": enabled,
+                    "channels": existing_channels,
+                    "source": source,
+                    "metadata": metadata,
+                    "requirements": metadata["requirements"],
+                    "updated_at": now,
+                },
+            )
 
-            # 保留已有的 config
-            if existing_config:
-                entry["config"] = existing_config
+            # 按原值保留已有 config，包括空字典或 None
+            if "config" in existing:
+                entry["config"] = existing["config"]
 
             # 保留已有的 created_at（首次注册时写入）
             entry["created_at"] = existing.get("created_at") or now
@@ -688,16 +718,6 @@ class MarketplaceService:
           因为内容已受信任。禁用再启用是用户的常规操作，不应被扫描阻断。
         - 如果技能未在 manifest 中注册（首次启用），则执行安全扫描。
         """
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            agent_id,
-            source_id,
-        )
-        skill_dir = skills_dir / skill_name
-        if not skill_dir.exists():
-            return {"success": False, "reason": "not_found"}
-
         # 检查技能是否已在 manifest 中注册（之前已启用过）
         manifest = read_user_skill_manifest(
             self.swe_root,
@@ -706,6 +726,25 @@ class MarketplaceService:
             source_id,
         )
         already_registered = skill_name in manifest.get("skills", {})
+        skills_dir = get_user_skills_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        skill_dir = skills_dir / skill_name
+        if not skill_dir.exists() and already_registered:
+            skill_dir = (
+                get_user_disabled_skills_dir(
+                    self.swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+        if not skill_dir.exists():
+            return {"success": False, "reason": "not_found"}
 
         # 仅对首次启用的技能执行安全扫描（已注册的技能重新启用时跳过）
         if not already_registered:
@@ -724,11 +763,49 @@ class MarketplaceService:
                 }
 
         # 更新 manifest
+        moved_from: Path | None = None
+        moved_to: Path | None = None
+
         def _update(payload: dict) -> bool:
+            nonlocal moved_from, moved_to
+            registered_entry = payload.get("skills", {}).get(skill_name)
             entry = payload.setdefault("skills", {}).setdefault(skill_name, {})
+            if registered_entry is not None:
+                active_dir = skills_dir / skill_name
+                disabled_dir = (
+                    get_user_disabled_skills_dir(
+                        self.swe_root,
+                        user_id,
+                        agent_id,
+                        source_id,
+                    )
+                    / skill_name
+                )
+                if active_dir.exists() and disabled_dir.exists():
+                    return False
+                if not disabled_dir.exists():
+                    if not active_dir.exists():
+                        return False
+                else:
+                    active_dir.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        shutil.move(disabled_dir, active_dir)
+                    except OSError:
+                        return False
+                    moved_from = disabled_dir
+                    moved_to = active_dir
             entry["enabled"] = True
             entry["updated_at"] = datetime.now(timezone.utc).isoformat()
             return True
+
+        def _rollback_move() -> None:
+            if (
+                moved_from is not None
+                and moved_to is not None
+                and moved_to.exists()
+            ):
+                moved_from.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(moved_to, moved_from)
 
         updated = mutate_user_skill_manifest(
             self.swe_root,
@@ -736,6 +813,7 @@ class MarketplaceService:
             agent_id,
             _update,
             source_id,
+            rollback_fn=_rollback_move,
         )
 
         if updated:
@@ -763,6 +841,37 @@ class MarketplaceService:
             entry = payload.get("skills", {}).get(skill_name)
             if entry is None:
                 return False
+            workspace_dir = get_user_skill_manifest_path(
+                self.swe_root,
+                user_id,
+                agent_id,
+                source_id,
+            ).parent
+            resolved = resolve_registered_skill_path(
+                workspace_dir,
+                skill_name,
+                entry,
+            )
+            skill_dir = resolved.path
+            disabled_dir = (
+                get_user_disabled_skills_dir(
+                    self.swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+            if skill_dir is None:
+                return False
+            if skill_dir != disabled_dir:
+                if disabled_dir.exists():
+                    return False
+                disabled_dir.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    shutil.move(skill_dir, disabled_dir)
+                except OSError:
+                    return False
             entry["enabled"] = False
             entry["updated_at"] = datetime.now(timezone.utc).isoformat()
             return True
@@ -795,54 +904,29 @@ class MarketplaceService:
         source_id: str | None = None,
     ) -> dict[str, Any]:
         """批量删除技能."""
-        import shutil
-
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            agent_id,
-            source_id,
-        )
         results: dict[str, Any] = {}
 
         for skill_name in skill_names:
-            skill_dir = skills_dir / skill_name
-            if not skill_dir.exists():
+            disabled = await self.disable_skill(
+                user_id,
+                skill_name,
+                agent_id,
+                source_id,
+            )
+            if not disabled["success"]:
                 results[skill_name] = {"success": False, "reason": "not_found"}
                 continue
 
-            # 先禁用
-            await self.disable_skill(user_id, skill_name, agent_id, source_id)
-
-            # 删除目录
-            try:
-                shutil.rmtree(skill_dir)
-                results[skill_name] = {"success": True}
-            except Exception as e:
-                results[skill_name] = {"success": False, "reason": str(e)}
-                continue
-
-            # 从 manifest 移除
-            name_to_remove = skill_name
-
-            def _remove(payload: dict, _name: str = name_to_remove) -> bool:
-                payload.get("skills", {}).pop(_name, None)
-                return True
-
-            mutate_user_skill_manifest(
-                self.swe_root,
-                user_id,
-                agent_id,
-                _remove,
-                source_id,
-            )
-
-            # 删除数据库记录
-            await self.skill_registry.delete_skill(
+            deleted = await self.delete_skill(
                 user_id,
                 skill_name,
-                source_id or "",
+                agent_id,
+                source_id,
             )
+            if deleted:
+                results[skill_name] = {"success": True}
+                continue
+            results[skill_name] = {"success": False, "reason": "not_found"}
 
         return results
 
@@ -1011,6 +1095,29 @@ class MarketplaceService:
             except Exception as e:
                 logger.warning("Failed to log publish operation: %s", e)
 
+        # 同步写入 swe_marketplace_skills 表
+        if self.db.is_connected:
+            try:
+                from market.marketplace.market_skill_registry import (
+                    MarketSkillRegistry,
+                )
+
+                registry = MarketSkillRegistry(self.db)
+                await registry.upsert_market_skill(
+                    source_id=source_id,
+                    item_id=item.item_id,
+                    skill_id=item.skill_id,
+                    skill_name=item.name,
+                    cn_name=item.chinese_name,
+                    include_in_statistics=item.include_in_statistics,
+                    creator_id=item.creator_id,
+                    creator_name=item.creator_name,
+                    updator_id=operator_id or item.creator_id,
+                    updator_name=operator_name or item.creator_name,
+                )
+            except Exception as e:
+                logger.warning("Failed to upsert market skill: %s", e)
+
         return item, version_unchanged
 
     async def unpublish_skill(
@@ -1035,6 +1142,19 @@ class MarketplaceService:
         item.status = "inactive"
         item.updated_at = datetime.now(timezone.utc).isoformat()
         save_index(self.marketplace_root, source_id, items)
+
+        # 同步删除 swe_marketplace_skills 表中的记录
+        if self.db.is_connected:
+            try:
+                await self.db.execute(
+                    "DELETE FROM swe_marketplace_skills WHERE source_id = %s AND item_id = %s",
+                    (source_id, item_id),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete from swe_marketplace_skills: %s",
+                    e,
+                )
 
         if self.db.is_connected:
             try:
@@ -1095,6 +1215,19 @@ class MarketplaceService:
         # 从索引中移除该技能
         items = [i for i in items if i.item_id != item_id]
         save_index(self.marketplace_root, source_id, items)
+
+        # 同步删除 swe_marketplace_skills 表中的记录
+        if self.db.is_connected:
+            try:
+                await self.db.execute(
+                    "DELETE FROM swe_marketplace_skills WHERE source_id = %s AND item_id = %s",
+                    (source_id, item_id),
+                )
+            except Exception as e:
+                logger.warning(
+                    "Failed to delete from swe_marketplace_skills: %s",
+                    e,
+                )
 
         if self.db.is_connected:
             try:
@@ -1163,6 +1296,7 @@ class MarketplaceService:
                     updated_at=item.updated_at,
                     call_count=call_count,
                     user_count=user_count,
+                    include_in_statistics=item.include_in_statistics,
                 ),
             )
         return result
@@ -1198,6 +1332,7 @@ class MarketplaceService:
             call_count=call_count,
             user_count=user_count,
             user_stats=user_stats,
+            include_in_statistics=item.include_in_statistics,
         )
 
     def _get_visible_skill_item(
@@ -1284,18 +1419,20 @@ class MarketplaceService:
 
                 # 注册技能到 manifest（使用返回的 metadata）
                 metadata = result.get("metadata") or {}
+                final_enabled = bool(result["final_enabled"])
                 self.register_skill_in_manifest(
                     user["tenant_id"],
                     safe_skill_name,
                     "default",
                     source_id,
-                    enabled=True,
+                    enabled=final_enabled,
                     source=f"marketplace:{item_id}",
                     extra_metadata=metadata,
+                    package_path=result.get("package_path"),
                 )
 
                 # 写入 swe_skills 表（分发时记录用户持有状态）
-                await self.skill_registry.insert_skill(
+                inserted = await self.skill_registry.insert_skill(
                     skill_id=skill_id,
                     skill_name=safe_skill_name,
                     cn_name=cn_name,
@@ -1304,10 +1441,22 @@ class MarketplaceService:
                     bbk_id=user.get("bbk_id", ""),
                     source=f"marketplace:{item_id}",
                     source_id=source_id,
-                    enabled=True,
+                    enabled=final_enabled,
                     description=item.description,
                     version_text=item.version,
                 )
+                if not inserted:
+                    logger.warning(
+                        "分发成功但 swe_skills 写入失败: user=%s, skill=%s",
+                        user["tenant_id"],
+                        safe_skill_name,
+                    )
+                if final_enabled:
+                    await self._trigger_agent_reload(
+                        user["tenant_id"],
+                        "default",
+                        source_id,
+                    )
                 count += 1
             except Exception as e:
                 logger.warning(
@@ -1357,15 +1506,6 @@ class MarketplaceService:
         - source、distributed_by、received_version 等：从 workspace manifest 读取
         - 不再依赖技能目录内的 skill.json 文件
         """
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            agent_id,
-            source_id,
-        )
-        if not skills_dir.exists():
-            return []
-
         # 读取 workspace manifest 获取技能状态和元数据
         manifest = read_user_skill_manifest(
             self.swe_root,
@@ -1375,6 +1515,43 @@ class MarketplaceService:
         )
         manifest_skills = manifest.get("skills", {})
         market_versions = self._get_active_market_versions(source_id)
+        workspace_dir = get_user_skill_manifest_path(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        ).parent
+        skill_dirs: dict[str, Path] = {}
+        for skill_name, manifest_entry in sorted(manifest_skills.items()):
+            if not isinstance(manifest_entry, dict):
+                continue
+            entry_for_resolution = dict(manifest_entry)
+            entry_for_resolution.setdefault("enabled", True)
+            try:
+                skill_dir = resolve_registered_skill_path(
+                    workspace_dir,
+                    skill_name,
+                    entry_for_resolution,
+                ).path
+            except ValueError:
+                continue
+            if skill_dir is None or not skill_dir.is_dir():
+                continue
+            skill_dirs[skill_name] = skill_dir
+
+        active_skills_dir = get_user_skills_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        if active_skills_dir.is_dir():
+            for skill_dir in active_skills_dir.iterdir():
+                if (
+                    skill_dir.is_dir()
+                    and skill_dir.name not in manifest_skills
+                ):
+                    skill_dirs[skill_dir.name] = skill_dir
 
         return [
             self._build_my_skill_item(
@@ -1382,18 +1559,37 @@ class MarketplaceService:
                 manifest_skills,
                 market_versions,
             )
-            for skill_dir in sorted(skills_dir.iterdir())
-            if skill_dir.is_dir()
+            for _, skill_dir in sorted(skill_dirs.items())
         ]
 
     def _get_active_market_versions(self, source_id: str) -> dict[str, str]:
         """读取当前来源下已发布技能的最新版本映射."""
         market_index = load_index(self.marketplace_root, source_id)
-        return {
-            item.name: item.version
-            for item in market_index
-            if item.status == "active"
-        }
+        versions: dict[str, str] = {}
+        for item in market_index:
+            if item.status != "active":
+                continue
+            for key in (item.item_id, item.skill_id, item.name):
+                if key:
+                    versions[key] = item.version
+        return versions
+
+    def _resolve_market_version(
+        self,
+        source: str,
+        skill_id: str,
+        skill_name: str,
+        display_name: str,
+        market_versions: dict[str, str],
+    ) -> str | None:
+        """Resolve the current market version from stable ids before names."""
+        source_item_id = ""
+        if source.startswith("marketplace:"):
+            source_item_id = source.removeprefix("marketplace:")
+        for key in (source_item_id, skill_id, skill_name, display_name):
+            if key and key in market_versions:
+                return market_versions[key]
+        return None
 
     def _read_skill_frontmatter(
         self,
@@ -1497,7 +1693,6 @@ class MarketplaceService:
             )
         )
         received_version = manifest_metadata.get("received_version")
-        market_version = market_versions.get(display_name)
         created_at, updated_at = self._resolve_skill_timestamps(
             manifest_entry,
             manifest_metadata,
@@ -1507,6 +1702,13 @@ class MarketplaceService:
             skill_name,
             source,
             manifest_metadata,
+        )
+        market_version = self._resolve_market_version(
+            source,
+            skill_id,
+            skill_name,
+            display_name,
+            market_versions,
         )
         is_received = source.startswith("marketplace:")
         has_update = (
@@ -1525,6 +1727,7 @@ class MarketplaceService:
             description=description,
             version=version or "1.0.0",
             received_version=received_version,
+            market_version=market_version,
             distributed_by=manifest_metadata.get("distributed_by"),
             is_received=is_received,
             has_update=has_update,
@@ -1640,6 +1843,245 @@ class MarketplaceService:
                 ]
         return []
 
+    def _build_user_status_list(
+        self,
+        target_tenant_ids: list[str],
+        user_skill_map: dict,
+        user_info_map: dict,
+        skill_name: str,
+        source_id: str,
+    ) -> tuple[list[dict], int, int, int]:
+        """构建用户状态列表，返回 (状态列表, 文件I/O次数, customized数, 无记录数)."""
+        from .fs import check_skill_status_in_manifest
+
+        users_status: list[dict] = []
+        file_io_count = 0
+        customized_count = 0
+        no_record_count = 0
+
+        for tenant_id in target_tenant_ids:
+            user_info = user_info_map.get(
+                tenant_id,
+                {"tenant_id": tenant_id, "tenant_name": None, "bbk_id": None},
+            )
+            skill_info = user_skill_map.get(tenant_id)
+
+            if skill_info:
+                source = skill_info.get("source", "")
+                current_version = skill_info.get("version_text", "")
+
+                if source.startswith("marketplace:"):
+                    users_status.append(
+                        {
+                            "tenant_id": tenant_id,
+                            "tenant_name": user_info.get("tenant_name"),
+                            "bbk_id": user_info.get("bbk_id"),
+                            "status": "update",
+                            "current_version": current_version,
+                        },
+                    )
+                elif source == "customized":
+                    customized_count += 1
+                    file_io_count += 1
+                    manifest_status, manifest_version = (
+                        check_skill_status_in_manifest(
+                            self.swe_root,
+                            tenant_id,
+                            skill_name,
+                            source_id,
+                        )
+                    )
+                    users_status.append(
+                        {
+                            "tenant_id": tenant_id,
+                            "tenant_name": user_info.get("tenant_name"),
+                            "bbk_id": user_info.get("bbk_id"),
+                            "status": manifest_status,
+                            "current_version": manifest_version,
+                        },
+                    )
+                else:
+                    users_status.append(
+                        {
+                            "tenant_id": tenant_id,
+                            "tenant_name": user_info.get("tenant_name"),
+                            "bbk_id": user_info.get("bbk_id"),
+                            "status": "first_time",
+                            "current_version": None,
+                        },
+                    )
+            else:
+                no_record_count += 1
+                file_io_count += 1
+                manifest_status, manifest_version = (
+                    check_skill_status_in_manifest(
+                        self.swe_root,
+                        tenant_id,
+                        skill_name,
+                        source_id,
+                    )
+                )
+                users_status.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "tenant_name": user_info.get("tenant_name"),
+                        "bbk_id": user_info.get("bbk_id"),
+                        "status": manifest_status,
+                        "current_version": manifest_version,
+                    },
+                )
+
+        return users_status, file_io_count, customized_count, no_record_count
+
+    async def get_distribution_preview(
+        self,
+        source_id: str,
+        item_id: str,
+        target_tenant_ids: list[str],
+    ) -> dict:
+        """获取技能分发预览，返回每个用户的技能持有状态.
+
+        Args:
+            source_id: 来源 ID
+            item_id: 市场条目 ID
+            target_tenant_ids: 目标用户 ID 列表
+
+        Returns:
+            包含 skill_version、users、distributed_user_ids 的字典
+        """
+        import time
+
+        t_start = time.time()
+
+        # 加载市场条目
+        t0 = time.time()
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                i
+                for i in items
+                if i.item_id == item_id and i.item_type == "skill"
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"Item {item_id} not found in source {source_id}")
+        logger.info(
+            "[PERF] 加载市场条目: %.2fs, item_id=%s",
+            time.time() - t0,
+            item_id,
+        )
+
+        skill_version = item.version
+        skill_name = normalize_skill_name(item.name)
+
+        # 查询用户技能状态
+        users_status: list[dict] = []
+        distributed_user_ids: list[str] = []
+
+        if self.db.is_connected and target_tenant_ids:
+            # 第1次数据库查询：用户技能状态
+            t1 = time.time()
+            placeholders = ",".join(["%s"] * len(target_tenant_ids))
+            sql = _QUERY_USER_SKILL_STATUS_SQL.format(
+                placeholders=placeholders,
+            )
+            rows = await self.db.fetch_all(
+                sql,
+                (skill_name, source_id, *target_tenant_ids),
+            )
+            logger.info(
+                "[PERF] 查询用户技能状态: %.2fs, 用户数=%d, 返回=%d",
+                time.time() - t1,
+                len(target_tenant_ids),
+                len(rows),
+            )
+
+            # 构建状态映射
+            user_skill_map = {row["tenant_id"]: row for row in rows}
+
+            # 第2次数据库查询：已分发用户
+            t2 = time.time()
+            dist_rows = await self.db.fetch_all(
+                _QUERY_DISTRIBUTED_USERS_SQL,
+                (skill_name, source_id),
+            )
+            distributed_user_ids = list(
+                {
+                    row["tenant_id"]
+                    for row in dist_rows
+                    if row["tenant_id"] in target_tenant_ids
+                },
+            )
+            logger.info(
+                "[PERF] 查询已分发用户: %.2fs, 返回=%d, 在目标中=%d",
+                time.time() - t2,
+                len(dist_rows),
+                len(distributed_user_ids),
+            )
+
+            # 第3次数据库查询：用户基本信息
+            t3 = time.time()
+            user_sql = _QUERY_USERS_BY_TENANT_IDS_SQL.format(
+                placeholders=placeholders,
+            )
+            user_rows = await self.db.fetch_all(
+                user_sql,
+                (source_id, *target_tenant_ids),
+            )
+            user_info_map = {row["tenant_id"]: row for row in user_rows}
+            logger.info(
+                "[PERF] 查询用户基本信息: %.2fs, 返回=%d",
+                time.time() - t3,
+                len(user_rows),
+            )
+
+            # 构建每个用户的状态（含文件I/O统计）
+            t4 = time.time()
+            (
+                users_status,
+                file_io_count,
+                customized_count,
+                no_record_count,
+            ) = self._build_user_status_list(
+                target_tenant_ids,
+                user_skill_map,
+                user_info_map,
+                skill_name,
+                source_id,
+            )
+            logger.info(
+                "[PERF] 循环处理用户状态: %.2fs, 文件I/O=%d (customized=%d, 无记录=%d)",
+                time.time() - t4,
+                file_io_count,
+                customized_count,
+                no_record_count,
+            )
+        else:
+            # 数据库未连接或无目标用户，返回基本信息
+            for tenant_id in target_tenant_ids:
+                users_status.append(
+                    {
+                        "tenant_id": tenant_id,
+                        "tenant_name": None,
+                        "bbk_id": None,
+                        "status": "first_time",
+                        "current_version": None,
+                    },
+                )
+
+        logger.info(
+            "[PERF] get_distribution_preview 总耗时: %.2fs, 用户数=%d",
+            time.time() - t_start,
+            len(target_tenant_ids),
+        )
+
+        return {
+            "skill_version": skill_version,
+            "users": users_status,
+            "distributed_user_ids": distributed_user_ids,
+        }
+
     def list_skill_files(
         self,
         user_id: str,
@@ -1648,17 +2090,61 @@ class MarketplaceService:
         source_id: str | None = None,
     ) -> list[dict]:
         """列出技能文件树（不包含 skill.json）."""
-        skills_dir = get_user_skills_dir(
+        skill_dir = self.get_registered_skill_dir(
+            user_id,
+            skill_name,
+            agent_id,
+            source_id,
+        )
+        if skill_dir is None:
+            return []
+        return _build_file_tree_entries(
+            skill_dir,
+            hidden_files={"skill.json"},
+        )
+
+    def get_registered_skill_dir(
+        self,
+        user_id: str,
+        skill_name: str,
+        agent_id: str = "default",
+        source_id: str | None = None,
+    ) -> Path | None:
+        """解析 manifest 注册技能在 active 或 disabled 根目录中的路径."""
+        manifest = read_user_skill_manifest(
             self.swe_root,
             user_id,
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
-        return _build_file_tree_entries(
-            skill_dir,
-            hidden_files={"skill.json"},
-        )
+        manifest_entry = manifest.get("skills", {}).get(skill_name)
+        if not isinstance(manifest_entry, dict):
+            active_skill_dir = (
+                get_user_skills_dir(
+                    self.swe_root,
+                    user_id,
+                    agent_id,
+                    source_id,
+                )
+                / skill_name
+            )
+            return active_skill_dir if active_skill_dir.is_dir() else None
+        entry_for_resolution = dict(manifest_entry)
+        entry_for_resolution.setdefault("enabled", True)
+        workspace_dir = get_user_skill_manifest_path(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        ).parent
+        try:
+            return resolve_registered_skill_path(
+                workspace_dir,
+                skill_name,
+                entry_for_resolution,
+            ).path
+        except ValueError:
+            return None
 
     def read_skill_file(
         self,
@@ -1669,13 +2155,14 @@ class MarketplaceService:
         source_id: str | None = None,
     ) -> tuple[str | None, str]:
         """读取技能文件内容，返回 (content, file_type)."""
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
+        skill_dir = self.get_registered_skill_dir(
             user_id,
+            skill_name,
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
+        if skill_dir is None:
+            return None, "error"
         return _read_preview_file(skill_dir, file_path)
 
     def list_market_skill_files(
@@ -1890,13 +2377,14 @@ class MarketplaceService:
         返回:
             (是否成功, 新版本号或None)
         """
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
+        skill_dir = self.get_registered_skill_dir(
             user_id,
+            skill_name,
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
+        if skill_dir is None:
+            return False, None
         target = skill_dir / file_path
 
         try:
@@ -2074,15 +2562,32 @@ class MarketplaceService:
         """删除用户技能（同时从 manifest 移除条目并删除数据库记录）。"""
         import shutil
 
-        skills_dir = get_user_skills_dir(
+        manifest = read_user_skill_manifest(
             self.swe_root,
             user_id,
             agent_id,
             source_id,
         )
-        skill_dir = skills_dir / skill_name
-
-        if not skill_dir.exists():
+        manifest_entry = manifest.get("skills", {}).get(skill_name)
+        if not isinstance(manifest_entry, dict):
+            return False
+        entry_for_resolution = dict(manifest_entry)
+        entry_for_resolution.setdefault("enabled", True)
+        workspace_dir = get_user_skill_manifest_path(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        ).parent
+        try:
+            skill_dir = resolve_registered_skill_path(
+                workspace_dir,
+                skill_name,
+                entry_for_resolution,
+            ).path
+        except ValueError:
+            return False
+        if skill_dir is None:
             return False
 
         try:
@@ -2121,7 +2626,8 @@ class MarketplaceService:
     ) -> dict[str, Any]:
         """迁移技能目录内 skill.json 字段到 workspace manifest.
 
-        将以下字段从 skills/<技能名>/skill.json 合并到 workspaces/<agent_id>/skill.json:
+        将以下字段从 skills/<技能名>/skill.json 合并到
+        workspaces/<agent_id>/skill.json:
         - creator_id
         - creator_name
         - bbk_id
@@ -2772,6 +3278,8 @@ class MarketplaceService:
         results: list[MCPDistributionTenantResult] = []
 
         for tenant_id in req.target_tenant_ids:
+            user_info = user_info_map.get(tenant_id, {})
+            tenant_name = user_info.get("tenant_name", "")
             try:
                 effective_user_id = resolve_effective_user_id(
                     tenant_id,
@@ -2797,6 +3305,7 @@ class MarketplaceService:
                     results.append(
                         MCPDistributionTenantResult(
                             tenant_id=tenant_id,
+                            tenant_name=tenant_name,
                             success=False,
                             error=(f"用户已有同名 MCP " f'"{item.name}"'),
                         ),
@@ -2818,8 +3327,6 @@ class MarketplaceService:
                 )
 
                 # 获取用户信息（如果查询不到则为空）
-                user_info = user_info_map.get(tenant_id, {})
-                tenant_name = user_info.get("tenant_name", "")
                 bbk_id = user_info.get("bbk_id", "")
 
                 # 记录分发日志
@@ -2848,6 +3355,7 @@ class MarketplaceService:
                 results.append(
                     MCPDistributionTenantResult(
                         tenant_id=tenant_id,
+                        tenant_name=tenant_name,
                         success=True,
                         bootstrapped=bootstrapped,
                         default_agent_updated=[effective_client_key],
@@ -2862,6 +3370,7 @@ class MarketplaceService:
                 results.append(
                     MCPDistributionTenantResult(
                         tenant_id=tenant_id,
+                        tenant_name=tenant_name,
                         success=False,
                         error=str(e),
                     ),
@@ -3024,6 +3533,12 @@ class MarketplaceService:
     ) -> bool:
         """仅更新 manifest 中的 cn_name 字段."""
         now = datetime.now(timezone.utc).isoformat()
+        manifest_path = get_user_skill_manifest_path(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
 
         def _update(payload: dict) -> bool:
             entry = payload.get("skills", {}).get(skill_name)
@@ -3036,13 +3551,36 @@ class MarketplaceService:
             entry["updated_at"] = now
             return True
 
-        return mutate_user_skill_manifest(
+        updated = mutate_user_skill_manifest(
             self.swe_root,
             user_id,
             agent_id,
             _update,
             source_id,
         )
+        if updated:
+            logger.info(
+                "Updated user skill manifest cn_name: "
+                "user=%s source=%s agent=%s skill=%s path=%s cn_name=%s",
+                user_id,
+                source_id,
+                agent_id,
+                skill_name,
+                manifest_path,
+                cn_name,
+            )
+        else:
+            logger.warning(
+                "Skipped user skill manifest cn_name update: "
+                "user=%s source=%s agent=%s skill=%s path=%s "
+                "reason=skill_entry_not_found",
+                user_id,
+                source_id,
+                agent_id,
+                skill_name,
+                manifest_path,
+            )
+        return updated
 
     def _sync_cn_name_to_user_workspace(
         self,
@@ -3061,10 +3599,19 @@ class MarketplaceService:
             )
             skill_dir = skills_dir / skill_name
             if not skill_dir.exists():
+                logger.warning(
+                    "Skipped user skill file cn_name sync: "
+                    "user=%s source=%s skill=%s path=%s "
+                    "reason=skill_dir_not_found",
+                    tenant_id,
+                    source_id,
+                    skill_name,
+                    skill_dir,
+                )
                 return False
 
             # 更新 manifest
-            self._update_skill_manifest_cn_name_only(
+            manifest_updated = self._update_skill_manifest_cn_name_only(
                 tenant_id,
                 skill_name,
                 cn_name,
@@ -3072,8 +3619,23 @@ class MarketplaceService:
                 source_id,
             )
             # 条件更新 SKILL.md
-            self._update_frontmatter_cn_name_if_exists(skill_dir, cn_name)
-            return True
+            frontmatter_updated = self._update_frontmatter_cn_name_if_exists(
+                skill_dir,
+                cn_name,
+            )
+            logger.info(
+                "Synced user skill cn_name files: "
+                "user=%s source=%s skill=%s skill_dir=%s "
+                "manifest_updated=%s frontmatter_updated=%s cn_name=%s",
+                tenant_id,
+                source_id,
+                skill_name,
+                skill_dir,
+                manifest_updated,
+                frontmatter_updated,
+                cn_name,
+            )
+            return manifest_updated
         except Exception as e:
             logger.warning(
                 "Failed to sync cn_name to user %s: %s",
@@ -3100,7 +3662,16 @@ class MarketplaceService:
             chinese_name,
         )
 
-        # 2. 若 sync_to_users=True，同步用户空间
+        # 2. 同步更新 swe_marketplace_skills 表
+        if self.db.is_connected:
+            await self.db.execute(
+                """UPDATE swe_marketplace_skills
+                SET cn_name = %s, updated_at = NOW()
+                WHERE source_id = %s AND item_id = %s""",
+                (chinese_name, source_id, item_id),
+            )
+
+        # 3. 若 sync_to_users=True，同步用户空间
         synced_users = 0
         errors = []
         distribution_count = 0
@@ -3225,6 +3796,7 @@ class MarketplaceService:
         source_id: str,
         item_id: str,
         item_type: str,
+        skill_name: str | None = None,
     ) -> list[DistributionRecord]:
         """查询分发记录.
 
@@ -3232,6 +3804,7 @@ class MarketplaceService:
             source_id: 来源 ID.
             item_id: 条目 ID.
             item_type: 条目类型（skill 或 mcp）.
+            skill_name: 技能名称（可选，用于查询当前实际持有的用户）.
 
         Returns:
             分发记录列表.
@@ -3239,6 +3812,24 @@ class MarketplaceService:
         if not self.db.is_connected:
             return []
         try:
+            # 如果提供了 skill_name，查询 swe_skills 表获取当前实际持有技能的用户
+            if skill_name and item_type == "skill":
+                # 规范化 skill_name，与 swe_skills 表存储格式一致
+                normalized_skill_name = normalize_skill_name(skill_name)
+                rows = await self.db.fetch_all(
+                    _QUERY_DISTRIBUTED_USERS_SQL,
+                    (normalized_skill_name, source_id),
+                )
+                return [
+                    DistributionRecord(
+                        target_user_id=r["tenant_id"],
+                        target_user_name=r.get("tenant_name") or "",
+                        target_bbk_id=r.get("bbk_id") or "",
+                        distributed_at=None,
+                    )
+                    for r in rows
+                ]
+            # 否则查询操作日志表
             rows = await self.db.fetch_all(
                 _QUERY_DISTRIBUTIONS_SQL,
                 (source_id, item_id, item_type),
@@ -3493,15 +4084,6 @@ class MarketplaceService:
         reload_source_id: str | None = None,
     ) -> str | None:
         """撤回单个用户的技能，失败时返回原因."""
-        skills_dir = get_user_skills_dir(
-            self.swe_root,
-            user_id,
-            "default",
-            source_id,
-        )
-        skill_dir = skills_dir / skill_name
-        if not skill_dir.exists():
-            return "skill_not_found"
         if expected_source_prefix and not self._skill_source_matches(
             user_id,
             skill_name,
@@ -3510,14 +4092,14 @@ class MarketplaceService:
         ):
             return "not_from_this_marketplace"
 
-        await self.disable_skill(
+        deleted = await self.delete_skill(
             user_id,
             skill_name,
             "default",
             source_id,
         )
-        shutil.rmtree(skill_dir)
-        self._remove_skill_manifest_entry(user_id, skill_name, source_id)
+        if not deleted:
+            return "skill_not_found"
         await self._trigger_agent_reload(
             user_id,
             "default",

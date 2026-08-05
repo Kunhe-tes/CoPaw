@@ -15,12 +15,17 @@ from .session import (
 )
 from .manager import ChatManager
 from .models import (
+    ChatArchiveMetadata,
+    ChatArchivePage,
+    ChatCompactionBoundary,
     ChatPage,
     ChatSpec,
     ChatHistory,
     ChatMessage,
 )
+from ...agents.memory.conversation_archive import ConversationArchiveStore
 from .model_call_error_detail import MODEL_CALL_FAILED_MESSAGES_STATE_KEY
+from .hidden_context_injection import HIDDEN_CONTEXT_METADATA_KEY
 from .utils import agentscope_msg_to_message
 from ..approvals import get_approval_service
 
@@ -108,6 +113,48 @@ async def _annotate_approval_action_statuses(
         approval_action["status"] = request.status
 
     return messages
+
+
+def _redact_hidden_context_messages(
+    messages: list[ChatMessage],
+) -> list[ChatMessage]:
+    """Build display-safe chat-history messages without mutating memory."""
+    redacted: list[ChatMessage] = []
+    for message in messages:
+        if message.role != "user" or not isinstance(message.metadata, dict):
+            redacted.append(message)
+            continue
+
+        nested_metadata = message.metadata.get("metadata")
+        marker = message.metadata.get(HIDDEN_CONTEXT_METADATA_KEY)
+        if marker is None and isinstance(nested_metadata, dict):
+            marker = nested_metadata.get(HIDDEN_CONTEXT_METADATA_KEY)
+        if not isinstance(marker, dict):
+            redacted.append(message)
+            continue
+
+        visible_text = marker.get("visible_text")
+        suffix = marker.get("suffix")
+        if not isinstance(visible_text, str) or not isinstance(suffix, str):
+            redacted.append(message)
+            continue
+
+        payload = message.model_dump(mode="json")
+        metadata = {
+            key: value
+            for key, value in message.metadata.items()
+            if key != HIDDEN_CONTEXT_METADATA_KEY
+        }
+        if isinstance(nested_metadata, dict):
+            metadata["metadata"] = {
+                key: value
+                for key, value in nested_metadata.items()
+                if key != HIDDEN_CONTEXT_METADATA_KEY
+            }
+        payload["metadata"] = metadata
+        payload["content"] = [{"type": "text", "text": visible_text}]
+        redacted.append(ChatMessage.model_validate(payload))
+    return redacted
 
 
 def _task_session_messages_from_state(state: dict) -> list[ChatMessage]:
@@ -463,11 +510,13 @@ async def _build_chat_history(
     status = await workspace.task_tracker.get_status(chat_spec.id)
     task_messages = _task_session_messages_from_state(state)
     model_call_failed_messages = _model_call_failed_messages_from_state(state)
+    archive = await _archive_metadata(workspace, chat_spec.id)
     if not state:
         return ChatHistory(
             chat=chat_spec,
             messages=[*task_messages, *model_call_failed_messages],
             status=status,
+            archive=archive,
         )
     memory_state = state.get("agent", {}).get("memory", {})
     messages: list[ChatMessage] = []
@@ -487,7 +536,62 @@ async def _build_chat_history(
     messages.extend(model_call_failed_messages)
     messages.sort(key=_message_sort_key)
     messages = await _annotate_approval_action_statuses(messages)
-    return ChatHistory(chat=chat_spec, messages=messages, status=status)
+    messages = _redact_hidden_context_messages(messages)
+    return ChatHistory(
+        chat=chat_spec,
+        messages=messages,
+        status=status,
+        archive=archive,
+    )
+
+
+def _archive_store(workspace) -> ConversationArchiveStore | None:
+    workspace_dir = getattr(workspace, "workspace_dir", None)
+    if workspace_dir is None:
+        return None
+    return ConversationArchiveStore(workspace_dir / "dialog")
+
+
+def _boundary_model(boundary) -> ChatCompactionBoundary:
+    return ChatCompactionBoundary(
+        id=boundary.id,
+        archived_message_count=boundary.archived_message_count,
+        first_message_id=boundary.first_message_id,
+        last_message_id=boundary.last_message_id,
+        created_at=boundary.created_at,
+        first_timestamp=boundary.first_timestamp,
+        last_timestamp=boundary.last_timestamp,
+    )
+
+
+async def _archive_metadata(workspace, chat_id: str) -> ChatArchiveMetadata:
+    store = _archive_store(workspace)
+    if store is None:
+        return ChatArchiveMetadata()
+    page = await store.read_page(chat_id, limit=1)
+    return ChatArchiveMetadata(
+        has_more=bool(page.messages),
+        boundaries=[_boundary_model(boundary) for boundary in page.boundaries],
+    )
+
+
+async def _archive_page(
+    workspace,
+    chat_id: str,
+    before: str | None,
+    limit: int,
+) -> ChatArchivePage:
+    store = _archive_store(workspace)
+    if store is None:
+        return ChatArchivePage()
+    page = await store.read_page(chat_id, before=before, limit=limit)
+    messages = agentscope_msg_to_message(page.messages)
+    return ChatArchivePage(
+        messages=_redact_hidden_context_messages(messages),
+        boundaries=[_boundary_model(boundary) for boundary in page.boundaries],
+        has_more=page.has_more,
+        next_cursor=page.next_cursor,
+    )
 
 
 def _message_original_id(message: ChatMessage) -> str | None:
@@ -537,7 +641,7 @@ async def list_chats(
     ),
     cursor: Optional[str] = Query(
         None,
-        description="Opaque cursor for stable chat pagination",
+        description="Opaque cursor for live best-effort chat pagination",
     ),
     mgr: ChatManager = Depends(get_chat_manager),
     workspace=Depends(get_workspace),
@@ -546,6 +650,8 @@ async def list_chats(
 
     Omitting both pagination parameters preserves the legacy array response.
     Providing both returns a ``ChatPage`` ordered by latest update first.
+    Cursor pages are live and best-effort: updates between requests can move
+    records across the cursor boundary.
 
     Args:
         user_id: Optional user ID to filter chats
@@ -698,6 +804,27 @@ async def get_answer_turn(
         messages=messages,
         status=history.status,
     )
+
+
+@router.get("/{chat_id}/history", response_model=ChatArchivePage)
+async def get_chat_history_page(
+    chat_id: str,
+    before: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=50),
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    """Load one display-safe page of compacted history for a chat record."""
+    chat_spec = await mgr.get_chat(chat_id)
+    if not chat_spec:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat not found: {chat_id}",
+        )
+    try:
+        return await _archive_page(workspace, chat_spec.id, before, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.get("/{chat_id}", response_model=ChatHistory)

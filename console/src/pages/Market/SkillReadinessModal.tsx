@@ -122,7 +122,7 @@ function renderUpdateTag(value: boolean | null | undefined): ReactNode {
   if (value === null || value === undefined) return "-";
   return (
     <Tag color={value ? "orange" : "blue"}>
-      {value ? "可更新" : "已同步"}
+      {value ? "版本不同" : "已一致"}
     </Tag>
   );
 }
@@ -633,6 +633,10 @@ export function SkillReadinessModal({
   const ownerSummary = overview?.owner_summary ?? DEFAULT_OWNER_SUMMARY;
   const configChecks = overview?.config_checks ?? [];
   const ownerRows = overview?.owners ?? [];
+  const marketVersion =
+    skill?.version ||
+    ownerRows.find((owner) => owner.market_version)?.market_version ||
+    null;
   const filteredOwnerRows = useMemo(() => {
     const keyword = normalizeSearchKeyword(ownerAppliedSearchText);
     return ownerRows.filter(
@@ -710,12 +714,6 @@ export function SkillReadinessModal({
       render: renderNullableText,
     },
     {
-      title: "市场版本",
-      dataIndex: "market_version",
-      key: "market_version",
-      render: renderNullableText,
-    },
-    {
       title: "用户版本",
       dataIndex: "installed_version",
       key: "installed_version",
@@ -728,7 +726,7 @@ export function SkillReadinessModal({
       render: renderEnabledTag,
     },
     {
-      title: "版本",
+      title: "版本差异",
       dataIndex: "has_update",
       key: "has_update",
       render: renderUpdateTag,
@@ -993,11 +991,16 @@ export function SkillReadinessModal({
           <SafetyCertificateOutlined />
           <span>用户可执行性</span>
           {target.displayName && <Text type="secondary">{target.displayName}</Text>}
+          {marketVersion && (
+            <Tag color="blue" title={`市场版本 v${marketVersion}`}>
+              市场版本 v{marketVersion}
+            </Tag>
+          )}
         </Space>
       }
       width={1040}
       onCancel={overviewLoading || starting ? undefined : onClose}
-      destroyOnClose
+      destroyOnHidden
       footer={[
         <Button
           key="refresh"
@@ -1189,7 +1192,7 @@ export function SkillReadinessModal({
                   locale={{
                     emptyText: ownerEmptyText,
                   }}
-                  scroll={{ x: 900 }}
+                  scroll={{ x: 760 }}
                 />
               </div>
 

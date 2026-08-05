@@ -23,14 +23,10 @@ _REACT_AGENT_TOOL_EXPORTS = (
     "edit_file",
     "execute_shell_command",
     "get_current_time",
-    "get_token_usage",
     "glob_search",
     "grep_search",
     "read_file",
     "send_file_to_user",
-    "set_user_timezone",
-    "view_image",
-    "view_video",
     "write_file",
     "create_memory_search_tool",
 )
@@ -338,6 +334,7 @@ def test_stdio_launch_config_injects_runtime_claim_env(
         tenant_context(tenant_id="tenant-a", source_id="source-a"),
         runtime_invocation_claims_context(
             session_id="session-1",
+            chat_id="chat-uuid-1",
             trace_id="trace-1",
         ),
     ):
@@ -353,6 +350,7 @@ def test_stdio_launch_config_injects_runtime_claim_env(
         "source-a",
     )
     assert launch_config.env["SWE_SESSION_ID"] == "session-1"
+    assert launch_config.env["SWE_CHAT_ID"] == "chat-uuid-1"
     assert launch_config.env["SWE_TRACE_ID"] == "trace-1"
 
 

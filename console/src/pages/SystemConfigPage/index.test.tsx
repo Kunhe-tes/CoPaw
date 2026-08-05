@@ -6,6 +6,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -52,12 +53,24 @@ describe("SystemConfigPage", () => {
     return screen.getAllByRole("switch")[0];
   }
 
-  function getCronUnreadAutoPauseSwitch() {
+  function getZhaohuToolGuardNotificationSwitch() {
     return screen.getAllByRole("switch")[2];
   }
 
-  function getToolResultCompactSwitch() {
+  function getCronUnreadAutoPauseSwitch() {
+    return screen.getAllByRole("switch")[3];
+  }
+
+  function getCronSkipWeekendZhaohuSwitch() {
     return screen.getAllByRole("switch")[4];
+  }
+
+  function getArchiveMaintenanceSwitch() {
+    return screen.getAllByRole("switch")[6];
+  }
+
+  function getToolResultCompactSwitch() {
+    return screen.getAllByRole("switch")[7];
   }
 
   function seedEffectiveConfig(config: Record<string, unknown> = {}) {
@@ -168,6 +181,86 @@ describe("SystemConfigPage", () => {
     expect(mocks.messageApi.success).toHaveBeenCalled();
   });
 
+  it("keeps a dirty draft until the manager confirms a source switch", async () => {
+    render(<SystemConfigPage />);
+
+    await screen.findByText("当前系统");
+    fireEvent.click(getTaskProgressSwitch());
+
+    act(() => {
+      useIframeStore.getState().setContext({ source: "workspace" });
+    });
+
+    expect(await screen.findByText("切换系统前保存修改？")).toBeTruthy();
+    expect(useIframeStore.getState().source).toBe("portal");
+
+    fireEvent.click(screen.getByRole("button", { name: "继续编辑" }));
+    expect(screen.getByText("存在未保存修改")).toBeTruthy();
+    expect(useIframeStore.getState().source).toBe("portal");
+  });
+
+  it("edits a capability from its detail drawer", async () => {
+    render(<SystemConfigPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /对话与执行/ }));
+
+    const drawer = await screen.findByRole("dialog");
+    fireEvent.click(
+      within(drawer).getByRole("button", { name: "新增提示词片段" }),
+    );
+    const promptSegment = within(drawer).getByLabelText("提示词片段 1");
+    fireEvent.change(promptSegment, { target: { value: "保持简洁" } });
+    await waitFor(() => {
+      expect(screen.getByText("存在未保存修改")).toBeTruthy();
+    });
+  });
+
+  it("shows grouped context and page-level save guidance in the editor drawer", async () => {
+    render(<SystemConfigPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: /安全与审批/ }));
+
+    const drawer = await screen.findByRole("dialog");
+    expect(within(drawer).getByText("访问防护")).toBeTruthy();
+    expect(
+      within(drawer).getByText("所有修改仍会通过页面底部统一保存。"),
+    ).toBeTruthy();
+    expect(within(drawer).getByText("高影响")).toBeTruthy();
+  });
+
+  it("saves zhaohu Tool Guard approval notification switch changes", async () => {
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        approval_notifications: {
+          zhaohu_tool_guard_enabled: true,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("Tool Guard 审批招乎通知")).toBeTruthy();
+
+    fireEvent.click(getZhaohuToolGuardNotificationSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          approval_notifications: {
+            zhaohu_tool_guard_enabled: true,
+          },
+        },
+      });
+    });
+    expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
+  });
+
   it("saves cron unread auto pause settings", async () => {
     mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
       source_id: "portal",
@@ -203,6 +296,42 @@ describe("SystemConfigPage", () => {
         },
       });
     });
+  });
+
+  it("saves cron weekend zhaohu suppression setting", async () => {
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        cron_notifications: {
+          skip_weekend_zhaohu_enabled: true,
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    const scheduledTaskCardTitle = await screen.findByText("定时任务设置");
+    const scheduledTaskCard = scheduledTaskCardTitle.closest(".ant-card");
+    const switchTitle = await screen.findByText("周末不发招呼完成通知");
+    expect(switchTitle.closest(".ant-card")).toBe(scheduledTaskCard);
+
+    fireEvent.click(getCronSkipWeekendZhaohuSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          cron_notifications: {
+            skip_weekend_zhaohu_enabled: true,
+          },
+        },
+      });
+    });
+    expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
   });
 
   it("saves cron task session cleanup settings", async () => {
@@ -266,6 +395,64 @@ describe("SystemConfigPage", () => {
             enabled: true,
             retention_days: 45,
             cron: "30 2 * * *",
+            unknown_retained: "yes",
+          },
+        },
+      });
+    });
+  });
+
+  it("saves archive maintenance settings", async () => {
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        archive_maintenance: {
+          enabled: true,
+          cron: "0 3 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 1,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        provider_policy: { default_model: "qwen-max" },
+        archive_maintenance: {
+          enabled: false,
+          cron: "30 3 * * *",
+          unknown_retained: "yes",
+        },
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-21 10:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    expect(await screen.findByText("文件归档维护")).toBeTruthy();
+    expect(screen.getByText("03:00")).toBeTruthy();
+
+    fireEvent.mouseDown(
+      screen.getByRole("combobox", { name: "归档维护每日运行时间" }),
+    );
+    fireEvent.click(await screen.findByText("03:30"));
+    fireEvent.click(getArchiveMaintenanceSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() => {
+      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
+        config: {
+          provider_policy: { default_model: "qwen-max" },
+          archive_maintenance: {
+            enabled: false,
+            cron: "30 3 * * *",
             unknown_retained: "yes",
           },
         },
@@ -353,13 +540,12 @@ describe("SystemConfigPage", () => {
 
     render(<SystemConfigPage />);
 
-    const input = await screen.findByLabelText("系统提示词注入");
-    expect(input).toHaveValue("source prompt");
-
-    fireEvent.change(input, {
-      target: {
-        value: "source prompt\n\nruntime rule\n\nsource prompt",
-      },
+    expect(await screen.findByLabelText("提示词片段 1")).toHaveValue(
+      "source prompt",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "新增提示词片段" }));
+    fireEvent.change(screen.getByLabelText("提示词片段 2"), {
+      target: { value: "runtime rule" },
     });
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
@@ -592,48 +778,16 @@ describe("SystemConfigPage", () => {
         },
       });
     });
-  });
+  }, 10_000);
 
-  it("saves explicit immediate truncation configs", async () => {
-    mocks.sourceSystemConfigApi.updateCurrent.mockResolvedValue({
-      source_id: "portal",
-      config: {
-        file_read_truncation: {
-          enabled: true,
-          max_bytes: 50000,
-        },
-      },
-      version: 1,
-      is_default: false,
-      updated_by: "alice",
-      updated_at: "2026-05-21 10:00:00",
-    });
-
-    render(<SystemConfigPage />);
-
-    expect(await screen.findByText("工具输出控制")).toBeTruthy();
-    expect(screen.getByText("继承旧工具结果近期阈值")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "启用独立配置" }));
-    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
-
-    await waitFor(() => {
-      expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
-        config: {
-          file_read_truncation: {
-            enabled: true,
-            max_bytes: 50000,
-          },
-        },
-      });
-    });
-  });
-
-  it("can restore a single immediate truncation section to inheritance", async () => {
+  it("uses the tool output override for new and recent output without a file-read field", async () => {
     mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
       source_id: "portal",
       config: {
         provider_policy: { default_model: "qwen-max" },
+        tool_result_compact: {
+          recent_max_bytes: 12000,
+        },
         file_read_truncation: {
           enabled: true,
           max_bytes: 12000,
@@ -648,6 +802,9 @@ describe("SystemConfigPage", () => {
       source_id: "portal",
       config: {
         provider_policy: { default_model: "qwen-max" },
+        tool_result_compact: {
+          recent_max_bytes: 16000,
+        },
       },
       version: 2,
       is_default: false,
@@ -658,14 +815,25 @@ describe("SystemConfigPage", () => {
     render(<SystemConfigPage />);
 
     expect(await screen.findByText("工具输出控制")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "recent_max_bytes 同时控制新产生和近期的工具输出；old_max_bytes 仅控制历史工具输出。",
+      ),
+    ).toBeTruthy();
+    expect(screen.queryByText("文件读取截断")).toBeNull();
 
-    fireEvent.click(screen.getByRole("button", { name: "恢复继承" }));
+    fireEvent.change(screen.getByDisplayValue("12000"), {
+      target: { value: "16000" },
+    });
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() => {
       expect(mocks.sourceSystemConfigApi.updateCurrent).toHaveBeenCalledWith({
         config: {
           provider_policy: { default_model: "qwen-max" },
+          tool_result_compact: {
+            recent_max_bytes: 16000,
+          },
         },
       });
     });
@@ -716,38 +884,9 @@ describe("SystemConfigPage", () => {
         },
       });
     });
-  });
+  }, 10_000);
 
-  it("blocks invalid immediate truncation max bytes before saving", async () => {
-    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValueOnce({
-      source_id: "portal",
-      config: {
-        file_read_truncation: {
-          enabled: true,
-          max_bytes: 999,
-        },
-      },
-      version: 1,
-      is_default: false,
-      updated_by: "alice",
-      updated_at: "2026-05-21 10:00:00",
-    });
-
-    render(<SystemConfigPage />);
-
-    expect(await screen.findByText("工具输出控制")).toBeTruthy();
-
-    fireEvent.click(screen.getByRole("button", { name: "common.save" }));
-
-    await waitFor(() => {
-      expect(mocks.messageApi.error).toHaveBeenCalledWith(
-        "文件读取输出片段字节数不能小于 1000",
-      );
-    });
-    expect(mocks.sourceSystemConfigApi.updateCurrent).not.toHaveBeenCalled();
-  });
-
-  it("deletes explicit config and refreshes effective config", async () => {
+  it("confirms restoring defaults before clearing explicit config", async () => {
     mocks.sourceSystemConfigApi.getCurrent
       .mockResolvedValueOnce({
         source_id: "portal",
@@ -777,7 +916,15 @@ describe("SystemConfigPage", () => {
 
     expect(await screen.findByText("存在显式覆盖")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "common.delete" }));
+    fireEvent.click(screen.getByRole("button", { name: "恢复默认设置" }));
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText("恢复当前系统的默认设置？")).toBeTruthy();
+    expect(mocks.sourceSystemConfigApi.deleteCurrent).not.toHaveBeenCalled();
+
+    fireEvent.click(
+      within(dialog).getByRole("button", { name: "恢复默认设置" }),
+    );
 
     await waitFor(() => {
       expect(mocks.sourceSystemConfigApi.deleteCurrent).toHaveBeenCalledTimes(
@@ -786,6 +933,72 @@ describe("SystemConfigPage", () => {
     });
     expect(loadEffectiveConfig).toHaveBeenCalledWith("portal");
     expect(await screen.findByText("继承默认值")).toBeTruthy();
+  });
+
+  it("keeps unsaved changes when default restoration is cancelled", async () => {
+    mocks.sourceSystemConfigApi.getCurrent.mockResolvedValue({
+      source_id: "portal",
+      config: {
+        feature_switches: {
+          chat_task_progress_enabled: false,
+        },
+      },
+      version: 2,
+      is_default: false,
+      updated_by: "alice",
+      updated_at: "2026-05-20 22:00:00",
+    });
+
+    render(<SystemConfigPage />);
+
+    await screen.findByText("存在显式覆盖");
+    fireEvent.click(getTaskProgressSwitch());
+    fireEvent.click(screen.getByRole("button", { name: "恢复默认设置" }));
+
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /取\s*消/ }));
+
+    expect(mocks.sourceSystemConfigApi.deleteCurrent).not.toHaveBeenCalled();
+    expect(screen.getByText("存在未保存修改")).toBeTruthy();
+  });
+
+  it("closes default restoration confirmation when the active source changes", async () => {
+    mocks.sourceSystemConfigApi.getCurrent
+      .mockResolvedValueOnce({
+        source_id: "portal",
+        config: {
+          feature_switches: {
+            chat_task_progress_enabled: false,
+          },
+        },
+        version: 2,
+        is_default: false,
+        updated_by: "alice",
+        updated_at: "2026-05-20 22:00:00",
+      })
+      .mockResolvedValueOnce({
+        source_id: "workspace",
+        config: {},
+        version: 0,
+        is_default: true,
+        updated_by: null,
+        updated_at: null,
+      });
+
+    render(<SystemConfigPage />);
+
+    await screen.findByText("存在显式覆盖");
+    fireEvent.click(screen.getByRole("button", { name: "恢复默认设置" }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+
+    act(() => {
+      useIframeStore.getState().setContext({ source: "workspace" });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+    expect(mocks.sourceSystemConfigApi.deleteCurrent).not.toHaveBeenCalled();
   });
 
   it("clears stale draft and blocks save when the next source load fails", async () => {
@@ -819,9 +1032,7 @@ describe("SystemConfigPage", () => {
     expect(await screen.findByText("当前系统配置请求失败")).toBeTruthy();
     expect(getTaskProgressSwitch()).toHaveAttribute("aria-checked", "true");
     expect(screen.getByRole("button", { name: "common.save" })).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: "common.delete" }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: "恢复默认设置" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "common.save" }));
     expect(mocks.sourceSystemConfigApi.updateCurrent).not.toHaveBeenCalled();

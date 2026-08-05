@@ -162,6 +162,7 @@ async def test_create_streamable_http_mcp_client_uses_explicit_httpx_timeouts(
             ),
             passthrough_headers={"Authorization": "Bearer test-token"},
             session_id="session-1",
+            chat_id="chat-uuid-1",
         )
 
     assert captured["stateful_client_kwargs"] == {
@@ -181,6 +182,8 @@ async def test_create_streamable_http_mcp_client_uses_explicit_httpx_timeouts(
             ),
             "x-swe-session-id": "session-1",
             "sessionid": "session-1",
+            "x-swe-chat-id": "chat-uuid-1",
+            "chatid": "chat-uuid-1",
         },
         "timeout": runner_module._MCP_HTTP_TIMEOUT_SECONDS,
         "sse_read_timeout": runner_module._MCP_HTTP_SSE_READ_TIMEOUT_SECONDS,
@@ -233,6 +236,7 @@ async def test_create_streamable_http_mcp_client_injects_trace_id_header(
             ),
             passthrough_headers={"x-swe-trace-id": "passthrough-trace"},
             session_id="session-1",
+            chat_id="chat-uuid-1",
             trace_id="trace-1",
         )
 
@@ -245,6 +249,8 @@ async def test_create_streamable_http_mcp_client_injects_trace_id_header(
         "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
         "x-swe-session-id": "session-1",
         "sessionid": "session-1",
+        "x-swe-chat-id": "chat-uuid-1",
+        "chatid": "chat-uuid-1",
         "x-swe-trace-id": "trace-1",
         "traceid": "trace-1",
     }

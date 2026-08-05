@@ -170,6 +170,7 @@ export default function ConversationQuickNav({
             className="quick-nav-overflow-hint quick-nav-overflow-hint--top"
             onClick={() => scrollNavPage(-1)}
             aria-label={`上方还有 ${hiddenQuestionCount.above} 个问题`}
+            title={`上方还有 ${hiddenQuestionCount.above} 个问题`}
           >
             <ChevronUp size={13} aria-hidden="true" />
             <span>上方还有 {hiddenQuestionCount.above} 条</span>
@@ -181,6 +182,7 @@ export default function ConversationQuickNav({
             className="quick-nav-overflow-hint quick-nav-overflow-hint--bottom"
             onClick={() => scrollNavPage(1)}
             aria-label={`下方还有 ${hiddenQuestionCount.below} 个问题`}
+            title={`下方还有 ${hiddenQuestionCount.below} 个问题`}
           >
             <span>下方还有 {hiddenQuestionCount.below} 条</span>
             <ChevronDown size={13} aria-hidden="true" />

@@ -33,6 +33,9 @@ vi.mock("../../../stores/iframeStore", () => ({
   useIframeStore: (selector: (state: { source: string }) => unknown) =>
     selector({ source: "RMASSIST" }),
 }));
+vi.mock("./CronScheduleDistribution", () => ({
+  default: () => <div data-testid="schedule-distribution-panel" />,
+}));
 
 describe("ContinuousGovernancePage", () => {
   afterEach(() => {
@@ -268,6 +271,37 @@ describe("ContinuousGovernancePage", () => {
     ).not.toBeInTheDocument();
   }, 10000);
 
+  it("limits dense trend charts to evenly spaced date labels", async () => {
+    const baseReport = await mocks.dreamLogsApi.report();
+    mocks.dreamLogsApi.report.mockClear();
+    const trends = Array.from({ length: 14 }, (_, index) => ({
+      date: dayjs("2026-06-26").add(index, "day").format("YYYY-MM-DD"),
+      executions: index + 1,
+      manual_count: index % 3,
+      cron_count: index + 1 - (index % 3),
+      success_count: index,
+      failed_count: 1,
+      total_size_saved: index * 1024,
+    }));
+    mocks.dreamLogsApi.report.mockResolvedValueOnce({
+      ...baseReport,
+      trends,
+    });
+
+    render(<ContinuousGovernancePage />);
+
+    await screen.findByTestId("governance-kpi-covered_users");
+    const trendLabels = screen.getAllByTestId("governance-trend-date-label");
+    const savingsLabels = screen.getAllByTestId(
+      "governance-savings-date-label",
+    );
+
+    expect(trendLabels).toHaveLength(6);
+    expect(savingsLabels).toHaveLength(6);
+    expect(trendLabels[0]).toHaveTextContent("06-26");
+    expect(trendLabels[trendLabels.length - 1]).toHaveTextContent("07-09");
+  });
+
   it("loads all source branches for the BBK filter", async () => {
     render(<ContinuousGovernancePage />);
 
@@ -296,8 +330,9 @@ describe("ContinuousGovernancePage", () => {
     expect(
       within(actions).getByTestId("governance-query-button"),
     ).toBeInTheDocument();
-    expect(within(actions).getByTestId("governance-reset-button"))
-      .toBeInTheDocument();
+    expect(
+      within(actions).getByTestId("governance-reset-button"),
+    ).toBeInTheDocument();
     expect(within(actions).getAllByRole("button")).toHaveLength(2);
   });
 
@@ -382,9 +417,9 @@ describe("ContinuousGovernancePage", () => {
       });
     });
 
-    expect(screen.getByTestId("governance-kpi-archive_files")).toHaveTextContent(
-      "3",
-    );
+    expect(
+      screen.getByTestId("governance-kpi-archive_files"),
+    ).toHaveTextContent("3");
     expect(screen.getAllByText("memory/old.md").length).toBeGreaterThan(0);
     expect(screen.getAllByText("memory/protected.md").length).toBeGreaterThan(
       0,
@@ -427,7 +462,10 @@ describe("ContinuousGovernancePage", () => {
       });
     });
 
-    const archiveSection = screen.getByText("归档文件").closest("section");
+    const archiveSection = screen
+      .getAllByText("归档文件")
+      .find((element) => element.closest("section"))
+      ?.closest("section");
     expect(archiveSection).not.toBeNull();
     const secondPage = within(archiveSection as HTMLElement).getByTitle("2");
     fireEvent.click(secondPage);
@@ -484,9 +522,9 @@ describe("ContinuousGovernancePage", () => {
     expect(
       await screen.findByTestId("governance-health-panel"),
     ).toHaveTextContent("governance_record / record-2");
-    expect(screen.getByTestId("governance-kpi-total_executions")).toHaveTextContent(
-      "1",
-    );
+    expect(
+      screen.getByTestId("governance-kpi-total_executions"),
+    ).toHaveTextContent("1");
   });
 
   it("passes only user-dimension filters to file governance requests", async () => {
@@ -543,9 +581,9 @@ describe("ContinuousGovernancePage", () => {
     render(<ContinuousGovernancePage />);
 
     expect((await screen.findAllByText("Alice")).length).toBeGreaterThan(0);
-    expect(screen.getByTestId("governance-kpi-covered_users")).toHaveTextContent(
-      "10",
-    );
+    expect(
+      screen.getByTestId("governance-kpi-covered_users"),
+    ).toHaveTextContent("10");
 
     fireEvent.click(screen.getByRole("tab", { name: "文件清理与归档" }));
 
@@ -565,5 +603,25 @@ describe("ContinuousGovernancePage", () => {
       await screen.findByTestId("governance-kpi-archive_files"),
     ).toHaveTextContent("3");
     expect(screen.getAllByText("memory/old.md").length).toBeGreaterThan(0);
+  });
+
+  it("lazily mounts the scheduled firing distribution in a third tab", async () => {
+    render(<ContinuousGovernancePage />);
+
+    expect(
+      screen.getByRole("tab", { name: "定时任务触发分布" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByTestId("schedule-distribution-panel"),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("tab", { name: "定时任务触发分布" }),
+    );
+
+    expect(
+      await screen.findByTestId("schedule-distribution-panel"),
+    ).toBeInTheDocument();
+    expect(mocks.dreamLogsApi.archiveReport).not.toHaveBeenCalled();
   });
 });
