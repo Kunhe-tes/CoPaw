@@ -6,6 +6,7 @@ Yields (Msg, last) compatible with query_handler stream.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import AsyncIterator
@@ -102,7 +103,6 @@ async def _resolve_command_context(
                 await chat_manager.get_chat_id_by_session(
                     session_id,
                     channel or "console",
-                    user_id,
                 )
                 or ""
             )
@@ -257,11 +257,15 @@ async def _run_conversation_command(
     )
     try:
         response_msg = await conv_handler.handle_conversation_command(query)
-    except RuntimeError as exc:
-        response_msg = Msg(
-            name="Friday",
-            role="assistant",
-            content=[TextBlock(type="text", text=str(exc))],
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Conversation command failed: %s", query)
+        command = query.strip().split(maxsplit=1)[0]
+        response_msg = _command_error(
+            f"- `{command}` could not be completed. "
+            "Please retry or check server logs.",
+            prefix="**Command Failed**\n\n",
         )
     yield response_msg, True
     if context.session_id and context.user_id:

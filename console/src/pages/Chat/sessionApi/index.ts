@@ -578,6 +578,20 @@ function compactionBoundaryCard(
   };
 }
 
+function archiveSourceMessageId(
+  message: Message | undefined,
+): string | undefined {
+  if (!message) return undefined;
+  const metadata = message.metadata;
+  if (metadata && typeof metadata === "object") {
+    const originalId = (metadata as Record<string, unknown>).original_id;
+    if (typeof originalId === "string" && originalId) {
+      return originalId;
+    }
+  }
+  return typeof message.id === "string" ? message.id : undefined;
+}
+
 function withArchiveBoundaries(
   messages: IAgentScopeRuntimeWebUIMessage[],
   boundaries: ChatCompactionBoundary[] | undefined,
@@ -606,11 +620,12 @@ export function convertArchivedPage(
   const result: IAgentScopeRuntimeWebUIMessage[] = [];
   let segmentStart = 0;
   messages.forEach((message, index) => {
-    const messageId =
-      typeof message.id === "string" ? message.id : undefined;
-    const batchBoundaries = messageId
-      ? boundariesByLastMessageId.get(messageId)
-      : undefined;
+    const sourceMessageId = archiveSourceMessageId(message);
+    const nextSourceMessageId = archiveSourceMessageId(messages[index + 1]);
+    const batchBoundaries =
+      sourceMessageId && sourceMessageId !== nextSourceMessageId
+        ? boundariesByLastMessageId.get(sourceMessageId)
+        : undefined;
     if (!batchBoundaries?.length) return;
     result.push(...convertMessages(messages.slice(segmentStart, index + 1)));
     result.push(...batchBoundaries.map(compactionBoundaryCard));

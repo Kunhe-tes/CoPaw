@@ -1495,4 +1495,47 @@ describe("archived conversation card conversion", () => {
       "AgentScopeRuntimeRequestCard",
     ]);
   });
+
+  it("places a compaction boundary after the final runtime fragment of its source message", () => {
+    const cards = convertArchivedPage(
+      [
+        {
+          id: "runtime-fragment-1",
+          role: "assistant",
+          content: "thinking",
+          metadata: { original_id: "source-message-1" },
+        },
+        {
+          id: "runtime-fragment-2",
+          role: "assistant",
+          content: "answer",
+          metadata: { original_id: "source-message-1" },
+        },
+        {
+          id: "runtime-message-3",
+          role: "user",
+          content: "follow-up",
+          metadata: { original_id: "source-message-2" },
+        },
+      ],
+      [
+        {
+          id: "boundary-1",
+          archived_message_count: 1,
+          first_message_id: "source-message-1",
+          last_message_id: "source-message-1",
+          created_at: "2026-08-01T12:00:00+00:00",
+        },
+      ],
+    );
+
+    expect(cards.map((card) => card.cards?.[0]?.code)).toEqual([
+      "AgentScopeRuntimeResponseCard",
+      "ConversationCompactionBoundary",
+      "AgentScopeRuntimeRequestCard",
+    ]);
+    expect(
+      (cards[0]?.cards?.[0]?.data as { output?: unknown[] }).output,
+    ).toHaveLength(2);
+  });
 });

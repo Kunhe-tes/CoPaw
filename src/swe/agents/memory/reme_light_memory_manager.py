@@ -698,17 +698,34 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             return False
         from .chat_checkpoint import EvidenceItem, PrecompactionCandidate
 
+        source_message_ids = tuple(message.id for message in messages)
+        online_message_ids = tuple(
+            message.id for message, _marks in getattr(memory, "content", ())
+        )
+        if (
+            not source_message_ids
+            or len(source_message_ids) != len(set(source_message_ids))
+            or len(online_message_ids) != len(set(online_message_ids))
+        ):
+            return False
         state = await memory.chat_checkpoint_store.read_checkpoint_state(
             chat_id,
         )
-        source_refs = {f"message:{message.id}" for message in messages}
-        selected_events = []
-        for event in state.events:
-            if not any(ref in source_refs for ref in event.source_refs):
-                break
-            selected_events.append(event)
-        if not selected_events:
+        if len(state.events) < len(messages):
             return False
+        selected_events = list(state.events[: len(messages)])
+        for offset, (message, event) in enumerate(
+            zip(messages, selected_events),
+            start=1,
+        ):
+            if (
+                event.sequence != state.record.applied_event_sequence + offset
+                or event.type != "message_added"
+                or dict(event.facts)
+                != {"message_id": message.id, "role": message.role}
+                or event.source_refs != (f"message:{message.id}",)
+            ):
+                return False
         applied_event_sequence = selected_events[-1].sequence
         event_context = tuple(
             EvidenceItem(
@@ -738,7 +755,7 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             record=candidate_record,
             base_revision=state.record.revision,
             applied_event_sequence=applied_event_sequence,
-            source_message_ids=[message.id for message in messages],
+            source_message_ids=source_message_ids,
         )
         await memory.chat_checkpoint_store.write_pending_candidate(
             chat_id,
