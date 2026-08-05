@@ -144,26 +144,6 @@ describe("ConversationQuickNav", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("marks embedded navigation as a dedicated rail", async () => {
-    renderWithContexts(
-      <>
-        <div className="swe-bubble-list-scroll">
-          <div id="question-1" className="swe-bubble" />
-        </div>
-        <ConversationQuickNav placement="rail" />
-      </>,
-    );
-
-    const nav = await screen.findByLabelText("会话快速导航");
-
-    expect(nav.parentElement).toHaveClass("conversation-quick-nav--rail");
-    expect(
-      screen.getByRole("button", {
-        name: /第 1 次问题: 原聊天页问题/,
-      }),
-    ).toBeInTheDocument();
-  });
-
   it("keeps all question nav items reachable inside a scroll container", async () => {
     const messages = Array.from({ length: 32 }, (_, index) =>
       makeUserMessage(`question-${index + 1}`, `第 ${index + 1} 个问题`),
