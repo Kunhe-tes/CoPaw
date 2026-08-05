@@ -10,7 +10,7 @@ that reuses recent successful results or starts a background workflow task.
 #### Scenario: Reuse recent successful result on submission
 
 - **GIVEN** a request to `POST /api/monitor/high-frequency-question/tasks`
-- **AND** the request contains `source_id`, `start_time`, and `end_time`
+- **AND** the request contains `X-Source-Id`, `start_time`, and `end_time`
 - **WHEN** a successful result batch exists for the same `source_id`, start
   date, end date, normalized `scope_type`, and normalized `bbk_id`
 - **AND** that batch's latest `created_at` is within the last 24 hours
@@ -57,14 +57,16 @@ external workflow finishes or fails.
 
 - **GIVEN** a high-frequency question task has been created
 - **WHEN** the workflow call raises or returns an unexpected response
-- **AND** result rows exist for `source_id + batch_id`
+- **AND** result rows appear for `source_id + batch_id` within the configured
+  result wait window
 - **THEN** the service updates the task status to `succeeded`.
 
 #### Scenario: Mark task failed when workflow does not write results
 
 - **GIVEN** a high-frequency question task has been created
 - **WHEN** the workflow call raises or returns an unexpected response
-- **AND** no result rows exist for `source_id + batch_id`
+- **AND** no result rows appear for `source_id + batch_id` within the
+  configured result wait window
 - **THEN** the service updates the task status to `failed`
 - **AND** stores only a truncated safe error summary.
 
@@ -76,7 +78,7 @@ the same submission logic.
 #### Scenario: Submit default seven-day ALL-scope prewarm
 
 - **GIVEN** a request to `POST /api/monitor/high-frequency-question/prewarm`
-- **AND** the request contains `source_id`
+- **AND** the request contains `X-Source-Id` or a compatible body `source_id`
 - **WHEN** no explicit time range is provided
 - **THEN** the service submits a task for the most recent seven-day range
 - **AND** uses normalized `scope_type = ALL` and `bbk_id = ALL`
@@ -90,7 +92,7 @@ successful result rows for the caller's source.
 #### Scenario: Return recent available results
 
 - **GIVEN** a request to `GET /api/monitor/high-frequency-question/results`
-- **AND** the query contains `source_id`, `start_time`, and `end_time`
+- **AND** the request contains `X-Source-Id`, `start_time`, and `end_time`
 - **WHEN** a successful result batch exists for the same normalized criteria
 - **AND** the batch's latest `created_at` is within the last 24 hours
 - **THEN** the service returns `state = AVAILABLE`
@@ -112,3 +114,39 @@ successful result rows for the caller's source.
 - **WHEN** no successful result exists for the same normalized criteria
 - **THEN** the service returns `state = EMPTY`
 - **AND** does not inspect running tasks.
+
+### Requirement: High-Frequency Question Console Modal
+
+The Console SHALL provide a high-frequency question analysis modal from the
+user-message analytics page.
+
+#### Scenario: Open modal and query default cache
+
+- **GIVEN** a user opens the user-message analytics page
+- **WHEN** the user clicks "高频问题分析"
+- **THEN** the Console opens a large centered modal
+- **AND** defaults to the most recent seven-day range and all organizations
+- **AND** calls the result lookup API using the request context `X-Source-Id`.
+
+#### Scenario: Filter changes require explicit cache query
+
+- **GIVEN** the modal is open
+- **WHEN** the user changes date range or organization
+- **THEN** the current result area enters a pending-query state
+- **AND** no task is submitted automatically.
+
+#### Scenario: Empty lookup requires explicit generation
+
+- **GIVEN** the user clicks "查询结果"
+- **WHEN** the result lookup API returns `state = EMPTY`
+- **THEN** the Console shows an empty result state
+- **AND** exposes a separate "生成分析" action.
+
+#### Scenario: Submit task and poll status
+
+- **GIVEN** the modal shows an empty result state
+- **WHEN** the user clicks "生成分析"
+- **THEN** the Console submits the task API
+- **AND** shows an in-progress state when the API returns `RUNNING`
+- **AND** polls the async task detail until success or failure
+- **AND** refreshes result lookup after success.

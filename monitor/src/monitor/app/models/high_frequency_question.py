@@ -27,7 +27,7 @@ def _strip_optional(value: Optional[str]) -> Optional[str]:
 class HighFrequencyQuestionMessageQueryRequest(BaseModel):
     """Request for querying source user messages."""
 
-    source_id: str = Field(..., min_length=1, max_length=64)
+    source_id: str = Field(default="", max_length=64)
     start_time: datetime
     end_time: datetime
     bbk_id: Optional[str] = Field(default=None, max_length=64)
@@ -35,10 +35,7 @@ class HighFrequencyQuestionMessageQueryRequest(BaseModel):
     @field_validator("source_id")
     @classmethod
     def _strip_required_text(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("source_id is required")
-        return stripped
+        return value.strip()
 
     @field_validator("bbk_id")
     @classmethod
@@ -129,7 +126,7 @@ class HighFrequencyQuestionResultItem(BaseModel):
 class HighFrequencyQuestionResultSaveRequest(BaseModel):
     """Request for saving high-frequency question results."""
 
-    source_id: str = Field(..., min_length=1, max_length=64)
+    source_id: str = Field(default="", max_length=64)
     batch_id: str = Field(..., min_length=1, max_length=64)
     stat_start_time: datetime
     stat_end_time: datetime
@@ -138,9 +135,14 @@ class HighFrequencyQuestionResultSaveRequest(BaseModel):
         min_length=1,
     )
 
-    @field_validator("source_id", "batch_id")
+    @field_validator("source_id")
     @classmethod
-    def _strip_required_text(cls, value: str) -> str:
+    def _strip_source_id(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("batch_id")
+    @classmethod
+    def _strip_batch_id(cls, value: str) -> str:
         stripped = value.strip()
         if not stripped:
             raise ValueError("field is required")
@@ -182,7 +184,7 @@ class HighFrequencyQuestionResultSaveResponse(BaseModel):
 class HighFrequencyQuestionCriteriaRequest(BaseModel):
     """Base criteria for task submission and result lookup."""
 
-    source_id: str = Field(..., min_length=1, max_length=64)
+    source_id: str = Field(default="", max_length=64)
     start_time: datetime
     end_time: datetime
     bbk_id: Optional[str] = Field(default=None, max_length=64)
@@ -190,10 +192,7 @@ class HighFrequencyQuestionCriteriaRequest(BaseModel):
     @field_validator("source_id")
     @classmethod
     def _strip_source_id(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("source_id is required")
-        return stripped
+        return value.strip()
 
     @field_validator("bbk_id")
     @classmethod
@@ -222,7 +221,7 @@ class HighFrequencyQuestionTaskSubmitRequest(
 class HighFrequencyQuestionPrewarmRequest(BaseModel):
     """Request for scheduler-driven high-frequency question prewarm."""
 
-    source_id: str = Field(..., min_length=1, max_length=64)
+    source_id: str = Field(default="", max_length=64)
     start_time: Optional[datetime] = None
     end_time: Optional[datetime] = None
     bbk_id: Optional[str] = Field(default=None, max_length=64)
@@ -230,10 +229,7 @@ class HighFrequencyQuestionPrewarmRequest(BaseModel):
     @field_validator("source_id")
     @classmethod
     def _strip_source_id(cls, value: str) -> str:
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("source_id is required")
-        return stripped
+        return value.strip()
 
     @field_validator("bbk_id")
     @classmethod

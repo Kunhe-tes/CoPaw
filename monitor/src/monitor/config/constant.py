@@ -249,6 +249,18 @@ HFQ_WORKFLOW_TIMEOUT_SECONDS = EnvVarLoader.get_float(
     min_value=1.0,
 )
 
+HFQ_RESULT_WAIT_SECONDS = EnvVarLoader.get_float(
+    "MONITOR_HFQ_RESULT_WAIT_SECONDS",
+    420.0,
+    min_value=0.0,
+)
+
+HFQ_RESULT_POLL_INTERVAL_SECONDS = EnvVarLoader.get_float(
+    "MONITOR_HFQ_RESULT_POLL_INTERVAL_SECONDS",
+    10.0,
+    min_value=1.0,
+)
+
 # 定时任务定义表名。生产库使用 swe_cron_jobs，允许环境变量覆盖 schema 前缀。
 SWE_WARMUP_CRON_TABLE = EnvVarLoader.get_str(
     "MONITOR_SWE_WARMUP_CRON_TABLE",

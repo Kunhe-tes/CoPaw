@@ -21,6 +21,8 @@ same source/date/scope, and exposes the latest result state to the frontend.
   logic.
 - Add a result query endpoint that returns recent or stale successful results,
   or an empty state.
+- Add the Console user-message page entry and modal for querying cached
+  high-frequency question results before explicit task submission.
 - Store task request criteria in `swe_async_tasks.result_json`.
 - Dispatch the external workflow in an `asyncio` background task.
 - Configure workflow URL, API key, open id, and response mode through
@@ -39,18 +41,24 @@ Existing endpoints remain:
 
 ## Decisions
 
-- `source_id` is always preserved as the raw caller-provided source id.
+- `source_id` is resolved from `X-Source-Id` for interactive requests; body or
+  query `source_id` remains a compatibility fallback for workflow and scheduler
+  callers.
 - `swe_async_tasks.status` uses the existing lowercase status style:
   `running`, `succeeded`, `failed`.
 - Submission does not deduplicate or reuse currently running tasks.
 - Result lookup does not return running tasks.
+- Console result lookup only checks cached successful rows. When it returns
+  `EMPTY`, the frontend shows a separate generate action instead of creating a
+  task automatically.
 - 24-hour reuse only applies to successful result rows in
   `swe_high_frequency_question_result`.
 - The workflow call is considered successful only when the HTTP call succeeds
   and the JSON response contains `message = "success"`.
-- If workflow completion is ambiguous or raises, Monitor checks whether rows
-  already exist for `batch_id = task_id`; existing rows mark the task
-  `succeeded`, otherwise the task is marked `failed`.
+- If workflow completion is ambiguous or raises, Monitor polls for result rows
+  for up to the configured wait window, defaulting to 7 minutes. Rows for
+  `source_id + batch_id` mark the task `succeeded`; otherwise the task is
+  marked `failed`.
 
 ## Out of Scope
 

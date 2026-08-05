@@ -16,6 +16,8 @@ from fastapi import HTTPException
 import httpx
 
 from ....config.constant import (
+    HFQ_RESULT_POLL_INTERVAL_SECONDS,
+    HFQ_RESULT_WAIT_SECONDS,
     HFQ_WORKFLOW_API_KEY,
     HFQ_WORKFLOW_OPEN_ID,
     HFQ_WORKFLOW_RESPONSE_MODE,
@@ -611,7 +613,7 @@ class HighFrequencyQuestionService:
                 error_message,
             )
 
-        result_count = await self._count_result_rows(
+        result_count = await self._wait_for_result_rows(
             source_id=criteria.source_id,
             batch_id=task_id,
         )
@@ -672,6 +674,31 @@ class HighFrequencyQuestionService:
             (source_id, batch_id),
         )
         return int(row.get("count", 0)) if row else 0
+
+    async def _wait_for_result_rows(self, *, source_id: str, batch_id: str) -> int:
+        wait_seconds = max(float(HFQ_RESULT_WAIT_SECONDS), 0.0)
+        interval_seconds = max(float(HFQ_RESULT_POLL_INTERVAL_SECONDS), 1.0)
+        deadline = time.monotonic() + wait_seconds
+
+        logger.info(
+            "Waiting for high-frequency question result rows: "
+            "task_id=%s source_id=%s wait_seconds=%s interval_seconds=%s",
+            batch_id,
+            source_id,
+            wait_seconds,
+            interval_seconds,
+        )
+
+        while True:
+            result_count = await self._count_result_rows(
+                source_id=source_id,
+                batch_id=batch_id,
+            )
+            if result_count > 0 or time.monotonic() >= deadline:
+                return result_count
+
+            remaining_seconds = max(deadline - time.monotonic(), 0.0)
+            await asyncio.sleep(min(interval_seconds, remaining_seconds))
 
     async def _mark_task_succeeded(
         self,

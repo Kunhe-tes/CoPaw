@@ -13,6 +13,8 @@ from monitor.app.models.high_frequency_question import (
     HighFrequencyQuestionMessageQueryRequest,
     HighFrequencyQuestionResultSaveRequest,
 )
+from monitor.app.routers.high_frequency_question import _resolve_source_id
+from monitor.app.services.tracing import high_frequency_question as hfq_service_module
 from monitor.app.services.tracing.high_frequency_question import (
     HighFrequencyQuestionService,
 )
@@ -60,6 +62,12 @@ def test_result_save_rejects_duplicate_rank_key():
                 _result_item(),
             ],
         )
+
+
+def test_resolve_source_id_prefers_header_then_body_then_default():
+    assert _resolve_source_id(" RMASSIST ", "default") == "RMASSIST"
+    assert _resolve_source_id(None, " body-source ") == "body-source"
+    assert _resolve_source_id(None, None) == "default"
 
 
 @pytest.mark.asyncio
@@ -129,6 +137,27 @@ async def test_save_results_deletes_and_batch_inserts_in_transaction():
     assert db.cursor.many[0][1][0][1] == "HFQ_20260730_030000"
 
 
+@pytest.mark.asyncio
+async def test_wait_for_result_rows_polls_until_rows_exist(monkeypatch):
+    db = _FakeDb(fetch_one_results=[{"count": 0}, {"count": 3}])
+    service = HighFrequencyQuestionService(db)
+    monkeypatch.setattr(hfq_service_module, "HFQ_RESULT_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(
+        hfq_service_module,
+        "HFQ_RESULT_POLL_INTERVAL_SECONDS",
+        1.0,
+    )
+    monkeypatch.setattr(hfq_service_module.asyncio, "sleep", _noop_sleep)
+
+    result_count = await service._wait_for_result_rows(
+        source_id="RMASSIST",
+        batch_id="task-001",
+    )
+
+    assert result_count == 3
+    assert len(db.fetch_one_calls) == 2
+
+
 def _result_item() -> dict:
     return {
         "scope_type": "ORG",
@@ -142,9 +171,15 @@ def _result_item() -> dict:
 
 
 class _FakeDb:
-    def __init__(self, rows: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[dict] | None = None,
+        fetch_one_results: list[dict | None] | None = None,
+    ) -> None:
         self.rows = rows or []
+        self.fetch_one_results = fetch_one_results or []
         self.fetch_all_calls: list[tuple[str, tuple]] = []
+        self.fetch_one_calls: list[tuple[str, tuple]] = []
         self.cursor = _FakeCursor()
         self.conn = _FakeConnection(self.cursor)
 
@@ -152,9 +187,19 @@ class _FakeDb:
         self.fetch_all_calls.append((query, params))
         return self.rows
 
+    async def fetch_one(self, query: str, params: tuple) -> dict | None:
+        self.fetch_one_calls.append((query, params))
+        if self.fetch_one_results:
+            return self.fetch_one_results.pop(0)
+        return None
+
     @asynccontextmanager
     async def acquire(self):
         yield self.conn
+
+
+async def _noop_sleep(_delay: float) -> None:
+    return None
 
 
 class _FakeConnection:

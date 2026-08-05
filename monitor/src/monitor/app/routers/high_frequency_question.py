@@ -31,6 +31,19 @@ router = APIRouter(
 )
 
 
+def _resolve_source_id(
+    header_source_id: str | None,
+    fallback_source_id: str | None = None,
+) -> str:
+    source_id = (header_source_id or "").strip()
+    if source_id:
+        return source_id
+    source_id = (fallback_source_id or "").strip()
+    if source_id:
+        return source_id
+    return "default"
+
+
 @router.post(
     "/messages",
     response_model=HighFrequencyQuestionMessageListResponse,
@@ -38,11 +51,17 @@ router = APIRouter(
 )
 async def query_high_frequency_question_messages(
     body: HighFrequencyQuestionMessageQueryRequest,
+    x_source_id: str | None = Header(default=None, alias="X-Source-Id"),
 ) -> HighFrequencyQuestionMessageListResponse:
     """Query clean source messages for high-frequency question analysis."""
     try:
+        resolved_body = body.model_copy(
+            update={
+                "source_id": _resolve_source_id(x_source_id, body.source_id),
+            },
+        )
         service = HighFrequencyQuestionService.get_instance()
-        return await service.query_messages(body)
+        return await service.query_messages(resolved_body)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=503,
@@ -57,11 +76,17 @@ async def query_high_frequency_question_messages(
 )
 async def save_high_frequency_question_results(
     body: HighFrequencyQuestionResultSaveRequest,
+    x_source_id: str | None = Header(default=None, alias="X-Source-Id"),
 ) -> HighFrequencyQuestionResultSaveResponse:
     """Save AI-generated high-frequency question analysis results."""
     try:
+        resolved_body = body.model_copy(
+            update={
+                "source_id": _resolve_source_id(x_source_id, body.source_id),
+            },
+        )
         service = HighFrequencyQuestionService.get_instance()
-        return await service.save_results(body)
+        return await service.save_results(resolved_body)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=503,
@@ -76,14 +101,20 @@ async def save_high_frequency_question_results(
 )
 async def submit_high_frequency_question_task(
     body: HighFrequencyQuestionTaskSubmitRequest,
+    x_source_id: str | None = Header(default=None, alias="X-Source-Id"),
     x_user_id: str | None = Header(default=None, alias="X-User-Id"),
     x_user_name: str | None = Header(default=None, alias="X-User-Name"),
 ) -> HighFrequencyQuestionTaskSubmitResponse:
     """Submit analysis task or reuse a recent successful result."""
     try:
+        resolved_body = body.model_copy(
+            update={
+                "source_id": _resolve_source_id(x_source_id, body.source_id),
+            },
+        )
         service = HighFrequencyQuestionService.get_instance()
         return await service.submit_task(
-            body,
+            resolved_body,
             actor_user_id=x_user_id or "",
             actor_user_name=unquote(x_user_name or ""),
         )
@@ -101,11 +132,17 @@ async def submit_high_frequency_question_task(
 )
 async def prewarm_high_frequency_question_task(
     body: HighFrequencyQuestionPrewarmRequest,
+    x_source_id: str | None = Header(default=None, alias="X-Source-Id"),
 ) -> HighFrequencyQuestionTaskSubmitResponse:
     """Submit scheduler-driven prewarm through the normal task flow."""
     try:
+        resolved_body = body.model_copy(
+            update={
+                "source_id": _resolve_source_id(x_source_id, body.source_id),
+            },
+        )
         service = HighFrequencyQuestionService.get_instance()
-        return await service.submit_prewarm(body)
+        return await service.submit_prewarm(resolved_body)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=503,
@@ -120,11 +157,17 @@ async def prewarm_high_frequency_question_task(
 )
 async def query_high_frequency_question_results(
     request: HighFrequencyQuestionCriteriaRequest = Depends(),
+    x_source_id: str | None = Header(default=None, alias="X-Source-Id"),
 ) -> HighFrequencyQuestionResultQueryResponse:
     """Query recent or stale successful analysis results."""
     try:
+        resolved_request = request.model_copy(
+            update={
+                "source_id": _resolve_source_id(x_source_id, request.source_id),
+            },
+        )
         service = HighFrequencyQuestionService.get_instance()
-        return await service.query_results(request)
+        return await service.query_results(resolved_request)
     except RuntimeError as exc:
         raise HTTPException(
             status_code=503,

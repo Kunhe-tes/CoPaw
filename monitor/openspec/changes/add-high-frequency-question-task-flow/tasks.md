@@ -22,9 +22,16 @@
 - [x] 4.1 Add `POST /monitor/high-frequency-question/tasks`
 - [x] 4.2 Add `POST /monitor/high-frequency-question/prewarm`
 - [x] 4.3 Add `GET /monitor/high-frequency-question/results`
+- [x] 4.4 Resolve interactive `source_id` from `X-Source-Id`
 
-## 5. Verification
+## 5. Console UI
 
-- [x] 5.1 Add focused unit tests for cache hit, task creation, workflow update,
+- [x] 5.1 Add user-message page high-frequency question modal entry
+- [x] 5.2 Query cached results before explicit task submission
+- [x] 5.3 Submit generation task from empty state and poll async task status
+
+## 6. Verification
+
+- [x] 6.1 Add focused unit tests for cache hit, task creation, workflow update,
       and result query states
-- [x] 5.2 Run syntax checks and available focused tests
+- [x] 6.2 Run syntax checks and available focused tests

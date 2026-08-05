@@ -45,6 +45,11 @@ Normalized request criteria are:
 `bbk_id` is normalized to `ALL` with `scope_type = ALL` when missing, otherwise
 `scope_type = ORG` and the trimmed input `bbk_id` is preserved.
 
+Interactive requests resolve `source_id` from the `X-Source-Id` header, matching
+the existing tracing query APIs. Body or query `source_id` remains a
+compatibility fallback for workflow and scheduler callers, followed by the
+existing default source behavior.
+
 Date matching uses day boundaries calculated in Python so SQL does not need
 `DATE(column)` on indexed datetime columns.
 
@@ -56,6 +61,11 @@ same normalized criteria. The 24-hour cache only matches rows whose grouped
 
 If submission finds a 24-hour hit, it returns the existing result and does not
 create a task. If no hit exists, submission always creates a new task.
+
+The Console modal separates cache lookup from task creation. Changing filters
+puts the result area into a pending-query state. Clicking "查询结果" only calls
+the result lookup API. If the API returns `EMPTY`, the modal shows a separate
+"生成分析" action; clicking that action submits the task.
 
 ## Workflow Dispatch
 
@@ -77,10 +87,12 @@ The workflow payload includes:
 ## Failure Handling
 
 Workflow success requires a JSON response with `message == "success"`. On
-unexpected responses or exceptions, Monitor checks whether
-`swe_high_frequency_question_result` contains rows for the same
-`source_id + batch_id`. If rows exist, the task is marked `succeeded`; otherwise
-it is marked `failed` with a truncated safe error message.
+unexpected responses or exceptions, Monitor polls
+`swe_high_frequency_question_result` for the configured wait window
+(`MONITOR_HFQ_RESULT_WAIT_SECONDS`, default 420 seconds) at the configured
+interval (`MONITOR_HFQ_RESULT_POLL_INTERVAL_SECONDS`, default 10 seconds). If
+rows exist for the same `source_id + batch_id`, the task is marked `succeeded`;
+otherwise it is marked `failed` with a truncated safe error message.
 
 ## Concurrency
 
