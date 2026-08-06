@@ -1882,38 +1882,32 @@ export default function ChatPage() {
                 onDragOver={isContentOnly ? undefined : handleDragOver}
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
-                <div className={styles.chatMessagesLayout}>
-                  <div className={styles.chatMessagesViewport}>
-                    <ChatContentOnlyProvider enabled={isContentOnly}>
-                      <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
-                        <WPlusSopActiveBar
-                          chatId={feedbackChatId || chatId}
-                          logicalSessionId={feedbackSessionId || undefined}
-                          onLocksChatInputChange={setWPlusSopLocksChatInput}
-                        />
-                        <div
-                          className={
-                            wPlusSopLocksChatInput
-                              ? styles.chatDisabledOverlay
-                              : undefined
-                          }
-                          style={{ height: "100%", width: "100%" }}
-                        >
-                          <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                        </div>
-                      </GlobalVoiceRecorder>
-                    </ChatContentOnlyProvider>
-                  </div>
-                  <div className={styles.chatQuickNavRail}>
-                    <ConversationQuickNav placement="rail" />
-                  </div>
+              <ChatContentOnlyProvider enabled={isContentOnly}>
+                  <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                    <WPlusSopActiveBar
+                      chatId={feedbackChatId || chatId}
+                      logicalSessionId={feedbackSessionId || undefined}
+                      onLocksChatInputChange={setWPlusSopLocksChatInput}
+                    />
+                    <div
+                      className={
+                        wPlusSopLocksChatInput
+                          ? styles.chatDisabledOverlay
+                          : undefined
+                      }
+                      style={{ height: "100%", width: "100%" }}
+                    >
+                      <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                    </div>
+                  </GlobalVoiceRecorder>
+                </ChatContentOnlyProvider>
                 {!isContentOnly && (
                   <DragUploadOverlay
                     visible={isDragging}
                     onClose={handleDragOverlayClose}
                   />
                 )}
-              </div>
+                <ConversationQuickNav />
             </div>
           </div>
           </AutoPreviewHtmlProvider>
