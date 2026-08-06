@@ -636,7 +636,6 @@ def _extract_context_references(
     return request_data.get("context_references")
 
 
-<<<<<<< HEAD
 def _local_path_from_console_attachment_url(url: object) -> Path | None:
     """Resolve the local path encoded in a Console attachment preview URL."""
     if not isinstance(url, str) or not url:
