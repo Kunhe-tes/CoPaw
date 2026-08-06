@@ -250,27 +250,36 @@ _RUN_EVENT_STATES: dict[EventKind, frozenset[SessionState]] = {
     EventKind.QUESTION_BATCH: frozenset(
         {SessionState.GENERATING_QUESTIONS},
     ),
-    EventKind.TRIAL_PLAN: frozenset({SessionState.GENERATING_TRIAL}),
+    EventKind.TRIAL_PLAN: frozenset(
+        {
+            SessionState.GENERATING_QUESTIONS,
+            SessionState.GENERATING_TRIAL,
+        },
+    ),
     EventKind.TRIAL_EXECUTION_STARTED: frozenset(
         {
+            SessionState.GENERATING_QUESTIONS,
             SessionState.GENERATING_TRIAL,
             SessionState.EXECUTING_TRIAL,
         },
     ),
     EventKind.TRIAL_EXECUTION_PROGRESS: frozenset(
         {
+            SessionState.GENERATING_QUESTIONS,
             SessionState.GENERATING_TRIAL,
             SessionState.EXECUTING_TRIAL,
         },
     ),
     EventKind.TRIAL_EXECUTION_COMPLETED: frozenset(
         {
+            SessionState.GENERATING_QUESTIONS,
             SessionState.GENERATING_TRIAL,
             SessionState.EXECUTING_TRIAL,
         },
     ),
     EventKind.TRIAL_EXECUTION_FAILED: frozenset(
         {
+            SessionState.GENERATING_QUESTIONS,
             SessionState.GENERATING_TRIAL,
             SessionState.EXECUTING_TRIAL,
         },
@@ -1872,7 +1881,7 @@ class WPlusSopService:
             if projection.state is not SessionState.AWAITING_ANSWER:
                 raise WPlusCommandError("Session is not awaiting answers")
             typed_payload = self._answers_payload(record, payload)
-            target_state = SessionState.GENERATING_TRIAL
+            target_state = SessionState.GENERATING_QUESTIONS
             kind = EventKind.ANSWER_ACCEPTED
             changes = {
                 "answers": [*projection.answers, typed_payload],
@@ -2036,7 +2045,7 @@ class WPlusSopService:
                     revised_stage_seen = True
                 elif revised_stage_seen:
                     stage.status = StageStatus.PENDING
-            target_state = SessionState.GENERATING_TRIAL
+            target_state = SessionState.GENERATING_QUESTIONS
             kind = EventKind.REVISION_APPLIED
             changes = {
                 "revision": projection.revision + 1,

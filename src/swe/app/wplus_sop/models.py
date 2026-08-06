@@ -1390,15 +1390,26 @@ _MAIN_TRANSITIONS: dict[SessionState, frozenset[SessionState]] = {
         {SessionState.GENERATING_QUESTIONS},
     ),
     SessionState.GENERATING_QUESTIONS: frozenset(
-        {SessionState.AWAITING_ANSWER},
+        {
+            SessionState.AWAITING_ANSWER,
+            SessionState.GENERATING_TRIAL,
+            SessionState.EXECUTING_TRIAL,
+            SessionState.AWAITING_TRIAL_FEEDBACK,
+        },
     ),
-    SessionState.AWAITING_ANSWER: frozenset({SessionState.GENERATING_TRIAL}),
+    SessionState.AWAITING_ANSWER: frozenset(
+        {
+            SessionState.GENERATING_QUESTIONS,
+            SessionState.GENERATING_TRIAL,
+        },
+    ),
     SessionState.GENERATING_TRIAL: frozenset({SessionState.EXECUTING_TRIAL}),
     SessionState.EXECUTING_TRIAL: frozenset(
         {SessionState.AWAITING_TRIAL_FEEDBACK},
     ),
     SessionState.AWAITING_TRIAL_FEEDBACK: frozenset(
         {
+            SessionState.GENERATING_QUESTIONS,
             SessionState.GENERATING_TRIAL,
             SessionState.AWAITING_STAGE_CONFIRMATION,
         },

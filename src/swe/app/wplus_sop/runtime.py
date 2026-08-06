@@ -784,6 +784,13 @@ def _expected_event_sequence(
             "trial_execution_progress?",
             "trial_execution_completed|trial_execution_failed",
         ]
+    if target_state == "GeneratingQuestions":
+        return [
+            "[question_batch|trial_plan]",
+            "trial_execution_started?",
+            "trial_execution_progress?",
+            "trial_execution_completed|trial_execution_failed",
+        ]
     if target_state == "FinalizingOutputs":
         if payload.get("final_result_persisted") is True:
             return ["memory_candidates"]
@@ -810,12 +817,12 @@ def build_wplus_command_text(
     )
     expected_event_kind = {
         "GeneratingStageProposal": "stage_proposal",
-        "GeneratingQuestions": "question_batch",
     }.get(effective_target_state)
     is_trial_turn = effective_target_state in {
         "GeneratingTrial",
         "ExecutingTrial",
     }
+    is_question_or_trial_turn = effective_target_state == "GeneratingQuestions"
     is_finalizing_turn = effective_target_state == "FinalizingOutputs"
     is_memory_write_turn = effective_target_state == "WritingMemory"
     expected_sequence = _expected_event_sequence(
@@ -874,7 +881,7 @@ def build_wplus_command_text(
                 sort_keys=True,
             )
         )
-    elif expected_event_kind == "question_batch":
+    elif is_question_or_trial_turn:
         current_stage_id = payload.get("current_stage_id")
         question_batch_example = {
             **_QUESTION_BATCH_EXAMPLE,
@@ -885,25 +892,33 @@ def build_wplus_command_text(
             ),
         }
         command_contract = (
-            "\n本回合只允许成功持久化一个业务边界事件。若 "
-            "emit_wplus_sop_event 工具返回 ok=false，可根据返回的 allowed "
-            "agent events 与 current_stage_id 修正参数后重试；失败调用不计入"
-            "已持久化事件。不得成功持久化其他 W+ SOP 事件。调用参数必须满足 "
-            "kind='question_batch'；"
+            "\n本回合允许按需选择以下两条路径之一：\n"
+            "A) 如果当前环节仍需澄清（信息不足、用户上一次回答引发新问题等），"
+            "提交且只提交一个 question_batch。若 emit_wplus_sop_event 工具返回 "
+            "ok=false，可根据返回的 allowed agent events 与 current_stage_id "
+            "修正参数后重试；失败调用不计入已持久化事件。"
             "不得提交 kind='stage_queue_confirmed'，该确认事件已由工作流服务端"
             "持久化。event_key 必须根据当前 stage_id 保持稳定。payload 必须根据"
-            "已确认环节队列和当前环节新生成，不得把命令输入中的 payload 原样提交。"
+            "已确认环节队列、用户历史回答和当前环节新生成，不得把命令输入中的 "
+            "payload 原样提交。"
             "question_batch.stage_id 必须严格等于命令 payload.current_stage_id="
             + json.dumps(current_stage_id, ensure_ascii=False)
-            + "。"
-            "不得只输出 Markdown；Markdown 只能作为工具提交成功后的可读摘要。"
-            "payload 顶层必须且只能包含 batch_id、stage_id、questions；questions "
-            "必须包含 1 到 3 个符合 schema 的问题。\n"
-            "question_batch payload 示例：\n"
+            + "。question_batch 最终 payload 示例：\n"
             + json.dumps(
                 question_batch_example,
                 ensure_ascii=False,
                 sort_keys=True,
+            )
+            + "\nB) 如果当前环节的入口、范围、口径、规则、输出和下一动作都已"
+            "确认、明确未知或不适用，直接进入预跑：按 trial_plan → "
+            "trial_execution_started → trial_execution_progress? → "
+            "trial_execution_completed|trial_execution_failed 顺序执行。"
+            "严禁在信息明显不足时跳过 question_batch 直接提交 trial_plan。\n"
+            "路径 B 的详细执行指令如下："
+            + _build_trial_command_contract(
+                run_id=run_id,
+                attempt_id=attempt_id,
+                requires_plan=True,
             )
         )
     elif is_trial_turn:

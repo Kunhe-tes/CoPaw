@@ -455,12 +455,14 @@ function StageQueueEditor({
   session,
   stages,
   busy,
+  runtimeReady,
   onChange,
   onConfirm,
 }: {
   session: WPlusSopSession;
   stages: WPlusSopStage[];
   busy: boolean;
+  runtimeReady: boolean;
   onChange: (stages: WPlusSopStage[]) => void;
   onConfirm: () => void;
 }) {
@@ -586,11 +588,15 @@ function StageQueueEditor({
           icon={<Check size={16} />}
           loading={busy}
           disabled={
-            !validation.valid || session.state !== "AwaitingQueueConfirmation"
+            !validation.valid
+            || session.state !== "AwaitingQueueConfirmation"
+            || !runtimeReady
           }
           onClick={onConfirm}
         >
-          确认这 {stages.length} 个环节
+          {runtimeReady
+            ? `确认这 ${stages.length} 个环节`
+            : "正在完成上一轮处理"}
         </Button>
       </div>
     </section>
@@ -837,6 +843,7 @@ function TrialPanel({
   session,
   feedback,
   busy,
+  runtimeReady,
   onFeedback,
   onRerun,
   onAccept,
@@ -844,6 +851,7 @@ function TrialPanel({
   session: WPlusSopSession;
   feedback: string;
   busy: boolean;
+  runtimeReady: boolean;
   onFeedback: (value: string) => void;
   onRerun: () => void;
   onAccept: () => void;
@@ -938,19 +946,21 @@ function TrialPanel({
           <div className={styles.sectionActions}>
             <Button
               icon={<Check size={16} />}
-              disabled={busy}
+              disabled={busy || !runtimeReady}
               onClick={onAccept}
             >
-              结果符合预期
+              {runtimeReady ? "结果符合预期" : "正在完成上一轮处理"}
             </Button>
             <Button
               type="primary"
               icon={<RotateCcw size={16} />}
               loading={busy}
-              disabled={!feedback.trim()}
+              disabled={!feedback.trim() || !runtimeReady}
               onClick={onRerun}
             >
-              提交反馈并重新预跑
+              {runtimeReady
+                ? "提交反馈并重新预跑"
+                : "正在完成上一轮处理"}
             </Button>
           </div>
         </div>
@@ -1411,12 +1421,14 @@ export default function WPlusSopWorkspace() {
 
   const mainPanel = useMemo(() => {
     if (!session) return null;
+    const runtimeReady = session.runtime_status?.runtime_ready === true;
     if (session.state === "AwaitingQueueConfirmation") {
       return (
         <StageQueueEditor
           session={session}
           stages={stages}
           busy={busy}
+          runtimeReady={runtimeReady}
           onChange={setStages}
           onConfirm={() => void sendCommand("confirm_stage_queue", { stages })}
         />
@@ -1428,7 +1440,7 @@ export default function WPlusSopWorkspace() {
           session={session}
           answers={answers}
           busy={busy}
-          runtimeReady={session.runtime_status?.runtime_ready === true}
+          runtimeReady={runtimeReady}
           onAnswer={(questionId, value) => {
             setAnswerDraft((current) => ({
               scope: answerScope,
@@ -1448,6 +1460,7 @@ export default function WPlusSopWorkspace() {
           session={session}
           feedback={feedback}
           busy={busy}
+          runtimeReady={runtimeReady}
           onFeedback={setFeedback}
           onRerun={() =>
             void sendCommand("submit_trial_feedback", {
@@ -1473,9 +1486,10 @@ export default function WPlusSopWorkspace() {
             type="primary"
             size="large"
             loading={busy}
+            disabled={!runtimeReady}
             onClick={() => void sendCommand("confirm_stage")}
           >
-            确认并继续
+            {runtimeReady ? "确认并继续" : "正在完成上一轮处理"}
           </Button>
         </section>
       );
@@ -1518,9 +1532,10 @@ export default function WPlusSopWorkspace() {
             type="primary"
             icon={<Play size={16} />}
             loading={busy}
+            disabled={!runtimeReady}
             onClick={() => void sendCommand("resume")}
           >
-            从上次位置继续
+            {runtimeReady ? "从上次位置继续" : "正在完成上一轮处理"}
           </Button>
         </section>
       );
@@ -1536,6 +1551,7 @@ export default function WPlusSopWorkspace() {
             type="primary"
             icon={<RefreshCw size={16} />}
             loading={busy}
+            disabled={!runtimeReady}
             onClick={() =>
               void sendCommand("retry_current_turn", {
                 target_state: session.resume_state || "GeneratingQuestions",
@@ -1543,7 +1559,7 @@ export default function WPlusSopWorkspace() {
               })
             }
           >
-            重试当前轮
+            {runtimeReady ? "重试当前轮" : "正在完成上一轮处理"}
           </Button>
         </section>
       );
@@ -1583,9 +1599,10 @@ export default function WPlusSopWorkspace() {
               type="primary"
               icon={<Check size={16} />}
               loading={busy}
+              disabled={!runtimeReady}
               onClick={() => void sendCommand("confirm_outputs")}
             >
-              确认结果并继续
+              {runtimeReady ? "确认结果并继续" : "正在完成上一轮处理"}
             </Button>
           </div>
         </section>
