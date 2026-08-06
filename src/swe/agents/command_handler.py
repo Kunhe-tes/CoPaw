@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ConversationCommandHandlerMixin:
     """Mixin for conversation (system) commands: /compact, /new, /clear, etc.
 
-    Expects self to have: agent_name, memory, formatter, memory_manager,
+    Expects self to have: agent_name, memory, memory_manager,
     _enable_memory_manager.
     """
 
@@ -165,15 +165,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
         self.memory_manager.add_async_summary_task(
             messages=messages,
-            chat_model=self.model,
-            formatter=self.formatter,
             scope_id=self._summary_task_scope_id(),
         )
         compact_content = await self.memory_manager.compact_memory(
             messages=messages,
             previous_summary=self.memory.get_compressed_summary(),
-            _bound_chat_model=self.model,
-            _bound_formatter=self.formatter,
         )
 
         if not compact_content:
@@ -230,8 +226,6 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
         self.memory_manager.add_async_summary_task(
             messages=messages,
-            chat_model=self.model,
-            formatter=self.formatter,
             scope_id=self._summary_task_scope_id(),
         )
         await self._reset_checkpoint_epoch("new")
@@ -499,6 +493,8 @@ class CommandHandler(ConversationCommandHandlerMixin):
                             has_summary_marker = True
                         if len(loaded_messages) >= MAX_LOAD_HISTORY_COUNT:
                             break
+
+            await self._reset_checkpoint_epoch("load_history")
 
             # Clear existing memory
             self.memory.content.clear()

@@ -72,6 +72,7 @@ from .tools import (
     has_explicit_subagent_run_id,
     has_subagent_registration_intent,
     has_subagent_intent,
+    emit_wplus_sop_event,
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
@@ -531,6 +532,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         if request_context.get("agent_role", "main") != "subagent":
             tool_functions.update(
                 {
+                    "emit_wplus_sop_event": emit_wplus_sop_event,
                     "ask_plan_clarification": ask_plan_clarification,
                     "submit_proposed_plan": create_submit_proposed_plan_tool(
                         request_context=request_context,

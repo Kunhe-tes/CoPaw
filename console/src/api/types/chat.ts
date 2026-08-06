@@ -32,6 +32,8 @@ export interface ChatCompactionBoundary {
   first_message_id: string;
   last_message_id: string;
   created_at: string;
+  first_timestamp?: string | null;
+  last_timestamp?: string | null;
 }
 
 export interface ChatArchiveMetadata {

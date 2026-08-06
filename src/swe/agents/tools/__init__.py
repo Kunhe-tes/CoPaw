@@ -36,6 +36,7 @@ from .subagent_background import (
     has_subagent_registration_intent,
     has_subagent_intent,
 )
+from .emit_wplus_sop_event import emit_wplus_sop_event
 
 __all__ = [
     "execute_python_code",
@@ -65,4 +66,5 @@ __all__ = [
     "has_explicit_subagent_run_id",
     "has_subagent_registration_intent",
     "has_subagent_intent",
+    "emit_wplus_sop_event",
 ]

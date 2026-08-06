@@ -50,6 +50,7 @@ _ROUTER_MODULES = (
     ("..source_system_config", "router"),
     ("..source_tools", "router"),
     ("..skill_readiness.router", "router"),
+    ("..wplus_sop.router", "router"),
     ("..asset_upload_record", "router"),
 )
 
