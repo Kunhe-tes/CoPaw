@@ -117,8 +117,6 @@ import {
 import RuntimeResponseCard from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
-import WPlusSopActiveBar from "./components/WPlusSopActiveBar";
-import WPlusSopEntryCard from "./components/WPlusSopEntryCard";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
 import FileManager from "./components/FileManager";
@@ -131,7 +129,6 @@ import type {
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
 } from "./messageMeta";
-import type { WPlusSopEntryProposal } from "@/api/types/wplusSop";
 import {
   buildFeedbackLookup,
   collectFeedbackResponsesFromMessages,
@@ -199,9 +196,6 @@ const chatCardRenderers = {
       />
     );
   },
-  WPlusSopEntryProposal: (props: { data: WPlusSopEntryProposal }) => (
-    <WPlusSopEntryCard {...props} />
-  ),
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
@@ -541,7 +535,6 @@ export default function ChatPage() {
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
-  const [wPlusSopLocksChatInput, setWPlusSopLocksChatInput] = useState(false);
   const [selectedContextReferences, setSelectedContextReferences] = useState<
     SkillMentionItem[]
   >([]);
@@ -1086,7 +1079,7 @@ export default function ChatPage() {
     });
 
     void cronJobApi
-      .markTaskRead(currentTask.id)
+      .markTaskRead(currentTask.id, false)
       .catch(() => {})
       .finally(() => {
         markTaskReadPendingRef.current = false;
@@ -1882,23 +1875,9 @@ export default function ChatPage() {
                 onDragOver={isContentOnly ? undefined : handleDragOver}
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
-              <ChatContentOnlyProvider enabled={isContentOnly}>
+                <ChatContentOnlyProvider enabled={isContentOnly}>
                   <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
-                    <WPlusSopActiveBar
-                      chatId={feedbackChatId || chatId}
-                      logicalSessionId={feedbackSessionId || undefined}
-                      onLocksChatInputChange={setWPlusSopLocksChatInput}
-                    />
-                    <div
-                      className={
-                        wPlusSopLocksChatInput
-                          ? styles.chatDisabledOverlay
-                          : undefined
-                      }
-                      style={{ height: "100%", width: "100%" }}
-                    >
-                      <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                    </div>
+                    <AgentScopeRuntimeWebUILayout ref={chatRef} />
                   </GlobalVoiceRecorder>
                 </ChatContentOnlyProvider>
                 {!isContentOnly && (
@@ -1908,8 +1887,8 @@ export default function ChatPage() {
                   />
                 )}
                 <ConversationQuickNav />
+              </div>
             </div>
-          </div>
           </AutoPreviewHtmlProvider>
         </HtmlPreviewTrackingProvider>
       </ChatFeedbackRenderProvider>
