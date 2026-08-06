@@ -421,28 +421,6 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             return;
           }
 
-          if (
-            chunkData &&
-            typeof chunkData === "object" &&
-            (chunkData as { object?: unknown }).object ===
-              "wplus_sop_entry_proposal"
-          ) {
-            if (
-              currentQARef.current.response &&
-              isLiveResponseMounted()
-            ) {
-              currentQARef.current.response.cards = [
-                {
-                  code: "WPlusSopEntryProposal",
-                  data: chunkData,
-                },
-              ];
-              emitTaskProgressUpdate(null, owner);
-              onFinish(owner);
-            }
-            return;
-          }
-
           const streamedTaskProgress = extractTaskProgress(chunkData);
           if (streamedTaskProgress !== undefined) {
             emitTaskProgressUpdate(streamedTaskProgress, owner);

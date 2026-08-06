@@ -201,69 +201,6 @@ describe("useChatRequest", () => {
     mocks.streamGate.resolve = resolveGate;
   });
 
-  it("finishes a W+ entry proposal as a structured Chat card", async () => {
-    mocks.fetch.mockResolvedValue({
-      ok: true,
-      body: {},
-    } as Response);
-    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
-      data: JSON.stringify({
-        object: "wplus_sop_entry_proposal",
-        status: "completed",
-        proposal_id: "proposal-1",
-        mode: "explicit",
-        chat_id: "chat-real-a",
-        session_id: "logical-a",
-        title: "进入 W+ SOP 工作台",
-        message: "确认后进入独立工作台。",
-      }),
-    });
-    const onFinish = vi.fn();
-    const currentQARef = {
-      current: {
-        response: {
-          id: "ui-response-a",
-          msgStatus: "generating",
-          cards: [
-            {
-              code: "AgentScopeRuntimeResponseCard",
-              data: {
-                id: "response-1",
-                status: "created",
-                created_at: 0,
-                output: [],
-              },
-            },
-          ],
-        },
-        activeRequestOwner: createOwner(),
-      },
-    } as CurrentQARef;
-
-    render(
-      <Harness
-        currentQARef={currentQARef}
-        updateMessage={vi.fn()}
-        onFinish={onFinish}
-      />,
-    );
-
-    await act(async () => {
-      await hookApi.request([], undefined, createOwner());
-    });
-
-    expect(currentQARef.current.response?.cards).toEqual([
-      {
-        code: "WPlusSopEntryProposal",
-        data: expect.objectContaining({
-          proposal_id: "proposal-1",
-          mode: "explicit",
-        }),
-      },
-    ]);
-    expect(onFinish).toHaveBeenCalledWith(createOwner());
-  });
-
   it("ignores delayed SSE chunks after another request owns the active response", async () => {
     mocks.fetch.mockResolvedValue({
       ok: true,
