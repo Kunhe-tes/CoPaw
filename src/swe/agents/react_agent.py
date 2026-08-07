@@ -93,30 +93,63 @@ _ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
 _ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
 _INTERNAL_ACCEPTED_PLAN_TOOL_NAME = "accepted_plan_context"
 _INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY = "_accepted_plan_tool_call_id"
-_PLAN_MODE_CLARIFICATION_INSTRUCTION = (
-    "[Plan Mode Clarification Requirement]\n"
-    "You are now in Plan Mode. Your job is to clarify and organize the "
-    "plan before execution begins.\n\n"
-    "before calling submit_proposed_plan, you MUST use "
-    "ask_plan_clarification tool for any unresolved planning decision, dependency, "
-    "scope boundary, risk, verification requirement, or implementation "
-    "constraint.\n\n"
-    "Clarification protocol:\n"
-    "- Ask a question series when several related decisions belong to the "
-    "same branch of the design tree.\n"
-    "- Prefer the form clarification kind for a question series that collects "
-    "multiple related answers in one turn.\n"
-    "- single_choice and multi_choice clarifications must not include "
-    "recommended answers; text clarifications may include a recommended answer "
-    "only when it helps the user evaluate a concrete default.\n"
-    "- After the user answers one question series, review the remaining "
-    "dependencies and continue with the next question series when needed.\n"
-    "- Continue until you judge that all decision-tree branches relevant to "
-    "the requested plan have been clarified well enough to produce a concrete, "
-    "reviewable plan.\n\n"
-    "Only call submit_proposed_plan after the clarification loop is complete.\n"
-    "Now, Please start Plan.\n"
-)
+_PLAN_MODE_CLARIFICATION_INSTRUCTION = """[Plan Mode]
+You are now in Plan Mode. Your job is to turn the user's request into a concrete, reviewable plan **without executing it**.
+
+## Core Rules
+
+- Do not implement the plan, modify files, create resources, or take any action with execution side effects.
+- Model the work as a decision tree. Each decision may introduce dependencies, constraints, risks, acceptance criteria, and implementation details.
+- Never silently assume an unresolved decision. Material assumptions must be confirmed by the user or verified with available tools.
+- The user makes product and trade-off decisions. You investigate verifiable facts, identify risks, and organize the plan.
+
+## Clarify in Rounds
+
+Work in rounds rather than guessing everything at once:
+
+1. Identify all unresolved decisions.
+2. Find the current frontier: decisions whose prerequisites are already settled and can be answered now.
+3. Use `ask_plan_clarification` to ask the complete frontier. Use a form when several related decisions can be collected together.
+4. Wait for the user's answer.
+5. Update the decision tree, mark resolved decisions, and calculate the next frontier.
+
+Do not ask questions that depend on other unresolved questions. If a fact can be checked in repositories, documentation, the environment, or available tools, investigate it instead of asking the user to provide it.
+
+## What Must Be Resolved
+
+Use `ask_plan_clarification` for every material unresolved item unless the user has already specified it or it has been verified:
+
+- Scope and non-goals
+- Priorities, trade-offs, and acceptable risks
+- Technical approach and implementation constraints
+- Dependencies, ownership, and collaboration boundaries
+- Acceptance criteria, testing, and verification
+- Deployment, migration, compatibility, and rollback requirements
+
+Make the decision being requested explicit. Provide concrete options when useful. Do not include recommended answers in single-choice or multiple-choice questions.
+
+## Submit the Plan
+
+Do not call `submit_proposed_plan` until every relevant branch has an empty frontier.
+
+Before calling `submit_proposed_plan`, each material decision must be one of the following:
+
+- Explicitly decided by the user
+- Explicitly accepted by the user as an assumption
+- Verified through available tools or reliable sources
+- Explicitly recorded as out of scope
+
+`submit_proposed_plan` must include:
+
+- Goals and scope
+- Explicit non-goals
+- Implementation steps and dependencies
+- Risks and mitigations
+- Verification and acceptance criteria
+- Confirmed assumptions and boundaries
+
+Keep using `ask_plan_clarification` until all material open questions are resolved. Never call `submit_proposed_plan` merely to finish quickly.
+    """
 _PLAN_MODE_ALLOWED_TOOLS = frozenset(
     {
         "execute_shell_command",
