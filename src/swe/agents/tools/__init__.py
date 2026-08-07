@@ -27,6 +27,7 @@ from .recover_evidence import create_recover_evidence_tool
 from .get_current_time import get_current_time
 from .copy_file_to_static import copy_file_to_static
 from .update_task_progress import update_task_progress
+from .emit_wplus_sop_event import emit_wplus_sop_event
 
 __all__ = [
     "execute_python_code",
@@ -48,4 +49,5 @@ __all__ = [
     "get_current_time",
     "copy_file_to_static",
     "update_task_progress",
+    "emit_wplus_sop_event",
 ]
