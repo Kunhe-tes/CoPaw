@@ -6,9 +6,10 @@ with tenant-first resolution order.
 """
 
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional, TYPE_CHECKING
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from ..config.utils import (
     load_config,
@@ -37,6 +38,15 @@ _current_agent_id: ContextVar[Optional[str]] = ContextVar(
     "current_agent_id",
     default=None,
 )
+FILE_MANAGER_SOURCE_SCOPE_BASE_DIR = Path("/opt/deployments/app/working")
+
+
+@dataclass(frozen=True)
+class FileManagerSourceScopeLocation:
+    """Trusted external root location for one tenant file-manager request."""
+
+    base_dir: Path
+    component: str
 
 
 def _resolve_tenant_id(request: Request) -> Optional[str]:
@@ -221,6 +231,29 @@ async def resolve_file_manager_workspace_dir(request: Request) -> Path:
             detail=f"Agent '{agent_id}' not found",
         )
     return workspace_dir
+
+
+def resolve_file_manager_source_scope_location(
+    request: Request,
+) -> FileManagerSourceScopeLocation:
+    """Return the external root location bound to the request tenant scope."""
+
+    tenant_workspace = getattr(request.state, "workspace", None)
+    if not isinstance(tenant_workspace, TenantWorkspaceContext):
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant workspace is unavailable",
+        )
+    component = tenant_workspace.workspace_dir.name
+    if component in {"", ".", ".."} or "/" in component:
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant workspace is unavailable",
+        )
+    return FileManagerSourceScopeLocation(
+        base_dir=FILE_MANAGER_SOURCE_SCOPE_BASE_DIR,
+        component=component,
+    )
 
 
 async def get_agent_for_request(
@@ -424,6 +457,8 @@ def get_tenant_workspace_strict(request: Request) -> "Workspace":
 
 
 __all__ = [
+    "FileManagerSourceScopeLocation",
+    "resolve_file_manager_source_scope_location",
     "resolve_file_manager_workspace_dir",
     "get_agent_for_request",
     "get_agent_and_config_for_request",
