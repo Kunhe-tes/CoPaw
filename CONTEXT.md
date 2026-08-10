@@ -273,7 +273,7 @@ A planning artifact presented by the Main Agent for user review before continuin
 _Avoid_: permission request, execution unlock
 
 **Plan Review Decision**:
-The user's response to a Proposed Plan: `revise`, `execute`, or `exit_plan`. `revise` keeps Plan Mode active for replanning, `execute` accepts the persisted Proposed Plan and continues in normal mode, and `exit_plan` closes Plan Mode without starting a Main Agent execution run by default.
+The user's response to a Proposed Plan: `revise`, `execute`, or `exit_plan`. `revise` enters or keeps Plan Mode active for replanning, `execute` accepts the persisted Proposed Plan and continues in normal mode, and `exit_plan` closes Plan Mode without starting a Main Agent execution run by default.
 _Avoid_: tool approval, permission grant
 
 **Plan Interaction Card**:
@@ -347,6 +347,10 @@ _Avoid_: content fingerprint, semantic duplicate, shared clarification prompt
 **Plan Interaction Tool**:
 A built-in Main Agent tool that emits Plan Interaction Cards through validated structured metadata.
 _Avoid_: markdown JSON card, frontend text parser
+
+**Plan Interaction Tool Availability**:
+The source-scoped runtime rule that the Plan Clarification Tool and Proposed Plan Tool are available together in Plan Mode and, outside Plan Mode, only when enabled by that source's Source System Configuration. A configuration change applies to subsequent Agent requests; enabling ordinary-mode availability makes the tools callable without applying Plan Mode's planning instructions or permission restrictions.
+_Avoid_: automatic Plan Mode, forced planning workflow, global tenant switch
 
 **Plan Interaction Turn Boundary**:
 The conversation boundary created when the Main Agent emits a Plan Interaction Card through a Plan Interaction Tool. The current Main Agent turn finishes the already-started tool-call batch, then ends without another reasoning step and waits for a user Plan Interaction Response, regardless of the current Plan Mode State.
