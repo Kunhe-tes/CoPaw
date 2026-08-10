@@ -343,7 +343,6 @@ function ChoiceRows({
               .join(" ")}
             aria-current={focused ? "true" : undefined}
             aria-pressed={selected}
-            onMouseEnter={() => onFocusIndexChange(index)}
             onFocus={() => onFocusIndexChange(index)}
             onClick={() => onSelect(option.id)}
           >
@@ -370,12 +369,11 @@ function ChoiceRows({
             styles.optionRow,
             focusedIndex === allRowsCount - 1 ? styles.optionRowFocused : "",
             customActive ? styles.optionRowSelected : "",
-          ]
-            .filter(Boolean)
-            .join(" ")}
+            ]
+              .filter(Boolean)
+              .join(" ")}
           aria-current={focusedIndex === allRowsCount - 1 ? "true" : undefined}
           aria-pressed={customActive}
-          onMouseEnter={() => onFocusIndexChange(allRowsCount - 1)}
           onFocus={() => onFocusIndexChange(allRowsCount - 1)}
           onClick={onCustomSelect}
         >

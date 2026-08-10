@@ -1,4 +1,6 @@
 import React from "react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import {
   cleanup,
   fireEvent,
@@ -20,6 +22,14 @@ import {
   PlanReviewSnapshot,
 } from "./PlanInteractionCards";
 import styles from "./PlanInteractionCards.module.less";
+
+const stylesheet = readFileSync(
+  path.join(
+    process.cwd(),
+    "src/pages/Chat/components/PlanInteractionCards.module.less",
+  ),
+  "utf8",
+);
 
 vi.mock("@/components/agentscope-chat", () => ({
   ChatAnywhereSessionsContext: createContext({
@@ -456,6 +466,52 @@ describe("Plan interaction cards", () => {
       },
     });
     submit.cleanup();
+  });
+
+  it("does not move choice focus or scroll on mouse hover", () => {
+    const originalScrollIntoView = Object.getOwnPropertyDescriptor(
+      HTMLElement.prototype,
+      "scrollIntoView",
+    );
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: scrollIntoView,
+    });
+
+    try {
+      render(
+        <PlanClarificationCard
+          data={{
+            card_type: "plan_clarification",
+            kind: "single_choice",
+            prompt: "Pick scope",
+            options: [
+              { id: "small", label: "Small" },
+              { id: "large", label: "Large" },
+            ],
+          }}
+        />,
+      );
+      scrollIntoView.mockClear();
+
+      const largeOption = screen.getByRole("button", { name: /Large/ });
+      fireEvent.mouseEnter(largeOption);
+
+      expect(largeOption).not.toHaveAttribute("aria-current", "true");
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    } finally {
+      if (originalScrollIntoView) {
+        Object.defineProperty(
+          HTMLElement.prototype,
+          "scrollIntoView",
+          originalScrollIntoView,
+        );
+      } else {
+        delete (HTMLElement.prototype as { scrollIntoView?: unknown })
+          .scrollIntoView;
+      }
+    }
   });
 
   it("shows a custom text box by default for top-level single choice cards", () => {
@@ -1557,5 +1613,18 @@ describe("Plan interaction cards", () => {
     expect(submit.handler).not.toHaveBeenCalled();
 
     submit.cleanup();
+  });
+
+  it("uses the approved blue-gray visual state tokens", () => {
+    expect(stylesheet).toContain("--clarification-card-bg: #ffffff");
+    expect(stylesheet).toContain("--clarification-border: #dce6f2");
+    expect(stylesheet).toContain("--clarification-accent: #1677ff");
+    expect(stylesheet).toContain("--clarification-selected-bg: #f0f7ff");
+    expect(stylesheet).toContain(
+      "border-left: 3px solid var(--clarification-accent)",
+    );
+    expect(stylesheet).toContain("min-height: 40px");
+    expect(stylesheet).toContain("height: 32px");
+    expect(stylesheet).not.toContain("#4f6f63");
   });
 });
