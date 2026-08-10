@@ -37,18 +37,23 @@ export interface FeaturedCaseCreate {
   iframe_url?: string;
   iframe_title?: string;
   steps?: CaseStep[];
+  is_active?: boolean;
 }
 
 export interface FeaturedCaseUpdate {
-  bbk_id?: string | null;
   label?: string;
   value?: string;
   image_url?: string;
   iframe_url?: string;
   iframe_title?: string;
   steps?: CaseStep[];
-  sort_order?: number;
   is_active?: boolean;
+}
+
+export interface FeaturedCaseReorderResult {
+  case_id: number;
+  sort_order: number;
+  total: number;
 }
 
 export interface FeaturedCaseListResponse {
