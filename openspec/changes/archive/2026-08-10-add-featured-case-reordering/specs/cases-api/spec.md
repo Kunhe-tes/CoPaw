@@ -1,11 +1,6 @@
-## Purpose
-
-Define the runtime and management API contracts for retrieving and maintaining featured cases while preserving the existing case-detail endpoint.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Cases API endpoint for listing cases
-
 The system SHALL provide `GET /featured-cases` to return active featured cases for the requesting source and BBK context.
 
 #### Scenario: Head-office context requests runtime cases
@@ -21,20 +16,7 @@ The system SHALL provide `GET /featured-cases` to return active featured cases f
 - **WHEN** the client sends `GET /featured-cases` without `X-Source-Id`
 - **THEN** the system SHALL return an empty case list
 
-### Requirement: Cases API endpoint for case detail
-
-The system SHALL provide a `GET /cases/{case_id}` endpoint that returns full case detail including iframe_url and steps.
-
-#### Scenario: User requests existing case detail
-- **WHEN** client sends `GET /cases/case-deposit-maturity`
-- **THEN** system returns `{id, label, value, detail: {iframe_url, iframe_title, steps}}`
-
-#### Scenario: User requests non-existent case
-- **WHEN** client sends `GET /cases/non-existent-id`
-- **THEN** system returns `404 Not Found` with error message "Case not found"
-
 ### Requirement: Cases API management endpoints
-
 The system SHALL provide exact-scope management endpoints for listing, creating, updating, reordering, and deleting featured cases in the relational store.
 
 #### Scenario: Operator lists an exact branch scope
@@ -75,3 +57,10 @@ The system SHALL provide exact-scope management endpoints for listing, creating,
 #### Scenario: Mutation targets another branch
 - **WHEN** a context attempts to edit, reorder, or delete a case outside its normalized BBK scope
 - **THEN** the system SHALL reject the mutation without changing either queue
+
+## REMOVED Requirements
+
+### Requirement: Cases stored in JSON configuration file
+**Reason**: Featured cases are already persisted in the `swe_featured_case` relational table, and atomic multi-row ordering requires one transactional store.
+
+**Migration**: No client migration is required. Existing relational rows remain in place; logical head-office values and discontinuous ordering are normalized lazily when the affected queue is mutated.
