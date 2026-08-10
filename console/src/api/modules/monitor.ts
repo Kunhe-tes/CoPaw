@@ -332,6 +332,7 @@ export interface HighFrequencyQuestionCriteria {
   start_time: string;
   end_time: string;
   bbk_id?: string | null;
+  force?: boolean;
 }
 
 export interface HighFrequencyQuestionTopic {

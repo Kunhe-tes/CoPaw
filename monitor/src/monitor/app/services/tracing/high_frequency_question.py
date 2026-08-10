@@ -225,19 +225,20 @@ class HighFrequencyQuestionService:
     ) -> HighFrequencyQuestionTaskSubmitResponse:
         """Submit an analysis task or reuse a recent successful result."""
         criteria = self._normalize_criteria(request)
-        recent = await self._find_result_batch(
-            criteria,
-            max_age=timedelta(hours=24),
-        )
-        if recent is not None:
-            result = await self._build_result_response(
+        if not request.force:
+            recent = await self._find_result_batch(
                 criteria,
-                recent,
-                state="AVAILABLE",
+                max_age=timedelta(hours=24),
             )
-            return HighFrequencyQuestionTaskSubmitResponse(
-                **result.model_dump(),
-            )
+            if recent is not None:
+                result = await self._build_result_response(
+                    criteria,
+                    recent,
+                    state="AVAILABLE",
+                )
+                return HighFrequencyQuestionTaskSubmitResponse(
+                    **result.model_dump(),
+                )
 
         task_id = str(uuid.uuid4())
         await self._create_async_task(

@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from monitor.app.models.high_frequency_question import (
     HighFrequencyQuestionMessageQueryRequest,
     HighFrequencyQuestionResultSaveRequest,
+    HighFrequencyQuestionTaskSubmitRequest,
 )
 from monitor.app.routers.high_frequency_question import _resolve_source_id
 from monitor.app.services.tracing import high_frequency_question as hfq_service_module
@@ -156,6 +157,57 @@ async def test_wait_for_result_rows_polls_until_rows_exist(monkeypatch):
 
     assert result_count == 3
     assert len(db.fetch_one_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_task_force_bypasses_recent_result(monkeypatch):
+    created_tasks: list[tuple[str, object]] = []
+    scheduled_tasks: list[object] = []
+    db = _FakeDb(
+        fetch_one_results=[
+            {
+                "batch_id": "existing-batch",
+                "stat_start_time": datetime(2026, 7, 23, 0, 0, 0),
+                "stat_end_time": datetime(2026, 7, 30, 23, 59, 59),
+                "result_updated_at": datetime(2026, 7, 30, 10, 0, 0),
+                "result_count": 1,
+            },
+        ],
+    )
+    service = HighFrequencyQuestionService(db)
+
+    async def fake_create_async_task(**kwargs):
+        created_tasks.append((kwargs["task_id"], kwargs["criteria"]))
+
+    async def fake_run_workflow_and_finish_task(**_kwargs):
+        return None
+
+    def fake_create_task(coro):
+        scheduled_tasks.append(coro)
+        coro.close()
+        return None
+
+    monkeypatch.setattr(service, "_create_async_task", fake_create_async_task)
+    monkeypatch.setattr(
+        service,
+        "_run_workflow_and_finish_task",
+        fake_run_workflow_and_finish_task,
+    )
+    monkeypatch.setattr(hfq_service_module.asyncio, "create_task", fake_create_task)
+
+    response = await service.submit_task(
+        HighFrequencyQuestionTaskSubmitRequest(
+            source_id="RMASSIST",
+            start_time="2026-07-23 00:00:00",
+            end_time="2026-07-30 23:59:59",
+            bbk_id="110",
+            force=True,
+        ),
+    )
+
+    assert response.state == "RUNNING"
+    assert created_tasks
+    assert scheduled_tasks
 
 
 def _result_item() -> dict:

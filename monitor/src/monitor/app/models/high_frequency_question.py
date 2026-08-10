@@ -217,6 +217,11 @@ class HighFrequencyQuestionTaskSubmitRequest(
 ):
     """Request for submitting a high-frequency question analysis task."""
 
+    force: bool = Field(
+        default=False,
+        description="Whether to bypass recent cached results and create a new task.",
+    )
+
 
 class HighFrequencyQuestionPrewarmRequest(BaseModel):
     """Request for scheduler-driven high-frequency question prewarm."""

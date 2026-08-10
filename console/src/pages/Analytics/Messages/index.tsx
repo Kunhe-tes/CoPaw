@@ -23,6 +23,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { tracingApi, UserMessageItem } from "../../../api/modules/tracing";
 import {
   monitorApi,
+  type AsyncTaskRecord,
   type HighFrequencyQuestionCriteria,
   type HighFrequencyQuestionResult,
 } from "../../../api/modules/monitor";
@@ -30,6 +31,7 @@ import { getBbkDisplayName, BBK_ID_MAP } from "../../../constants/bbk";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
+const HIGH_FREQUENCY_QUESTION_TASK_TYPE = "monitor.high.freq.question";
 
 function getDefaultAnalysisRange(): [Dayjs, Dayjs] {
   return [dayjs().subtract(6, "day").startOf("day"), dayjs().endOf("day")];
@@ -53,6 +55,54 @@ function getTopicPercent(topic: HighFrequencyQuestionResult["topics"][number]) {
   return `${((topic.message_count / topic.valid_message_count) * 100).toFixed(
     1,
   )}%`;
+}
+
+function getTopicMetricText(
+  topic: HighFrequencyQuestionResult["topics"][number],
+) {
+  return `${topic.message_count.toLocaleString("zh-CN")}条（${getTopicPercent(
+    topic,
+  )}）`;
+}
+
+function getCriteriaTaskRequest(criteria: HighFrequencyQuestionCriteria) {
+  const bbkId = criteria.bbk_id?.trim();
+  return {
+    start_date: dayjs(criteria.start_time).format("YYYY-MM-DD"),
+    end_date: dayjs(criteria.end_time).format("YYYY-MM-DD"),
+    scope_type: bbkId ? "ORG" : "ALL",
+    bbk_id: bbkId || "ALL",
+  };
+}
+
+function isMatchingRunningAnalysisTask(
+  task: AsyncTaskRecord,
+  criteria: HighFrequencyQuestionCriteria,
+) {
+  if (
+    task.task_type !== HIGH_FREQUENCY_QUESTION_TASK_TYPE ||
+    String(task.status || "").toLowerCase() !== "running"
+  ) {
+    return false;
+  }
+
+  const resultJson = task.result_json;
+  if (!resultJson || typeof resultJson !== "object") {
+    return false;
+  }
+
+  const request = (resultJson as { request?: Record<string, unknown> }).request;
+  if (!request) {
+    return false;
+  }
+
+  const expected = getCriteriaTaskRequest(criteria);
+  return (
+    request.start_date === expected.start_date &&
+    request.end_date === expected.end_date &&
+    request.scope_type === expected.scope_type &&
+    request.bbk_id === expected.bbk_id
+  );
 }
 
 function formatAnalysisTime(value?: string | null) {
@@ -217,9 +267,28 @@ export default function MessagesPage() {
       setAnalysisTaskId(null);
       setAnalysisTaskStatus("idle");
       try {
+        const criteria = toHighFrequencyCriteria(range, bbkId);
         const data = await monitorApi.getHighFrequencyQuestionResults(
-          toHighFrequencyCriteria(range, bbkId),
+          criteria,
         );
+        if (data.state === "EMPTY") {
+          const tasks = await monitorApi.getAsyncTasks({
+            task_type: HIGH_FREQUENCY_QUESTION_TASK_TYPE,
+            status: "running",
+            page: 1,
+            page_size: 100,
+          });
+          const runningTask = tasks.items.find((task) =>
+            isMatchingRunningAnalysisTask(task, criteria),
+          );
+          if (runningTask) {
+            setAnalysisResult(null);
+            setAnalysisTaskId(runningTask.task_id);
+            setAnalysisTaskStatus("running");
+            setAnalysisQueried(true);
+            return;
+          }
+        }
         setAnalysisResult(data);
         setAnalysisQueried(true);
       } catch (error) {
@@ -275,8 +344,14 @@ export default function MessagesPage() {
     setAnalysisSubmitting(true);
     setAnalysisError(null);
     try {
+      const shouldForceRegenerate =
+        analysisResult?.state === "AVAILABLE" ||
+        analysisResult?.state === "AVAILABLE_STALE";
       const data = await monitorApi.submitHighFrequencyQuestionTask(
-        toHighFrequencyCriteria(analysisRange, analysisBbkId),
+        {
+          ...toHighFrequencyCriteria(analysisRange, analysisBbkId),
+          force: shouldForceRegenerate,
+        },
       );
       if (data.state === "AVAILABLE") {
         setAnalysisResult({ ...data, state: "AVAILABLE" });
@@ -405,7 +480,7 @@ export default function MessagesPage() {
                       topic.rank_no,
                     )}`}
                   >
-                    {getTopicPercent(topic)}
+                    {getTopicMetricText(topic)}
                   </span>
                 </article>
               ))}
@@ -677,7 +752,7 @@ export default function MessagesPage() {
             type="primary"
             onClick={submitAnalysisTask}
             loading={analysisSubmitting}
-            disabled={analysisTaskStatus === "running"}
+            disabled={analysisLoading || analysisTaskStatus === "running"}
           >
             {analysisTaskStatus === "running"
               ? "生成中..."
