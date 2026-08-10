@@ -17,6 +17,7 @@ import {
   preparePlanModeSubmit,
   resolveActivePlanModeSession,
 } from "./planMode";
+import quickMenuStyles from "@/components/agentscope-chat/ComposerQuickMenu/index.module.less";
 
 describe("Plan Mode frontend helpers", () => {
   afterEach(() => {
@@ -53,6 +54,23 @@ describe("Plan Mode frontend helpers", () => {
     await waitFor(() => {
       expect(onChange).toHaveBeenCalledWith(true);
     });
+  });
+
+  it("can render as a compact submenu item without an icon", () => {
+    render(
+      <PlanModeMenuItem
+        enabled={false}
+        label="计划"
+        showIcon={false}
+        onChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText("计划")).toBeInTheDocument();
+    expect(screen.queryByLabelText("ordered-list")).not.toBeInTheDocument();
+    expect(
+      screen.getByText("计划").closest(`.${quickMenuStyles.item}`),
+    ).toHaveClass(quickMenuStyles.itemClickable);
   });
 
   it("does not dispatch toggle changes when the menu item is disabled", async () => {
@@ -176,7 +194,9 @@ describe("Plan Mode frontend helpers", () => {
       <ActivePlanModeButton enabled label="计划模式" onDisable={onDisable} />,
     );
 
-    expect(screen.getByRole("button", { name: "计划模式" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "计划模式" }),
+    ).toBeInTheDocument();
   });
 
   it("turns /plan with text into a planning request", async () => {
@@ -257,6 +277,20 @@ describe("Plan Mode frontend helpers", () => {
         scopeKey: "chat-b",
       }),
     ).toBe(false);
+  });
+
+  it("uses local Plan Mode state for aliased chat scopes", () => {
+    expect(
+      getScopedPlanModeEnabled({
+        metadataEnabled: false,
+        localState: {
+          scopeKey: "",
+          aliases: ["1780458341751000", "chat-real-created"],
+          enabled: true,
+        },
+        scopeKey: "1780458341751000",
+      }),
+    ).toBe(true);
   });
 
   it("preserves explicit card-submitted request mode", async () => {

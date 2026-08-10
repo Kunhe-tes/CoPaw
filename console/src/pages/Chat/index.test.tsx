@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
 
   return {
     capturedOptions: null as Record<string, any> | null,
+    planModeEnabledHistory: [] as boolean[],
     createChat: vi.fn(async () => ({
       id: "chat-real-created",
       meta: { plan_mode_enabled: true },
@@ -75,6 +76,21 @@ const mocks = vi.hoisted(() => {
 
 vi.mock("@/components/agentscope-chat", () => {
   const React = require("react");
+  const findPlanModeEnabled = (node: React.ReactNode): boolean | null => {
+    for (const item of React.Children.toArray(node)) {
+      if (!React.isValidElement(item)) {
+        continue;
+      }
+      if (item.props && "enabled" in item.props) {
+        return Boolean(item.props.enabled);
+      }
+      const childEnabled = findPlanModeEnabled(item.props?.children);
+      if (childEnabled !== null) {
+        return childEnabled;
+      }
+    }
+    return null;
+  };
 
   return {
     AgentScopeRuntimeWebUIComposedProvider: ({
@@ -85,6 +101,12 @@ vi.mock("@/components/agentscope-chat", () => {
       children: React.ReactNode;
     }) => {
       mocks.capturedOptions = options;
+      const planModeEnabled = findPlanModeEnabled(
+        options.sender?.quickMenuItems,
+      );
+      if (planModeEnabled !== null) {
+        mocks.planModeEnabledHistory.push(planModeEnabled);
+      }
       return <>{children}</>;
     },
     AgentScopeRuntimeWebUILayout: React.forwardRef(() => (
@@ -164,6 +186,7 @@ vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => {
     icon?: React.ReactNode;
     label: React.ReactNode;
     extra?: React.ReactNode;
+    enabled?: boolean;
   }) {
     return (
       <div>
@@ -174,10 +197,26 @@ vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => {
     );
   }
 
+  function ComposerQuickMenuSubmenu(props: {
+    icon?: React.ReactNode;
+    label: React.ReactNode;
+    children?: React.ReactNode;
+    disabled?: boolean;
+  }) {
+    return (
+      <div aria-disabled={props.disabled}>
+        {props.icon}
+        <span>{props.label}</span>
+        <div>{props.children}</div>
+      </div>
+    );
+  }
+
   return {
     __esModule: true,
     default: ComposerQuickMenu,
     ComposerQuickMenuItem,
+    ComposerQuickMenuSubmenu,
   };
 });
 
@@ -533,6 +572,7 @@ vi.mock("@/api/modules/featuredCases", () => ({
 describe("ChatPage plan mode wiring", () => {
   beforeEach(() => {
     mocks.capturedOptions = null;
+    mocks.planModeEnabledHistory = [];
     mocks.inputDisabled = true;
     mocks.pathname = "/chat/chat-1";
     mocks.currentSessionId = "chat-1";
@@ -602,6 +642,25 @@ describe("ChatPage plan mode wiring", () => {
   it("disables the quick menu Plan Mode switch when the composer is disabled", () => {
     render(<ChatPage />);
 
+    expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
+  });
+
+  it("renders Plan Mode as compact text inside the Mode submenu", () => {
+    mocks.sessions = [
+      {
+        id: "chat-1",
+        realId: "chat-1",
+        sessionId: "chat-1",
+        name: "会话 1",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+
+    render(<ChatPage />);
+
+    expect(screen.getByText("模式")).toBeInTheDocument();
+    expect(screen.getByText("计划")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
   });
 
@@ -709,6 +768,215 @@ describe("ChatPage plan mode wiring", () => {
     expect(
       screen.getAllByRole("button", { name: "计划模式" }).length,
     ).toBeGreaterThan(0);
+
+    await act(async () => {
+      resolveUpdateChat({ meta: { plan_mode_enabled: true } });
+    });
+  });
+
+  it("keeps first-click Plan Mode visible when a new session id appears after the URL was cleared", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.getChatIdForSession.mockImplementation(() => null);
+    mocks.getRealIdForSession.mockImplementation(() => null);
+    mocks.sessions = [];
+    let resolveUpdateChat: (value: {
+      meta: { plan_mode_enabled: boolean };
+    }) => void = () => undefined;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveUpdateChat = resolve;
+        }),
+    );
+
+    const { rerender } = render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    });
+
+    mocks.pathname = "/chat/1780458341751000";
+    mocks.currentSessionId = "1780458341751000";
+    mocks.sessions = [
+      {
+        id: "1780458341751000",
+        realId: "",
+        sessionId: "1780458341751000",
+        name: "新会话",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    rerender(<ChatPage />);
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    });
+    expect(
+      screen.getAllByRole("button", { name: "计划模式" }).length,
+    ).toBeGreaterThan(0);
+
+    await act(async () => {
+      resolveUpdateChat({ meta: { plan_mode_enabled: true } });
+    });
+  });
+
+  it("keeps Plan Mode enabled after a blank-scope persist resolves before the new session id is available", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.getChatIdForSession.mockImplementation(() => null);
+    mocks.getRealIdForSession.mockImplementation(() => null);
+    mocks.sessions = [];
+    let resolveUpdateChat: (value: {
+      meta: { plan_mode_enabled: boolean };
+    }) => void = () => undefined;
+    let resolveUpdateSession: (value: unknown) => void = () => undefined;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveUpdateChat = resolve;
+        }),
+    );
+    mocks.updateSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveUpdateSession = resolve;
+        }),
+    );
+
+    const { rerender } = render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    });
+
+    await act(async () => {
+      resolveUpdateChat({ meta: { plan_mode_enabled: true } });
+      resolveUpdateSession(undefined);
+    });
+
+    mocks.pathname = "/chat/chat-real-created";
+    mocks.currentSessionId = "chat-real-created";
+    mocks.sessions = [
+      {
+        id: "chat-real-created",
+        realId: "chat-real-created",
+        sessionId: "chat-real-created",
+        name: "新会话",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    rerender(<ChatPage />);
+
+    expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("keeps Plan Mode enabled when the first submitted message creates a temp session id", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.getChatIdForSession.mockImplementation(() => null);
+    mocks.getRealIdForSession.mockImplementation(() => null);
+    mocks.sessions = [];
+    mocks.updateChat.mockResolvedValue({ meta: { plan_mode_enabled: true } });
+    mocks.updateSession.mockResolvedValue([]);
+
+    const { rerender } = render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    });
+
+    mocks.currentSessionId = "1780458341751000";
+    mocks.sessions = [
+      {
+        id: "1780458341751000",
+        realId: "",
+        sessionId: "1780458341751000",
+        name: "新会话",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    rerender(<ChatPage />);
+
+    expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  });
+
+  it("does not render Plan Mode disabled after the first enable while a new session scope appears", async () => {
+    mocks.inputDisabled = false;
+    mocks.pathname = "/chat";
+    mocks.currentSessionId = "";
+    mocks.getChatIdForSession.mockImplementation(() => null);
+    mocks.getRealIdForSession.mockImplementation(() => null);
+    mocks.sessions = [];
+    let resolveUpdateChat: (value: {
+      meta: { plan_mode_enabled: boolean };
+    }) => void = () => undefined;
+    mocks.updateChat.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveUpdateChat = resolve;
+        }),
+    );
+
+    const { rerender } = render(<ChatPage />);
+
+    fireEvent.click(screen.getByRole("switch", { name: "计划模式" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("switch", { name: "计划模式" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      );
+    });
+    const firstEnabledRender = mocks.planModeEnabledHistory.indexOf(true);
+    expect(firstEnabledRender).toBeGreaterThanOrEqual(0);
+
+    mocks.currentSessionId = "1780458341751000";
+    mocks.sessions = [
+      {
+        id: "1780458341751000",
+        realId: "",
+        sessionId: "1780458341751000",
+        name: "新会话",
+        messages: [],
+        meta: { plan_mode_enabled: false },
+      },
+    ];
+    rerender(<ChatPage />);
+
+    expect(
+      mocks.planModeEnabledHistory.slice(firstEnabledRender),
+    ).not.toContain(false);
 
     await act(async () => {
       resolveUpdateChat({ meta: { plan_mode_enabled: true } });

@@ -29,6 +29,7 @@ export type PlanModeSessionLike = {
 export type PlanModeLocalState = {
   scopeKey: string;
   enabled: boolean;
+  aliases?: string[];
 };
 
 export function getScopedPlanModeEnabled({
@@ -40,7 +41,8 @@ export function getScopedPlanModeEnabled({
   localState: PlanModeLocalState;
   scopeKey: string;
 }): boolean {
-  return localState.scopeKey === scopeKey
+  return localState.scopeKey === scopeKey ||
+    localState.aliases?.includes(scopeKey)
     ? localState.enabled
     : metadataEnabled;
 }
@@ -214,28 +216,34 @@ export async function persistPlanModeState<
 }
 
 export function PlanModeMenuItem({
+  ariaLabel,
   enabled,
   disabled = false,
   label,
+  showIcon = true,
   tooltip,
   onChange,
 }: {
+  ariaLabel?: string;
   enabled: boolean;
   disabled?: boolean;
   label: string;
+  showIcon?: boolean;
   tooltip?: string;
   onChange: (enabled: boolean) => void;
 }) {
+  const switchLabel = ariaLabel || label;
   const control = (
     <ComposerQuickMenuItem
-      icon={<OrderedListOutlined />}
+      icon={showIcon ? <OrderedListOutlined /> : undefined}
+      interactive
       label={<span className={styles.planModeToggleLabel}>{label}</span>}
       extra={
         <Switch
           size="small"
           checked={enabled}
           disabled={disabled}
-          aria-label={label}
+          aria-label={switchLabel}
           onChange={(checked) => onChange(checked)}
         />
       }

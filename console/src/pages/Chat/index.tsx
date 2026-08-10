@@ -22,10 +22,14 @@ import {
   useTransition,
 } from "react";
 import { flushSync } from "react-dom";
-import { Button, Modal, Result, Tooltip } from "antd";
+import { Button, Modal, Result } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
-import { ExclamationCircleOutlined, SettingOutlined } from "@ant-design/icons";
-import { SparkAttachmentLine, SparkCopyLine } from "@agentscope-ai/icons";
+import {
+  ControlOutlined,
+  ExclamationCircleOutlined,
+  SettingOutlined,
+} from "@ant-design/icons";
+import { SparkCopyLine } from "@agentscope-ai/icons";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import sessionApi from "./sessionApi";
@@ -64,7 +68,7 @@ import { useIframeStore } from "../../stores/iframeStore";
 import { useChatPresentationStore } from "../../stores/chatPresentationStore";
 // ==================== URL 导航参数结束 ====================
 import styles from "./index.module.less";
-import { Form, IconButton } from "@agentscope-ai/design";
+import { Form } from "@agentscope-ai/design";
 // import ChatActionGroup from "./components/ChatActionGroup";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
@@ -109,6 +113,7 @@ import {
   CHAT_ATTACHMENT_ACCEPT_HINT,
   uploadChatAttachment,
 } from "./attachmentUploadPolicy";
+import { ComposerQuickMenuSubmenu } from "@/components/agentscope-chat/ComposerQuickMenu";
 
 import RuntimeRequestCard from "./components/RuntimeRequestCard";
 import { FOLLOW_UP_SUBMIT_FAILED_EVENT } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
@@ -119,9 +124,7 @@ import {
 import RuntimeResponseCard from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
-import {
-  ActivePlanInteractionComposer,
-} from "./components/PlanInteractionCards";
+import { ActivePlanInteractionComposer } from "./components/PlanInteractionCards";
 import WPlusSopActiveBar from "./components/WPlusSopActiveBar";
 import WPlusSopEntryCard from "./components/WPlusSopEntryCard";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
@@ -569,8 +572,18 @@ function ActivePlanModeControl({
   );
 }
 
-type AttachmentTriggerProps = {
-  disabled?: boolean;
+const addPlanModeScopeAlias = (
+  state: PlanModeLocalState,
+  alias: string | null | undefined,
+): PlanModeLocalState => {
+  if (!alias || alias === state.scopeKey || state.aliases?.includes(alias)) {
+    return state;
+  }
+
+  return {
+    ...state,
+    aliases: [...(state.aliases || []), alias],
+  };
 };
 
 export default function ChatPage() {
@@ -783,11 +796,16 @@ export default function ChatPage() {
         pendingPlanModePersistScopesRef.current.add(realId);
         resolvedPlanModePersistScopesRef.current.set(tempId, realId);
       }
-      setPlanModeLocalState((current) =>
-        current.scopeKey === tempId
-          ? { scopeKey: realId, enabled: current.enabled }
-          : current,
-      );
+      setPlanModeLocalState((current) => {
+        const isResolvedPlanModeScope =
+          current.scopeKey === tempId || current.aliases?.includes(tempId);
+
+        if (!current.enabled && !isResolvedPlanModeScope) {
+          return current;
+        }
+
+        return addPlanModeScopeAlias(current, realId);
+      });
       // Update URL when realId is resolved, regardless of current chatId
       // (chatId may be undefined if URL was cleared in onSessionCreated)
       lastSessionIdRef.current = realId;
@@ -863,8 +881,14 @@ export default function ChatPage() {
       }
     };
 
-    sessionApi.onSessionCreated = () => {
+    sessionApi.onSessionCreated = (sessionId) => {
       if (!isChatActiveRef.current) return;
+      setPlanModeLocalState((current) =>
+        current.enabled ||
+        pendingPlanModePersistScopesRef.current.has(current.scopeKey)
+          ? addPlanModeScopeAlias(current, sessionId)
+          : current,
+      );
       // Clear URL when creating new session, wait for realId resolution to update
       lastSessionIdRef.current = null;
       navigateRef.current("/chat", { replace: true });
@@ -1051,17 +1075,24 @@ export default function ChatPage() {
       scopeKey: activePlanModeScopeKey,
       enabled: activePlanModeMetadataEnabled,
     });
-  const planModeEnabled = getScopedPlanModeEnabled({
-    metadataEnabled: activePlanModeMetadataEnabled,
-    localState: planModeLocalState,
-    scopeKey: activePlanModeScopeKey,
-  });
-  const [pendingPlanRevision, setPendingPlanRevision] =
-    useState<PendingPlanRevision | null>(null);
   const activePlanModeSessionRef = useRef<PlanModeSession | null>(null);
   const activePlanModeScopeKeyRef = useRef(activePlanModeScopeKey);
   const pendingPlanModePersistScopesRef = useRef(new Set<string>());
   const resolvedPlanModePersistScopesRef = useRef(new Map<string, string>());
+  const planModeLocalStateForActiveScope =
+    planModeLocalState.scopeKey === "" &&
+    activePlanModeScopeKey &&
+    planModeLocalState.enabled &&
+    pendingPlanModePersistScopesRef.current.has("")
+      ? addPlanModeScopeAlias(planModeLocalState, activePlanModeScopeKey)
+      : planModeLocalState;
+  const planModeEnabled = getScopedPlanModeEnabled({
+    metadataEnabled: activePlanModeMetadataEnabled,
+    localState: planModeLocalStateForActiveScope,
+    scopeKey: activePlanModeScopeKey,
+  });
+  const [pendingPlanRevision, setPendingPlanRevision] =
+    useState<PendingPlanRevision | null>(null);
   activePlanModeSessionRef.current = activePlanModeSession;
   activePlanModeScopeKeyRef.current = activePlanModeScopeKey;
 
@@ -1073,6 +1104,32 @@ export default function ChatPage() {
       ) {
         return current;
       }
+      if (
+        current.enabled &&
+        current.aliases?.includes(activePlanModeScopeKey)
+      ) {
+        return {
+          ...current,
+          scopeKey: activePlanModeScopeKey,
+        };
+      }
+      if (
+        current.scopeKey === "" &&
+        activePlanModeScopeKey &&
+        pendingPlanModePersistScopesRef.current.has(current.scopeKey)
+      ) {
+        pendingPlanModePersistScopesRef.current.delete(current.scopeKey);
+        pendingPlanModePersistScopesRef.current.add(activePlanModeScopeKey);
+        resolvedPlanModePersistScopesRef.current.set(
+          current.scopeKey,
+          activePlanModeScopeKey,
+        );
+        return {
+          scopeKey: activePlanModeScopeKey,
+          enabled: current.enabled,
+          aliases: current.aliases,
+        };
+      }
       return {
         scopeKey: activePlanModeScopeKey,
         enabled: activePlanModeMetadataEnabled,
@@ -1083,10 +1140,12 @@ export default function ChatPage() {
   const setPlanModeEnabledForScope = useCallback(
     (scopeKey: string, enabled: boolean) => {
       setPlanModeLocalState((current) => {
-        if (activePlanModeScopeKeyRef.current !== scopeKey) {
+        const resolvedScopeKey =
+          resolvedPlanModePersistScopesRef.current.get(scopeKey) || scopeKey;
+        if (activePlanModeScopeKeyRef.current !== resolvedScopeKey) {
           return current;
         }
-        return { scopeKey, enabled };
+        return { scopeKey: resolvedScopeKey, enabled };
       });
     },
     [],
@@ -1154,7 +1213,10 @@ export default function ChatPage() {
   const persistPlanMode = useCallback(
     async (enabled: boolean) => {
       const scopeKey = activePlanModeScopeKeyRef.current;
+      const retainBlankScope =
+        enabled && scopeKey === "" && !activePlanModeMetadataEnabled;
       pendingPlanModePersistScopesRef.current.add(scopeKey);
+      let persistSucceeded = false;
       try {
         await persistPlanModeState({
           enabled,
@@ -1179,10 +1241,13 @@ export default function ChatPage() {
             );
           },
         });
+        persistSucceeded = true;
       } finally {
         const resolvedScopeKey =
           resolvedPlanModePersistScopesRef.current.get(scopeKey);
-        pendingPlanModePersistScopesRef.current.delete(scopeKey);
+        if (!(persistSucceeded && retainBlankScope)) {
+          pendingPlanModePersistScopesRef.current.delete(scopeKey);
+        }
         if (resolvedScopeKey) {
           pendingPlanModePersistScopesRef.current.delete(resolvedScopeKey);
           resolvedPlanModePersistScopesRef.current.delete(scopeKey);
@@ -1190,6 +1255,7 @@ export default function ChatPage() {
       }
     },
     [
+      activePlanModeMetadataEnabled,
       ensurePlanModeChatId,
       message,
       setPlanModeEnabledForScope,
@@ -1919,19 +1985,17 @@ export default function ChatPage() {
       ...Children.toArray(senderConfig?.prefix),
     ].filter(Boolean);
 
-    const {
-      beforeSubmit: handleSkillMentionsBeforeSubmit,
-      skillMentions,
-    } = createWelcomeSkillMentions({
-      contextReferences,
-      contextReferencesError,
-      contextReferencesLoading,
-      isComposingRef,
-      loadContextReferences,
-      pendingContextReferencesRef,
-      selectedContextReferences,
-      setSelectedContextReferences,
-    });
+    const { beforeSubmit: handleSkillMentionsBeforeSubmit, skillMentions } =
+      createWelcomeSkillMentions({
+        contextReferences,
+        contextReferencesError,
+        contextReferencesLoading,
+        isComposingRef,
+        loadContextReferences,
+        pendingContextReferencesRef,
+        selectedContextReferences,
+        setSelectedContextReferences,
+      });
 
     const handleBeforeSubmit: NonNullable<
       IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
@@ -1984,16 +2048,25 @@ export default function ChatPage() {
     };
 
     const planModeQuickMenuItems = [
-      <PlanModeMenuItem
-        key="plan-mode"
-        enabled={planModeEnabled}
+      <ComposerQuickMenuSubmenu
+        key="mode"
+        icon={<ControlOutlined />}
+        label={t("chat.quickMenu.mode", "模式")}
         disabled={composerDisabled}
-        label={t("chat.planMode.label", "计划模式")}
-        tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
-        onChange={(enabled) => {
-          void persistPlanMode(enabled);
-        }}
-      />,
+      >
+        <PlanModeMenuItem
+          key="plan-mode"
+          ariaLabel={t("chat.planMode.label", "计划模式")}
+          enabled={planModeEnabled}
+          disabled={composerDisabled}
+          label={t("chat.planMode.shortLabel", "计划")}
+          showIcon={false}
+          tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
+          onChange={(enabled) => {
+            void persistPlanMode(enabled);
+          }}
+        />
+      </ComposerQuickMenuSubmenu>,
     ];
 
     return {
@@ -2068,22 +2141,6 @@ export default function ChatPage() {
           senderPrefixNodes.length > 0 ? <>{senderPrefixNodes}</> : undefined,
         allowSpeech: false,
         attachments: {
-          trigger: function AttachmentTrigger(props: AttachmentTriggerProps) {
-            const tooltipKey = multimodalCaps.supportsMultimodal
-              ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
-                ? "chat.attachments.tooltipImageOnly"
-                : "chat.attachments.tooltip"
-              : "chat.attachments.tooltipNoMultimodal";
-            return (
-              <Tooltip title={t(tooltipKey, { limit: CHAT_ATTACHMENT_MAX_MB })}>
-                <IconButton
-                  disabled={props?.disabled}
-                  icon={<SparkAttachmentLine />}
-                  bordered={false}
-                />
-              </Tooltip>
-            );
-          },
           accept: CHAT_ATTACHMENT_ACCEPT_HINT,
           customRequest: handleFileUpload,
         },
@@ -2276,7 +2333,7 @@ export default function ChatPage() {
                 onDragOver={isContentOnly ? undefined : handleDragOver}
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
-              <ChatContentOnlyProvider enabled={isContentOnly}>
+                <ChatContentOnlyProvider enabled={isContentOnly}>
                   <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
                     <WPlusSopActiveBar
                       chatId={feedbackChatId || chatId}
@@ -2302,8 +2359,8 @@ export default function ChatPage() {
                   />
                 )}
                 <ConversationQuickNav />
+              </div>
             </div>
-          </div>
           </AutoPreviewHtmlProvider>
         </HtmlPreviewTrackingProvider>
       </ChatFeedbackRenderProvider>
