@@ -51,6 +51,7 @@ export interface GeneratedFilesResponse {
 
 export type FileManagerRoot =
   | "working"
+  | "source_scope"
   | "upload"
   | "download"
   | "conversation"

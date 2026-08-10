@@ -767,6 +767,58 @@ def test_file_manager_workspace_resolver_falls_back_to_active_agent(
     assert resolved == selected.resolve()
 
 
+def test_file_manager_source_scope_location_uses_tenant_workspace_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_scope_base = tmp_path / "source-root"
+    tenant_workspace_dir = tmp_path / "default_ruice"
+    tenant_workspace_dir.mkdir()
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="default",
+            source_id="ruice",
+            workspace=agent_context.TenantWorkspaceContext(
+                "default_ruice",
+                tenant_workspace_dir,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "FILE_MANAGER_SOURCE_SCOPE_BASE_DIR",
+        source_scope_base,
+        raising=False,
+    )
+
+    location = agent_context.resolve_file_manager_source_scope_location(
+        request,
+    )
+
+    assert location.base_dir == source_scope_base
+    assert location.component == tenant_workspace_dir.name
+
+
+def test_file_manager_source_scope_location_fails_without_tenant_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SimpleNamespace(state=SimpleNamespace(workspace=None))
+    source_scope_base = tmp_path / "source-root"
+    monkeypatch.setattr(
+        agent_context,
+        "FILE_MANAGER_SOURCE_SCOPE_BASE_DIR",
+        source_scope_base,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        agent_context.resolve_file_manager_source_scope_location(request)
+
+    assert raised.value.status_code == 503
+    assert str(source_scope_base) not in str(raised.value.detail)
+
+
 @pytest.mark.parametrize(
     ("profile", "exists", "expected_status"),
     [
