@@ -1,7 +1,27 @@
 import React from "react";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import ComposerQuickMenu, { ComposerQuickMenuItem } from "./index";
+import ComposerQuickMenu, {
+  ComposerQuickMenuItem,
+  ComposerQuickMenuSubmenu,
+} from "./index";
+import styles from "./index.module.less";
+
+const stylesheet = readFileSync(
+  path.join(
+    process.cwd(),
+    "src/components/agentscope-chat/ComposerQuickMenu/index.module.less",
+  ),
+  "utf8",
+);
 
 describe("ComposerQuickMenu", () => {
   afterEach(() => {
@@ -82,5 +102,37 @@ describe("ComposerQuickMenu", () => {
     const menuItem = await screen.findByText("上传文件");
     expect(container).not.toContainElement(menuItem);
     expect(document.body).toContainElement(menuItem);
+  });
+
+  it("opens submenu items without closing the root menu", async () => {
+    render(
+      <ComposerQuickMenu triggerLabel="快捷操作">
+        <ComposerQuickMenuSubmenu label="模式">
+          <ComposerQuickMenuItem label="计划模式" />
+        </ComposerQuickMenuSubmenu>
+      </ComposerQuickMenu>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷操作" }));
+    fireEvent.click(await screen.findByRole("button", { name: "模式" }));
+
+    expect(await screen.findByText("计划模式")).toBeInTheDocument();
+    expect(screen.getByText("模式")).toBeInTheDocument();
+  });
+
+  it("allows externally handled items to render with hover affordance", () => {
+    render(<ComposerQuickMenuItem interactive label="上传文件" />);
+
+    expect(screen.getByText("上传文件").closest(`.${styles.item}`)).toHaveClass(
+      styles.itemClickable,
+    );
+    expect(
+      screen.queryByRole("button", { name: "上传文件" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps Ant Upload trigger layers full width for row-sized hover", () => {
+    expect(stylesheet).toContain(":global(.ant-upload-select)");
+    expect(stylesheet).toContain(":global(.ant-upload-select > span)");
   });
 });

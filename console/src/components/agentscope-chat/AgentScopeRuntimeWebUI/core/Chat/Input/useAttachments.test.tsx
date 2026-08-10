@@ -3,8 +3,10 @@ import { act, render, renderHook, waitFor } from "@testing-library/react";
 import type { UploadFile } from "antd";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import useAttachments from "./useAttachments";
+import quickMenuStyles from "@/components/agentscope-chat/ComposerQuickMenu/index.module.less";
 
 const attachmentsSpy = vi.fn();
+const quickMenuItemSpy = vi.fn();
 
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => null,
@@ -25,7 +27,10 @@ vi.mock("@/components/agentscope-chat", () => ({
 }));
 
 vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => ({
-  ComposerQuickMenuItem: () => null,
+  ComposerQuickMenuItem: (props: unknown) => {
+    quickMenuItemSpy(props);
+    return null;
+  },
 }));
 
 vi.mock("react-i18next", () => ({
@@ -37,6 +42,7 @@ vi.mock("react-i18next", () => ({
 describe("useAttachments", () => {
   beforeEach(() => {
     attachmentsSpy.mockClear();
+    quickMenuItemSpy.mockClear();
   });
 
   it("does not upload pasted files when attachments are disabled", async () => {
@@ -88,6 +94,36 @@ describe("useAttachments", () => {
       disabled: true,
       items: [file],
     });
+  });
+
+  it("marks the default upload quick menu item as interactive", () => {
+    const { result } = renderHook(() =>
+      useAttachments({
+        customRequest: vi.fn(),
+      }),
+    );
+
+    render(<>{result.current.uploadQuickMenuItem}</>);
+
+    expect(quickMenuItemSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        interactive: true,
+        label: "上传文件",
+      }),
+    );
+  });
+
+  it("renders the upload trigger at the same full row width as other quick menu items", () => {
+    const { result } = renderHook(() =>
+      useAttachments({
+        customRequest: vi.fn(),
+      }),
+    );
+
+    const uploadItem = result.current.uploadQuickMenuItem as React.ReactElement;
+
+    expect(quickMenuStyles.uploadTrigger).toEqual(expect.any(String));
+    expect(uploadItem.props.className).toBe(quickMenuStyles.uploadTrigger);
   });
 
   it("routes pasted files to customRequest even when they do not match the picker accept hint", () => {

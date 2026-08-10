@@ -1,4 +1,4 @@
-import { PlusOutlined } from "@ant-design/icons";
+import { PlusOutlined, RightOutlined } from "@ant-design/icons";
 import classNames from "classnames";
 import React, {
   useCallback,
@@ -24,17 +24,27 @@ export interface ComposerQuickMenuItemProps {
   onClick?: () => void;
   className?: string;
   disabled?: boolean;
+  interactive?: boolean;
 }
 
 export function ComposerQuickMenuItem(props: ComposerQuickMenuItemProps) {
-  const { className, disabled = false, extra, icon, label, onClick } = props;
+  const {
+    className,
+    disabled = false,
+    extra,
+    icon,
+    interactive = false,
+    label,
+    onClick,
+  } = props;
   const clickable = Boolean(onClick) && !disabled;
+  const interactiveItem = (clickable || interactive) && !disabled;
 
   return (
     <div
       className={classNames(
         styles.item,
-        clickable && styles.itemClickable,
+        interactiveItem && styles.itemClickable,
         disabled && styles.itemDisabled,
         className,
       )}
@@ -56,6 +66,118 @@ export function ComposerQuickMenuItem(props: ComposerQuickMenuItemProps) {
       {icon ? <span className={styles.icon}>{icon}</span> : null}
       <span className={styles.label}>{label}</span>
       {extra ? <span className={styles.extra}>{extra}</span> : null}
+    </div>
+  );
+}
+
+export interface ComposerQuickMenuSubmenuProps
+  extends Omit<ComposerQuickMenuItemProps, "extra" | "onClick"> {
+  children?: React.ReactNode;
+}
+
+export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
+  const {
+    children,
+    className,
+    disabled = false,
+    icon,
+    interactive: _interactive,
+    label,
+  } = props;
+  const [open, setOpen] = useState(false);
+  const items = useMemo(
+    () => React.Children.toArray(children).filter(Boolean),
+    [children],
+  );
+
+  useEffect(() => {
+    if (disabled) {
+      setOpen(false);
+    }
+  }, [disabled]);
+
+  if (items.length === 0) {
+    return (
+      <ComposerQuickMenuItem
+        className={className}
+        disabled={disabled}
+        icon={icon}
+        label={label}
+      />
+    );
+  }
+
+  const expanded = open && !disabled;
+
+  return (
+    <div
+      className={styles.submenu}
+      onMouseEnter={() => {
+        if (!disabled) {
+          setOpen(true);
+        }
+      }}
+      onMouseLeave={() => setOpen(false)}
+    >
+      <div
+        className={classNames(
+          styles.item,
+          styles.itemClickable,
+          disabled && styles.itemDisabled,
+          className,
+        )}
+        aria-disabled={disabled}
+        aria-expanded={expanded}
+        aria-haspopup="menu"
+        onClick={(event) => {
+          event.stopPropagation();
+          if (!disabled) {
+            setOpen((prev) => !prev);
+          }
+        }}
+        onFocus={() => {
+          if (!disabled) {
+            setOpen(true);
+          }
+        }}
+        onKeyDown={(event) => {
+          if (disabled) {
+            return;
+          }
+          if (
+            event.key === "Enter" ||
+            event.key === " " ||
+            event.key === "ArrowRight"
+          ) {
+            event.preventDefault();
+            setOpen(true);
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            setOpen(false);
+          }
+        }}
+        role="button"
+        tabIndex={disabled ? undefined : 0}
+      >
+        {icon ? <span className={styles.icon}>{icon}</span> : null}
+        <span className={styles.label}>{label}</span>
+        <span aria-hidden="true" className={styles.extra}>
+          <RightOutlined className={styles.submenuArrow} />
+        </span>
+      </div>
+      {expanded ? (
+        <div className={styles.submenuPanel} role="menu">
+          {items.map((item, index) => (
+            <div
+              key={(React.isValidElement(item) && item.key) || index}
+              className={styles.itemWrap}
+            >
+              {item}
+            </div>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -87,10 +209,7 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
       viewportPadding,
       window.innerWidth - panelRect.width - viewportPadding,
     );
-    const left = Math.min(
-      Math.max(triggerRect.left, viewportPadding),
-      maxLeft,
-    );
+    const left = Math.min(Math.max(triggerRect.left, viewportPadding), maxLeft);
     const openAbove =
       triggerRect.top >= panelRect.height + gap + viewportPadding;
     const maxTop = Math.max(

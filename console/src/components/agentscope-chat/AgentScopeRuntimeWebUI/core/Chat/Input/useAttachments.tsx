@@ -5,9 +5,8 @@ import { SparkAttachmentLine } from "@agentscope-ai/icons";
 import { Sender, Attachments } from "@/components/agentscope-chat";
 import React, { useCallback, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  ComposerQuickMenuItem,
-} from "@/components/agentscope-chat/ComposerQuickMenu";
+import { ComposerQuickMenuItem } from "@/components/agentscope-chat/ComposerQuickMenu";
+import quickMenuStyles from "@/components/agentscope-chat/ComposerQuickMenu/index.module.less";
 
 export default function useAttachments(
   attachments: IAgentScopeRuntimeWebUISenderAttachmentsOptions,
@@ -109,6 +108,7 @@ export default function useAttachments(
   if (customRequest) {
     const uploadQuickMenuItem = (
       <Upload
+        className={quickMenuStyles.uploadTrigger}
         fileList={fileList}
         showUploadList={false}
         onChange={(info) => {
@@ -119,9 +119,12 @@ export default function useAttachments(
         maxCount={maxCount}
         disabled={options?.disabled}
       >
-        {trigger ? React.createElement(trigger, { disabled: options?.disabled }) : (
+        {trigger ? (
+          React.createElement(trigger, { disabled: options?.disabled })
+        ) : (
           <ComposerQuickMenuItem
             icon={<SparkAttachmentLine />}
+            interactive
             label={t("chat.quickMenu.upload", "上传文件")}
           />
         )}
