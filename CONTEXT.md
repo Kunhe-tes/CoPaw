@@ -80,12 +80,76 @@ _Avoid_: subagent creation
 A **SubAgent Run** that is started by the Main Agent and observed later through status, result retrieval, or cancellation. It is still one run of a **SubAgent Definition**, not a new definition.
 _Avoid_: detached subagent, subprocess subagent
 
+**SubAgent Research Phase**:
+The portion of a **SubAgent Run** in which the worker gathers task evidence and may use its effective read-only tools. It ends before the worker produces its terminal **AgentResult**.
+_Avoid_: final response, structured-output phase, unbounded agent loop
+
+**SubAgent Research Completion**:
+The normal end of a **SubAgent Research Phase**, reached when the worker replies without requesting a tool. It supplies a **SubAgent Research Synthesis** to **SubAgent Structured Finalization**; reaching the turn limit instead follows the distinct **SubAgent Turn-limit Finalization** path.
+_Avoid_: implicit final tool call, budget-exhaustion normal completion, forced completion
+
+**SubAgent Research Synthesis**:
+The concise natural-language, tool-free reply emitted at **SubAgent Research Completion**. It summarizes the research evidence for **SubAgent Structured Finalization** and is not an **AgentResult**.
+_Avoid_: final JSON, terminal result, user-facing completion claim
+
+**SubAgent Research Turn Budget**:
+The maximum number of ReAct reasoning turns available to a **SubAgent Research Phase**. It does not include the one terminal **SubAgent Structured Finalization** call; both phases share the run's total time budget.
+_Avoid_: total model-call budget, finalization turn limit, per-phase timeout
+
+**SubAgent Research Phase Controller**:
+The SubAgent-specific agent operation that runs the ReAct research loop and reports whether it ended normally or reached its turn limit. It prevents a turn-limit fallback summary from being mistaken for **SubAgent Research Completion**.
+_Avoid_: opaque reply outcome, automatic ReAct summarization, runtime-owned protected loop
+
+**SubAgent Turn Usage**:
+The actual number of model calls made by a **SubAgent Run**. It includes each research reasoning turn and the one **SubAgent Finalization Attempt**, when one occurs; it can therefore exceed the **SubAgent Research Turn Budget** by one.
+_Avoid_: research-only call count, hidden terminal-call cost, turn-budget alias
+
+**SubAgent Structured Finalization**:
+The terminal, tool-free step after a **SubAgent Research Phase** that produces the run's validated **SubAgent Response Payload**. The runtime then constructs the **SubAgent Application Result**; finalization does not gather new evidence or execute work tools.
+_Avoid_: ordinary ReAct turn, tool-call loop, free-form final answer
+
+**SubAgent Response Payload**:
+The validated structured task content produced by **SubAgent Structured Finalization**. It contains research conclusions and suggested follow-up, but no run identity, lifecycle status, budget usage, or runtime errors.
+_Avoid_: persisted run record, execution envelope, model-generated metrics
+
+**SubAgent Finalization Context**:
+The bounded handoff supplied to **SubAgent Structured Finalization**: the original delegation request and the **SubAgent Research Synthesis**, together with the terminal response contract. It excludes ReAct memory, tool-call records, and raw tool output.
+_Avoid_: full transcript replay, tool-result dump, implicit memory access
+
+**SubAgent Turn-limit Finalization**:
+The one terminal **SubAgent Structured Finalization** call made after a **SubAgent Research Phase** reaches its turn budget without a **SubAgent Research Synthesis**. Its finalization context includes a size-limited research record of assistant replies, tool calls, and tool results so it can produce a structured response without further research.
+_Avoid_: unbounded transcript replay, extra research turn, skipped terminal response
+
+**SubAgent Turn-limit Partial Result**:
+The **SubAgent Application Result** emitted when a **SubAgent Turn-limit Finalization** produces a valid **SubAgent Response Payload**. It retains the structured response while reporting `partial` and `research_turn_limit_reached`, because the research phase did not complete normally.
+_Avoid_: completed after turn exhaustion, discarded structured evidence, runtime failure
+
+**SubAgent Finalization Attempt**:
+The single **SubAgent Structured Finalization** call allowed after **SubAgent Research Completion** or through **SubAgent Turn-limit Finalization**. A failed or invalid attempt produces a **SubAgent Partial Result** and is not retried.
+_Avoid_: JSON repair loop, schema retry, repeated terminal calls
+
+**SubAgent Structured Finalization Compatibility**:
+The requirement that terminal output be read from native structured-response metadata. A Provider endpoint that rejects the tool-free structured-response request yields a **SubAgent Partial Result**; the runtime does not fall back to parsing free-form JSON or perform a separate capability probe.
+_Avoid_: text JSON fallback, tool-choice workaround, startup capability call
+
+**SubAgent Application Result**:
+The application-constructed terminal result of a **SubAgent Run**. It combines a **SubAgent Response Payload**, when available, with runtime-owned identity, lifecycle status, metrics, and errors.
+_Avoid_: model-authored result envelope, raw model response, unvalidated payload
+
+**SubAgent Result Projection**:
+The stable, flat caller-facing representation of a **SubAgent Application Result** returned by the Background SubAgent tools. The internal **SubAgent Response Payload** is merged into this representation rather than exposed as a nested API object.
+_Avoid_: payload-only API, nested response migration, internal schema leak
+
+**SubAgent Partial Result**:
+An **AgentResult** that retains available research evidence without representing the delegated task as completed. It is produced when **SubAgent Structured Finalization** cannot produce a validated terminal result, or when **SubAgent Turn-limit Finalization** produces a valid payload after research exhausted its budget.
+_Avoid_: completed result with warning, discarded research, research timeout result
+
 **Background SubAgent Concurrency Limit**:
 The maximum number of **Background SubAgent Runs** that one runtime scope may have running at the same time. When the limit is reached, a new background start request is rejected as blocked rather than queued.
 _Avoid_: queue size, worker pool size, soft recommendation
 
 **Background SubAgent Run Status**:
-The lifecycle state of a **Background SubAgent Run** as observed by the Main Agent: `pending`, `running`, `paused`, `completed`, `failed`, `cancelled`, or `expired`. It is separate from the `status` field inside an **AgentResult**, which describes the delegated task outcome. `expired` is reserved for future supervisor cleanup semantics and is not emitted by the first background-tool implementation.
+The lifecycle state of a **Background SubAgent Run** as observed by the Main Agent: `pending`, `running`, `paused`, `completed`, `partial`, `failed`, `cancelled`, or `expired`. `partial` retains usable research evidence when terminal validation cannot complete. It is separate from the `status` field inside an **AgentResult**, which describes the delegated task outcome. `expired` is reserved for future supervisor cleanup semantics and is not emitted by the first background-tool implementation.
 _Avoid_: AgentResult status, tool call status, process exit code
 
 **Background SubAgent Tools**:

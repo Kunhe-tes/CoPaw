@@ -130,7 +130,7 @@ async def test_wait_subagent_returns_compact_snapshot(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_wait_subagent_returns_parent_facing_terminal_result(tmp_path):
+async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
     supervisor = SimpleNamespace()
     supervisor.wait = _AsyncReturn(
         SimpleNamespace(
@@ -138,7 +138,7 @@ async def test_wait_subagent_returns_parent_facing_terminal_result(tmp_path):
             terminal_runs=[
                 SimpleNamespace(
                     run_id="subagent-done",
-                    status="completed",
+                    status="partial",
                     spec=SimpleNamespace(
                         name="plan-researcher",
                         objective="Inspect",
@@ -148,8 +148,8 @@ async def test_wait_subagent_returns_parent_facing_terminal_result(tmp_path):
                         task_id="task-1",
                         agent_run_id="subagent-done",
                         agent_name="plan-researcher",
-                        status="completed",
-                        summary="done",
+                        status="partial",
+                        summary="partial research",
                     ),
                     errors=[],
                     worker=SimpleNamespace(
@@ -182,13 +182,13 @@ async def test_wait_subagent_returns_parent_facing_terminal_result(tmp_path):
 
     assert terminal == {
         "run_id": "subagent-done",
-        "status": "completed",
+        "status": "partial",
         "agent_name": "plan-researcher",
         "nickname": "研究员",
         "objective": "Inspect",
         "result": {
-            "status": "completed",
-            "summary": "done",
+            "status": "partial",
+            "summary": "partial research",
             "findings": [],
             "relevant_files": [],
             "risks": [],
@@ -633,7 +633,9 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_get_subagent_defaults_to_parent_facing_projection(tmp_path):
+async def test_get_subagent_defaults_to_parent_facing_partial_projection(
+    tmp_path,
+):
     definition = AgentRegistry([builtin_definition_provider()]).resolve(
         "plan-researcher",
     )
@@ -643,18 +645,18 @@ async def test_get_subagent_defaults_to_parent_facing_projection(tmp_path):
         definition,
         PermissionPolicy.readonly(),
     )
-    completed = await store.finish(
+    partial = await store.finish(
         record.run_id,
         AgentResult(
             task_id="task-1",
             agent_run_id=record.run_id,
             agent_name="plan-researcher",
-            status="completed",
-            summary="done",
+            status="partial",
+            summary="partial research",
         ),
     )
     supervisor = SimpleNamespace()
-    supervisor.get = _AsyncReturn(completed)
+    supervisor.get = _AsyncReturn(partial)
     supervisor.is_manageable = lambda _scope, _run_id: False
     tools = create_background_subagent_tools(
         supervisor=supervisor,
@@ -670,7 +672,9 @@ async def test_get_subagent_defaults_to_parent_facing_projection(tmp_path):
     response = await tools["get_subagent"](record.run_id)
     payload = json.loads(response.content[0]["text"])
 
-    assert payload["result"]["summary"] == "done"
+    assert payload["status"] == "partial"
+    assert payload["result"]["status"] == "partial"
+    assert payload["result"]["summary"] == "partial research"
     assert "definition_match" not in payload
     assert "worker" not in payload
     assert "errors" not in payload

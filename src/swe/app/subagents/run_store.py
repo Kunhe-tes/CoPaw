@@ -320,14 +320,14 @@ class PerRunSubAgentRunStore:
         run_id: str,
         result: AgentResult,
     ) -> BackgroundSubAgentRunRecord:
-        """Store a terminal result under lifecycle status completed."""
+        """Store a terminal completed or partial result."""
         record = self._require(run_id)
         if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
             return record
         now = _now_utc()
         finished = record.model_copy(
             update={
-                "status": "completed",
+                "status": result.status,
                 "result": result,
                 "finished_at": now,
                 "updated_at": now,

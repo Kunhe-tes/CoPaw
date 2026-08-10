@@ -37,12 +37,13 @@ BackgroundRunStatus = Literal[
     "running",
     "paused",
     "completed",
+    "partial",
     "failed",
     "cancelled",
     "expired",
 ]
 TERMINAL_BACKGROUND_RUN_STATUSES = frozenset(
-    {"completed", "failed", "cancelled", "expired"},
+    {"completed", "partial", "failed", "cancelled", "expired"},
 )
 SAFE_WORKER_REQUEST_CONTEXT_KEYS = frozenset(
     {
@@ -708,13 +709,9 @@ class AgentError(BaseModel):
     recoverable: bool = False
 
 
-class AgentResult(BaseModel):
-    """Compact structured output returned from a SubAgent to the caller."""
+class SubAgentResponse(BaseModel):
+    """Model-generated, validated content from a SubAgent finalization."""
 
-    task_id: str
-    agent_run_id: str
-    agent_name: str
-    status: AgentResultStatus
     summary: str
     findings: list[Finding] = Field(default_factory=list)
     relevant_files: list[RelevantFile] = Field(default_factory=list)
@@ -722,8 +719,17 @@ class AgentResult(BaseModel):
     recommendations: list[Recommendation] = Field(default_factory=list)
     open_questions: list[str] = Field(default_factory=list)
     suggested_next_steps: list[str] = Field(default_factory=list)
-    metrics: Metrics = Field(default_factory=Metrics)
     artifacts: list[ArtifactRef] = Field(default_factory=list)
+
+
+class AgentResult(SubAgentResponse):
+    """Application-owned terminal result returned from a SubAgent run."""
+
+    task_id: str
+    agent_run_id: str
+    agent_name: str
+    status: AgentResultStatus
+    metrics: Metrics = Field(default_factory=Metrics)
     errors: list[AgentError] = Field(default_factory=list)
 
 

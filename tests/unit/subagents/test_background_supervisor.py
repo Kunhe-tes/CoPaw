@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from swe.app.subagents import (
+    AgentResult,
     AgentRegistry,
     BackgroundSubAgentScope,
     BackgroundSubAgentStartBlocked,
@@ -143,6 +144,41 @@ async def test_wait_lazy_reaps_worker_without_result(tmp_path):
     assert record.worker is not None
     assert record.worker.exit_code == 1
     assert record.errors[-1].code == "worker_exited_without_result"
+
+
+@pytest.mark.asyncio
+async def test_wait_preserves_partial_worker_result(tmp_path):
+    popen_factory = _FakePopenFactory()
+    supervisor = BackgroundSubAgentSupervisor(
+        max_running_per_scope=1,
+        popen_factory=popen_factory,
+    )
+    scope = _scope(tmp_path)
+    started = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+    )
+    store = PerRunSubAgentRunStore(scope.run_store_dir)
+    partial = AgentResult(
+        task_id="task-1",
+        agent_run_id=started.run_id,
+        agent_name="plan-researcher",
+        status="partial",
+        summary="research retained",
+    )
+    await store.finish(started.run_id, partial)
+    popen_factory.processes[0].returncode = 0
+
+    snapshot = await supervisor.wait(scope, timeout_ms=1)
+    record = await store.get(started.run_id)
+
+    assert snapshot.terminal_runs[0].status == "partial"
+    assert snapshot.terminal_runs[0].result == partial
+    assert record is not None
+    assert record.status == "partial"
+    assert record.result == partial
 
 
 @pytest.mark.asyncio

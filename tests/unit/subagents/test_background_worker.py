@@ -44,12 +44,12 @@ def _agent_config(tmp_path: Path) -> AgentProfileConfig:
     )
 
 
-def _result(run_id: str) -> AgentResult:
+def _result(run_id: str, *, status: str = "completed") -> AgentResult:
     return AgentResult(
         task_id="task-1",
         agent_run_id=run_id,
         agent_name="plan-researcher",
-        status="completed",
+        status=status,
         summary="worker completed",
     )
 
@@ -173,6 +173,30 @@ async def test_worker_writes_terminal_result_from_runtime(
     assert record.status == "completed"
     assert record.result is not None
     assert record.result.summary == "worker completed"
+
+
+@pytest.mark.asyncio
+async def test_worker_preserves_partial_runtime_result(monkeypatch, tmp_path):
+    from swe.app.subagents import worker as worker_module
+
+    class FakeRuntime:
+        def __init__(self, store):
+            self.store = store
+
+        async def run(self, **kwargs):
+            return _result(kwargs["run"].run_id, status="partial")
+
+    launch_path, run_id, run_store_dir = await _write_launch_spec(tmp_path)
+    monkeypatch.setattr(worker_module, "SubAgentRuntime", FakeRuntime)
+
+    exit_code = await worker_module.run_worker(launch_path)
+    record = await PerRunSubAgentRunStore(run_store_dir).get(run_id)
+
+    assert exit_code == 0
+    assert record is not None
+    assert record.status == "partial"
+    assert record.result is not None
+    assert record.result.status == "partial"
 
 
 @pytest.mark.asyncio

@@ -174,7 +174,9 @@ def _plan_interaction_tools_enabled(plan_mode_enabled: bool) -> bool:
     from ..app.source_system_config.registry import (
         is_normal_mode_plan_interaction_tools_enabled,
     )
-    from ..app.source_system_config.runtime import get_current_source_system_config
+    from ..app.source_system_config.runtime import (
+        get_current_source_system_config,
+    )
 
     return is_normal_mode_plan_interaction_tools_enabled(
         get_current_source_system_config(),
@@ -352,6 +354,16 @@ class AgentPhaseState:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class ResearchPhaseResult:
+    """Outcome of a bounded SubAgent research ReAct loop."""
+
+    status: Literal["completed", "turn_limit_reached"]
+    reply: Msg | None
+    turns_used: int
+    messages: tuple[Msg, ...] = ()
+
+
 class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     """SWE Agent with integrated tools, skills, and memory management.
 
@@ -372,6 +384,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     **must** call ``super()._acting(...)`` / ``super()._reasoning(...)``
     so the guard interception remains active.
     """
+
+    _reply_task: asyncio.Task[Any] | None
 
     def __init__(
         self,
@@ -2034,6 +2048,88 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             msg.content = new_content
 
         return total_stripped
+
+    async def run_research_phase(
+        self,
+        msg: Msg | list[Msg] | None,
+    ) -> ResearchPhaseResult:
+        """Run a bounded tool-enabled ReAct loop for a SubAgent research phase.
+
+        Unlike :meth:`reply`, reaching ``max_iters`` is reported explicitly
+        instead of invoking AgentScope's free-form summarization fallback.
+        """
+        from ..config.context import (
+            set_current_task_progress_chat_id,
+            set_current_task_progress_tracker,
+            set_current_task_progress_turn_id,
+            set_current_workspace_dir,
+            set_current_recent_max_bytes,
+        )
+        from ..app.source_system_config import (
+            resolve_tool_result_compact_config,
+        )
+
+        set_current_workspace_dir(self._workspace_dir)
+        tool_result_compact = resolve_tool_result_compact_config(
+            self._agent_config.running.tool_result_compact,
+        )
+        set_current_recent_max_bytes(tool_result_compact.recent_max_bytes)
+        set_current_task_progress_tracker(self._task_tracker)
+        set_current_task_progress_chat_id(
+            self._request_context.get("chat_id"),
+        )
+        set_current_task_progress_turn_id(
+            self._request_context.get("turn_id"),
+        )
+        if msg is not None:
+            await process_file_and_media_blocks_in_message(msg)
+        await self.memory.add(msg)
+        await self._retrieve_from_long_term_memory(msg)
+        await self._retrieve_from_knowledge(msg)
+
+        last_reply: Msg | None = None
+        previous_reply_task = self._reply_task
+        self._reply_task = asyncio.current_task()
+        self._required_structured_model = None
+        self.toolkit.remove_tool_function(self.finish_function_name)
+        self._start_watchdog()
+        try:
+            with self.agent_phase(AgentPhase.REASONING, reason="research"):
+                for turn in range(1, self.max_iters + 1):
+                    await self._compress_memory_if_needed()
+                    reply = await self._reasoning()
+                    last_reply = reply
+                    tool_calls = reply.get_content_blocks("tool_use")
+                    if not tool_calls:
+                        return ResearchPhaseResult(
+                            status="completed",
+                            reply=reply,
+                            turns_used=turn,
+                            messages=await self._research_messages(),
+                        )
+
+                    futures = [
+                        self._acting(tool_call) for tool_call in tool_calls
+                    ]
+                    if self.parallel_tool_calls:
+                        await asyncio.gather(*futures)
+                    else:
+                        for future in futures:
+                            await future
+
+            return ResearchPhaseResult(
+                status="turn_limit_reached",
+                reply=last_reply,
+                turns_used=self.max_iters,
+                messages=await self._research_messages(),
+            )
+        finally:
+            self._stop_watchdog()
+            self._reply_task = previous_reply_task
+
+    async def _research_messages(self) -> tuple[Msg, ...]:
+        """Snapshot research memory for a bounded terminal handoff."""
+        return tuple(await self.memory.get_memory())
 
     # pylint: disable=protected-access
     async def reply(

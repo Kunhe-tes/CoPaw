@@ -21,6 +21,7 @@ from swe.app.subagents import (
     LocalJsonSubAgentRunStore,
     PermissionPolicy,
     SubAgentDefinition,
+    SubAgentResponse,
     SubAgentRuntime,
     builtin_definition_provider,
 )
@@ -31,18 +32,42 @@ from swe.config.config import AgentProfileConfig
 class _FakeSWEAgent:
     instances: list["_FakeSWEAgent"] = []
     replies: list[Msg | Exception] = []
+    final_payloads: list[dict | Exception | None] = []
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
         self.messages: list[Msg] = []
+        self.formatter = SimpleNamespace(format=self._format)
+        self.model = self._model
         _FakeSWEAgent.instances.append(self)
 
-    async def reply(self, msg=None, structured_model=None):
+    async def _format(self, messages):
+        return messages
+
+    async def run_research_phase(self, msg=None):
         self.messages.append(msg)
         reply = _FakeSWEAgent.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
-        return reply
+        return SimpleNamespace(
+            status="completed",
+            reply=reply,
+            turns_used=1,
+            messages=(msg, reply),
+        )
+
+    async def _model(self, prompt, **kwargs):
+        self.finalization_prompt = prompt
+        self.finalization_kwargs = kwargs
+        payload = (
+            _FakeSWEAgent.final_payloads.pop(0)
+            if _FakeSWEAgent.final_payloads
+            else {"summary": "finalized"}
+        )
+        if isinstance(payload, Exception):
+            raise RuntimeError(str(payload))
+        metadata = None if payload is None else {"structured_output": payload}
+        return SimpleNamespace(metadata=metadata)
 
 
 def _agent_config(tmp_path: Path) -> AgentProfileConfig:
@@ -72,21 +97,8 @@ async def test_runtime_creates_fresh_agent_with_subagent_safe_options(
     from swe.app.subagents import runtime as runtime_module
 
     _FakeSWEAgent.instances = []
-    _FakeSWEAgent.replies = [
-        Msg(
-            "Friday",
-            json.dumps(
-                {
-                    "task_id": "task-1",
-                    "agent_run_id": "ignored",
-                    "agent_name": "plan-researcher",
-                    "status": "completed",
-                    "summary": "found files",
-                },
-            ),
-            "assistant",
-        ),
-    ]
+    _FakeSWEAgent.replies = [Msg("Friday", "found files", "assistant")]
+    _FakeSWEAgent.final_payloads = [{"summary": "found files"}]
     monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
     registry = AgentRegistry([builtin_definition_provider()])
     definition = registry.resolve("plan-researcher")
@@ -133,6 +145,9 @@ async def test_runtime_creates_fresh_agent_with_subagent_safe_options(
     delegated_message = created.messages[0]
     assert delegated_message.get_text_content().count("task-1") >= 1
     assert "parent scratchpad" not in delegated_message.get_text_content()
+    assert created.finalization_kwargs == {
+        "structured_model": SubAgentResponse,
+    }
 
 
 @pytest.mark.asyncio
@@ -316,32 +331,38 @@ async def test_runtime_uses_definition_instruction_and_no_max_tokens(
     config_payload = created.kwargs["agent_config"].model_dump(mode="json")
     assert result.status == "completed"
     assert "Use the canonical instruction field only." in prompt
-    assert "Return AgentResult JSON." in prompt
+    assert "Return AgentResult JSON." not in prompt
+    assert "natural-language research synthesis" in prompt
+    assert "Return AgentResult JSON." in (
+        created.finalization_prompt[0].get_text_content()
+    )
     assert "prompt.system" not in prompt
     assert "max_tokens" not in json.dumps(config_payload)
 
 
 @pytest.mark.asyncio
-async def test_runtime_repair_attempt_uses_remaining_timeout(
+async def test_runtime_research_timeout_skips_finalization(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """The JSON repair attempt cannot outlive the run timeout budget."""
+    """Research timeout fails without starting structured finalization."""
     from swe.app.subagents import runtime as runtime_module
 
-    class SlowRepairAgent:
+    class SlowResearchAgent:
+        instances: list["SlowResearchAgent"] = []
+
         def __init__(self, **kwargs):
             self.kwargs = kwargs
-            self.messages: list[Msg] = []
+            self.model_calls = 0
+            SlowResearchAgent.instances.append(self)
 
-        async def reply(self, msg=None, structured_model=None):
-            self.messages.append(msg)
-            if len(self.messages) == 1:
-                return Msg("Friday", "not json", "assistant")
+        async def run_research_phase(self, msg=None):
             await asyncio.sleep(0.2)
-            return Msg("Friday", "{}", "assistant")
 
-    monkeypatch.setattr(runtime_module, "SWEAgent", SlowRepairAgent)
+        async def model(self, *args, **kwargs):
+            self.model_calls += 1
+
+    monkeypatch.setattr(runtime_module, "SWEAgent", SlowResearchAgent)
     registry = AgentRegistry([builtin_definition_provider()])
     definition = registry.resolve("plan-researcher").model_copy(
         update={"budget": BudgetConfig(timeout_ms=50)},
@@ -364,33 +385,22 @@ async def test_runtime_repair_attempt_uses_remaining_timeout(
 
     assert result.status == "failed"
     assert result.errors[0].code == "timeout"
+    assert SlowResearchAgent.instances[0].model_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_runtime_invalid_output_uses_one_repair_attempt(
+async def test_runtime_missing_finalization_metadata_returns_partial_once(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Invalid output is repaired once before falling back."""
+    """Missing finalization metadata returns partial without retrying."""
     from swe.app.subagents import runtime as runtime_module
 
     _FakeSWEAgent.instances = []
     _FakeSWEAgent.replies = [
-        Msg("Friday", "not json", "assistant"),
-        Msg(
-            "Friday",
-            json.dumps(
-                {
-                    "task_id": "task-1",
-                    "agent_run_id": "ignored",
-                    "agent_name": "plan-researcher",
-                    "status": "partial",
-                    "summary": "repaired",
-                },
-            ),
-            "assistant",
-        ),
+        Msg("Friday", "research synthesis", "assistant"),
     ]
+    _FakeSWEAgent.final_payloads = [None]
     monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
     registry = AgentRegistry([builtin_definition_provider()])
     definition = registry.resolve("plan-researcher")
@@ -411,16 +421,202 @@ async def test_runtime_invalid_output_uses_one_repair_attempt(
     )
 
     assert result.status == "partial"
-    assert result.summary == "repaired"
-    assert len(_FakeSWEAgent.instances[0].messages) == 2
+    assert result.summary == "research synthesis"
+    assert result.errors[0].code == "structured_finalization_failed"
+    assert result.metrics.turns_used == 2
+    assert len(_FakeSWEAgent.instances[0].messages) == 1
 
 
 @pytest.mark.asyncio
-async def test_runtime_extracts_markdown_fenced_agent_result_json(
+async def test_runtime_finalization_exception_returns_partial_once(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
-    """Markdown fenced JSON is extracted and validated without repair."""
+    from swe.app.subagents import runtime as runtime_module
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [
+        Msg("Friday", "research synthesis", "assistant"),
+    ]
+    _FakeSWEAgent.final_payloads = [RuntimeError("response_format rejected")]
+    monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher")
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    assert result.status == "partial"
+    assert result.summary == "research synthesis"
+    assert result.errors[0].code == "structured_finalization_failed"
+    assert result.metrics.turns_used == 2
+    assert len(_FakeSWEAgent.instances[0].messages) == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_invalid_finalization_payload_returns_partial_once(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from swe.app.subagents import runtime as runtime_module
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [
+        Msg("Friday", "research synthesis", "assistant"),
+    ]
+    _FakeSWEAgent.final_payloads = [{"findings": []}]
+    monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher")
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    assert result.status == "partial"
+    assert result.summary == "research synthesis"
+    assert result.errors[0].code == "structured_finalization_failed"
+    assert result.metrics.turns_used == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_finalization_timeout_returns_partial(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from swe.app.subagents import runtime as runtime_module
+
+    class SlowFinalizationAgent(_FakeSWEAgent):
+        async def _model(self, prompt, **kwargs):
+            await asyncio.sleep(0.2)
+            return SimpleNamespace(
+                metadata={"structured_output": {"summary": "x"}},
+            )
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [
+        Msg("Friday", "research synthesis", "assistant"),
+    ]
+    monkeypatch.setattr(runtime_module, "SWEAgent", SlowFinalizationAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher").model_copy(
+        update={"budget": BudgetConfig(timeout_ms=50)},
+    )
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    assert result.status == "partial"
+    assert result.errors[0].code == "structured_finalization_failed"
+    assert result.metrics.turns_used == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_turn_limit_finalizes_from_bounded_research_record(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from swe.app.subagents import runtime as runtime_module
+
+    class TurnLimitAgent(_FakeSWEAgent):
+        async def run_research_phase(self, msg=None):
+            self.messages.append(msg)
+            return SimpleNamespace(
+                status="turn_limit_reached",
+                reply=Msg(
+                    "Friday",
+                    [
+                        {
+                            "type": "tool_use",
+                            "id": "tool-1",
+                            "name": "read_file",
+                            "input": {"path": "README.md"},
+                        },
+                    ],
+                    "assistant",
+                ),
+                turns_used=2,
+                messages=(
+                    msg,
+                    Msg(
+                        "system",
+                        [{"type": "tool_result", "output": "tool evidence"}],
+                        "system",
+                    ),
+                ),
+            )
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.final_payloads = [{"summary": "bounded evidence"}]
+    monkeypatch.setattr(runtime_module, "SWEAgent", TurnLimitAgent)
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher")
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    created = _FakeSWEAgent.instances[0]
+    context = json.loads(created.finalization_prompt[1].get_text_content())
+    assert result.status == "partial"
+    assert result.summary == "bounded evidence"
+    assert result.metrics.turns_used == 3
+    assert result.errors[0].code == "research_turn_limit_reached"
+    assert "tool evidence" in context["research_record"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_structured_metadata_not_research_text_json(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Free-form research JSON is not parsed as a terminal result."""
     from swe.app.subagents import runtime as runtime_module
 
     _FakeSWEAgent.instances = []
@@ -440,6 +636,9 @@ async def test_runtime_extracts_markdown_fenced_agent_result_json(
 ```""",
             "assistant",
         ),
+    ]
+    _FakeSWEAgent.final_payloads = [
+        {"summary": "from structured metadata"},
     ]
     monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
     registry = AgentRegistry([builtin_definition_provider()])
@@ -461,7 +660,7 @@ async def test_runtime_extracts_markdown_fenced_agent_result_json(
     )
 
     assert result.status == "completed"
-    assert result.summary == "from fenced json"
+    assert result.summary == "from structured metadata"
     assert len(_FakeSWEAgent.instances[0].messages) == 1
 
 
@@ -511,26 +710,8 @@ async def test_runtime_overrides_untrusted_model_metrics(
     from swe.app.subagents import runtime as runtime_module
 
     _FakeSWEAgent.instances = []
-    _FakeSWEAgent.replies = [
-        Msg(
-            "Friday",
-            json.dumps(
-                {
-                    "task_id": "task-1",
-                    "agent_run_id": "ignored",
-                    "agent_name": "plan-researcher",
-                    "status": "completed",
-                    "summary": "done",
-                    "metrics": {
-                        "turns_used": 99,
-                        "tool_calls_used": 88,
-                        "elapsed_ms": 1,
-                    },
-                },
-            ),
-            "assistant",
-        ),
-    ]
+    _FakeSWEAgent.replies = [Msg("Friday", "done", "assistant")]
+    _FakeSWEAgent.final_payloads = [{"summary": "done"}]
     monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
     registry = AgentRegistry([builtin_definition_provider()])
     definition = registry.resolve("plan-researcher")
@@ -550,7 +731,7 @@ async def test_runtime_overrides_untrusted_model_metrics(
         effective_policy=PermissionPolicy.readonly(),
     )
 
-    assert result.metrics.turns_used == 1
+    assert result.metrics.turns_used == 2
     assert result.metrics.tool_calls_used == 0
     assert result.metrics.elapsed_ms >= 0
 

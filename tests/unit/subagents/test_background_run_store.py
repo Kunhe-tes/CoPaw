@@ -104,7 +104,7 @@ async def test_per_run_store_loads_record_from_individual_file(tmp_path):
     reloaded = await PerRunSubAgentRunStore(tmp_path).get(record.run_id)
 
     assert reloaded is not None
-    assert reloaded.status == "completed"
+    assert reloaded.status == "partial"
     assert reloaded.result is not None
     assert reloaded.result.status == "partial"
 

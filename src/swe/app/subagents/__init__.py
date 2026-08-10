@@ -12,6 +12,7 @@ from .matcher import (
 )
 from .models import (
     AgentResult,
+    SubAgentResponse,
     BackgroundRunStatus,
     BackgroundSubAgentRunRecord,
     DelegationSpec,
@@ -53,6 +54,7 @@ from .runtime import SubAgentRuntime
 __all__ = [
     "AgentRegistry",
     "AgentResult",
+    "SubAgentResponse",
     "BackgroundRunStatus",
     "BackgroundSubAgentNotManageable",
     "BackgroundSubAgentRunRecord",
