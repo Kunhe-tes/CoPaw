@@ -16,10 +16,10 @@
  */
 
 /** 默认用户 ID（非 iframe 模式时使用） */
-export const DEFAULT_USER_ID = "default";
+export const DEFAULT_USER_ID = "80280195";
 
 /** 默认租户 ID（与 X-Tenant-Id header 对应） */
-export const DEFAULT_TENANT_ID = "default";
+export const DEFAULT_TENANT_ID = "80280195";
 
 /** 默认渠道名称 */
 export const DEFAULT_CHANNEL = "console";
