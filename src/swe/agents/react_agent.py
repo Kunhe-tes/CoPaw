@@ -167,6 +167,41 @@ _PLAN_MODE_ALLOWED_TOOLS = frozenset(
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
 
 
+def _plan_interaction_tools_enabled(plan_mode_enabled: bool) -> bool:
+    if plan_mode_enabled:
+        return True
+
+    from ..app.source_system_config.registry import (
+        is_normal_mode_plan_interaction_tools_enabled,
+    )
+    from ..app.source_system_config.runtime import get_current_source_system_config
+
+    return is_normal_mode_plan_interaction_tools_enabled(
+        get_current_source_system_config(),
+    )
+
+
+def _add_main_agent_tools(
+    tool_functions: dict[str, Any],
+    *,
+    request_context: dict[str, Any],
+    workspace_dir: Path | None,
+    plan_mode_enabled: bool,
+) -> None:
+    tool_functions["emit_wplus_sop_event"] = emit_wplus_sop_event
+    if not _plan_interaction_tools_enabled(plan_mode_enabled):
+        return
+    tool_functions.update(
+        {
+            "ask_plan_clarification": ask_plan_clarification,
+            "submit_proposed_plan": create_submit_proposed_plan_tool(
+                request_context=request_context,
+                workspace_dir=workspace_dir,
+            ),
+        },
+    )
+
+
 def _stringify_accepted_plan_value(value: Any) -> str:
     """限制计划字段长度，避免异常持久化内容撑爆系统提示词。"""
     text = str(value).strip()
@@ -562,16 +597,13 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             "copy_file_to_static": copy_file_to_static,
             "update_task_progress": update_task_progress,
         }
-        if request_context.get("agent_role", "main") != "subagent":
-            tool_functions.update(
-                {
-                    "emit_wplus_sop_event": emit_wplus_sop_event,
-                    "ask_plan_clarification": ask_plan_clarification,
-                    "submit_proposed_plan": create_submit_proposed_plan_tool(
-                        request_context=request_context,
-                        workspace_dir=self._workspace_dir,
-                    ),
-                },
+        is_main_agent = request_context.get("agent_role", "main") != "subagent"
+        if is_main_agent:
+            _add_main_agent_tools(
+                tool_functions,
+                request_context=request_context,
+                workspace_dir=self._workspace_dir,
+                plan_mode_enabled=plan_mode_enabled,
             )
 
         # Register only enabled tools

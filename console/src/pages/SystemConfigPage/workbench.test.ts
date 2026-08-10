@@ -51,6 +51,22 @@ describe("source-system configuration workbench", () => {
     );
   });
 
+  it("includes normal-mode plan interaction tools in conversation drafts", () => {
+    const summaries = buildCapabilitySummaries({
+      savedConfig: {},
+      draftConfig: {
+        feature_switches: {
+          normal_mode_plan_interaction_tools_enabled: true,
+        },
+      },
+      effectiveConfig: {},
+    });
+
+    expect(summaries.find((item) => item.id === "conversation")?.state).toBe(
+      "unsaved",
+    );
+  });
+
   it("preserves prompt order while adding, moving, and removing", () => {
     expect(addPromptSegment(["first"])).toEqual(["first", ""]);
     expect(movePromptSegment(["first", "second"], 1, -1)).toEqual([

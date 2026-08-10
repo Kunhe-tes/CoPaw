@@ -15,6 +15,11 @@ from swe.agents.hook_runtime.models import MergedHookResult
 from swe.agents.react_agent import SWEAgent
 from swe.agents.tool_guard_mixin import ToolGuardMixin
 from swe.app.subagents import PermissionPolicy
+from swe.app.source_system_config.models import (
+    EffectiveSourceSystemConfig,
+    SourceSystemConfig,
+)
+from swe.app.source_system_config.runtime import bind_source_system_config
 from swe.config.config import AgentProfileConfig
 
 
@@ -238,6 +243,22 @@ def _bare_agent(tmp_path: Path, *, request_context=None) -> SWEAgent:
     return agent
 
 
+def _source_config_with_plan_interaction_tools(
+    enabled: bool,
+) -> EffectiveSourceSystemConfig:
+    return EffectiveSourceSystemConfig(
+        source_id="portal",
+        config=SourceSystemConfig.model_validate(
+            {
+                "feature_switches": {
+                    "normal_mode_plan_interaction_tools_enabled": enabled,
+                },
+            },
+        ),
+        version=1,
+    )
+
+
 def test_system_prompt_override_bypasses_normal_main_prompt(
     monkeypatch,
     tmp_path: Path,
@@ -305,31 +326,33 @@ def test_subagent_toolkit_filters_builtins_and_excludes_delegate(
     assert "delegate_to_subagent" not in toolkit.tools
 
 
-def test_main_agent_never_registers_delegation_tool(
+def test_main_agent_registers_plan_interaction_tools_by_mode_and_source_config(
     tmp_path: Path,
 ) -> None:
-    """Synchronous delegation is no longer part of the Main Agent toolkit."""
+    """计划交互工具仅对 Plan Mode 或已开启 Source 的主 Agent 可用。"""
     disabled = _bare_agent(tmp_path, request_context={"agent_role": "main"})
-    enabled = _bare_agent(
+    plan_mode = _bare_agent(
         tmp_path,
-        request_context={"agent_role": "main", "enable_subagents": True},
+        request_context={"agent_role": "main", "plan_mode_enabled": True},
+    )
+    subagent = _bare_agent(
+        tmp_path,
+        request_context={"agent_role": "subagent", "plan_mode_enabled": True},
     )
 
-    assert (
-        "delegate_to_subagent" not in SWEAgent._create_toolkit(disabled).tools
-    )
-    assert (
-        "delegate_to_subagent" not in SWEAgent._create_toolkit(enabled).tools
-    )
-    main_tools = SWEAgent._create_toolkit(disabled).tools
-    assert "ask_plan_clarification" in main_tools
-    assert "submit_proposed_plan" in main_tools
-    assert (
-        "ask_plan_clarification"
-        not in SWEAgent._create_toolkit(
-            _bare_agent(tmp_path, request_context={"agent_role": "subagent"}),
-        ).tools
-    )
+    with bind_source_system_config(_source_config_with_plan_interaction_tools(False)):
+        normal_tools = SWEAgent._create_toolkit(disabled).tools
+        plan_mode_tools = SWEAgent._create_toolkit(plan_mode).tools
+        subagent_tools = SWEAgent._create_toolkit(subagent).tools
+
+    with bind_source_system_config(_source_config_with_plan_interaction_tools(True)):
+        enabled_normal_tools = SWEAgent._create_toolkit(disabled).tools
+
+    for tool_name in ("ask_plan_clarification", "submit_proposed_plan"):
+        assert tool_name not in normal_tools
+        assert tool_name in plan_mode_tools
+        assert tool_name not in subagent_tools
+        assert tool_name in enabled_normal_tools
 
 
 def test_background_subagent_tools_require_explicit_intent(

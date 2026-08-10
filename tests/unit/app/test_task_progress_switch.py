@@ -23,7 +23,9 @@ from swe.app.source_system_config.models import (
     SourceSystemConfig,
 )
 from swe.app.source_system_config.registry import (
+    build_default_source_system_config_payload,
     is_chat_task_progress_enabled,
+    is_normal_mode_plan_interaction_tools_enabled,
 )
 from swe.app.source_system_config.runtime import bind_source_system_config
 from swe.config.context import (
@@ -44,6 +46,22 @@ def _build_effective_config(enabled: bool) -> EffectiveSourceSystemConfig:
             {
                 "feature_switches": {
                     "chat_task_progress_enabled": enabled,
+                },
+            },
+        ),
+        version=1,
+    )
+
+
+def _build_plan_interaction_tools_config(
+    enabled: bool,
+) -> EffectiveSourceSystemConfig:
+    return EffectiveSourceSystemConfig(
+        source_id="portal",
+        config=SourceSystemConfig.model_validate(
+            {
+                "feature_switches": {
+                    "normal_mode_plan_interaction_tools_enabled": enabled,
                 },
             },
         ),
@@ -181,7 +199,7 @@ class TestReactAgentTaskProgressPrompt:
         )
         agent = self._build_agent()
 
-        with bind_source_system_config(_build_effective_config(False)):
+        with bind_source_system_config(_build_plan_interaction_tools_config(True)):
             prompt = SWEAgent._build_sys_prompt(agent)
 
         assert "use ask_plan_clarification tool" not in prompt
@@ -534,4 +552,28 @@ def test_is_chat_task_progress_enabled_reads_false_string_as_disabled():
             },
         )
         is False
+    )
+
+
+def test_plan_interaction_tools_switch_is_disabled_by_default():
+    """普通模式计划交互工具必须在 Source 配置中默认关闭。"""
+    assert build_default_source_system_config_payload()["feature_switches"] == {
+        "chat_task_progress_enabled": True,
+        "database_access_guard_enabled": True,
+        "normal_mode_plan_interaction_tools_enabled": False,
+    }
+
+
+def test_plan_interaction_tools_switch_helper_reads_source_value():
+    """helper 应读取并容错处理 Source 的成对工具开关。"""
+    assert is_normal_mode_plan_interaction_tools_enabled(None) is False
+    assert (
+        is_normal_mode_plan_interaction_tools_enabled(
+            {
+                "feature_switches": {
+                    "normal_mode_plan_interaction_tools_enabled": "true",
+                },
+            },
+        )
+        is True
     )
