@@ -1095,6 +1095,7 @@ async def _create_mcp_client_with_headers(
     merged_headers = build_mcp_http_headers(
         client_config.headers,
         passthrough_headers=passthrough_headers,
+        url=client_config.url,
         session_id=session_id,
         chat_id=chat_id,
         trace_id=trace_id,

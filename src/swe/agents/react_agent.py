@@ -1435,6 +1435,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 passthrough_headers=rebuild_info.get(
                     "passthrough_headers",
                 ),
+                url=rebuild_info.get("url"),
                 session_id=rebuild_info.get("session_id"),
                 chat_id=rebuild_info.get("chat_id"),
                 trace_id=rebuild_info.get("trace_id"),
