@@ -1,11 +1,6 @@
-## Purpose
-
-Define the featured-case management experience for exact-scope case maintenance, ordering, deletion, and existing user assignments.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Cases management page
-
 The system SHALL provide a featured-case management page at `/featured-cases-management` for exact-scope case CRUD and ordering operations.
 
 #### Scenario: Operator opens management in a branch context
@@ -31,7 +26,6 @@ The system SHALL provide a featured-case management page at `/featured-cases-man
 - **THEN** the system SHALL query only the selected logical scope using the selected pagination values
 
 ### Requirement: Case creation form
-
 The system SHALL provide a drawer form for creating a case in the caller's writable featured-case scope.
 
 #### Scenario: Operator opens the create form
@@ -49,7 +43,6 @@ The system SHALL provide a drawer form for creating a case in the caller's writa
 - **THEN** the page SHALL NOT expose a create action for that scope
 
 ### Requirement: Case editing form
-
 The system SHALL provide a drawer form for editing case content in the caller's writable scope and a separate inline control for editing ordering position.
 
 #### Scenario: Operator opens content editing
@@ -70,7 +63,6 @@ The system SHALL provide a drawer form for editing case content in the caller's 
 - **THEN** the page SHALL NOT expose content-editing or ordering-editing controls
 
 ### Requirement: Case deletion with confirmation
-
 The system SHALL require confirmation before deleting a writable case and SHALL compact the affected logical queue after deletion.
 
 #### Scenario: Operator requests deletion
@@ -84,19 +76,3 @@ The system SHALL require confirmation before deleting a writable case and SHALL 
 #### Scenario: Operator views a read-only scope
 - **WHEN** a branch operator views head-office cases
 - **THEN** the page SHALL NOT expose deletion controls
-
-### Requirement: User assignment tab
-
-The system SHALL provide a tab for managing user-case assignments.
-
-#### Scenario: Admin views user assignments
-- **WHEN** admin clicks "用户分配" tab
-- **THEN** system displays table: userId | 可见案例（checkbox list）
-
-#### Scenario: Admin adds user assignment
-- **WHEN** admin clicks "+添加用户" and enters userId and selects cases
-- **THEN** system updates user_cases.json via `PUT /cases/admin/user-mapping`
-
-#### Scenario: Admin modifies user cases
-- **WHEN** admin toggles case checkboxes for userId A001234
-- **THEN** system updates user_cases.json with new case list

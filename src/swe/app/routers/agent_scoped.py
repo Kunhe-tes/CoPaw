@@ -136,7 +136,6 @@ def create_agent_scoped_router() -> APIRouter:
     from ..runner.api import router as chats_router
     from .console import router as console_router
     from .subagents import router as subagents_router
-    from ..wplus_sop.router import router as wplus_sop_router
 
     # Create parent router with agentId parameter
     router = APIRouter(prefix="/agents/{agentId}", tags=["agent-scoped"])
@@ -169,6 +168,5 @@ def create_agent_scoped_router() -> APIRouter:
     router.include_router(workspace_router)
     router.include_router(console_router)
     router.include_router(subagents_router)
-    router.include_router(wplus_sop_router)
 
     return router

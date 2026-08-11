@@ -42,10 +42,6 @@ class TaskTracker:
 
     def __init__(self) -> None:
         self._lock = asyncio.Lock()
-        self._lifecycle_locks: weakref.WeakValueDictionary[
-            str,
-            asyncio.Lock,
-        ] = weakref.WeakValueDictionary()
         self._runs: dict[str, _RunState] = {}
         self._task_progress: dict[str, TaskProgressPayload] = {}
 
@@ -60,35 +56,6 @@ class TaskTracker:
         if state is None or state.task.done():
             return "idle"
         return state.status
-
-    async def call_if_idle(
-        self,
-        run_key: str,
-        callback: Callable[[], Any],
-    ) -> tuple[bool, Any]:
-        """Run blocking recovery without blocking unrelated run keys."""
-
-        lifecycle_lock = self._lifecycle_locks.setdefault(
-            run_key,
-            asyncio.Lock(),
-        )
-        async with lifecycle_lock:
-            async with self._lock:
-                state = self._runs.get(run_key)
-                if state is not None and not state.task.done():
-                    return False, None
-            operation = asyncio.create_task(asyncio.to_thread(callback))
-            try:
-                return True, await asyncio.shield(operation)
-            except asyncio.CancelledError as exc:
-                try:
-                    await operation
-                except Exception:
-                    logger.exception(
-                        "idle callback failed after cancellation run_key=%s",
-                        run_key,
-                    )
-                raise exc
 
     async def has_active_tasks(self) -> bool:
         """Check if any tasks are currently running.
@@ -214,122 +181,81 @@ class TaskTracker:
         run_key: str,
         payload: Any,
         stream_fn: Callable[..., Coroutine],
-        *,
-        before_start: Callable[[], None] | None = None,
     ) -> tuple[asyncio.Queue, bool]:
         """Attach to an existing run or start a new one.
 
         Returns ``(queue, is_new_run)``.
         """
-        lifecycle_lock = self._lifecycle_locks.setdefault(
-            run_key,
-            asyncio.Lock(),
-        )
-        async with lifecycle_lock:
-            async with self._lock:
-                state = self._runs.get(run_key)
-                if state is not None and not state.task.done():
-                    q: asyncio.Queue = asyncio.Queue()
-                    for sse in state.buffer:
-                        q.put_nowait(sse)
-                    state.queues.append(q)
-                    return q, False
-            if before_start is not None:
-                operation = asyncio.create_task(
-                    asyncio.to_thread(before_start),
-                )
-                try:
-                    await asyncio.shield(operation)
-                except asyncio.CancelledError:
-                    logger.debug(
-                        "delaying cancellation until run registration "
-                        "run_key=%s",
-                        run_key,
-                    )
-                    await operation
-            async with self._lock:
-                return self._attach_or_start_unlocked(
-                    run_key,
-                    payload,
-                    stream_fn,
-                )
+        async with self._lock:
+            state = self._runs.get(run_key)
+            if state is not None and not state.task.done():
+                q: asyncio.Queue = asyncio.Queue()
+                for sse in state.buffer:
+                    q.put_nowait(sse)
+                state.queues.append(q)
+                return q, False
 
-    def _attach_or_start_unlocked(
-        self,
-        run_key: str,
-        payload: Any,
-        stream_fn: Callable[..., Coroutine],
-    ) -> tuple[asyncio.Queue, bool]:
-        """Attach or register while the caller holds the tracker lock."""
+            my_queue: asyncio.Queue = asyncio.Queue()
+            run = _RunState(
+                task=asyncio.Future(),  # placeholder, replaced below
+                queues=[my_queue],
+                buffer=[],
+            )
+            self._runs[run_key] = run
 
-        state = self._runs.get(run_key)
-        if state is not None and not state.task.done():
-            q: asyncio.Queue = asyncio.Queue()
-            for sse in state.buffer:
-                q.put_nowait(sse)
-            state.queues.append(q)
-            return q, False
+            tracker_ref = weakref.ref(self)
 
-        my_queue: asyncio.Queue = asyncio.Queue()
-        run = _RunState(
-            task=asyncio.Future(),  # placeholder, replaced below
-            queues=[my_queue],
-            buffer=[],
-        )
-        self._runs[run_key] = run
-        tracker_ref = weakref.ref(self)
-
-        async def _producer() -> None:
-            async def _broadcast_sse(sse: str) -> None:
-                tracker = tracker_ref()
-                if tracker is None:
-                    return
-                async with tracker.lock:
-                    run.buffer.append(sse)
-                    for q in run.queues:
-                        q.put_nowait(sse)
-
-            async def _emit_tool_output_frame(
-                frame: ToolOutputFrame,
-            ) -> None:
-                await _broadcast_sse(
-                    "data: "
-                    + json.dumps(frame, ensure_ascii=False)
-                    + "\n\n",
-                )
-
-            try:
-                with bind_tool_output_emitter(_emit_tool_output_frame):
-                    async for sse in stream_fn(payload):
-                        await _broadcast_sse(sse)
-            except asyncio.CancelledError:
-                logger.debug("run cancelled run_key=%s", run_key)
-            except Exception:
-                logger.exception("run error run_key=%s", run_key)
-                err_sse = (
-                    "data: "
-                    f"{json.dumps({'error': 'internal server error'})}\n\n"
-                )
-                tracker = tracker_ref()
-                if tracker is not None:
-                    await _broadcast_sse(err_sse)
-            finally:
-                tracker = tracker_ref()
-                if tracker is not None:
+            async def _producer() -> None:
+                async def _broadcast_sse(sse: str) -> None:
+                    tracker = tracker_ref()
+                    if tracker is None:
+                        return
                     async with tracker.lock:
+                        run.buffer.append(sse)
                         for q in run.queues:
-                            q.put_nowait(_SENTINEL)
-                        current = tracker._runs.get(run_key)
-                        if current is run:
-                            tracker._task_progress.pop(run_key, None)
-                            # pylint: disable=protected-access
-                            tracker._runs.pop(
-                                run_key,
-                                None,
-                            )
+                            q.put_nowait(sse)
 
-        run.task = asyncio.create_task(_producer())
-        return my_queue, True
+                async def _emit_tool_output_frame(
+                    frame: ToolOutputFrame,
+                ) -> None:
+                    await _broadcast_sse(
+                        "data: "
+                        + json.dumps(frame, ensure_ascii=False)
+                        + "\n\n",
+                    )
+
+                try:
+                    with bind_tool_output_emitter(_emit_tool_output_frame):
+                        async for sse in stream_fn(payload):
+                            await _broadcast_sse(sse)
+                except asyncio.CancelledError:
+                    logger.debug("run cancelled run_key=%s", run_key)
+                except Exception:
+                    logger.exception("run error run_key=%s", run_key)
+                    err_sse = (
+                        "data: "
+                        f"{json.dumps({'error': 'internal server error'})}\n\n"
+                    )
+                    tracker = tracker_ref()
+                    if tracker is not None:
+                        await _broadcast_sse(err_sse)
+                finally:
+                    tracker = tracker_ref()
+                    if tracker is not None:
+                        async with tracker.lock:
+                            for q in run.queues:
+                                q.put_nowait(_SENTINEL)
+                            current = tracker._runs.get(run_key)
+                            if current is run:
+                                tracker._task_progress.pop(run_key, None)
+                                # pylint: disable=protected-access
+                                tracker._runs.pop(
+                                    run_key,
+                                    None,
+                                )
+
+            run.task = asyncio.create_task(_producer())
+            return my_queue, True
 
     async def stream_from_queue(
         self,

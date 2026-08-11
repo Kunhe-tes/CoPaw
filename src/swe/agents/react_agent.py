@@ -72,7 +72,6 @@ from .tools import (
     has_explicit_subagent_run_id,
     has_subagent_registration_intent,
     has_subagent_intent,
-    emit_wplus_sop_event,
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
@@ -190,7 +189,6 @@ def _add_main_agent_tools(
     workspace_dir: Path | None,
     plan_mode_enabled: bool,
 ) -> None:
-    tool_functions["emit_wplus_sop_event"] = emit_wplus_sop_event
     if not _plan_interaction_tools_enabled(plan_mode_enabled):
         return
     tool_functions.update(
