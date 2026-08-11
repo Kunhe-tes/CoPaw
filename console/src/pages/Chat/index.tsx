@@ -127,7 +127,6 @@ import ApprovalActionCard from "./components/ApprovalActionCard";
 import { ActivePlanInteractionComposer } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
-import GeneratedFilesDrawer from "./components/GeneratedFilesDrawer";
 import {
   ActivePlanModeButton,
   PlanModeMenuItem,
