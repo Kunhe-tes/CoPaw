@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import { useEffect, useRef, useState } from "react";
 import { Button, InputNumber, Tooltip } from "antd";
-import { CheckOutlined, CloseOutlined, EditOutlined } from "@ant-design/icons";
+import { CheckOutlined, CloseOutlined, FormOutlined } from "@ant-design/icons";
 import type { ColumnType } from "antd/es/table";
 import type { FeaturedCase } from "@/api/types/featuredCases";
 import { BBK_ID_MAP } from "@/constants/bbk";
@@ -93,15 +93,17 @@ function SortOrderCell({
       <div className={styles.sortDisplay}>
         <span>{caseItem.sort_order}</span>
         {!disabled && (
-          <Button
-            aria-label={`编辑“${caseItem.label}”的排序`}
-            className={styles.sortIconButton}
-            disabled={saving}
-            icon={<EditOutlined />}
-            onClick={onStart}
-            size="small"
-            type="text"
-          />
+          <Tooltip title="调整排序">
+            <Button
+              aria-label={`编辑“${caseItem.label}”的排序`}
+              className={styles.sortEditButton}
+              disabled={saving}
+              icon={<FormOutlined />}
+              onClick={onStart}
+              size="small"
+              type="text"
+            />
+          </Tooltip>
         )}
       </div>
     );
@@ -146,7 +148,7 @@ function SortOrderCell({
       </Tooltip>
       <Button
         aria-label="保存排序"
-        className={styles.sortIconButton}
+        className={`${styles.sortIconButton} ${styles.sortConfirmButton}`}
         disabled={saving}
         icon={<CheckOutlined />}
         loading={saving}
@@ -157,7 +159,7 @@ function SortOrderCell({
       />
       <Button
         aria-label="取消排序编辑"
-        className={styles.sortIconButton}
+        className={`${styles.sortIconButton} ${styles.sortCancelButton}`}
         disabled={saving}
         icon={<CloseOutlined />}
         onMouseDown={(event) => event.preventDefault()}
