@@ -3,6 +3,7 @@ import {
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -106,20 +107,44 @@ describe("FileManager", () => {
       within(shortcuts).getByRole("button", { name: "工作目录" }),
     ).toHaveAttribute("aria-pressed", "true");
     expect(
-      within(shortcuts).getByRole("button", { name: "上传目录" }),
-    ).toBeInTheDocument();
+      within(shortcuts).getByRole("button", { name: "根目录" }),
+    ).toHaveAttribute("aria-pressed", "false");
     expect(
-      within(shortcuts).getByRole("button", { name: "下载目录" }),
-    ).toBeInTheDocument();
-    expect(
-      within(shortcuts).getByRole("button", { name: "对话目录" }),
-    ).toBeInTheDocument();
-    expect(
-      within(shortcuts).getByRole("button", { name: "回收站" }),
-    ).toBeInTheDocument();
+      within(shortcuts)
+        .getAllByRole("button")
+        .map((button) => button.textContent?.trim()),
+    ).toEqual([
+      "工作目录",
+      "根目录",
+      "上传目录",
+      "下载目录",
+      "对话目录",
+      "回收站",
+    ]);
     expect(screen.getByLabelText("文件列表第 1 栏")).toBeInTheDocument();
     expect(screen.getByLabelText("文件列表第 2 栏")).toBeInTheDocument();
     expect(screen.getByLabelText("文件列表第 3 栏")).toBeInTheDocument();
+  });
+
+  it("loads the tenant source scope from the root shortcut", async () => {
+    listDirectory.mockImplementation(
+      ({ root, path }: { root: string; path: string }) =>
+        Promise.resolve(
+          root === "source_scope" && path === ""
+            ? { ...rootPage, root: "source_scope", items: [] }
+            : rootPage,
+        ),
+    );
+    render(<FileManager />);
+
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+    fireEvent.click(await screen.findByRole("button", { name: "根目录" }));
+
+    await waitFor(() =>
+      expect(listDirectory).toHaveBeenLastCalledWith(
+        expect.objectContaining({ root: "source_scope", path: "" }),
+      ),
+    );
   });
 
   it("anchors a shortcut root in the left column before listing its contents in the middle column", async () => {

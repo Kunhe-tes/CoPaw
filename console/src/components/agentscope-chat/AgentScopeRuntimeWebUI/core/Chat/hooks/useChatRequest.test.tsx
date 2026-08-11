@@ -533,6 +533,70 @@ describe("useChatRequest", () => {
     expect(onFinish).toHaveBeenCalledWith(createOwner());
   });
 
+  it("finishes exit_plan short-circuit frames without adding assistant content", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+    } as Response);
+    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
+      data: JSON.stringify({
+        object: "response",
+        id: "response-1",
+        status: "completed",
+        type: "exit_plan",
+        created_at: 1,
+        completed_at: 2,
+        output: [],
+      }),
+    });
+
+    const updateMessage = vi.fn();
+    const onFinish = vi.fn();
+    const currentQARef = {
+      current: {
+        response: {
+          id: "ui-response-a",
+          msgStatus: "generating",
+          cards: [
+            {
+              code: "AgentScopeRuntimeResponseCard",
+              data: {
+                id: "response-1",
+                status: "created",
+                created_at: 0,
+                output: [],
+              },
+            },
+          ],
+        },
+        activeRequestOwner: createOwner(),
+      },
+    } as CurrentQARef;
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        onFinish={onFinish}
+      />,
+    );
+
+    const requestPromise = hookApi.request([], undefined, createOwner());
+    mocks.streamGate.resolve();
+
+    await act(async () => {
+      await requestPromise;
+    });
+
+    const responseCardData = currentQARef.current.response?.cards?.[0]
+      ?.data as { output?: unknown[]; status?: string };
+
+    expect(onFinish).toHaveBeenCalledWith(createOwner());
+    expect(responseCardData.status).toBe("completed");
+    expect(responseCardData.output).toEqual([]);
+    expect(updateMessage).not.toHaveBeenCalled();
+  });
+
   it("preserves the latest assistant output on terminal empty response frames", async () => {
     mocks.fetch.mockResolvedValue({
       ok: true,

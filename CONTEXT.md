@@ -8,6 +8,66 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 A named, versioned worker profile that describes what kind of delegated work a SubAgent can perform. One **SubAgent Definition** can be used by many **SubAgent Runs**.
 _Avoid_: custom subagent, subagent template, agent config
 
+**Run-scoped SubAgent Definition**:
+A temporary **SubAgent Definition** supplied by the Main Agent for one **SubAgent Run**. It is validated like other SubAgent Definitions but is not stored for reuse, versioned as a reusable profile, or visible as a long-lived registry entry.
+_Avoid_: persistent custom subagent, saved worker profile
+
+**Run-scoped Definition Source**:
+The definition source value `run_scoped`, used to identify a **Run-scoped SubAgent Definition** in runtime records and audit data.
+_Avoid_: builtin, user, stored
+
+**Stored SubAgent Definition**:
+A reusable **SubAgent Definition** available through the definition registry across more than one **SubAgent Run**. Stored definitions may be built-in or user-owned, but user-owned persistence and CRUD are separate from run-scoped delegation.
+_Avoid_: temporary subagent, inline worker profile
+
+**SubAgent Definition Store**:
+The tenant-and-agent scoped store for **Stored SubAgent Definitions**. The first implementation stores one definition per JSON file and does not provide cross-pod registry consistency.
+_Avoid_: tenant-global registry, distributed definition database
+
+**Stored Definition Source**:
+The definition source value `stored`, used for reusable non-built-in **Stored SubAgent Definitions** regardless of whether they were created by a user, tenant admin, system import, or another registration flow.
+_Avoid_: user source, customized source
+
+**SubAgent Start Request**:
+The compact Main Agent tool request for starting one **SubAgent Run** with a **Run-scoped SubAgent Definition**. It must include a **SubAgent Name**, **Instruction**, and objective; it does not start a built-in or stored definition by name alone.
+_Avoid_: registration payload, full definition schema
+
+**SubAgent Definition Short-circuit Match**:
+The start-time decision to use an existing **Stored SubAgent Definition** or built-in definition instead of the **Run-scoped SubAgent Definition** described by a **SubAgent Start Request**. The request's **Instruction** may inform matching and audit records, but the matched definition's own **Instruction** controls execution.
+_Avoid_: instruction override, silent definition rewrite
+
+**Definition Match Metadata**:
+The audit data written to a **SubAgent Run** and returned by start/status tools to show whether a **SubAgent Definition Short-circuit Match** occurred, which definition was used, and why.
+_Avoid_: hidden routing decision, implicit reuse
+
+**Unknown SubAgent**:
+An error condition for registry-facing operations that require an existing **Stored SubAgent Definition** or built-in definition by name. It is not part of the compact **SubAgent Start Request**, which falls back to a **Run-scoped SubAgent Definition** when no short-circuit match is used.
+_Avoid_: start_subagent fallback failure, missing temporary worker
+
+**SubAgent Definition Registration Request**:
+The full request for creating or updating a **Stored SubAgent Definition** through a registry-facing entry point. It may include routing metadata, trigger keywords, execution budgets, tool policy, and other reusable profile fields.
+_Avoid_: start request, one-off delegation payload
+
+**SubAgent Definition Upsert**:
+The registration behavior that creates a new **Stored SubAgent Definition** or replaces the existing same-name definition in the same tenant-and-agent scope as a whole object. It does not patch-merge partial fields and cannot shadow a built-in definition name.
+_Avoid_: partial update, builtin override
+
+**Instruction**:
+The role and operating instructions for a **SubAgent Definition**. It is the canonical SubAgent term across user-facing requests, registration contracts, and runtime records, because it describes the delegated worker contract rather than a raw model-message implementation detail.
+_Avoid_: system_prompt, prompt text, hidden prompt, prompt.system
+
+**Instruction Size Limit**:
+An **Instruction** must be present and non-empty after trimming. Compact start requests reject instructions larger than 8 KB so the worker contract does not become a substitute for delegated task background or source material.
+_Avoid_: unlimited system prompt, embedded document payload
+
+**SubAgent Name**:
+The stable identifier field named `name`, used by the Main Agent or another runtime entry point to identify a **SubAgent Definition**. It is not the display label shown to users.
+_Avoid_: agent_name, display name, nickname, frontend title
+
+**SubAgent Nickname**:
+The user-facing display label for a **SubAgent Run** or **Stored SubAgent Definition**. It may be configured by a registration request or assigned from a built-in nickname pool; compact **SubAgent Start Requests** do not accept nickname input, but their run responses may still include an assigned nickname for display.
+_Avoid_: agent_name, registry key, stable identifier
+
 **SubAgent Run**:
 A single observable execution instance created when the main agent delegates work to a SubAgent Definition. A **SubAgent Run** is not a new SubAgent Definition.
 _Avoid_: create subagent, custom subagent, subagent profile
@@ -15,6 +75,122 @@ _Avoid_: create subagent, custom subagent, subagent profile
 **Delegation Run**:
 Alias for **SubAgent Run** when emphasizing the parent-to-worker handoff rather than the worker identity.
 _Avoid_: subagent creation
+
+**Background SubAgent Run**:
+A **SubAgent Run** that is started by the Main Agent and observed later through status, result retrieval, or cancellation. It is still one run of a **SubAgent Definition**, not a new definition.
+_Avoid_: detached subagent, subprocess subagent
+
+**SubAgent Research Phase**:
+The portion of a **SubAgent Run** in which the worker gathers task evidence and may use its effective read-only tools. It ends before the worker produces its terminal **AgentResult**.
+_Avoid_: final response, structured-output phase, unbounded agent loop
+
+**SubAgent Research Completion**:
+The normal end of a **SubAgent Research Phase**, reached when the worker replies without requesting a tool. It supplies a **SubAgent Research Synthesis** to **SubAgent Structured Finalization**; reaching the turn limit instead follows the distinct **SubAgent Turn-limit Finalization** path.
+_Avoid_: implicit final tool call, budget-exhaustion normal completion, forced completion
+
+**SubAgent Research Synthesis**:
+The concise natural-language, tool-free reply emitted at **SubAgent Research Completion**. It summarizes the research evidence for **SubAgent Structured Finalization** and is not an **AgentResult**.
+_Avoid_: final JSON, terminal result, user-facing completion claim
+
+**SubAgent Research Turn Budget**:
+The maximum number of ReAct reasoning turns available to a **SubAgent Research Phase**. It does not include the one terminal **SubAgent Structured Finalization** call; both phases share the run's total time budget.
+_Avoid_: total model-call budget, finalization turn limit, per-phase timeout
+
+**SubAgent Research Phase Controller**:
+The SubAgent-specific agent operation that runs the ReAct research loop and reports whether it ended normally or reached its turn limit. It prevents a turn-limit fallback summary from being mistaken for **SubAgent Research Completion**.
+_Avoid_: opaque reply outcome, automatic ReAct summarization, runtime-owned protected loop
+
+**SubAgent Turn Usage**:
+The actual number of model calls made by a **SubAgent Run**. It includes each research reasoning turn and the one **SubAgent Finalization Attempt**, when one occurs; it can therefore exceed the **SubAgent Research Turn Budget** by one.
+_Avoid_: research-only call count, hidden terminal-call cost, turn-budget alias
+
+**SubAgent Structured Finalization**:
+The terminal, tool-free step after a **SubAgent Research Phase** that produces the run's validated **SubAgent Response Payload**. The runtime then constructs the **SubAgent Application Result**; finalization does not gather new evidence or execute work tools.
+_Avoid_: ordinary ReAct turn, tool-call loop, free-form final answer
+
+**SubAgent Response Payload**:
+The validated structured task content produced by **SubAgent Structured Finalization**. It contains research conclusions and suggested follow-up, but no run identity, lifecycle status, budget usage, or runtime errors.
+_Avoid_: persisted run record, execution envelope, model-generated metrics
+
+**SubAgent Finalization Context**:
+The bounded handoff supplied to **SubAgent Structured Finalization**: the original delegation request and the **SubAgent Research Synthesis**, together with the terminal response contract. It excludes ReAct memory, tool-call records, and raw tool output.
+_Avoid_: full transcript replay, tool-result dump, implicit memory access
+
+**SubAgent Turn-limit Finalization**:
+The one terminal **SubAgent Structured Finalization** call made after a **SubAgent Research Phase** reaches its turn budget without a **SubAgent Research Synthesis**. Its finalization context includes a size-limited research record of assistant replies, tool calls, and tool results so it can produce a structured response without further research.
+_Avoid_: unbounded transcript replay, extra research turn, skipped terminal response
+
+**SubAgent Turn-limit Partial Result**:
+The **SubAgent Application Result** emitted when a **SubAgent Turn-limit Finalization** produces a valid **SubAgent Response Payload**. It retains the structured response while reporting `partial` and `research_turn_limit_reached`, because the research phase did not complete normally.
+_Avoid_: completed after turn exhaustion, discarded structured evidence, runtime failure
+
+**SubAgent Finalization Attempt**:
+The single **SubAgent Structured Finalization** call allowed after **SubAgent Research Completion** or through **SubAgent Turn-limit Finalization**. A failed or invalid attempt produces a **SubAgent Partial Result** and is not retried.
+_Avoid_: JSON repair loop, schema retry, repeated terminal calls
+
+**SubAgent Structured Finalization Compatibility**:
+The requirement that terminal output be read from native structured-response metadata. A Provider endpoint that rejects the tool-free structured-response request yields a **SubAgent Partial Result**; the runtime does not fall back to parsing free-form JSON or perform a separate capability probe.
+_Avoid_: text JSON fallback, tool-choice workaround, startup capability call
+
+**SubAgent Application Result**:
+The application-constructed terminal result of a **SubAgent Run**. It combines a **SubAgent Response Payload**, when available, with runtime-owned identity, lifecycle status, metrics, and errors.
+_Avoid_: model-authored result envelope, raw model response, unvalidated payload
+
+**SubAgent Result Projection**:
+The stable, flat caller-facing representation of a **SubAgent Application Result** returned by the Background SubAgent tools. The internal **SubAgent Response Payload** is merged into this representation rather than exposed as a nested API object.
+_Avoid_: payload-only API, nested response migration, internal schema leak
+
+**SubAgent Partial Result**:
+An **AgentResult** that retains available research evidence without representing the delegated task as completed. It is produced when **SubAgent Structured Finalization** cannot produce a validated terminal result, or when **SubAgent Turn-limit Finalization** produces a valid payload after research exhausted its budget.
+_Avoid_: completed result with warning, discarded research, research timeout result
+
+**Background SubAgent Concurrency Limit**:
+The maximum number of **Background SubAgent Runs** that one runtime scope may have running at the same time. When the limit is reached, a new background start request is rejected as blocked rather than queued.
+_Avoid_: queue size, worker pool size, soft recommendation
+
+**Background SubAgent Run Status**:
+The lifecycle state of a **Background SubAgent Run** as observed by the Main Agent: `pending`, `running`, `paused`, `completed`, `partial`, `failed`, `cancelled`, or `expired`. `partial` retains usable research evidence when terminal validation cannot complete. It is separate from the `status` field inside an **AgentResult**, which describes the delegated task outcome. `expired` is reserved for future supervisor cleanup semantics and is not emitted by the first background-tool implementation.
+_Avoid_: AgentResult status, tool call status, process exit code
+
+**Background SubAgent Tools**:
+The Main Agent tools for managing **Background SubAgent Runs**: `start_subagent`, `wait_subagent`, `get_subagent`, and `cancel_subagent`. They are the intended SubAgent tool surface for the next implementation stage.
+_Avoid_: agent tools, generic worker tools, synchronous delegate tool
+
+**wait_subagent Tool**:
+A Main Agent tool that performs a bounded wait and returns basic run identity, status information, and terminal run results for the current tenant-and-agent scope's observable **Background SubAgent Runs**. It is not a diagnostic, routing-audit, worker-inspection, or historical run-browsing surface.
+_Avoid_: list agents, background queue browser, automatic completion callback, debug inspector, routing audit
+
+**SubAgent Run Cancellation**:
+The act of cancelling the execution handle that owns a **Background SubAgent Run** and marking that run as cancelled. It does not imply recursively terminating tool-owned subprocesses unless a later execution backend explicitly supports that behavior.
+_Avoid_: kill process tree, hard stop all tools
+
+**SubAgent Run Monitor**:
+A user-facing view that shows the **Background SubAgent Runs** associated with the current Main Agent conversation. It is scoped to the current conversation and is not an agent-wide operations console.
+_Avoid_: global subagent dashboard, worker pool monitor, all-agent status panel
+
+**SubAgent Run Snapshot**:
+A point-in-time observable summary of the current conversation's **Background SubAgent Runs**. It is the authoritative state used by user-facing monitoring surfaces, while live stream events may only prompt refresh.
+_Avoid_: stream-only state, frontend cache, tool result transcript
+
+**SubAgent Budget Consumption**:
+The portion of a **Background SubAgent Run**'s execution budget that has been used. In the first monitoring surface this means elapsed time against the run's time budget, not task completion percentage.
+_Avoid_: task progress, completion percent, model confidence
+
+**Frontend SubAgent Stop Request**:
+A user action from a **SubAgent Run Monitor** that asks the runtime to cancel one specific **Background SubAgent Run** directly. It is not a natural-language instruction for the Main Agent to decide whether to call a tool.
+_Avoid_: chat stop message, assistant-mediated cancellation, generic task stop
+
+**SubAgent Run Stop Eligibility**:
+The rule that only an actively running **Background SubAgent Run** can expose a user stop action in the **SubAgent Run Monitor**. Terminal, pending, paused, expired, and already-cancelled runs remain visible as status records but are not clickable stop targets.
+_Avoid_: remove record action, terminal cleanup button, clickable status row
+
+**SubAgent Stop Pending State**:
+The temporary user-facing state shown after a **Frontend SubAgent Stop Request** has been submitted and before the next **SubAgent Run Snapshot** confirms the run's terminal status. It disables repeated stop actions without implying the run has already been cancelled.
+_Avoid_: confirmed cancellation, terminal stopped state, retry button state
+
+**SubAgent Execution Backend**:
+The runtime mechanism used to execute a **SubAgent Run**, such as an in-process task or a separate operating-system process. It is an implementation boundary and does not change the meaning of **SubAgent Run**.
+_Avoid_: subagent type, agent definition source
 
 **Main Agent**:
 The user-facing agent that owns global task understanding, user interaction, mode decisions, and final responses.
@@ -157,28 +333,92 @@ A user-visible planning state where the Main Agent itself runs under reduced pla
 _Avoid_: dry run, planning prompt
 
 **Proposed Plan**:
-A planning artifact presented by the Main Agent for user review before continuing work. A Proposed Plan contains a plan id, title, summary, steps, risks, verification items, open questions, and confidence.
+A planning artifact presented by the Main Agent for user review before continuing work. A Proposed Plan contains a plan id, title, summary, steps, risks, and verification items.
 _Avoid_: permission request, execution unlock
 
 **Plan Review Decision**:
-The user's response to a Proposed Plan: `revise`, `execute`, or `exit_plan`. `revise` keeps Plan Mode active for replanning, `execute` accepts the persisted Proposed Plan and continues in normal mode, and `exit_plan` closes Plan Mode without starting a Main Agent execution run by default.
+The user's response to a Proposed Plan: `revise`, `execute`, or `exit_plan`. `revise` enters or keeps Plan Mode active for replanning, `execute` accepts the persisted Proposed Plan and continues in normal mode, and `exit_plan` closes Plan Mode without starting a Main Agent execution run by default.
 _Avoid_: tool approval, permission grant
 
 **Plan Interaction Card**:
 A structured chat UI card used by the Main Agent to ask for planning clarification or present a Proposed Plan. A Plan Interaction Card is user-facing and is not emitted directly by a SubAgent.
 _Avoid_: subagent question card, free-form prompt hack
 
+**Plan Interaction Composer Replacement**:
+A blocking chat composer state where one active Plan Interaction Card replaces the normal user input panel until the user completes or dismisses that card. It owns the visible input controls for that moment; the normal composer input, send action, attachments, quick menu, and Plan Mode prefix controls are not concurrently available.
+_Avoid_: card above composer, floating plan card, parallel input form
+
+**Active Plan Interaction Card**:
+The latest non-superseded Plan Interaction Card in the chat timeline that is currently waiting for user action. At most one Active Plan Interaction Card owns the Plan Interaction Composer Replacement at a time.
+_Avoid_: all pending cards, card type priority, parallel active cards
+
 **Planning Clarification Card**:
 A Plan Interaction Card that asks the user for missing planning information using single choice, multiple choice, or text input.
 _Avoid_: generic form, survey
+
+**Custom Clarification Response**:
+A user-authored text answer shown as an always-visible input on a top-level single-choice or multiple-choice Planning Clarification Card. For single choice it is mutually exclusive with selecting a listed option; for multiple choice it may be submitted together with listed options. It is not a field-level option inside a structured clarification form.
+_Avoid_: collapsed other option, form field other option, generated option, hidden option id
 
 **Plan Interaction Response**:
 The user's structured answer to a Plan Interaction Card, submitted as the next normal chat turn with metadata that identifies the card and selected or entered value.
 _Avoid_: hidden plan API update, out-of-band form submission
 
+**Plan Interaction Event**:
+A persisted chat-context event that records a user's submitted action on a Plan Interaction Card, such as answering a clarification or deciding on a Proposed Plan. It is metadata, not user-visible prose, and it identifies the card by stable source identity first with runtime instance identity only as a fallback.
+_Avoid_: browser cache flag, local UI state, hidden text command
+
+**Plan Review Submission**:
+A Plan Interaction Event that records the user's `revise`, `execute`, or `exit_plan` decision for a Proposed Plan. Restored Plan Review Cards use this event and any backend-submitted status as the sources of truth for whether the review has already been handled.
+_Avoid_: browser-submitted flag, frontend-only review state
+
+**Plan Revision Input**:
+The next user-authored chat turn after the user chooses to continue modifying a Proposed Plan. It is the content submitted with a `revise` Plan Review Decision and keeps Plan Mode active.
+_Avoid_: empty revise click, implicit plan rejection
+
+**Plan Mode Exit Feedback**:
+The user-visible confirmation that an `exit_plan` Plan Review Decision succeeded. It is expressed by the Plan Mode control leaving the composer area, not by adding a chat message or starting a Main Agent run.
+_Avoid_: assistant exit message, plan execution result
+
+**Plan Review Snapshot**:
+A read-only historical presentation of a Proposed Plan after it has appeared in the chat history. A **Plan Review Snapshot** preserves review context but is not the active place for submitting a Plan Review Decision.
+_Avoid_: stale actionable card, replayed plan approval
+
+**Accepted Plan Review Snapshot**:
+A Plan Review Snapshot for a Proposed Plan whose `execute` Plan Review Decision has been submitted. It shows that the plan was accepted and normal Main Agent execution has started or will start.
+_Avoid_: active execution approval, editable accepted plan
+
+**Revised Plan Review Snapshot**:
+A Plan Review Snapshot for a Proposed Plan whose `revise` Plan Review Decision has been submitted. It shows that the previous proposal was sent back for modification and may include the user's Plan Revision Input as review context.
+_Avoid_: active revision form, rejected plan
+
+**Planning Clarification Dismissal**:
+The user's decision to close the current Planning Clarification Card without submitting a Plan Interaction Response. It is a current-runtime UI action, leaves Plan Mode active, and restores normal chat input for the user; after session restore it is not remembered unless the clarification was superseded by a later user message.
+_Avoid_: exit Plan Mode, reject plan, submit empty response
+
+**Planning Clarification Replay**:
+The behavior of showing a Planning Clarification Card again after a page reload or session restore. It is not part of the intended user flow for a card that was already displayed once in the current chat.
+_Avoid_: history replay, reload restoration, persistent clarification prompt
+
+**Planning Clarification Supersession**:
+The point where a Planning Clarification Instance is overtaken by any later user message in the same chat session. A superseded clarification is not shown again when the session is restored, while a later assistant message may still create a new Planning Clarification Instance with the same content.
+_Avoid_: render-seen state, frontend cache flag, browser storage marker
+
+**Planning Clarification Instance**:
+One visible Planning Clarification Card occurrence tied to a specific assistant message. Two cards with the same内容 but different assistant messages are different instances.
+_Avoid_: content fingerprint, semantic duplicate, shared clarification prompt
+
 **Plan Interaction Tool**:
 A built-in Main Agent tool that emits Plan Interaction Cards through validated structured metadata.
 _Avoid_: markdown JSON card, frontend text parser
+
+**Plan Interaction Tool Availability**:
+The source-scoped runtime rule that the Plan Clarification Tool and Proposed Plan Tool are available together in Plan Mode and, outside Plan Mode, only when enabled by that source's Source System Configuration. A configuration change applies to subsequent Agent requests; enabling ordinary-mode availability makes the tools callable without applying Plan Mode's planning instructions or permission restrictions.
+_Avoid_: automatic Plan Mode, forced planning workflow, global tenant switch
+
+**Plan Interaction Turn Boundary**:
+The conversation boundary created when the Main Agent emits a Plan Interaction Card through a Plan Interaction Tool. The current Main Agent turn finishes the already-started tool-call batch, then ends without another reasoning step and waits for a user Plan Interaction Response, regardless of the current Plan Mode State.
+_Avoid_: optional pause, prompt-only guideline, Plan Mode-only stop, sibling tool cancellation
 
 **Plan Clarification Tool**:
 The Plan Interaction Tool used by the Main Agent to ask the user a single planning clarification question.
@@ -483,6 +723,10 @@ _Avoid_: source default, tenant override, page default
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
 _Avoid_: cache key, auth header set, iframe context
 
+**Background SubAgent Launch Identity**:
+The **Runtime Request Identity** carried from the Main Agent runtime into a **Background SubAgent Run** so the worker observes the same source-scoped runtime configuration and model selection as its parent run.
+_Avoid_: effective tenant only, provider cache key, worker tenant
+
 **Tenant Scaffold Bootstrap**:
 The tenant setup state in which a runtime scope has the required tenant-local workspace structure and baseline files. A **Tenant Scaffold Bootstrap** does not imply that the first-run conversational onboarding has happened.
 _Avoid_: chat bootstrap, BOOTSTRAP.md flow, onboarding chat
@@ -678,6 +922,14 @@ _Avoid_: file compaction, historical tool result compaction
 **Tool Output Controls**:
 The user-facing grouping for source-scoped controls over historical tool-result compaction and file-read output truncation.
 _Avoid_: tool result compression configuration
+
+**Context Window**:
+The bounded model input budget available to a Main Agent turn. A **Context Window** is measured as the configured capacity used to decide whether the next turn can fit its prompt, memory, conversation history, and current user input.
+_Avoid_: token bill, monthly quota, historical usage
+
+**Persisted Context Occupancy**:
+An estimate of how much of the **Context Window** is occupied by the persisted state and fixed runtime context that would actually enter the next Main Agent model input after any completed compaction. It includes system prompt, completed compressed summary, effective history messages, and compacted tool results; it excludes unsent composer text, already-compacted raw history, and tokens already billed by previous model calls.
+_Avoid_: token usage, usage statistics, cost usage
 
 **Tool Call Status**:
 The user-visible lifecycle state of one user-visible tool invocation during a Main Agent run. A **Tool Call Status** describes an individual tool invocation as running, successful, or failed; failed means the tool itself failed, not that the user stopped or cancelled the overall Main Agent run. The start of a tool invocation carries the running status, and the tool's returned output carries the successful or failed terminal status.
@@ -942,7 +1194,19 @@ _Avoid_: shared daily dialog file, chat transcript, session state
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
-Resolved to mean creating a **SubAgent Run**, not creating a new **SubAgent Definition**. User-defined SubAgent Definition CRUD/UI is outside the next stage.
+Resolved to distinguish two cases: starting work creates a **SubAgent Run**, while a Main Agent may also supply a **Run-scoped SubAgent Definition** for that single run. Creating a **Stored SubAgent Definition** with reusable persistence remains outside the next stage.
+
+**"Start Built-in SubAgent By Name"**:
+Resolved as outside the compact **SubAgent Start Request**. The Main Agent must provide a **SubAgent Name**, **Instruction**, and objective when calling the start tool; built-in or stored definition matching belongs to a separate registry-facing entry point.
+
+**"Async SubAgent Creation"**:
+Resolved to mean starting a **Background SubAgent Run** that can be queried, completed, or cancelled by run id.
+
+**"SubAgent Subprocess"**:
+Resolved as the next **SubAgent Execution Backend** for **Background SubAgent Runs**. It remains an execution mechanism, not a new kind of **SubAgent Definition**.
+
+**"Cancel SubAgent"**:
+Resolved for the next stage as **SubAgent Run Cancellation** of the subprocess process group that owns the run. If a terminal result has already been written, cancellation does not overwrite it.
 
 **"Enter Plan Mode"**:
 Resolved to require an **Explicit Plan Entry** such as a chat-window toggle or `/plan` command. Automatic silent switching is outside the next stage.
@@ -1023,16 +1287,43 @@ Resolved as outside the next Plan Mode design. The existing SubAgent runtime and
 Resolved as a **Hook Telemetry Log Message** emitted for log collection and analysis, not a Trace Span persisted in tracing storage and not a global logging format change.
 
 **"Plan Mode Delegation"**:
-Resolved as allowed but optional. Plan Mode may expose `delegate_to_subagent`, but it does not auto-call `plan-researcher` or any other built-in SubAgent.
+Resolved as allowed but optional. Plan Mode may expose readonly **Background SubAgent Tools**, but it does not auto-call `plan-researcher` or any other built-in SubAgent.
 
 **"Plan Mode Tool Scope"**:
-Resolved as the **Planning Readonly Policy**: `read_file`, `grep_search`, `glob_search`, `get_current_time`, readonly shell, and readonly `delegate_to_subagent` are allowed; `write_file`, `edit_file`, `copy_file_to_static`, `update_task_progress`, mutating shell, test commands, deployment commands, and migration commands are forbidden.
+Resolved as the **Planning Readonly Policy**: `read_file`, `grep_search`, `glob_search`, `get_current_time`, readonly shell, and readonly **Background SubAgent Tools** are allowed; `write_file`, `edit_file`, `copy_file_to_static`, `update_task_progress`, mutating shell, test commands, deployment commands, and migration commands are forbidden.
 
 **"Plan Interaction Types"**:
-Resolved to support only `single_choice`, `multi_choice`, `text_input`, and `plan_review` in the first version.
+Resolved to support only `single_choice`, `multi_choice`, `text`, and `plan_review` in the first version.
 
 **"Plan Card Submission"**:
 Resolved as a normal next chat turn carrying **Plan Interaction Response** metadata, not a separate plan-state API call.
+
+**"Planning Clarification Replay"**:
+Resolved to not reappear after a page reload or session restore once the card has already been shown in the current chat flow.
+
+**"Planning Clarification Instance"**:
+Resolved as assistant-message scoped. A later assistant message that repeats the same clarification content is treated as a new instance and may render again.
+
+**"Planning Clarification Submission Scope"**:
+Resolved as assistant-message scoped. Submitting a Planning Clarification Card marks that assistant message's clarification instance as handled, and does not suppress a repeated clarification from a later assistant message.
+
+**"Planning Clarification Display Memory"**:
+Resolved as derived from chat history instead of browser storage. A displayed Planning Clarification Card is not hidden merely because it rendered once; it is hidden on restore only after **Planning Clarification Supersession** or a submitted response can be inferred from later chat context.
+
+**"Planning Clarification First Display Timing"**:
+Resolved as realtime stream display. A Planning Clarification Card may render as soon as its structured metadata first appears in the active assistant stream, but that displayed instance must not reappear after reload or session restore.
+
+**"Planning Clarification Seen Moment"**:
+Replaced by **Planning Clarification Supersession**. First client render alone does not make the clarification seen, resolved, or hidden on restore.
+
+**"Planning Clarification Live Update"**:
+Resolved as continuing to update the currently visible Planning Clarification Card while its live assistant response changes. The seen state only prevents replay after reload or session restore; it does not freeze the active card.
+
+**"Dismiss Planning Clarification"**:
+Resolved as a **Planning Clarification Dismissal** that closes only the current clarification, restores normal chat input, keeps Plan Mode active, and submits no message.
+
+**"Custom Multi-choice Clarification Response"**:
+Resolved as an alternative to all predefined choices. Choosing a custom response clears previously selected predefined choices, and choosing any predefined choice clears the custom response.
 
 **"Plan Card Emission"**:
 Resolved as a **Plan Interaction Tool** call. The frontend must not infer planning cards from free-form assistant text JSON.
@@ -1041,7 +1332,7 @@ Resolved as a **Plan Interaction Tool** call. The frontend must not infer planni
 Resolved as two built-in tools: `ask_plan_clarification` for clarification cards and `submit_proposed_plan` for final plan review cards.
 
 **"Proposed Plan Fields"**:
-Resolved as `plan_id`, `title`, `summary`, `steps[]`, `risks[]`, `verification[]`, `open_questions[]`, and `confidence` for the first version.
+Resolved as `plan_id`, `title`, `summary`, `steps[]`, `risks[]`, and `verification[]`. `open_questions[]` and `confidence` are not part of the Proposed Plan protocol or user review card because they do not drive the Plan Review Decision.
 
 **"Scheduled Job Default Model"**:
 Resolved as execution-time model resolution: if a **Scheduled Job** has no **Execution Model Slot**, each run uses the current **Tenant Default Model** rather than the default model that existed when the job was created.
@@ -1177,6 +1468,12 @@ Resolved as exposing absence for **File Read Truncation** as inheriting the hist
 
 **"Tool Output Controls Scope"**:
 Resolved as limited to the Source System Configuration page and runtime resolution for current user-facing controls. The Agent configuration page no longer exposes historical tool-result compaction controls, while existing Agent runtime configuration remains available as inherited baseline behavior.
+
+**"Current Session Context Usage"**:
+Resolved as **Persisted Context Occupancy**, meaning the estimated persisted session context divided by the configured **Context Window**. It excludes the current unsent composer text and does not mean cumulative token usage across completed calls.
+
+**"Context Window Capacity"**:
+Resolved as the Main Agent running configuration `max_input_length`, not provider-reported model metadata. The indicator follows Swe's runtime budget because compaction and fit checks are governed by that configuration.
 
 **"System Self-Check"**:
 Resolved as **System Runtime Diagnostic**. The existing lightweight health endpoint remains a liveness probe, while the scheduled `HEARTBEAT.md` run remains an Agent Heartbeat.

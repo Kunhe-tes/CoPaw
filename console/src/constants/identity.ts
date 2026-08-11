@@ -16,16 +16,16 @@
  */
 
 /** 默认用户 ID（非 iframe 模式时使用） */
-export const DEFAULT_USER_ID = "default";
+export const DEFAULT_USER_ID = "80280195";
 
 /** 默认租户 ID（与 X-Tenant-Id header 对应） */
-export const DEFAULT_TENANT_ID = "default";
+export const DEFAULT_TENANT_ID = "80280195";
 
 /** 默认渠道名称 */
 export const DEFAULT_CHANNEL = "console";
 
 /** 默认 Source ID（非 iframe 模式时作为 X-Source-Id 头发送） */
-export const DEFAULT_SOURCE_ID = "default";
+export const DEFAULT_SOURCE_ID = "RMASSIST";
 
 /** 默认 BBK ID （非iframe模式时，X-Bbk-Id header使用，空表示不传） */
 export const DEFAULT_BBK_ID = "";

@@ -225,20 +225,27 @@ class BaseChannel(ABC):
         del payload
         del existing_items
 
+    @staticmethod
+    def _content_part_value(content: Any, key: str) -> Any:
+        """兼容运行时 Content 对象和 Console 原始 JSON dict。"""
+        if isinstance(content, dict):
+            return content.get(key)
+        return getattr(content, key, None)
+
     def _content_has_text(self, contents: List[Any]) -> bool:
         """True if contents has at least one TEXT or REFUSAL with non-empty."""
         if not contents:
             return False
         for c in contents:
-            t = getattr(c, "type", None)
+            t = self._content_part_value(c, "type")
             if (
                 t == ContentType.TEXT
-                and (getattr(c, "text", None) or "").strip()
+                and (self._content_part_value(c, "text") or "").strip()
             ):
                 return True
             if (
                 t == ContentType.REFUSAL
-                and (getattr(c, "refusal", None) or "").strip()
+                and (self._content_part_value(c, "refusal") or "").strip()
             ):
                 return True
         return False
@@ -246,7 +253,7 @@ class BaseChannel(ABC):
     def _content_has_audio(self, contents: List[Any]) -> bool:
         """True if contents has at least one AUDIO block."""
         return any(
-            getattr(c, "type", None) == ContentType.AUDIO
+            self._content_part_value(c, "type") == ContentType.AUDIO
             for c in (contents or [])
         )
 

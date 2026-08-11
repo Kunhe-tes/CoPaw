@@ -33,6 +33,18 @@ def _service(workspace: Path) -> FileManagerService:
     )
 
 
+def _source_scope_service(
+    workspace: Path,
+    source_scope_base: Path,
+) -> FileManagerService:
+    return FileManagerService(
+        workspace,
+        cursor_secret=b"test-file-manager-secret",
+        source_scope_base_dir=source_scope_base,
+        source_scope_component="tenant-a",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clear_cursor_secret_cache() -> Generator[None, None, None]:
     file_manager._load_or_create_cursor_secret.cache_clear()
@@ -120,6 +132,59 @@ def test_working_listing_hides_only_sessions_and_governance(
     listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
 
     assert [item.name for item in listing.items] == ["notes", ".env"]
+
+
+def test_source_scope_upload_archives_and_restores_to_tenant_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_scope_base = tmp_path / "source-scope"
+    workspace.mkdir()
+    source_scope_base.mkdir()
+    service = _source_scope_service(workspace, source_scope_base)
+
+    uploaded = service.upload_bytes(
+        "source_scope",
+        "",
+        "report.txt",
+        b"root file",
+    )
+    archived = service.archive_file(
+        "source_scope",
+        uploaded.path,
+        actor="test",
+    )
+
+    assert (source_scope_base / "tenant-a").is_dir()
+    assert archived.original_path == "source_scope/report.txt"
+    assert not (source_scope_base / "tenant-a" / "report.txt").exists()
+
+    restored = service.restore_recycle_item(
+        archived.archive_item_id,
+        actor="test",
+    )
+
+    assert restored.original_path == "source_scope/report.txt"
+    assert (source_scope_base / "tenant-a" / "report.txt").read_bytes() == (
+        b"root file"
+    )
+
+
+def test_source_scope_rejects_a_symlinked_tenant_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source_scope_base = tmp_path / "source-scope"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    source_scope_base.mkdir()
+    outside.mkdir()
+    (source_scope_base / "tenant-a").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+    service = _source_scope_service(workspace, source_scope_base)
+
+    with pytest.raises(FileManagerPathError, match="Unable to open directory"):
+        service.list_directory("source_scope")
 
 
 def test_listing_sorts_directories_first_with_case_insensitive_natural_order(

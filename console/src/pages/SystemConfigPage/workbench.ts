@@ -45,6 +45,7 @@ const CAPABILITIES: CapabilityDefinition[] = [
     description: "任务进度与系统提示词的可见体验。",
     paths: [
       ["feature_switches", "chat_task_progress_enabled"],
+      ["feature_switches", "normal_mode_plan_interaction_tools_enabled"],
       ["system_prompt_injections"],
     ],
     summary: (config) => {

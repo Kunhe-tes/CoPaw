@@ -16,11 +16,18 @@ import api, {
 import { cronJobApi } from "../../../api/modules/cronjob";
 import type {
   ChatApprovalActionCardData,
+  ChatPlanInteractionCardData,
+  ChatPlanReviewCardData,
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
+  PlanReviewDecision,
 } from "../messageMeta";
-import { resolveGroupTimestamp, resolveMessageTimestamp } from "../messageMeta";
+import {
+  extractPlanInteractionCard,
+  resolveGroupTimestamp,
+  resolveMessageTimestamp,
+} from "../messageMeta";
 import { toDisplayUrl } from "../utils";
 import { applyPreferredSessionSelection } from "./preferredSession";
 import { shouldNotifySessionSelected } from "./sessionRaceGuard";
@@ -54,6 +61,7 @@ const TYPE_PLUGIN_CALL_OUTPUT = "plugin_call_output";
 // const CARD_REQUEST = "AgentScopeRuntimeRequestCard";
 const CARD_RESPONSE = "AgentScopeRuntimeResponseCard";
 const CARD_APPROVAL_ACTION = "ApprovalAction";
+const CARD_PLAN_INTERACTION = "PlanInteraction";
 const CARD_TASK_RUN = "TaskRunGroupCard";
 const CARD_COMPACTION_BOUNDARY = "ConversationCompactionBoundary";
 const TASK_SESSION_KIND = "task";
@@ -108,6 +116,12 @@ interface TaskRunMetadata {
   runId: string;
   runIndex: number;
   section: string;
+}
+
+interface SubmittedPlanReview {
+  planId: string;
+  decision: PlanReviewDecision;
+  feedback?: string;
 }
 
 function extractApprovalAction(
@@ -427,6 +441,85 @@ function isTaskSessionResultMessage(message: Message): boolean {
   );
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function isPlanReviewDecision(value: unknown): value is PlanReviewDecision {
+  return value === "revise" || value === "execute" || value === "exit_plan";
+}
+
+function extractSubmittedPlanReview(
+  message: Message,
+): SubmittedPlanReview | null {
+  const record = asRecord(message);
+  const metadata = asRecord(record?.metadata);
+  const meta = asRecord(record?.meta);
+  const bizParams = asRecord(record?.biz_params);
+  const candidates = [
+    record?.plan_interaction_response,
+    metadata?.plan_interaction_response,
+    meta?.plan_interaction_response,
+    bizParams?.plan_interaction_response,
+  ];
+
+  for (const candidate of candidates) {
+    const response = asRecord(candidate);
+    if (!response) continue;
+    const planId = response.plan_id;
+    const decision = response.decision;
+    if (
+      typeof planId === "string" &&
+      planId &&
+      isPlanReviewDecision(decision)
+    ) {
+      const feedback = response.feedback;
+      return {
+        planId,
+        decision,
+        feedback: typeof feedback === "string" ? feedback : undefined,
+      };
+    }
+  }
+
+  return null;
+}
+
+function collectSubmittedPlanReviews(
+  messages: Message[],
+): Map<string, SubmittedPlanReview> {
+  const submittedPlanReviews = new Map<string, SubmittedPlanReview>();
+  messages.forEach((message) => {
+    const submitted = extractSubmittedPlanReview(message);
+    if (submitted) {
+      submittedPlanReviews.set(submitted.planId, submitted);
+    }
+  });
+  return submittedPlanReviews;
+}
+
+function markSubmittedPlanReviewCard(
+  card: ChatPlanInteractionCardData | null,
+  submittedPlanReviews: Map<string, SubmittedPlanReview>,
+): ChatPlanInteractionCardData | null {
+  const submitted =
+    card?.card_type === "plan_review"
+      ? submittedPlanReviews.get(card.plan_id)
+      : undefined;
+  if (!card || card.card_type !== "plan_review" || !submitted) {
+    return card;
+  }
+
+  return {
+    ...card,
+    status: "submitted",
+    submitted_decision: submitted.decision,
+    feedback: submitted.feedback,
+  } satisfies ChatPlanReviewCardData;
+}
+
 /** Build a user card (AgentScopeRuntimeRequestCard) from a user message. */
 function buildUserCard(msg: Message): IAgentScopeRuntimeWebUIMessage {
   const contentParts = contentToRequestParts(msg.content);
@@ -462,6 +555,7 @@ function buildUserCard(msg: Message): IAgentScopeRuntimeWebUIMessage {
  */
 const buildResponseCard = (
   outputMessages: OutputMessage[],
+  submittedPlanReviews: Map<string, SubmittedPlanReview>,
 ): IAgentScopeRuntimeWebUIMessage => {
   const timestamp = resolveGroupTimestamp(
     outputMessages.map((message) => ({
@@ -493,6 +587,13 @@ const buildResponseCard = (
       (found, message) => found ?? extractApprovalAction(message),
       null,
     );
+  const planInteractionCard = markSubmittedPlanReviewCard(
+    normalizedMessages.reduce<ChatPlanInteractionCardData | null>(
+      (found, message) => found ?? extractPlanInteractionCard(message),
+      null,
+    ),
+    submittedPlanReviews,
+  );
 
   const cards: NonNullable<IAgentScopeRuntimeWebUIMessage["cards"]> = [
     {
@@ -522,6 +623,13 @@ const buildResponseCard = (
     });
   }
 
+  if (planInteractionCard) {
+    cards.push({
+      code: CARD_PLAN_INTERACTION,
+      data: planInteractionCard,
+    });
+  }
+
   return {
     id: generateId(),
     role: ROLE_ASSISTANT,
@@ -542,6 +650,7 @@ export const convertMessages = (
   messages: Message[],
 ): IAgentScopeRuntimeWebUIMessage[] => {
   const result: IAgentScopeRuntimeWebUIMessage[] = [];
+  const submittedPlanReviews = collectSubmittedPlanReviews(messages);
   let i = 0;
 
   while (i < messages.length) {
@@ -549,7 +658,12 @@ export const convertMessages = (
       result.push(buildUserCard(messages[i++]));
     } else {
       if (isStandaloneOutputMessage(messages[i])) {
-        result.push(buildResponseCard([toOutputMessage(messages[i++])]));
+        result.push(
+          buildResponseCard(
+            [toOutputMessage(messages[i++])],
+            submittedPlanReviews,
+          ),
+        );
         continue;
       }
 
@@ -560,7 +674,9 @@ export const convertMessages = (
         }
         outputMsgs.push(toOutputMessage(messages[i++]));
       }
-      if (outputMsgs.length) result.push(buildResponseCard(outputMsgs));
+      if (outputMsgs.length) {
+        result.push(buildResponseCard(outputMsgs, submittedPlanReviews));
+      }
     }
   }
 
@@ -1375,7 +1491,11 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
         (session) => (session as ExtendedSession).sessionId === sessionId,
       ) as ExtendedSession[];
       if (matches.length === 1) {
-        return matches[0].realId || matches[0].id;
+        const matchedSession = matches[0];
+        if (matchedSession.realId) {
+          return matchedSession.realId;
+        }
+        return isLocalTimestamp(matchedSession.id) ? null : matchedSession.id;
       }
 
       return null;

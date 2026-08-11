@@ -135,6 +135,7 @@ def create_agent_scoped_router() -> APIRouter:
     from ..crons.api import router as cron_router
     from ..runner.api import router as chats_router
     from .console import router as console_router
+    from .subagents import router as subagents_router
 
     # Create parent router with agentId parameter
     router = APIRouter(prefix="/agents/{agentId}", tags=["agent-scoped"])
@@ -166,5 +167,6 @@ def create_agent_scoped_router() -> APIRouter:
     router.include_router(tools_router)
     router.include_router(workspace_router)
     router.include_router(console_router)
+    router.include_router(subagents_router)
 
     return router

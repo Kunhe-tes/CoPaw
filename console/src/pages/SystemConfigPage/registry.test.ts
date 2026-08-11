@@ -82,6 +82,16 @@ describe("SystemConfigPage registry compatibility", () => {
     });
   });
 
+  it("registers the normal-mode plan interaction tools switch", () => {
+    expect(CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES).toContainEqual({
+      key: "feature_switches.normal_mode_plan_interaction_tools_enabled",
+      path: ["feature_switches", "normal_mode_plan_interaction_tools_enabled"],
+      defaultValue: false,
+      title: "计划交互工具开放",
+      description: "开启后，普通模式可使用计划澄清与计划提案提交工具。",
+    });
+  });
+
   it("preserves nested tool config keys without native structuredClone", () => {
     vi.stubGlobal("structuredClone", undefined);
     const source = {

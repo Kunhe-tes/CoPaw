@@ -99,6 +99,13 @@ export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDef
         "关闭后不再注入 task progress 提示词，也不会写入或展示步骤进度。",
     },
     {
+      key: "feature_switches.normal_mode_plan_interaction_tools_enabled",
+      path: ["feature_switches", "normal_mode_plan_interaction_tools_enabled"],
+      defaultValue: false,
+      title: "计划交互工具开放",
+      description: "开启后，普通模式可使用计划澄清与计划提案提交工具。",
+    },
+    {
       key: "feature_switches.database_access_guard_enabled",
       path: ["feature_switches", "database_access_guard_enabled"],
       defaultValue: true,

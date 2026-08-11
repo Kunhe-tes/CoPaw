@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 from types import SimpleNamespace
-from typing import Any, AsyncGenerator, Type
+from typing import Any, AsyncGenerator, Literal, Type
 
 from agentscope.model import OpenAIChatModel
 from agentscope.model._model_response import ChatResponse
