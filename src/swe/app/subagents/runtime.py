@@ -27,6 +27,7 @@ from .models import (
 from .run_store import InMemorySubAgentRunStore
 
 SWEAgent: Any = None
+_FINALIZATION_TURN_RESERVE = 1
 _TURN_LIMIT_RECORD_MAX_CHARS = 32_000
 _RESEARCH_SYNTHESIS_FALLBACK = "Research phase ended without text output."
 _RESEARCH_TURN_LIMIT_MESSAGE = (
@@ -151,7 +152,7 @@ class SubAgentRuntime:
         config = parent_agent_config.model_copy(deep=True)
         config.running.max_iters = min(
             config.running.max_iters,
-            budget.max_turns,
+            max(1, budget.max_turns - _FINALIZATION_TURN_RESERVE),
         )
         if config.tools is None:
             config.tools = ToolsConfig()

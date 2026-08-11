@@ -255,7 +255,7 @@ async def test_runtime_applies_non_timeout_budgets_to_agent_context(
     )
 
     created = _FakeSWEAgent.instances[0]
-    assert created.kwargs["agent_config"].running.max_iters == 2
+    assert created.kwargs["agent_config"].running.max_iters == 1
     assert created.kwargs["request_context"]["subagent_budget"] == {
         "max_turns": 2,
         "max_tool_calls": 3,

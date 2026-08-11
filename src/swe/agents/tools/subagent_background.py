@@ -436,7 +436,7 @@ def _compact_failure_without_result(record: Any) -> dict[str, str] | None:
 
 
 def _compact_agent_result(result: Any) -> dict[str, Any]:
-    return {
+    payload = {
         "status": result.status,
         "summary": result.summary,
         "findings": _dump_json_value(getattr(result, "findings", [])),
@@ -454,6 +454,12 @@ def _compact_agent_result(result: Any) -> dict[str, Any]:
             getattr(result, "suggested_next_steps", []),
         ),
     }
+    errors = getattr(result, "errors", []) or []
+    if errors:
+        payload["error_code"] = str(
+            getattr(errors[-1], "code", "") or "",
+        )
+    return payload
 
 
 def _compact_record(
