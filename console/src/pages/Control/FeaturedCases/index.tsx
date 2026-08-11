@@ -1,44 +1,125 @@
-import { useState, useEffect } from "react";
-import { Button, Card, Table, Modal, Input, Select } from "antd";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Alert, Button, Card, Modal, Table, Tabs } from "antd";
 import { Form } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
 import { PageHeader } from "@/components/PageHeader";
+import { useAppMessage } from "@/hooks/useAppMessage";
+import { useIframeStore } from "@/stores/iframeStore";
 import { useFeaturedCases } from "./components/hooks";
-import { createCaseColumns } from "./components/columns";
+import { createCaseColumns, ReorderRefreshError } from "./components/columns";
 import { CaseDrawer } from "./components/CaseDrawer";
 import type { FeaturedCase } from "@/api/types/featuredCases";
 import styles from "./index.module.less";
 
+const HEAD_OFFICE_BBK_ID = "100";
+const DEFAULT_PAGE_SIZE = 20;
+
+interface PaginationState {
+  current: number;
+  pageSize: number;
+}
+
+function normalizeScopeBbkId(bbkId: string | null | undefined): string {
+  const normalized = bbkId?.trim();
+  return normalized && normalized !== HEAD_OFFICE_BBK_ID
+    ? normalized
+    : HEAD_OFFICE_BBK_ID;
+}
+
 function FeaturedCasesPage() {
   const { t } = useTranslation();
-  const { cases, loading, total, loadCases, createCase, updateCase, deleteCase } =
-    useFeaturedCases();
+  const { message } = useAppMessage();
+  const contextBbkId = useIframeStore((state) => state.bbk);
+  const writableScopeBbkId = normalizeScopeBbkId(contextBbkId);
+  const isHeadOffice = writableScopeBbkId === HEAD_OFFICE_BBK_ID;
+  const [activeScopeBbkId, setActiveScopeBbkId] = useState(writableScopeBbkId);
+  const [paginationByScope, setPaginationByScope] = useState<
+    Record<string, PaginationState>
+  >({
+    [writableScopeBbkId]: { current: 1, pageSize: DEFAULT_PAGE_SIZE },
+    [HEAD_OFFICE_BBK_ID]: { current: 1, pageSize: DEFAULT_PAGE_SIZE },
+  });
+  const pagination = paginationByScope[activeScopeBbkId] ?? {
+    current: 1,
+    pageSize: DEFAULT_PAGE_SIZE,
+  };
+  const readOnly = !isHeadOffice && activeScopeBbkId === HEAD_OFFICE_BBK_ID;
 
-  // Drawer state
+  const {
+    cases,
+    loading,
+    total,
+    loadCases,
+    createCase,
+    updateCase,
+    deleteCase,
+    reorderCase,
+  } = useFeaturedCases(activeScopeBbkId);
+
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [editingCase, setEditingCase] = useState<FeaturedCase | null>(null);
   const [saving, setSaving] = useState(false);
+  const [editingSortId, setEditingSortId] = useState<number | null>(null);
+  const [sortingId, setSortingId] = useState<number | null>(null);
+  const [highlightedCaseId, setHighlightedCaseId] = useState<number | null>(
+    null,
+  );
+  const highlightTimerRef = useRef<number | null>(null);
   const [form] = Form.useForm<FeaturedCase>();
 
-  // Pagination
-  const [pagination, setPagination] = useState({
-    current: 1,
-    pageSize: 20,
-  });
+  const updatePagination = (
+    scopeBbkId: string,
+    next: Partial<PaginationState>,
+  ) => {
+    setPaginationByScope((current) => ({
+      ...current,
+      [scopeBbkId]: {
+        current: current[scopeBbkId]?.current ?? 1,
+        pageSize: current[scopeBbkId]?.pageSize ?? DEFAULT_PAGE_SIZE,
+        ...next,
+      },
+    }));
+  };
 
-  // Filter
-  const [bbkIdFilter, setBbkIdFilter] = useState<string | undefined>(undefined);
+  const fetchScopePage = async (
+    scopeBbkId: string,
+    pageState: PaginationState,
+    reportError = true,
+  ) => {
+    try {
+      return await loadCases({
+        bbk_id: scopeBbkId,
+        page: pageState.current,
+        page_size: pageState.pageSize,
+      });
+    } catch {
+      if (reportError) {
+        message.error("精选案例加载失败，请重试");
+      }
+      return undefined;
+    }
+  };
 
-  // Load data on mount
   useEffect(() => {
-    loadCases({
-      bbk_id: bbkIdFilter,
-      page: pagination.current,
-      page_size: pagination.pageSize,
-    });
-  }, [loadCases, pagination.current, pagination.pageSize, bbkIdFilter]);
+    setActiveScopeBbkId(writableScopeBbkId);
+    setEditingSortId(null);
+  }, [writableScopeBbkId]);
 
-  // ==================== Handlers ====================
+  useEffect(() => {
+    void fetchScopePage(activeScopeBbkId, pagination);
+    // Pagination fields are explicit dependencies; fetchScopePage is scoped
+    // to the current render and must not turn tab changes into duplicate calls.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeScopeBbkId, pagination.current, pagination.pageSize]);
+
+  useEffect(
+    () => () => {
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+    },
+    [],
+  );
 
   const handleCreate = () => {
     setEditingCase(null);
@@ -53,19 +134,32 @@ function FeaturedCasesPage() {
   };
 
   const handleDelete = (id: number) => {
+    const targetCase = cases.find((caseItem) => caseItem.id === id);
     Modal.confirm({
       title: "确认删除",
-      content: `确定要删除该案例吗？`,
+      content: `确定要删除“${targetCase?.label || "该案例"}”吗？`,
       okText: "删除",
       okType: "danger",
       cancelText: "取消",
       onOk: async () => {
-        await deleteCase(id);
-        loadCases({
-          bbk_id: bbkIdFilter,
-          page: pagination.current,
-          page_size: pagination.pageSize,
-        });
+        try {
+          await deleteCase(id);
+          const remainingTotal = Math.max(0, total - 1);
+          const maxPage = Math.max(
+            1,
+            Math.ceil(remainingTotal / pagination.pageSize),
+          );
+          const nextPage = Math.min(pagination.current, maxPage);
+          updatePagination(activeScopeBbkId, { current: nextPage });
+          await fetchScopePage(activeScopeBbkId, {
+            ...pagination,
+            current: nextPage,
+          });
+          message.success("案例已删除，排序已更新");
+        } catch {
+          message.error("案例删除失败，请重试");
+          throw new Error("Failed to delete featured case");
+        }
       },
     });
   };
@@ -84,61 +178,148 @@ function FeaturedCasesPage() {
         await createCase(values);
       }
       setDrawerOpen(false);
-      loadCases({
-        bbk_id: bbkIdFilter,
-        page: pagination.current,
-        page_size: pagination.pageSize,
-      });
-    } catch (error) {
-      // Error handled in hooks
+      await fetchScopePage(activeScopeBbkId, pagination);
+      message.success(editingCase ? "案例已更新" : "案例已创建");
+    } catch {
+      message.error(editingCase ? "案例更新失败" : "案例创建失败");
     } finally {
       setSaving(false);
     }
   };
 
-  const handleTableChange = (pag: { current?: number; pageSize?: number }) => {
-    setPagination({
-      current: pag.current || 1,
-      pageSize: pag.pageSize || 20,
-    });
+  const handleReorder = async (caseItem: FeaturedCase, sortOrder: number) => {
+    setSortingId(caseItem.id);
+    try {
+      const result = await reorderCase(caseItem.id, sortOrder).catch(
+        (error) => {
+          message.error("排序保存失败，请重试");
+          throw error;
+        },
+      );
+      const destinationPage = Math.max(
+        1,
+        Math.ceil(result.sort_order / pagination.pageSize),
+      );
+      const refreshed = await fetchScopePage(
+        activeScopeBbkId,
+        {
+          ...pagination,
+          current: destinationPage,
+        },
+        false,
+      );
+      if (!refreshed) {
+        const refreshError = new ReorderRefreshError(
+          "排序已保存，但列表刷新失败，请重试或按 Esc 取消",
+        );
+        message.warning("排序已保存，但列表刷新失败，请重试");
+        throw refreshError;
+      }
+      updatePagination(activeScopeBbkId, { current: destinationPage });
+      setHighlightedCaseId(caseItem.id);
+      if (highlightTimerRef.current !== null) {
+        window.clearTimeout(highlightTimerRef.current);
+      }
+      highlightTimerRef.current = window.setTimeout(
+        () => setHighlightedCaseId(null),
+        1800,
+      );
+      message.success(`排序已调整为 ${result.sort_order}`);
+    } finally {
+      setSortingId(null);
+    }
   };
 
-  // ==================== Columns ====================
+  const columns = useMemo(
+    () =>
+      createCaseColumns({
+        writable: !readOnly,
+        editingSortId,
+        sortingId,
+        onStartSort: (caseItem) => setEditingSortId(caseItem.id),
+        onFinishSort: () => setEditingSortId(null),
+        onReorder: handleReorder,
+        onEdit: handleEdit,
+        onDelete: handleDelete,
+      }),
+    // Event handlers intentionally close over the current exact scope and page.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [cases, editingSortId, readOnly, sortingId, pagination, activeScopeBbkId],
+  );
 
-  const columns = createCaseColumns({
-    onEdit: handleEdit,
-    onDelete: handleDelete,
-  });
+  const scopeTabs = isHeadOffice
+    ? []
+    : [
+        { key: writableScopeBbkId, label: "本机构案例" },
+        { key: HEAD_OFFICE_BBK_ID, label: "总行案例" },
+      ];
 
   return (
     <div className={styles.featuredCasesPage}>
       <PageHeader
-        items={[{ title: t("nav.systemSettings") }, { title: t("nav.featuredCasesManagement", "精选案例管理") }]}
+        items={[
+          { title: t("nav.systemSettings") },
+          {
+            title: t("nav.featuredCasesManagement", "精选案例管理"),
+          },
+        ]}
         extra={
-          <Button type="primary" onClick={handleCreate}>
-            + 新建案例
-          </Button>
+          !readOnly ? (
+            <Button type="primary" onClick={handleCreate}>
+              + 新建案例
+            </Button>
+          ) : undefined
         }
       />
+
+      {scopeTabs.length > 0 && (
+        <Tabs
+          activeKey={activeScopeBbkId}
+          className={styles.scopeTabs}
+          items={scopeTabs}
+          onChange={(scopeBbkId) => {
+            setEditingSortId(null);
+            setActiveScopeBbkId(scopeBbkId);
+          }}
+        />
+      )}
+
+      {readOnly && (
+        <Alert
+          className={styles.readOnlyAlert}
+          message="总行案例仅供查看，如需调整请切换至总行管理上下文。"
+          showIcon
+          type="info"
+        />
+      )}
 
       <Card className={styles.tableCard}>
         <Table
           columns={columns}
           dataSource={cases}
           loading={loading}
+          rowClassName={(caseItem) =>
+            caseItem.id === highlightedCaseId ? styles.highlightedRow : ""
+          }
           rowKey="id"
           pagination={{
             current: pagination.current,
             pageSize: pagination.pageSize,
-            total: total,
+            total,
             showSizeChanger: true,
-            showTotal: (t) => `共 ${t} 条`,
+            showTotal: (count) => `共 ${count} 条`,
           }}
-          onChange={handleTableChange}
+          onChange={(nextPagination) => {
+            updatePagination(activeScopeBbkId, {
+              current: nextPagination.current || 1,
+              pageSize: nextPagination.pageSize || DEFAULT_PAGE_SIZE,
+            });
+          }}
         />
       </Card>
 
       <CaseDrawer
+        bbkId={activeScopeBbkId}
         open={drawerOpen}
         editingCase={editingCase}
         form={form}

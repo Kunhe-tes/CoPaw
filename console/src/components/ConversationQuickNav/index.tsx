@@ -9,7 +9,6 @@ import Style from "./style";
 
 export default function ConversationQuickNav({
   minQuestions = 1,
-  placement = "overlay",
   messages,
   scrollRootRef,
 }: ConversationQuickNavProps) {
@@ -136,13 +135,9 @@ export default function ConversationQuickNav({
     <>
       <Style />
       <div
-        className={[
-          "conversation-quick-nav",
-          placement === "rail" && "conversation-quick-nav--rail",
-          isContainerHovered && "conversation-quick-nav--hovered",
-        ]
-          .filter(Boolean)
-          .join(" ")}
+        className={`conversation-quick-nav ${
+          isContainerHovered ? "conversation-quick-nav--hovered" : ""
+        }`}
         onMouseEnter={() => setIsContainerHovered(true)}
         onMouseLeave={() => setIsContainerHovered(false)}
       >

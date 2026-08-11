@@ -45,6 +45,7 @@ from swe.tracing.manager import (
     get_current_trace,
     set_current_trace,
 )
+from swe.tracing.models import TraceStatus
 
 
 def _agent_config(hooks: HookConfig | None = None):
@@ -786,6 +787,56 @@ async def test_query_handler_no_config_does_not_emit_hook(
 
     assert outputs[-1][0].get_text_content() == "command"
     emit_hook.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_query_handler_traces_conversation_commands(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SimpleNamespace(
+        get_session_state_dict=AsyncMock(return_value={}),
+        mutate_session_state=AsyncMock(return_value={}),
+    )
+    setattr(runner, "_chat_manager", None)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(),
+    )
+    runner._start_query_trace = AsyncMock(return_value="trace-command")
+    runner._end_trace_if_needed = AsyncMock()
+
+    async def fake_run_command_path(request, msgs, runner):
+        del request, msgs, runner
+        yield Msg(name="Friday", role="assistant", content="command"), True
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner.run_command_path",
+        fake_run_command_path,
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    msgs = [Msg(name="user", role="user", content="/compact")]
+
+    outputs = [
+        item async for item in runner.query_handler(msgs, request=request)
+    ]
+
+    assert outputs[-1][0].get_text_content() == "command"
+    runner._start_query_trace.assert_awaited_once_with(request, msgs)
+    runner._end_trace_if_needed.assert_awaited_once_with(
+        "trace-command",
+        TraceStatus.COMPLETED,
+    )
 
 
 @pytest.mark.asyncio

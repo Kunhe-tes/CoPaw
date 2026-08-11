@@ -1,24 +1,48 @@
 # -*- coding: utf-8 -*-
-"""Featured case store (simplified - no case_id)."""
+"""Database-backed featured-case storage and ordering."""
 
 import json
 import logging
 from typing import Any, Optional
 
-from .models import CaseStep, FeaturedCase
+from .models import CaseStep, FeaturedCase, FeaturedCaseReorderResult
 
 logger = logging.getLogger(__name__)
 
+HEAD_OFFICE_BBK_ID = "100"
+
+
+def normalize_featured_case_bbk_id(bbk_id: Optional[str]) -> str:
+    """Return the canonical ordering scope for a featured-case BBK value."""
+    normalized = str(bbk_id or "").strip()
+    if normalized and normalized != HEAD_OFFICE_BBK_ID:
+        return normalized
+    return HEAD_OFFICE_BBK_ID
+
+
+def is_head_office_bbk_id(bbk_id: Optional[str]) -> bool:
+    """Return whether a BBK value identifies the shared head-office scope."""
+    return normalize_featured_case_bbk_id(bbk_id) == HEAD_OFFICE_BBK_ID
+
+
+def _scope_condition(
+    bbk_id: Optional[str],
+    column: str = "bbk_id",
+) -> tuple[str, list[str]]:
+    """Build an exact logical-scope predicate and its parameters."""
+    scope_bbk_id = normalize_featured_case_bbk_id(bbk_id)
+    if scope_bbk_id == HEAD_OFFICE_BBK_ID:
+        return (
+            f"({column} IS NULL OR TRIM({column}) = '' OR {column} = %s)",
+            [HEAD_OFFICE_BBK_ID],
+        )
+    return f"{column} = %s", [scope_bbk_id]
+
 
 class FeaturedCaseStore:
-    """Store for featured case operations."""
+    """Store for featured-case display, management, and queue mutations."""
 
     def __init__(self, db: Optional[Any] = None):
-        """Initialize store.
-
-        Args:
-            db: Database connection (TDSQLConnection)
-        """
         self.db = db
         self._use_db = db is not None and db.is_connected
 
@@ -29,47 +53,50 @@ class FeaturedCaseStore:
         source_id: str,
         bbk_id: Optional[str] = None,
     ) -> list[dict]:
-        """获取聊天欢迎页当前维度的全部可展示案例。
-
-        展示数量由前端控制，接口需要返回完整列表，便于判断是否
-        显示“查看更多”入口。
-
-        Args:
-            source_id: 来源标识
-            bbk_id: 可选的 BBK 标识
-
-        Returns:
-            当前维度匹配的案例列表
-        """
+        """Return all active cases for runtime display in context order."""
         if not self._use_db:
             return []
 
-        DEFAULT_BBK_ID = "100"
+        scope_bbk_id = normalize_featured_case_bbk_id(bbk_id)
+        head_condition, head_params = _scope_condition(HEAD_OFFICE_BBK_ID)
 
-        if bbk_id is None or bbk_id == DEFAULT_BBK_ID:
-            query = """
-                SELECT id, label, value, image_url,
-                       iframe_url, iframe_title, steps, sort_order
-                FROM swe_featured_case
-                WHERE source_id = %s AND is_active = 1
-                ORDER BY sort_order ASC
-            """
-            rows = await self.db.fetch_all(query, (source_id,))
-        else:
-            query = """
+        if scope_bbk_id == HEAD_OFFICE_BBK_ID:
+            query = f"""
                 SELECT id, label, value, image_url,
                        iframe_url, iframe_title, steps, sort_order
                 FROM swe_featured_case
                 WHERE source_id = %s
-                  AND (bbk_id <=> %s OR bbk_id <=> %s)
+                  AND {head_condition}
                   AND is_active = 1
-                ORDER BY
-                    CASE WHEN bbk_id <=> %s THEN 0 ELSE 1 END,
-                    sort_order ASC
+                ORDER BY sort_order ASC, id ASC
             """
             rows = await self.db.fetch_all(
                 query,
-                (source_id, bbk_id, DEFAULT_BBK_ID, bbk_id),
+                tuple([source_id, *head_params]),
+            )
+        else:
+            query = f"""
+                SELECT id, label, value, image_url,
+                       iframe_url, iframe_title, steps, sort_order
+                FROM swe_featured_case
+                WHERE source_id = %s
+                  AND (bbk_id = %s OR {head_condition})
+                  AND is_active = 1
+                ORDER BY
+                    CASE WHEN bbk_id = %s THEN 0 ELSE 1 END,
+                    sort_order ASC,
+                    id ASC
+            """
+            rows = await self.db.fetch_all(
+                query,
+                tuple(
+                    [
+                        source_id,
+                        scope_bbk_id,
+                        *head_params,
+                        scope_bbk_id,
+                    ],
+                ),
             )
 
         result = []
@@ -78,7 +105,7 @@ class FeaturedCaseStore:
             if row["steps"]:
                 try:
                     steps = json.loads(row["steps"])
-                except json.JSONDecodeError:
+                except (json.JSONDecodeError, TypeError):
                     steps = None
 
             detail = None
@@ -102,22 +129,34 @@ class FeaturedCaseStore:
         return result
 
     async def get_case_by_id(self, case_id: int) -> Optional[FeaturedCase]:
-        """Get case by id.
-
-        Args:
-            case_id: Case database id
-
-        Returns:
-            FeaturedCase if found, None otherwise
-        """
         if not self._use_db:
             return None
-
-        query = "SELECT * FROM swe_featured_case WHERE id = %s"
-        row = await self.db.fetch_one(query, (case_id,))
+        row = await self.db.fetch_one(
+            "SELECT * FROM swe_featured_case WHERE id = %s",
+            (case_id,),
+        )
         return self._row_to_case(row) if row else None
 
-    # ==================== Case CRUD ====================
+    async def get_case_for_scope(
+        self,
+        case_id: int,
+        source_id: str,
+        bbk_id: Optional[str],
+    ) -> Optional[FeaturedCase]:
+        """Return a case only when it belongs to the exact logical scope."""
+        if not self._use_db:
+            return None
+        scope_condition, scope_params = _scope_condition(bbk_id)
+        row = await self.db.fetch_one(
+            f"""
+                SELECT * FROM swe_featured_case
+                WHERE id = %s AND source_id = %s AND {scope_condition}
+            """,
+            tuple([case_id, source_id, *scope_params]),
+        )
+        return self._row_to_case(row) if row else None
+
+    # ==================== Exact-scope management ====================
 
     async def list_cases(
         self,
@@ -126,222 +165,315 @@ class FeaturedCaseStore:
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[FeaturedCase], int]:
-        """List cases for a specific source_id.
-
-        Logic:
-        - bbk_id is None or "100" (total branch): return all cases for source_id
-        - bbk_id is non-100: return specified bbk_id cases + default (bbk_id="100") cases,
-          with specified bbk_id cases first
-
-        Args:
-            source_id: Source identifier (required)
-            bbk_id: BBK identifier (optional filter)
-            page: Page number (1-based)
-            page_size: Items per page
-
-        Returns:
-            Tuple of (cases list, total count)
-        """
+        """List one exact logical BBK scope with deterministic pagination."""
         if not self._use_db:
             return [], 0
 
-        DEFAULT_BBK_ID = "100"
+        scope_condition, scope_params = _scope_condition(bbk_id)
+        where_sql = f"source_id = %s AND {scope_condition}"
+        where_params = [source_id, *scope_params]
 
-        if bbk_id is None or bbk_id == DEFAULT_BBK_ID:
-            # Total branch or no filter - return all cases for source_id
-            where_sql = "source_id = %s"
-            where_params: list = [source_id]
-            order_sql = "sort_order ASC, created_at DESC"
-            order_params: list = []
-        else:
-            # Query both specified bbk_id and default (bbk_id="100")
-            where_sql = "source_id = %s AND (bbk_id <=> %s OR bbk_id <=> %s)"
-            where_params = [source_id, bbk_id, DEFAULT_BBK_ID]
-            # Sort: specified bbk_id first, then default
-            order_sql = "CASE WHEN bbk_id <=> %s THEN 0 ELSE 1 END, sort_order ASC, created_at DESC"
-            order_params = [bbk_id]
-
-        # Count query only uses where_params
-        count_query = f"SELECT COUNT(*) as total FROM swe_featured_case WHERE {where_sql}"
-        count_row = await self.db.fetch_one(count_query, tuple(where_params))
-        total = count_row["total"] if count_row else 0
+        count_row = await self.db.fetch_one(
+            f"SELECT COUNT(*) AS total FROM swe_featured_case WHERE {where_sql}",
+            tuple(where_params),
+        )
+        total = int(count_row["total"]) if count_row else 0
 
         offset = (page - 1) * page_size
-        query = f"""
-            SELECT * FROM swe_featured_case
-            WHERE {where_sql}
-            ORDER BY {order_sql}
-            LIMIT %s OFFSET %s
-        """
-        params = where_params + order_params + [page_size, offset]
-        rows = await self.db.fetch_all(query, tuple(params))
-        cases = [self._row_to_case(row) for row in rows]
-        return cases, total
+        rows = await self.db.fetch_all(
+            f"""
+                SELECT * FROM swe_featured_case
+                WHERE {where_sql}
+                ORDER BY sort_order ASC, id ASC
+                LIMIT %s OFFSET %s
+            """,
+            tuple([*where_params, page_size, offset]),
+        )
+        return [self._row_to_case(row) for row in rows], total
+
+    # ==================== Transactional queue mutations ====================
 
     async def create_case(self, case: FeaturedCase) -> FeaturedCase:
-        """Create case with auto-increment sort_order.
+        """Append a case and normalize its exact queue atomically."""
+        if not self._use_db:
+            return case
 
-        Sort order is automatically set to max(sort_order) + 1 for the
-        current dimension (source_id + bbk_id).
-        First case starts at sort_order=1.
+        scope_bbk_id = normalize_featured_case_bbk_id(case.bbk_id)
+        case.bbk_id = scope_bbk_id
 
-        Args:
-            case: FeaturedCase to create
-
-        Returns:
-            Created FeaturedCase
-        """
-        if self._use_db:
-            # Get max sort_order for current dimension
-            # COALESCE with 0 means first case gets sort_order=1
-            max_query = """
-                SELECT COALESCE(MAX(sort_order), 0) as max_order
-                FROM swe_featured_case
-                WHERE source_id = %s AND bbk_id <=> %s
-            """
-            max_row = await self.db.fetch_one(
-                max_query,
-                (case.source_id, case.bbk_id),
-            )
-            next_order = (max_row["max_order"] if max_row else 0) + 1
-
-            steps_json = (
-                json.dumps([s.model_dump() for s in case.steps])
-                if case.steps
-                else None
-            )
-            query = """
-                INSERT INTO swe_featured_case
-                    (source_id, bbk_id, label, value, image_url,
-                     iframe_url, iframe_title, steps, sort_order, is_active)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            await self.db.execute(
-                query,
-                (
+        async with self.db.acquire() as conn:
+            await conn.begin()
+            try:
+                case_ids = await self._lock_queue(
+                    conn,
                     case.source_id,
-                    case.bbk_id,
-                    case.label,
-                    case.value,
-                    case.image_url,
-                    case.iframe_url,
-                    case.iframe_title,
-                    steps_json,
-                    next_order,
-                    int(case.is_active),
-                ),
-            )
-            case.sort_order = next_order
-        return case
+                    scope_bbk_id,
+                )
+                await self._persist_queue(
+                    conn,
+                    case.source_id,
+                    scope_bbk_id,
+                    case_ids,
+                )
+                steps_json = (
+                    json.dumps([step.model_dump() for step in case.steps])
+                    if case.steps
+                    else None
+                )
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                            INSERT INTO swe_featured_case
+                                (source_id, bbk_id, label, value, image_url,
+                                 iframe_url, iframe_title, steps, sort_order,
+                                 is_active)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            case.source_id,
+                            scope_bbk_id,
+                            case.label,
+                            case.value,
+                            case.image_url,
+                            case.iframe_url,
+                            case.iframe_title,
+                            steps_json,
+                            len(case_ids) + 1,
+                            int(case.is_active),
+                        ),
+                    )
+                    created_id = int(cursor.lastrowid)
+                    await cursor.execute(
+                        """
+                            SELECT created_at, updated_at
+                            FROM swe_featured_case
+                            WHERE id = %s
+                        """,
+                        (created_id,),
+                    )
+                    timestamps = await cursor.fetchone()
+                    if timestamps is None:
+                        raise RuntimeError(
+                            "Created featured case could not be reloaded",
+                        )
+                    created = case.model_copy(
+                        update={
+                            "id": created_id,
+                            "sort_order": len(case_ids) + 1,
+                            "created_at": timestamps[0],
+                            "updated_at": timestamps[1],
+                        },
+                    )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return created
 
     async def update_case(
         self,
         case_id: int,
-        bbk_id: Optional[str] = None,
+        source_id: str,
+        bbk_id: Optional[str],
         label: Optional[str] = None,
         value: Optional[str] = None,
         image_url: Optional[str] = None,
         iframe_url: Optional[str] = None,
         iframe_title: Optional[str] = None,
         steps: Optional[list[CaseStep]] = None,
-        sort_order: Optional[int] = None,
         is_active: Optional[bool] = None,
     ) -> Optional[FeaturedCase]:
-        """Update case.
-
-        Args:
-            case_id: Case database id
-            bbk_id: New bbk_id
-            label: New label
-            value: New value
-            image_url: New image URL
-            iframe_url: New iframe URL
-            iframe_title: New iframe title
-            steps: New steps
-            sort_order: New sort order
-            is_active: New active status
-
-        Returns:
-            Updated FeaturedCase or None if not found
-        """
+        """Update content without moving the case between ordering scopes."""
         if not self._use_db:
             return None
 
-        updates = []
-        params: list = []
-
-        if bbk_id is not None:
-            updates.append("bbk_id = %s")
-            params.append(bbk_id)
-        if label is not None:
-            updates.append("label = %s")
-            params.append(label)
-        if value is not None:
-            updates.append("value = %s")
-            params.append(value)
-        if image_url is not None:
-            updates.append("image_url = %s")
-            params.append(image_url)
-        if iframe_url is not None:
-            updates.append("iframe_url = %s")
-            params.append(iframe_url)
-        if iframe_title is not None:
-            updates.append("iframe_title = %s")
-            params.append(iframe_title)
+        updates: list[str] = []
+        params: list[Any] = []
+        for column, value_to_set in (
+            ("label", label),
+            ("value", value),
+            ("image_url", image_url),
+            ("iframe_url", iframe_url),
+            ("iframe_title", iframe_title),
+        ):
+            if value_to_set is not None:
+                updates.append(f"{column} = %s")
+                params.append(value_to_set)
         if steps is not None:
             updates.append("steps = %s")
             params.append(
-                json.dumps([s.model_dump() for s in steps]) if steps else None,
+                (
+                    json.dumps([step.model_dump() for step in steps])
+                    if steps
+                    else None
+                ),
             )
-        if sort_order is not None:
-            updates.append("sort_order = %s")
-            params.append(sort_order)
         if is_active is not None:
             updates.append("is_active = %s")
             params.append(int(is_active))
 
+        current = await self.get_case_for_scope(case_id, source_id, bbk_id)
+        if current is None:
+            return None
         if not updates:
+            return current
+
+        scope_condition, scope_params = _scope_condition(bbk_id)
+        await self.db.execute(
+            f"""
+                UPDATE swe_featured_case
+                SET {', '.join(updates)}
+                WHERE id = %s AND source_id = %s AND {scope_condition}
+            """,
+            tuple([*params, case_id, source_id, *scope_params]),
+        )
+        return await self.get_case_for_scope(case_id, source_id, bbk_id)
+
+    async def reorder_case(
+        self,
+        case_id: int,
+        source_id: str,
+        bbk_id: Optional[str],
+        sort_order: int,
+    ) -> Optional[FeaturedCaseReorderResult]:
+        """Move a case within its exact queue and normalize positions."""
+        if not self._use_db:
             return None
 
-        params.append(case_id)
-        query = f"""
-            UPDATE swe_featured_case
-            SET {', '.join(updates)}
-            WHERE id = %s
-        """
-        await self.db.execute(query, tuple(params))
-        return await self.get_case_by_id(case_id)
+        scope_bbk_id = normalize_featured_case_bbk_id(bbk_id)
+        async with self.db.acquire() as conn:
+            await conn.begin()
+            try:
+                case_ids = await self._lock_queue(
+                    conn,
+                    source_id,
+                    scope_bbk_id,
+                )
+                if case_id not in case_ids:
+                    await conn.rollback()
+                    return None
 
-    async def delete_case(self, case_id: int) -> bool:
-        """Delete case.
+                case_ids.remove(case_id)
+                final_sort_order = min(sort_order, len(case_ids) + 1)
+                case_ids.insert(final_sort_order - 1, case_id)
+                await self._persist_queue(
+                    conn,
+                    source_id,
+                    scope_bbk_id,
+                    case_ids,
+                )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
 
-        Args:
-            case_id: Case database id
+        return FeaturedCaseReorderResult(
+            case_id=case_id,
+            sort_order=final_sort_order,
+            total=len(case_ids),
+        )
 
-        Returns:
-            True if deleted, False otherwise
-        """
-        if self._use_db:
-            query = "DELETE FROM swe_featured_case WHERE id = %s"
-            result = await self.db.execute(query, (case_id,))
-            return result > 0
-        return False
+    async def delete_case(
+        self,
+        case_id: int,
+        source_id: str,
+        bbk_id: Optional[str],
+    ) -> bool:
+        """Delete a case and compact its exact queue atomically."""
+        if not self._use_db:
+            return False
+
+        scope_bbk_id = normalize_featured_case_bbk_id(bbk_id)
+        async with self.db.acquire() as conn:
+            await conn.begin()
+            try:
+                case_ids = await self._lock_queue(
+                    conn,
+                    source_id,
+                    scope_bbk_id,
+                )
+                if case_id not in case_ids:
+                    await conn.rollback()
+                    return False
+
+                async with conn.cursor() as cursor:
+                    await cursor.execute(
+                        """
+                            DELETE FROM swe_featured_case
+                            WHERE id = %s AND source_id = %s
+                        """,
+                        (case_id, source_id),
+                    )
+                    if cursor.rowcount <= 0:
+                        await conn.rollback()
+                        return False
+
+                case_ids.remove(case_id)
+                await self._persist_queue(
+                    conn,
+                    source_id,
+                    scope_bbk_id,
+                    case_ids,
+                )
+                await conn.commit()
+            except Exception:
+                await conn.rollback()
+                raise
+        return True
+
+    async def _lock_queue(
+        self,
+        conn: Any,
+        source_id: str,
+        bbk_id: Optional[str],
+    ) -> list[int]:
+        """Lock and return one queue's case IDs in stable current order."""
+        scope_condition, scope_params = _scope_condition(bbk_id)
+        async with conn.cursor() as cursor:
+            await cursor.execute(
+                f"""
+                    SELECT id
+                    FROM swe_featured_case
+                    WHERE source_id = %s AND {scope_condition}
+                    ORDER BY sort_order ASC, id ASC
+                    FOR UPDATE
+                """,
+                tuple([source_id, *scope_params]),
+            )
+            rows = await cursor.fetchall()
+        return [int(row[0]) for row in rows]
+
+    async def _persist_queue(
+        self,
+        conn: Any,
+        source_id: str,
+        bbk_id: Optional[str],
+        case_ids: list[int],
+    ) -> None:
+        """Persist contiguous positions and the canonical BBK value."""
+        if not case_ids:
+            return
+        scope_bbk_id = normalize_featured_case_bbk_id(bbk_id)
+        async with conn.cursor() as cursor:
+            await cursor.executemany(
+                """
+                    UPDATE swe_featured_case
+                    SET sort_order = %s, bbk_id = %s
+                    WHERE id = %s AND source_id = %s
+                """,
+                [
+                    (position, scope_bbk_id, row_id, source_id)
+                    for position, row_id in enumerate(case_ids, start=1)
+                ],
+            )
 
     def _row_to_case(self, row: dict) -> FeaturedCase:
-        """Convert row to FeaturedCase.
-
-        Args:
-            row: Database row dict
-
-        Returns:
-            FeaturedCase instance
-        """
         steps = None
         if row.get("steps"):
             try:
                 steps_data = json.loads(row["steps"])
-                steps = [CaseStep(**s) for s in steps_data]
-            except json.JSONDecodeError:
+                steps = [CaseStep(**step) for step in steps_data]
+            except (json.JSONDecodeError, TypeError):
                 steps = None
 
         return FeaturedCase(

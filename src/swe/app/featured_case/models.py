@@ -56,20 +56,33 @@ class FeaturedCaseCreate(BaseModel):
     iframe_url: Optional[str] = Field(None, max_length=1024)
     iframe_title: Optional[str] = Field(None, max_length=256)
     steps: Optional[List[CaseStep]] = None
+    is_active: bool = True
 
 
 class FeaturedCaseUpdate(BaseModel):
     """Update featured case request."""
 
-    bbk_id: Optional[str] = Field(None, max_length=64)
     label: Optional[str] = Field(None, min_length=1, max_length=512)
     value: Optional[str] = None
     image_url: Optional[str] = Field(None, max_length=1024)
     iframe_url: Optional[str] = Field(None, max_length=1024)
     iframe_title: Optional[str] = Field(None, max_length=256)
     steps: Optional[List[CaseStep]] = None
-    sort_order: Optional[int] = None
     is_active: Optional[bool] = None
+
+
+class FeaturedCaseReorderRequest(BaseModel):
+    """Move a featured case to an absolute queue position."""
+
+    sort_order: int = Field(..., ge=1, strict=True)
+
+
+class FeaturedCaseReorderResult(BaseModel):
+    """Final queue position returned after an atomic reorder."""
+
+    case_id: int
+    sort_order: int
+    total: int
 
 
 class FeaturedCaseListResponse(BaseModel):

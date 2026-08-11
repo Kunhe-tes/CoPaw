@@ -75,6 +75,32 @@ async def test_governance_schedules_only_new_watermarks() -> None:
 
 
 @pytest.mark.asyncio
+async def test_governance_scheduling_is_side_effect_only() -> None:
+    from inspect import signature
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    manager = SimpleNamespace(schedule_precompaction=AsyncMock())
+    hook = MemoryCompactionHook(manager)
+    agent = SimpleNamespace(model=object(), formatter=object())
+    decision = ContextBudgetDecision(65, 0.65, "governance", 0)
+
+    hook._schedule_governance_precompaction(
+        agent,
+        [],
+        "chat-1",
+        decision,
+        ("chat-1", 1),
+    )
+
+    assert (
+        signature(hook._schedule_governance_precompaction).return_annotation
+        is None
+    )
+    await asyncio.gather(*hook._precompaction_tasks.values())
+
+
+@pytest.mark.asyncio
 async def test_active_stage_installs_ready_candidate_before_reme() -> None:
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
@@ -252,6 +278,62 @@ async def test_emergency_degradation_remeasures_then_retries_reme_once(
 
 
 @pytest.mark.asyncio
+async def test_disabled_context_compaction_skips_checkpoint_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    message = Msg(name="user", role="user", content="message-1")
+    message.id = "message-1"
+    memory = SimpleNamespace(
+        get_compressed_summary=lambda: "",
+        get_memory=AsyncMock(return_value=[message]),
+    )
+    manager = SimpleNamespace(
+        agent_id="default",
+        tenant_id=None,
+        compact_tool_result=AsyncMock(),
+        check_context=AsyncMock(return_value=([message], [], True)),
+        schedule_precompaction=AsyncMock(),
+        install_ready_precompaction=AsyncMock(return_value=True),
+        compact_memory=AsyncMock(return_value="summary"),
+    )
+    running = SimpleNamespace(
+        max_input_length=100,
+        memory_compact_threshold=100,
+        memory_compact_reserve=0,
+        tool_result_compact=ToolResultCompactConfig(enabled=False),
+        memory_summary=SimpleNamespace(memory_summary_enabled=False),
+        context_compact=ContextCompactConfig(context_compact_enabled=False),
+    )
+    monkeypatch.setattr(
+        "swe.agents.hooks.memory_compaction.load_agent_config",
+        lambda *_args, **_kwargs: SimpleNamespace(running=running),
+    )
+    monkeypatch.setattr(
+        "swe.agents.hooks.memory_compaction.get_swe_token_counter",
+        lambda _config: SimpleNamespace(count=AsyncMock(return_value=90)),
+    )
+    agent = SimpleNamespace(
+        name="agent",
+        sys_prompt="",
+        memory=memory,
+        model=object(),
+        formatter=object(),
+        print=AsyncMock(),
+        _request_context={"chat_id": "chat-1"},
+    )
+
+    await MemoryCompactionHook(manager)(agent, {})
+
+    manager.check_context.assert_not_awaited()
+    manager.schedule_precompaction.assert_not_awaited()
+    manager.install_ready_precompaction.assert_not_awaited()
+    manager.compact_memory.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
     None
 ):
@@ -267,7 +349,8 @@ async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
         facts={"message_id": "message-1", "role": "user"},
         source_refs=("message:message-1",),
     )
-    message = SimpleNamespace(id="message-1")
+    message = Msg(name="user", role="user", content="message-1")
+    message.id = "message-1"
     store = SimpleNamespace(
         read_checkpoint_state=AsyncMock(
             return_value=CheckpointArchiveState(record, (event,), 1),
@@ -292,3 +375,42 @@ async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
     assert candidate.record.critical_context[0].evidence_refs == (
         "message:message-1",
     )
+
+
+@pytest.mark.asyncio
+async def test_schedule_precompaction_rejects_ambiguous_duplicate_online_ids() -> (
+    None
+):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    chat_id = "e1574b04-2ca1-44c5-82a0-d9d5cc410f3d"
+    record = CheckpointRecord.new(chat_id=chat_id, epoch=1)
+    first = SimpleNamespace(id="duplicate-id", role="user")
+    second = SimpleNamespace(id="duplicate-id", role="user")
+    event = CheckpointEvent.new(
+        sequence=1,
+        epoch=1,
+        type="message_added",
+        facts={"message_id": "duplicate-id", "role": "user"},
+        source_refs=("message:duplicate-id",),
+    )
+    store = SimpleNamespace(
+        read_checkpoint_state=AsyncMock(
+            return_value=CheckpointArchiveState(record, (event,), 1),
+        ),
+        write_pending_candidate=AsyncMock(),
+    )
+    memory = SimpleNamespace(
+        chat_checkpoint_store=store,
+        content=[(first, []), (second, [])],
+    )
+    manager = object.__new__(ReMeLightMemoryManager)
+    manager.get_in_memory_memory = lambda **_kwargs: memory
+
+    assert not await manager.schedule_precompaction(
+        chat_id=chat_id,
+        watermark=0,
+        messages=[first, second],
+    )
+    store.write_pending_candidate.assert_not_awaited()
