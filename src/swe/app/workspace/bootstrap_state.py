@@ -81,8 +81,7 @@ def inspect_bootstrap_readiness(
             config = Config.model_validate(config_payload)
             profile = config.agents.profiles.get("default")
             if (
-                config.agents.active_agent != "default"
-                or profile is None
+                profile is None
                 or profile.id != "default"
                 or not profile.enabled
                 or not _same_path(

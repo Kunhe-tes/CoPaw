@@ -107,6 +107,24 @@ def test_readiness_rejects_disabled_default_profile(good_tenant: Path) -> None:
     assert readiness.invalid_json_paths == (config_path,)
 
 
+def test_readiness_allows_a_non_default_active_agent(
+    good_tenant: Path,
+) -> None:
+    config_path = good_tenant / "config.json"
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["agents"]["active_agent"] = "alpha"
+    payload["agents"]["profiles"]["alpha"] = {
+        "id": "alpha",
+        "workspace_dir": str(good_tenant / "workspaces" / "alpha"),
+        "enabled": True,
+    }
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    readiness = inspect_bootstrap_readiness(good_tenant)
+
+    assert readiness.ready
+
+
 def test_ready_marker_does_not_hide_damaged_agent(good_tenant: Path) -> None:
     agent_path = good_tenant / "workspaces" / "default" / "agent.json"
     agent_path.write_text("{broken", encoding="utf-8")
