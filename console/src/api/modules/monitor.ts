@@ -340,6 +340,7 @@ export interface HighFrequencyQuestionTopic {
   topic_name: string;
   message_count: number;
   valid_message_count: number;
+  bbk_dis?: Record<string, number>;
   sample_questions: string[];
 }
 

@@ -190,9 +190,10 @@ class HighFrequencyQuestionService:
                                 topic_name,
                                 message_count,
                                 valid_message_count,
+                                bbk_dis,
                                 sample_questions
                             ) VALUES (
-                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
                             )
                             """,
                             params_list,
@@ -384,6 +385,7 @@ class HighFrequencyQuestionService:
                     result.topic_name,
                     result.message_count,
                     result.valid_message_count,
+                    json.dumps(result.bbk_dis, ensure_ascii=False),
                     json.dumps(result.sample_questions, ensure_ascii=False),
                 ),
             )
@@ -480,7 +482,7 @@ class HighFrequencyQuestionService:
         rows = await self._db.fetch_all(
             """
             SELECT rank_no, topic_name, message_count, valid_message_count,
-                   sample_questions
+                   bbk_dis, sample_questions
             FROM swe_high_frequency_question_result
             WHERE source_id = %s
               AND batch_id = %s
@@ -516,10 +518,25 @@ class HighFrequencyQuestionService:
             topic_name=str(row.get("topic_name") or ""),
             message_count=int(row.get("message_count") or 0),
             valid_message_count=int(row.get("valid_message_count") or 0),
+            bbk_dis=self._parse_bbk_distribution(row.get("bbk_dis")),
             sample_questions=self._parse_sample_questions(
                 row.get("sample_questions"),
             ),
         )
+
+    def _parse_bbk_distribution(self, value: Any) -> dict[str, Any]:
+        if value is None or value == "":
+            return {}
+        if isinstance(value, (bytes, bytearray)):
+            value = value.decode("utf-8", errors="ignore")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+        if not isinstance(value, dict):
+            return {}
+        return {str(key): item for key, item in value.items()}
 
     def _parse_sample_questions(self, value: Any) -> list[str]:
         if value is None or value == "":
