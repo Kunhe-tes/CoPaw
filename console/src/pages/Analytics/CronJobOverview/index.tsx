@@ -23,7 +23,7 @@ import {
 } from "antd";
 import { WarningOutlined } from "@ant-design/icons";
 import dayjs, { type Dayjs } from "dayjs";
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   monitorApi,
@@ -39,7 +39,12 @@ import {
   type BranchSkillManagerCustomerItem,
   type CronBranchTaskRankingItem,
 } from "../../../api/modules/monitor";
-import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP } from "../../../constants/bbk";
+import { BBK_ID_TO_NAME_MAP } from "../../../constants/bbk";
+import {
+  ensureBranchOptions,
+  getScopedBranchFilter,
+} from "../../../utils/branchScope";
+import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
 
 const { Option } = Select;
@@ -829,6 +834,15 @@ function FailedTaskModal({
 export default function CronJobOverviewPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
+  const currentBbkId = useIframeStore((state) => state.bbk);
+  const branchScope = useMemo(
+    () => getScopedBranchFilter(currentBbkId),
+    [currentBbkId],
+  );
+  const branchOptions = useMemo(
+    () => ensureBranchOptions(branchScope.lockedBbkId),
+    [branchScope.lockedBbkId],
+  );
   const initialDateRange = getInitialDateRange(searchParams);
   const [overviewData, setOverviewData] =
     useState<CronJobOverviewPageData>(emptyOverviewData);
@@ -838,7 +852,9 @@ export default function CronJobOverviewPage() {
   );
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>(initialDateRange);
   const [bbkIds, setBbkIds] = useState<string[]>(() =>
-    getInitialBbkIds(searchParams),
+    branchScope.lockedBbkId
+      ? [branchScope.lockedBbkId]
+      : getInitialBbkIds(searchParams),
   );
   const [failedTaskModalOpen, setFailedTaskModalOpen] = useState(false);
   const [failedTasks, setFailedTasks] = useState<ExecutionItem[]>([]);
@@ -895,6 +911,17 @@ export default function CronJobOverviewPage() {
   const [selectedModalSkill, setSelectedModalSkill] = useState<string | null>(
     null,
   );
+
+  useEffect(() => {
+    if (!branchScope.lockedBbkId) {
+      return;
+    }
+    setBbkIds((previous) =>
+      previous.length === 1 && previous[0] === branchScope.lockedBbkId
+        ? previous
+        : [branchScope.lockedBbkId],
+    );
+  }, [branchScope.lockedBbkId]);
 
   const getOverviewFilters = (): CronJobOverviewDateFilters => ({
     start_date: dateRange[0].format("YYYY-MM-DD"),
@@ -1400,22 +1427,31 @@ export default function CronJobOverviewPage() {
               className={styles.scopeSelect}
               mode="multiple"
               value={bbkIds}
-              onChange={setBbkIds}
+              onChange={(value) => {
+                if (!branchScope.lockedBbkId) {
+                  setBbkIds(value);
+                }
+              }}
               placeholder="全部分行"
-              maxTagCount="responsive"
-              maxTagPlaceholder={(omittedValues) => (
-                <Tooltip
-                  title={omittedValues
-                    .map((item) => {
-                      const value = String(item.value ?? "");
-                      return BBK_ID_TO_NAME_MAP[value] || value;
-                    })
-                    .join("、")}
-                >
-                  <span>+{omittedValues.length} 个分行</span>
-                </Tooltip>
-              )}
-              allowClear
+              disabled={!branchScope.isHeadOffice}
+              maxTagCount={branchScope.isHeadOffice ? "responsive" : 1}
+              maxTagPlaceholder={
+                branchScope.isHeadOffice
+                  ? (omittedValues) => (
+                      <Tooltip
+                        title={omittedValues
+                          .map((item) => {
+                            const value = String(item.value ?? "");
+                            return BBK_ID_TO_NAME_MAP[value] || value;
+                          })
+                          .join("、")}
+                      >
+                        <span>+{omittedValues.length} 个分行</span>
+                      </Tooltip>
+                    )
+                  : undefined
+              }
+              allowClear={branchScope.isHeadOffice}
               showSearch
               filterOption={(input, option) => {
                 const searchValue = input.toLowerCase();
@@ -1427,7 +1463,7 @@ export default function CronJobOverviewPage() {
                 );
               }}
             >
-              {BBK_ID_MAP.map((item) => (
+              {branchOptions.map((item) => (
                 <Option key={item.value} value={item.value}>
                   {item.label}
                 </Option>

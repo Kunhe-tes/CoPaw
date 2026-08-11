@@ -21,6 +21,9 @@ const monitorApiMock = vi.hoisted(() => ({
   getManagerCustomers: vi.fn(),
   getExecutions: vi.fn(),
 }));
+const iframeStoreMock = vi.hoisted(() => ({
+  bbk: undefined as string | undefined,
+}));
 
 vi.mock("../../../api/modules/monitor", async () => {
   const actual = await vi.importActual<
@@ -32,9 +35,17 @@ vi.mock("../../../api/modules/monitor", async () => {
   };
 });
 
+vi.mock("../../../stores/iframeStore", () => ({
+  useIframeStore: (selector: (state: unknown) => unknown) =>
+    selector({
+      bbk: iframeStoreMock.bbk,
+    }),
+}));
+
 describe("CronJobOverview summary cards", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    iframeStoreMock.bbk = undefined;
     monitorApiMock.getCronJobOverviewPageData.mockResolvedValue({
       summaryMetrics: [
         { key: "branches", value: "12" },
@@ -155,6 +166,43 @@ describe("CronJobOverview summary cards", () => {
     expect(screen.getByLabelText("概览指标").className).toContain(
       styles.summaryGrid,
     );
+  });
+
+  it("locks branch filter to current branch for branch users", async () => {
+    iframeStoreMock.bbk = "200";
+
+    const { container } = render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      const selectedItem = container.querySelector(
+        ".ant-select-selection-item",
+      );
+      expect(selectedItem?.textContent).toContain("北京分行");
+    });
+    expect(container.querySelector(".ant-select")).toHaveClass(
+      "ant-select-disabled",
+    );
+    await waitFor(() => {
+      expect(
+        monitorApiMock.getCronJobOverviewPageData,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bbk_ids: "200",
+        }),
+      );
+    });
+    expect(
+      container.querySelector(".ant-select-disabled"),
+    ).toBeInTheDocument();
   });
 
   it("renders expanded manager detail without extra drill-down scroll wrapper", async () => {

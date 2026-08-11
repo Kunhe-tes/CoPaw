@@ -255,10 +255,16 @@ class QueryService:
     ) -> str:
         """构建定时任务与技能表的关联条件。"""
         return (
-            f"JOIN swe_marketplace_skills {skill_alias} "
+            f"JOIN ("
+            f"SELECT source_id, skill_id, "
+            f"MIN(cn_name) AS cn_name, MIN(skill_name) AS skill_name "
+            f"FROM swe_marketplace_skills "
+            f"WHERE include_in_statistics = 1 "
+            f"AND skill_id IS NOT NULL AND skill_id != '' "
+            f"GROUP BY source_id, skill_id"
+            f") {skill_alias} "
             f"ON FIND_IN_SET({skill_alias}.skill_id, {job_alias}.skill_ids) "
-            f"AND {skill_alias}.source_id = {job_alias}.source_id "
-            f"AND {skill_alias}.include_in_statistics = 1"
+            f"AND {skill_alias}.source_id = {job_alias}.source_id"
         )
 
     @staticmethod
@@ -4793,6 +4799,7 @@ class QueryService:
                 e.status,
                 e.async_status,
                 e.is_read,
+                s.skill_id AS skill_id,
                 {skill_expr} AS skill_name
             FROM swe_cron_executions e
             JOIN swe_cron_jobs j ON e.job_id = j.id
@@ -4816,6 +4823,7 @@ class QueryService:
         skill_success: dict[str, int] = {}
         skill_read: dict[str, int] = {}
         skill_error: dict[str, int] = {}
+        skill_names: dict[str, str] = {}
 
         for row in rows:
             self._process_skill_row(
@@ -4825,6 +4833,7 @@ class QueryService:
                 skill_success,
                 skill_read,
                 skill_error,
+                skill_names,
             )
 
         return {
@@ -4833,6 +4842,7 @@ class QueryService:
             "skill_success": skill_success,
             "skill_read": skill_read,
             "skill_error": skill_error,
+            "skill_names": skill_names,
         }
 
     def _process_skill_row(
@@ -4843,31 +4853,35 @@ class QueryService:
         skill_success: dict[str, int],
         skill_read: dict[str, int],
         skill_error: dict[str, int],
+        skill_names: dict[str, str],
     ) -> None:
         """处理单行数据的技能聚合."""
+        skill_id = str(row.get("skill_id") or "").strip()
         skill_name = str(row.get("skill_name") or "").strip()
-        if not skill_name:
+        if not skill_id:
             return
         job_id = row["job_id"]
         status = (row["status"] or "").lower()
         async_status = (row["async_status"] or "").lower()
         is_read = bool(row["is_read"])
-        if skill_name not in skill_jobs:
+        if skill_id not in skill_jobs:
             self._init_skill_dicts(
                 skill_jobs,
                 skill_total,
                 skill_success,
                 skill_read,
                 skill_error,
-                skill_name,
+                skill_id,
             )
+        if skill_name:
+            skill_names.setdefault(skill_id, skill_name)
         self._count_skill_execution(
             skill_jobs,
             skill_total,
             skill_success,
             skill_read,
             skill_error,
-            skill_name,
+            skill_id,
             job_id,
             status,
             async_status,
@@ -4881,21 +4895,23 @@ class QueryService:
         skill_success: dict[str, int],
         skill_read: dict[str, int],
         skill_error: dict[str, int],
+        skill_names: dict[str, str],
     ) -> list[BranchSkillItem]:
         """构建分行技能统计结果列表."""
         items: list[BranchSkillItem] = []
-        for skill_name, jobs in skill_jobs.items():
+        for skill_id, jobs in skill_jobs.items():
             task_count = len(jobs)
-            success = skill_success.get(skill_name, 0)
-            exec_total = skill_total.get(skill_name, 0)
+            success = skill_success.get(skill_id, 0)
+            exec_total = skill_total.get(skill_id, 0)
+            skill_name = skill_names.get(skill_id, skill_id)
             items.append(
                 BranchSkillItem(
                     skill_name=skill_name,
                     cron_task_count=task_count,
                     success_count=success,
                     success_rate=self._percent(success, exec_total),
-                    read_count=skill_read.get(skill_name, 0),
-                    error_count=skill_error.get(skill_name, 0),
+                    read_count=skill_read.get(skill_id, 0),
+                    error_count=skill_error.get(skill_id, 0),
                 ),
             )
         items.sort(key=lambda item: item.cron_task_count, reverse=True)
@@ -4934,6 +4950,7 @@ class QueryService:
             stats["skill_success"],
             stats["skill_read"],
             stats["skill_error"],
+            stats["skill_names"],
         )
 
         return BranchSkillResponse(

@@ -1,4 +1,5 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
+import { useEffect } from "react";
 import { describe, expect, it, vi } from "vitest";
 import { Form } from "@agentscope-ai/design";
 import { CronJobFormBody } from "./CronJobFormBody";
@@ -62,5 +63,49 @@ describe("CronJobFormBody", () => {
     const field = screen.getByLabelText("绑定技能ID");
     expect(field.closest(".ant-select")).toHaveClass("ant-select-multiple");
     expect(screen.queryByPlaceholderText("skill-a, skill_b")).toBeNull();
+  });
+
+  it("shows existing bound skill labels after options load asynchronously", async () => {
+    const Wrapper = ({
+      skillOptions,
+    }: {
+      skillOptions: Array<{ value: string; label: string }>;
+    }) => {
+      const [form] = Form.useForm();
+
+      useEffect(() => {
+        form.setFieldsValue({ skillIds: ["skill-a"] });
+      }, [form]);
+
+      return (
+        <Form form={form}>
+          <CronJobFormBody
+            form={form}
+            executionModelOptions={[]}
+            executionModelLoading={false}
+            tenantDefaultModelLabel="Tenant default"
+            skillOptions={skillOptions}
+            skillOptionsLoading={false}
+          />
+        </Form>
+      );
+    };
+
+    const { rerender } = render(<Wrapper skillOptions={[]} />);
+
+    rerender(
+      <Wrapper
+        skillOptions={[
+          {
+            value: "skill-a",
+            label: "分析技能 (skill-a)",
+          },
+        ]}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText("分析技能 (skill-a)")).toBeInTheDocument();
+    });
   });
 });
