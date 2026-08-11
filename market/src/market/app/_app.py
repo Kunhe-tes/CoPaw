@@ -11,6 +11,7 @@ from ..__version__ import __version__
 from ..config.constant import DOCS_ENABLED, CORS_ORIGINS
 from ..database.config import get_database_config
 from ..database.connection import DatabaseConnection
+from .middleware import RequestLoggingMiddleware
 from .routers import api_router
 
 logger = logging.getLogger(__name__)
@@ -100,5 +101,7 @@ if CORS_ORIGINS:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+app.add_middleware(RequestLoggingMiddleware)
 
 app.include_router(api_router, prefix="/api")
