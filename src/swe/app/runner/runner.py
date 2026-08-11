@@ -107,6 +107,11 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 TASK_RUNS_STATE_KEY = "task_runs"
 _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
+_PLAN_MODE_META_KEY = "plan_mode_enabled"
+_PLAN_REQUEST_MODE_KEY = "mode"
+_PLAN_INTERACTION_RESPONSE_KEY = "plan_interaction_response"
+_ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
+_ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
 _PLAN_INTERACTION_CARD_METADATA_KEY = "plan_interaction_card"
 _SKILL_FRESHNESS_NOTICE_METADATA_KEY = "swe_skill_freshness_notice"
 _EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
@@ -145,6 +150,49 @@ _DENY_EXACT = frozenset(
         "/daemon deny",
     },
 )
+
+
+def _plan_decision_from_meta(channel_meta: dict[str, Any]) -> str | None:
+    """从计划交互响应中提取审核动作。"""
+    response = channel_meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
+    if not isinstance(response, dict):
+        return None
+    decision = response.get("decision")
+    return decision if isinstance(decision, str) else None
+
+
+def _requested_plan_mode_update(
+    channel_meta: dict[str, Any],
+) -> bool | None:
+    """解析本次请求是否显式要求更新 Plan Mode 状态。"""
+    decision = _plan_decision_from_meta(channel_meta)
+    if decision == "revise":
+        return True
+    if decision in {"execute", "exit_plan"}:
+        return False
+
+    mode = channel_meta.get(_PLAN_REQUEST_MODE_KEY)
+    if mode == "plan":
+        return True
+    if mode == "normal":
+        return False
+    return None
+
+
+def _resolve_plan_mode_enabled(
+    channel_meta: dict[str, Any],
+    chat: Any,
+) -> bool:
+    """优先使用请求显式状态，否则沿用 ChatSpec.meta 中的持久状态。"""
+    requested_update = _requested_plan_mode_update(channel_meta)
+    if requested_update is not None:
+        return requested_update
+    if isinstance(channel_meta.get(_PLAN_MODE_META_KEY), bool):
+        return channel_meta[_PLAN_MODE_META_KEY]
+    chat_meta = getattr(chat, "meta", None)
+    if isinstance(chat_meta, dict):
+        return bool(chat_meta.get(_PLAN_MODE_META_KEY, False))
+    return False
 
 
 @dataclass
@@ -2564,10 +2612,20 @@ class AgentRunner(Runner):
             meta={"agent_id": self.agent_id},
         )
         logger.debug(f"Runner: Got chat: {chat.id}")
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        plan_mode_enabled = _resolve_plan_mode_enabled(channel_meta, chat)
+        requested_plan_mode = _requested_plan_mode_update(channel_meta)
+        if requested_plan_mode is not None:
+            chat.meta = {
+                **(getattr(chat, "meta", None) or {}),
+                _PLAN_MODE_META_KEY: requested_plan_mode,
+            }
+            await self._chat_manager.update_chat(chat)
         request.channel_meta = {
-            **(getattr(request, "channel_meta", None) or {}),
+            **channel_meta,
             "chat_id": chat.id,
             "turn_id": turn_id,
+            _PLAN_MODE_META_KEY: plan_mode_enabled,
         }
         return chat
 
@@ -2666,6 +2724,25 @@ class AgentRunner(Runner):
             ),
             "_hook_overlay_model": hook_overlay,
         }
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        plan_mode_enabled = bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
+        request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
+        request_context[_PLAN_REQUEST_MODE_KEY] = (
+            "plan" if plan_mode_enabled else "normal"
+        )
+        plan_response = channel_meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
+        if isinstance(plan_response, dict):
+            request_context[_PLAN_INTERACTION_RESPONSE_KEY] = plan_response
+        accepted_plan = channel_meta.get("accepted_plan")
+        if (
+            isinstance(accepted_plan, dict)
+            and channel_meta.get(_ACCEPTED_PLAN_SOURCE_META_KEY)
+            == _ACCEPTED_PLAN_SERVER_SOURCE
+        ):
+            request_context["accepted_plan"] = accepted_plan
+            request_context[_ACCEPTED_PLAN_SOURCE_META_KEY] = (
+                _ACCEPTED_PLAN_SERVER_SOURCE
+            )
         if auth_token:
             request_context["auth_token"] = auth_token
         if approved_tool_call:
