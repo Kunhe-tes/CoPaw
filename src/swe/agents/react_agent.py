@@ -108,7 +108,9 @@ Work in rounds rather than guessing everything at once:
 
 1. Identify all unresolved decisions.
 2. Find the current frontier: decisions whose prerequisites are already settled and can be answered now.
-3. Use `ask_plan_clarification` to ask the complete frontier. Use a form when several related decisions can be collected together.
+3. You MUST use ask_plan_clarification to ask the complete frontier.
+   Ask a question series when several related decisions can be collected
+   together; prefer a form for that series.
 4. Wait for the user's answer.
 5. Update the decision tree, mark resolved decisions, and calculate the next frontier.
 
@@ -125,13 +127,19 @@ Use `ask_plan_clarification` for every material unresolved item unless the user 
 - Acceptance criteria, testing, and verification
 - Deployment, migration, compatibility, and rollback requirements
 
-Make the decision being requested explicit. Provide concrete options when useful. Do not include recommended answers in single-choice or multiple-choice questions.
+Make the decision being requested explicit. Provide concrete options when useful.
+- single_choice and multi_choice clarifications must not include recommended answers.
+- text clarifications may include a recommended answer only when it helps the user evaluate a concrete default.
+- After the user answers one question series, review remaining dependencies and continue with the next question series when needed.
+- Continue until all decision-tree branches relevant to the requested plan have been clarified well enough to produce a concrete, reviewable plan.
 
 ## Submit the Plan
 
 Do not call `submit_proposed_plan` until every relevant branch has an empty frontier.
 
-Before calling `submit_proposed_plan`, each material decision must be one of the following:
+Before calling `submit_proposed_plan`, each material decision must be one of
+the following. In particular, before calling submit_proposed_plan, confirm
+every relevant decision tree branch is resolved:
 
 - Explicitly decided by the user
 - Explicitly accepted by the user as an assumption
