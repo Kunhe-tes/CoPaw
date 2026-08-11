@@ -63,6 +63,107 @@ class _FakeTaskTracker:
         yield 'data: {"done": true}\n\n'
 
 
+class _TaskStartCountingTracker:
+    def __init__(self) -> None:
+        self.start_calls = 0
+
+    async def attach_or_start(self, _run_key, _payload, _stream_fn):
+        self.start_calls += 1
+        return object(), True
+
+
+def _build_authenticated_console_chat_client(
+    monkeypatch,
+    *,
+    authenticated_user_id: str,
+    authenticated_agent_id: str,
+    workspace_agent_id: str,
+) -> tuple[TestClient, _TaskStartCountingTracker]:
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _set_authenticated_identity(request, call_next):
+        request.state.user_id = authenticated_user_id
+        request.state.agent_id = authenticated_agent_id
+        return await call_next(request)
+
+    app.include_router(console_router.router)
+    tracker = _TaskStartCountingTracker()
+    workspace = SimpleNamespace(
+        agent_id=workspace_agent_id,
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=tracker,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    return TestClient(app), tracker
+
+
+def _console_chat_payload(user_id: str) -> dict[str, Any]:
+    return {
+        "input": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ],
+        "session_id": "session-1",
+        "user_id": user_id,
+        "channel": "console",
+    }
+
+
+def test_console_chat_authenticated_user_mismatch_is_rejected_before_starting_task(
+    monkeypatch,
+) -> None:
+    client, tracker = _build_authenticated_console_chat_client(
+        monkeypatch,
+        authenticated_user_id="authenticated-user",
+        authenticated_agent_id="agent-1",
+        workspace_agent_id="agent-1",
+    )
+
+    response = client.post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=_console_chat_payload("other-user"),
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Console sender does not match authenticated user",
+    }
+    assert tracker.start_calls == 0
+
+
+def test_console_chat_authenticated_agent_mismatch_is_rejected_before_starting_task(
+    monkeypatch,
+) -> None:
+    client, tracker = _build_authenticated_console_chat_client(
+        monkeypatch,
+        authenticated_user_id="user-1",
+        authenticated_agent_id="authenticated-agent",
+        workspace_agent_id="workspace-agent",
+    )
+
+    response = client.post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=_console_chat_payload("user-1"),
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Console Agent does not match authenticated Agent",
+    }
+    assert tracker.start_calls == 0
+
+
 @pytest.mark.asyncio
 async def test_start_new_chat_propagates_created_chat_id_to_compaction_sse():
     """A new-chat /compact stream must carry the created chat ID to SSE."""
