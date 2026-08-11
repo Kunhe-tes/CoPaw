@@ -466,7 +466,6 @@ async def test_runtime_finalization_exception_returns_partial_once(
 
 
 @pytest.mark.asyncio
-@pytest.mark.asyncio
 async def test_runtime_finalization_timeout_returns_partial(
     monkeypatch,
     tmp_path: Path,
