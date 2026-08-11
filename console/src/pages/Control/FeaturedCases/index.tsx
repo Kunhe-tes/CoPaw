@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Alert, Button, Modal, Table, Tabs } from "antd";
-import { PlusOutlined, RightOutlined, StarOutlined } from "@ant-design/icons";
+import { PlusOutlined, RightOutlined, SettingOutlined } from "@ant-design/icons";
 import { Form } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
 import { useAppMessage } from "@/hooks/useAppMessage";
@@ -258,7 +258,7 @@ function FeaturedCasesPage() {
     <div className={`${styles.featuredCasesPage} console-management-theme`}>
       <header className={styles.pageHeading}>
         <div className={styles.pageHeadingIcon} aria-hidden="true">
-          <StarOutlined />
+          <SettingOutlined />
         </div>
         <nav className={styles.breadcrumbTrail} aria-label="面包屑">
           <span className={styles.pageEyebrow}>{t("nav.systemSettings")}</span>
