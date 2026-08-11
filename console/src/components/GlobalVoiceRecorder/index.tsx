@@ -5,6 +5,7 @@ import {
   DownloadOutlined,
   FileTextOutlined,
   LoadingOutlined,
+  ProfileOutlined,
   ReloadOutlined,
   StopOutlined,
   WarningOutlined,
@@ -12,10 +13,14 @@ import {
 import { Alert, Button, Modal, Tooltip, Typography } from "antd";
 import { type ReactNode, useCallback, useState } from "react";
 
-import { emitChatInputAppendText } from "@/components/agentscope-chat/chatInputDraft";
+import {
+  emitChatInputAppendText,
+  emitChatInputReplaceText,
+} from "@/components/agentscope-chat/chatInputDraft";
 
 import { VoiceRecorderTriggerContext } from "./context";
 import styles from "./index.module.less";
+import { buildVoiceSopPrompt } from "./sop";
 import { formatRecordingDuration, useVoiceRecorder } from "./useVoiceRecorder";
 
 const { Text, Title } = Typography;
@@ -63,6 +68,15 @@ export default function GlobalVoiceRecorder({
     }
     void recorder.startRecording();
   }, [recorder, recordingActive]);
+
+  const handleGenerateSop = () => {
+    const sopPrompt = buildVoiceSopPrompt(recorder.transcript);
+    if (!sopPrompt) {
+      return;
+    }
+
+    emitChatInputReplaceText(sopPrompt);
+  };
 
   const triggerControl = enabled
     ? {
@@ -245,6 +259,17 @@ export default function GlobalVoiceRecorder({
                         </Button>
                       </span>
                     </Tooltip>
+                    <Button
+                      icon={<ProfileOutlined />}
+                      aria-label="生成SOP"
+                      disabled={
+                        !recorder.transcript ||
+                        recorder.status === "transcribing"
+                      }
+                      onClick={handleGenerateSop}
+                    >
+                      生成SOP
+                    </Button>
                     <Button
                       icon={<ReloadOutlined />}
                       onClick={() => setReplaceOpen(true)}
