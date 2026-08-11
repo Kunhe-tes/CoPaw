@@ -16,6 +16,21 @@ from fastapi.testclient import TestClient
 from swe.app.routers import providers as providers_router
 
 
+class FakeTenantWorkspacePool:
+    """Record pool bootstrap requests from distribution handlers."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str | None]] = []
+
+    async def ensure_bootstrap(
+        self,
+        tenant_id: str,
+        *,
+        source_id: str | None = None,
+    ) -> None:
+        self.calls.append((tenant_id, source_id))
+
+
 def _request(
     tenant_id: str = "tenant-source",
     source_id: str | None = None,
@@ -23,12 +38,18 @@ def _request(
     headers: dict[str, str] | None = None,
     app: Any | None = None,
 ) -> SimpleNamespace:
+    state = app.state if app is not None else None
+    if state is None:
+        state = SimpleNamespace()
+    if not hasattr(state, "tenant_workspace_pool"):
+        state.tenant_workspace_pool = FakeTenantWorkspacePool()
     request = SimpleNamespace(
         headers=headers or {},
         state=SimpleNamespace(
             tenant_id=tenant_id,
             source_id=source_id,
             scope_id=scope_id,
+            tenant_workspace_pool=state.tenant_workspace_pool,
         ),
     )
     if app is not None:
@@ -420,12 +441,13 @@ def test_distribute_providers_partial_failure(
 
     call_count = 0
 
-    def mock_distribute(
+    async def mock_distribute(
         *,
         source_providers_dir: Path,
         target_tenant_id: str,
         source_working_dir: Path,
         source_id: str | None,
+        tenant_workspace_pool: Any,
     ) -> providers_router.ProvidersDistributionTenantResult:
         nonlocal call_count
         call_count += 1
@@ -480,8 +502,6 @@ def test_distribute_providers_bootstraps_tenant(
         lambda tenant_id: tmp_path / str(tenant_id),
     )
 
-    bootstrap_calls: list[str] = []
-
     class FakeInitializer:
         def __init__(
             self,
@@ -501,15 +521,13 @@ def test_distribute_providers_bootstraps_tenant(
         def has_seeded_bootstrap(self) -> bool:
             return False
 
-        def ensure_seeded_bootstrap(self) -> dict[str, Any]:
-            bootstrap_calls.append(self.tenant_id)
-            return {"minimal": True}
-
     monkeypatch.setattr(providers_router, "TenantInitializer", FakeInitializer)
+
+    request = _request()
 
     result = asyncio.run(
         providers_router.distribute_providers(
-            _request(),
+            request,
             providers_router.ProvidersDistributionRequest(
                 target_tenant_ids=["tenant-new"],
                 overwrite=True,
@@ -517,7 +535,9 @@ def test_distribute_providers_bootstraps_tenant(
         ),
     )
 
-    assert bootstrap_calls == ["tenant-new"]
+    assert request.state.tenant_workspace_pool.calls == [
+        ("tenant-new", None),
+    ]
     assert result.results[0].bootstrapped is True
 
 
@@ -640,6 +660,7 @@ def test_distribute_providers_http_response_includes_task_id(
 
     app = FastAPI()
     app.state.db_connection = DisconnectedAsyncTaskDb()
+    app.state.tenant_workspace_pool = FakeTenantWorkspacePool()
 
     @app.middleware("http")
     async def add_tenant_state(request, call_next):  # noqa: ANN001

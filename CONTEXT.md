@@ -4,6 +4,34 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 
 ## Language
 
+**Tenant Bootstrap**:
+The creation or repair of one tenant scope's minimum runnable directory state, including its default Agent Profile and required workspace assets. A Tenant Bootstrap completes only when that scope can load its Default Agent Profile.
+_Avoid_: directory creation, partial initialization, workspace startup
+
+**Tenant Bootstrap Recovery**:
+The repair of an incomplete or unusable Tenant Bootstrap into its minimum runnable state. Its temporary rollback backup is removed immediately after successful recovery and retained when recovery fails; it is distinct from a first Tenant Bootstrap because it begins with an existing tenant scope.
+_Avoid_: silent reset, tenant recreation, best-effort startup
+
+**Tenant Bootstrap Lock**:
+The cross-instance exclusive ownership of one Tenant Bootstrap, keyed by that tenant scope's effective storage identity. It prevents two application instances from initializing or recovering the same tenant scope concurrently and rejects bootstrap when this lock cannot be used.
+_Avoid_: process-local bootstrap lock, logical-tenant lock, global initialization lock
+
+**Tenant Bootstrap Readiness**:
+The verified condition that a tenant scope's required configuration and Default Agent Profile assets are individually valid and mutually consistent. A ready-marker file may describe this condition but cannot establish it by itself.
+_Avoid_: file-exists check, marker-only readiness, directory-present check
+
+**Tenant Staging Artifact**:
+A temporary file created within a tenant scope before an atomic replacement of its intended target. It is not tenant workspace content and must not be considered a configuration or an agent asset; artifacts left by abrupt process termination require explicit recovery or manual removal.
+_Avoid_: workspace file, configuration file, recoverable user document
+
+**Source Template**:
+The explicitly provisioned and ready `default_<source_id>` tenant-scope asset used as the initialization source for tenants entering through one source system. A Source Template is distinct from both the global `default` template and an ordinary tenant scope.
+_Avoid_: source tenant, default tenant, per-request configuration
+
+**Source Template Provisioning**:
+The privileged internal or CLI operation that creates or repairs a Source Template before tenant requests may consume it. It never force-overwrites a ready Source Template, fails without creating a partial template when the global default template is not ready, and ordinary tenant requests cannot initiate it.
+_Avoid_: lazy template creation, tenant self-service initialization, request-time template repair
+
 **SubAgent Definition**:
 A named, versioned worker profile that describes what kind of delegated work a SubAgent can perform. One **SubAgent Definition** can be used by many **SubAgent Runs**.
 _Avoid_: custom subagent, subagent template, agent config

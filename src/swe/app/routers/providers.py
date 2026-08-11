@@ -531,12 +531,13 @@ async def _resolve_distribution_target_names(
     }
 
 
-def _distribute_providers_to_tenant(
+async def _distribute_providers_to_tenant(
     *,
     source_providers_dir: PathlibPath,
     target_tenant_id: str,
     source_working_dir: PathlibPath,
     source_id: str | None,
+    tenant_workspace_pool: Any,
 ) -> ProvidersDistributionTenantResult:
     """分发 providers 目录到单个目标租户。
 
@@ -559,7 +560,10 @@ def _distribute_providers_to_tenant(
     )
     was_bootstrapped = initializer.has_seeded_bootstrap()
     if not was_bootstrapped:
-        initializer.ensure_seeded_bootstrap()
+        await tenant_workspace_pool.ensure_bootstrap(
+            target_tenant_id,
+            source_id=source_id,
+        )
 
     target_providers_dir = _get_target_storage_providers_dir(
         initializer.effective_tenant_id,
@@ -631,6 +635,7 @@ async def _distribute_active_model_to_tenant(
     provider_payload: dict,
     source_active_model: ModelSlotConfig,
     source_id: str | None,
+    tenant_workspace_pool: Any,
 ) -> ActiveModelDistributionTenantResult:
     initializer = TenantInitializer(
         source_working_dir.parent,
@@ -639,7 +644,10 @@ async def _distribute_active_model_to_tenant(
     )
     was_bootstrapped = initializer.has_seeded_bootstrap()
     if not was_bootstrapped:
-        initializer.ensure_seeded_bootstrap()
+        await tenant_workspace_pool.ensure_bootstrap(
+            target_tenant_id,
+            source_id=source_id,
+        )
 
     ProviderManager.ensure_tenant_provider_storage(
         initializer.effective_tenant_id,
@@ -773,6 +781,7 @@ async def _run_active_model_distribution_task(
     provider_payload: dict,
     source_active_model: ModelSlotConfig,
     source_id: str | None,
+    tenant_workspace_pool: Any,
     target_names: dict[str, str | None] | None = None,
 ) -> None:
     """后台执行活跃模型分发并回写统一任务表。"""
@@ -804,6 +813,7 @@ async def _run_active_model_distribution_task(
                 provider_payload=provider_payload,
                 source_active_model=source_active_model,
                 source_id=source_id,
+                tenant_workspace_pool=tenant_workspace_pool,
             )
             done_count += 1
             await _safe_record_provider_task_item(
@@ -856,6 +866,7 @@ async def _run_providers_distribution_task(
     source_working_dir: PathlibPath,
     target_tenant_ids: list[str],
     source_id: str | None,
+    tenant_workspace_pool: Any,
     target_names: dict[str, str | None] | None = None,
 ) -> None:
     """后台执行 providers 全量分发并回写统一任务表。"""
@@ -880,11 +891,12 @@ async def _run_providers_distribution_task(
     errors: list[str] = []
     for tenant_id in target_tenant_ids:
         try:
-            result = _distribute_providers_to_tenant(
+            result = await _distribute_providers_to_tenant(
                 source_providers_dir=source_providers_dir,
                 target_tenant_id=tenant_id,
                 source_working_dir=source_working_dir,
                 source_id=source_id,
+                tenant_workspace_pool=tenant_workspace_pool,
             )
             done_count += 1
             await _safe_record_provider_task_item(
@@ -1549,6 +1561,16 @@ async def distribute_active_model(
             status_code=400,
             detail="No target tenant IDs provided",
         )
+    tenant_workspace_pool = getattr(
+        getattr(getattr(request, "app", None), "state", request.state),
+        "tenant_workspace_pool",
+        None,
+    )
+    if tenant_workspace_pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant pool not available",
+        )
 
     source_active_model, provider_payload = _resolve_distribution_source(
         manager,
@@ -1594,6 +1616,7 @@ async def distribute_active_model(
                 provider_payload=provider_payload,
                 source_active_model=source_active_model,
                 source_id=_request_source_id(request),
+                tenant_workspace_pool=tenant_workspace_pool,
                 target_names=target_names,
             ),
         )
@@ -1611,6 +1634,7 @@ async def distribute_active_model(
                 provider_payload=provider_payload,
                 source_active_model=source_active_model,
                 source_id=source_id,
+                tenant_workspace_pool=tenant_workspace_pool,
             )
             results.append(result)
         except Exception as exc:
@@ -1663,6 +1687,16 @@ async def distribute_providers(
         raise HTTPException(
             status_code=400,
             detail="No target tenant IDs provided",
+        )
+    tenant_workspace_pool = getattr(
+        getattr(getattr(request, "app", None), "state", request.state),
+        "tenant_workspace_pool",
+        None,
+    )
+    if tenant_workspace_pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant pool not available",
         )
 
     # 获取源租户的有效租户 ID
@@ -1721,6 +1755,7 @@ async def distribute_providers(
                 source_working_dir=_request_tenant_working_dir(request),
                 target_tenant_ids=body.target_tenant_ids,
                 source_id=_request_source_id(request),
+                tenant_workspace_pool=tenant_workspace_pool,
                 target_names=target_names,
             ),
         )
@@ -1731,11 +1766,12 @@ async def distribute_providers(
     results: list[ProvidersDistributionTenantResult] = []
     for tenant_id in body.target_tenant_ids:
         try:
-            result = _distribute_providers_to_tenant(
+            result = await _distribute_providers_to_tenant(
                 source_providers_dir=source_providers_dir,
                 target_tenant_id=tenant_id,
                 source_working_dir=source_working_dir,
                 source_id=source_id,
+                tenant_workspace_pool=tenant_workspace_pool,
             )
             results.append(result)
         except Exception as exc:

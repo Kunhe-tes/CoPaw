@@ -640,11 +640,16 @@ class TestTenantBootstrapInitSourceMapping:
         )
         monkeypatch.setattr(
             "swe.app.workspace.tenant_pool.TenantInitializer"
-            ".ensure_seeded_bootstrap",
-            lambda self, **kwargs: {"pool_seed": {}, "workspace_seed": {}},
+            ".recover_seeded_bootstrap",
+            lambda self, **kwargs: {"recovered_paths": []},
         )
 
         pool = TenantWorkspacePool(tmp_path)
+        monkeypatch.setattr(
+            pool,
+            "_require_ready_source_template",
+            lambda *_args: None,
+        )
 
         await pool.ensure_bootstrap(
             "tenant-1",
@@ -719,6 +724,58 @@ class TestTenantBootstrapObservability:
             and call.args[1] == "tenant-1"
             for call in mock_debug.call_args_list
         )
+
+
+class TestTenantBootstrapProcessLock:
+    """Cross-process bootstrap coordination is fail-closed."""
+
+    @pytest.mark.asyncio
+    async def test_lock_timeout_prevents_bootstrap_mutation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A contended file lock must not fall back to an unlocked repair."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+        from swe.app.workspace.bootstrap_lock import BootstrapLockTimeout
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable,
+        )
+
+        class TimedOutLock:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                raise BootstrapLockTimeout("contended")
+
+            async def __aexit__(self, *_args):
+                return None
+
+        pool = TenantWorkspacePool(tmp_path)
+        perform_bootstrap = AsyncMock()
+        monkeypatch.setattr(tenant_pool_module, "AsyncFlock", TimedOutLock)
+        monkeypatch.setattr(pool, "_perform_bootstrap", perform_bootstrap)
+
+        with pytest.raises(TenantBootstrapUnavailable):
+            await pool.ensure_bootstrap("tenant-lock-timeout")
+
+        perform_bootstrap.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_source_template_must_be_provisioned_before_tenant_bootstrap(
+        self,
+        tmp_path,
+    ):
+        """Normal source-scoped traffic cannot lazily create a template."""
+        from swe.app.workspace.bootstrap_state import SourceTemplateUnavailable
+
+        pool = TenantWorkspacePool(tmp_path)
+
+        with pytest.raises(SourceTemplateUnavailable):
+            await pool.ensure_bootstrap("tenant-a", source_id="ruice")
+
+        assert not (tmp_path / "default_ruice").exists()
 
 
 class TestTenantWorkspaceDirectoryLayout:
