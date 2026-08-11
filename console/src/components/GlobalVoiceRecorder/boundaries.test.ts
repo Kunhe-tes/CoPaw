@@ -18,8 +18,8 @@ describe("GlobalVoiceRecorder product boundaries", () => {
     expect(chatPageSource).toContain(
       'new URLSearchParams(location.search).get("origin") === "Y"',
     );
-    expect(runtimeInputSource).toContain("<VoiceRecorderTrigger />");
-    expect(welcomeInputSource).toContain("<VoiceRecorderTrigger />");
+    expect(runtimeInputSource).toContain("<VoiceRecorderQuickMenuItem");
+    expect(welcomeInputSource).toContain("<VoiceRecorderQuickMenuItem");
   });
 
   it("keeps Login outside the authenticated MainLayout", () => {

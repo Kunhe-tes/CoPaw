@@ -1,0 +1,5 @@
+# Background SubAgent Runs Use Subprocess Workers
+
+Background SubAgent Runs will use local subprocess workers for the first background execution backend, while the Main Agent process owns internal tools, active-handle supervision, concurrency limits, and cancellation. This is a deliberate choice over in-process `asyncio.Task` execution because background SubAgents need stronger resource and failure isolation under heavier use; it is also deliberately smaller than a distributed queue because this phase does not require cross-pod scheduling or restart recovery.
+
+The background tool surface replaces the synchronous `delegate_to_subagent` Main Agent tool for the next implementation stage. Each run writes a per-run JSON record as the single result source. The start path enforces a fixed per-tenant-and-agent concurrency limit and returns blocked without creating a run when the limit is reached. Cancellation terminates the worker process group, stdout is not a protocol channel, and stderr is kept only as bounded diagnostic output.

@@ -4,13 +4,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { installAudioPlaybackMocks } from "./testUtils";
 import GlobalVoiceRecorder from "./index";
+import VoiceRecorderQuickMenuItem from "./VoiceRecorderQuickMenuItem";
 import VoiceRecorderTrigger from "./VoiceRecorderTrigger";
 
 const mocks = vi.hoisted(() => ({
   recorder: {} as Record<string, unknown>,
   recorderOptions: {} as Record<string, unknown>,
   emitChatInputAppendText: vi.fn(),
-  emitChatInputReplaceText: vi.fn(),
 }));
 
 vi.mock("@agentscope-ai/icons", () => ({
@@ -47,7 +47,6 @@ vi.mock("./useVoiceRecorder", () => ({
 
 vi.mock("@/components/agentscope-chat/chatInputDraft", () => ({
   emitChatInputAppendText: mocks.emitChatInputAppendText,
-  emitChatInputReplaceText: mocks.emitChatInputReplaceText,
 }));
 
 function seedRecorder(overrides: Record<string, unknown> = {}) {
@@ -80,11 +79,18 @@ function renderRecorder(enabled = true) {
   );
 }
 
+function renderRecorderQuickMenuItem(enabled = true) {
+  return render(
+    <GlobalVoiceRecorder enabled={enabled}>
+      <VoiceRecorderQuickMenuItem />
+    </GlobalVoiceRecorder>,
+  );
+}
+
 describe("GlobalVoiceRecorder UI", () => {
   beforeEach(() => {
     seedRecorder();
     mocks.emitChatInputAppendText.mockReset();
-    mocks.emitChatInputReplaceText.mockReset();
     installAudioPlaybackMocks();
   });
 
@@ -99,6 +105,16 @@ describe("GlobalVoiceRecorder UI", () => {
     const launcher = screen.getByRole("button", { name: "开始语音录制" });
     expect(launcher).toBeEnabled();
     expect(launcher.textContent).toBe("");
+    fireEvent.click(launcher);
+    expect(mocks.recorder.startRecording).toHaveBeenCalledOnce();
+  });
+
+  it("renders a labelled quick menu item and starts recording from idle", () => {
+    renderRecorderQuickMenuItem();
+
+    const launcher = screen.getByRole("button", { name: "语音录制" });
+    expect(launcher).toBeEnabled();
+    expect(launcher).toHaveTextContent("语音录制");
     fireEvent.click(launcher);
     expect(mocks.recorder.startRecording).toHaveBeenCalledOnce();
   });
@@ -178,29 +194,10 @@ describe("GlobalVoiceRecorder UI", () => {
       screen.queryByRole("button", { name: "复制" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /转换文字$/ })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "生成SOP" })).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: "生成SOP" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByText("转写接口尚未配置")).toBeInTheDocument();
-  });
-
-  it("generates an SOP draft and replaces the chat input", () => {
-    seedRecorder({
-      status: "ready",
-      panelOpen: true,
-      transcript: "先提交申请，再等待审批",
-      recording: {
-        file: new File(["wav"], "voice.wav", { type: "audio/wav" }),
-        objectUrl: "blob:voice",
-        durationMs: 1_000,
-        createdAt: 0,
-      },
-    });
-    renderRecorder();
-
-    fireEvent.click(screen.getByRole("button", { name: "生成SOP" }));
-
-    const sopPrompt =
-      "@wplus-sop-miner 我要澄清一个工作流程，流程是：先提交申请，再等待审批";
-    expect(mocks.emitChatInputReplaceText).toHaveBeenCalledWith(sopPrompt);
   });
 
   it("requires confirmation before replacing the current WAV and transcript", () => {
@@ -216,7 +213,6 @@ describe("GlobalVoiceRecorder UI", () => {
     });
     renderRecorder();
 
-    expect(screen.getByRole("button", { name: "生成SOP" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /重新录制$/ }));
     expect(screen.getByText("替换当前录音？")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "清除并重新录制" }));

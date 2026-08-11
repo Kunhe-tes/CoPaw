@@ -1,10 +1,12 @@
 import { IAgentScopeRuntimeWebUISenderAttachmentsOptions } from "@/components/agentscope-chat";
 import { Upload } from "antd";
 import type { UploadFile } from "antd";
-import { IconButton } from "@agentscope-ai/design";
 import { SparkAttachmentLine } from "@agentscope-ai/icons";
 import { Sender, Attachments } from "@/components/agentscope-chat";
 import React, { useCallback, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { ComposerQuickMenuItem } from "@/components/agentscope-chat/ComposerQuickMenu";
+import quickMenuStyles from "@/components/agentscope-chat/ComposerQuickMenu/index.module.less";
 
 export default function useAttachments(
   attachments: IAgentScopeRuntimeWebUISenderAttachmentsOptions,
@@ -12,6 +14,7 @@ export default function useAttachments(
     disabled?: boolean;
   },
 ) {
+  const { t } = useTranslation();
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const fileListRef = useRef<UploadFile[]>([]);
   fileListRef.current = fileList;
@@ -23,6 +26,7 @@ export default function useAttachments(
 
   const handlePasteFile = useCallback(
     (file: File) => {
+      if (options?.disabled) return;
       if (!customRequest) return;
 
       const fileType = file.type || "";
@@ -98,12 +102,13 @@ export default function useAttachments(
         { defaultRequest: () => undefined },
       );
     },
-    [customRequest, maxCount],
+    [customRequest, maxCount, options?.disabled],
   );
 
   if (customRequest) {
-    const uploadIconButton = (
+    const uploadQuickMenuItem = (
       <Upload
+        className={quickMenuStyles.uploadTrigger}
         fileList={fileList}
         showUploadList={false}
         onChange={(info) => {
@@ -117,10 +122,10 @@ export default function useAttachments(
         {trigger ? (
           React.createElement(trigger, { disabled: options?.disabled })
         ) : (
-          <IconButton
-            disabled={options?.disabled}
+          <ComposerQuickMenuItem
             icon={<SparkAttachmentLine />}
-            bordered={false}
+            interactive
+            label={t("chat.quickMenu.upload", "上传文件")}
           />
         )}
       </Upload>
@@ -129,6 +134,7 @@ export default function useAttachments(
     const uploadFileListHeader = (
       <Sender.Header closable={false} open={fileList?.length > 0}>
         <Attachments
+          disabled={options?.disabled}
           items={fileList}
           onChange={(info) => setFileList(info.fileList)}
         />
@@ -140,13 +146,14 @@ export default function useAttachments(
       getFileList,
       setFileList,
       handlePasteFile,
-      uploadIconButton,
+      uploadQuickMenuItem,
       uploadFileListHeader,
     };
   } else {
     return {
       enabled: false,
       handlePasteFile: undefined,
+      uploadQuickMenuItem: undefined,
     };
   }
 }

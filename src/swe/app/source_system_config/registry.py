@@ -46,6 +46,15 @@ CHAT_TASK_PROGRESS_ENABLED_SWITCH = SourceSystemConfigSwitch(
     default_value=True,
     value_type="bool",
 )
+NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH = SourceSystemConfigSwitch(
+    key="feature_switches.normal_mode_plan_interaction_tools_enabled",
+    path=(
+        "feature_switches",
+        "normal_mode_plan_interaction_tools_enabled",
+    ),
+    default_value=False,
+    value_type="bool",
+)
 
 TOOL_RESULT_COMPACT_ENABLED_SETTING = SourceSystemConfigSetting(
     key="tool_result_compact.enabled",
@@ -283,6 +292,7 @@ SYSTEM_PROMPT_INJECTIONS_DEFAULT: list[str] = []
 
 CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: tuple[SourceSystemConfigSwitch, ...] = (
     CHAT_TASK_PROGRESS_ENABLED_SWITCH,
+    NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH,
     DATABASE_ACCESS_GUARD_ENABLED_SWITCH,
 )
 CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
@@ -290,6 +300,7 @@ CURRENT_SOURCE_SYSTEM_CONFIG_SETTINGS: tuple[
     ...,
 ] = (
     CHAT_TASK_PROGRESS_ENABLED_SWITCH,
+    NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH,
     DATABASE_ACCESS_GUARD_ENABLED_SWITCH,
     TOOL_RESULT_COMPACT_ENABLED_SETTING,
     TOOL_RESULT_COMPACT_RECENT_N_SETTING,
@@ -415,6 +426,28 @@ def is_chat_task_progress_enabled(config: Any | None) -> bool:
         CHAT_TASK_PROGRESS_ENABLED_SWITCH.key,
         value,
         default=bool(CHAT_TASK_PROGRESS_ENABLED_SWITCH.default_value),
+        strict=False,
+    )
+
+
+def is_normal_mode_plan_interaction_tools_enabled(
+    config: Any | None,
+) -> bool:
+    """读取普通模式计划交互工具开关，缺失时回退为默认关闭。"""
+    raw_config = _normalize_config_payload(config)
+    merged = merge_source_system_config_with_defaults(raw_config)
+    value = _get_nested_value(
+        merged,
+        NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH.path,
+    )
+    if value is _MISSING:
+        return bool(NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH.default_value)
+    return _coerce_registered_boolean_value(
+        NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH.key,
+        value,
+        default=bool(
+            NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH.default_value,
+        ),
         strict=False,
     )
 
@@ -869,6 +902,7 @@ __all__ = [
     "LLM_MAX_QPM_SETTING",
     "LLM_RATE_LIMIT_JITTER_SETTING",
     "LLM_RATE_LIMIT_PAUSE_SETTING",
+    "NORMAL_MODE_PLAN_INTERACTION_TOOLS_ENABLED_SWITCH",
     "QUERY_RETRY_BACKOFF_BASE_SETTING",
     "QUERY_RETRY_BACKOFF_CAP_SETTING",
     "QUERY_RETRY_ENABLED_SETTING",
@@ -886,6 +920,7 @@ __all__ = [
     "get_system_prompt_injections",
     "is_chat_task_progress_enabled",
     "is_database_access_guard_enabled",
+    "is_normal_mode_plan_interaction_tools_enabled",
     "merge_source_system_config_with_defaults",
     "normalize_registered_setting_values",
     "normalize_registered_switch_values",

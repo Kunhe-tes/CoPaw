@@ -14,6 +14,9 @@ import {
   CHAT_INPUT_APPEND_TEXT_EVENT,
   CHAT_INPUT_REPLACE_TEXT_EVENT,
 } from "../chatInputDraft";
+import quickMenuStyles from "../ComposerQuickMenu/index.module.less";
+
+const quickMenuItemSpy = vi.fn();
 
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => <span data-testid="attachment-icon" />,
@@ -31,6 +34,34 @@ vi.mock("@/components/agentscope-chat", () => ({
       ))}
     </div>
   ),
+  useChatAnywhereInput: (selector: (value: { disabled: boolean }) => unknown) =>
+    selector({ disabled: false }),
+}));
+
+vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => ({
+  default: ({ children }: { children?: React.ReactNode }) => (
+    <div data-testid="welcome-quick-menu">{children}</div>
+  ),
+  ComposerQuickMenuItem: (props: { label: React.ReactNode }) => {
+    quickMenuItemSpy(props);
+    return <span>{props.label}</span>;
+  },
+}));
+
+vi.mock("@/components/GlobalVoiceRecorder/VoiceRecorderQuickMenuItem", () => ({
+  default: () => <span data-testid="voice-recorder-trigger">语音录制</span>,
+}));
+
+vi.mock("@/components/GlobalVoiceRecorder/context", () => ({
+  useVoiceRecorderTrigger: () => ({
+    disabled: false,
+    label: "开始语音录制",
+    loading: false,
+    panelOpen: false,
+    recording: false,
+    unsupported: false,
+    trigger: () => undefined,
+  }),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -88,6 +119,7 @@ describe("WelcomeCenterLayout", () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    quickMenuItemSpy.mockClear();
     mockedUploadFile.mockResolvedValue({
       url: "demo.txt",
       file_name: "demo.txt",
@@ -109,6 +141,37 @@ describe("WelcomeCenterLayout", () => {
     await waitFor(() => {
       expect(screen.getByText("demo.txt")).toBeInTheDocument();
     });
+  });
+
+  it("combines upload, voice recording, and caller actions in one quick menu", () => {
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        quickMenuItems={<span>计划模式</span>}
+      />,
+    );
+
+    expect(screen.getByTestId("welcome-quick-menu")).toHaveTextContent(
+      "chat.quickMenu.upload",
+    );
+    expect(screen.getByTestId("welcome-quick-menu")).toHaveTextContent(
+      "计划模式",
+    );
+    expect(screen.getByTestId("welcome-quick-menu")).toContainElement(
+      screen.getByTestId("voice-recorder-trigger"),
+    );
+    expect(quickMenuItemSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        interactive: true,
+        label: "chat.quickMenu.upload",
+      }),
+    );
+    expect(
+      screen
+        .getByText("chat.quickMenu.upload")
+        .closest(`.${quickMenuStyles.uploadTrigger}`),
+    ).toBeInTheDocument();
   });
 
   it("appends transcribed text to the welcome draft without submitting", async () => {
@@ -193,9 +256,7 @@ describe("WelcomeCenterLayout", () => {
     setTokenEditorValue(input, "@");
     const menu = document.getElementById("context-reference-menu");
 
-    expect(menu?.parentElement).toBe(
-      input.closest(".welcome-input-card"),
-    );
+    expect(menu?.parentElement).toBe(input.closest(".welcome-input-card"));
     expect(menu).toHaveStyle({
       top: "calc(100% + 8px)",
     });

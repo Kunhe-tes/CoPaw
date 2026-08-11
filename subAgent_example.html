@@ -1,0 +1,950 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SubAgent Runtime Widget · 全状态演示</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page-bg: #f6f7f9;
+      --surface: rgba(255, 255, 255, 0.96);
+      --surface-solid: #ffffff;
+      --text: #22262e;
+      --muted: #8b93a1;
+      --border: #e5e8ed;
+      --rail: #edf0f4;
+      --focus: #6d8fff;
+      --shadow:
+        0 18px 48px rgba(29, 36, 50, 0.11),
+        0 3px 10px rgba(29, 36, 50, 0.05);
+      --radius: 18px;
+      --widget-width: min(360px, calc(100vw - 32px));
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html,
+    body {
+      min-height: 100%;
+    }
+
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 86% 12%, rgba(89, 115, 255, 0.08), transparent 28%),
+        radial-gradient(circle at 12% 86%, rgba(15, 155, 142, 0.07), transparent 30%),
+        var(--page-bg);
+      font-family:
+        Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont,
+        "SF Pro Display", "PingFang SC", "Hiragino Sans GB",
+        "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC",
+        Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+      text-rendering: optimizeLegibility;
+    }
+
+    button {
+      font: inherit;
+    }
+
+    .demo-page {
+      min-height: 100vh;
+      padding: 48px clamp(24px, 7vw, 112px) 220px;
+    }
+
+    .demo-header {
+      max-width: 820px;
+    }
+
+    .eyebrow {
+      margin: 0 0 12px;
+      color: #667085;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(30px, 4vw, 48px);
+      line-height: 1.12;
+      letter-spacing: -0.035em;
+    }
+
+    .lead {
+      max-width: 720px;
+      margin: 18px 0 0;
+      color: #667085;
+      font-size: 16px;
+      line-height: 1.8;
+    }
+
+    .control-panel {
+      max-width: 860px;
+      margin-top: 34px;
+      padding: 18px;
+      border: 1px solid rgba(222, 226, 233, 0.9);
+      border-radius: 16px;
+      background: rgba(255, 255, 255, 0.7);
+      box-shadow: 0 8px 30px rgba(29, 36, 50, 0.04);
+      backdrop-filter: blur(14px);
+    }
+
+    .control-label {
+      margin: 0 0 12px;
+      color: #737b89;
+      font-size: 12px;
+      font-weight: 650;
+    }
+
+    .scenario-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .scenario-button,
+    .action-button {
+      appearance: none;
+      min-height: 36px;
+      padding: 0 14px;
+      border: 1px solid #dfe3e9;
+      border-radius: 999px;
+      color: #4d5563;
+      background: #fff;
+      cursor: pointer;
+      transition:
+        border-color 150ms ease,
+        box-shadow 150ms ease,
+        background 150ms ease,
+        color 150ms ease,
+        transform 150ms ease;
+    }
+
+    .scenario-button:hover,
+    .action-button:hover {
+      border-color: #bdc6d5;
+      background: #fbfcfe;
+    }
+
+    .scenario-button:active,
+    .action-button:active {
+      transform: translateY(1px);
+    }
+
+    .scenario-button[aria-pressed="true"] {
+      color: #315fc4;
+      border-color: #b9ccff;
+      background: #eff4ff;
+      box-shadow: inset 0 0 0 1px rgba(67, 111, 225, 0.08);
+    }
+
+    .scenario-button:focus-visible,
+    .action-button:focus-visible,
+    .agent-stop:focus-visible,
+    .collapsed-trigger:focus-visible {
+      outline: 3px solid color-mix(in srgb, var(--focus) 35%, transparent);
+      outline-offset: 2px;
+    }
+
+    .action-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 14px;
+      padding-top: 14px;
+      border-top: 1px solid #e8ebef;
+    }
+
+    .action-button.primary {
+      color: #fff;
+      border-color: #3f6fe5;
+      background: #3f6fe5;
+    }
+
+    .action-button.primary:hover {
+      border-color: #315fc4;
+      background: #315fc4;
+    }
+
+    .design-notes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      max-width: 860px;
+      margin-top: 20px;
+    }
+
+    .note-card {
+      padding: 18px;
+      border: 1px solid #e4e7ec;
+      border-radius: 14px;
+      background: rgba(255, 255, 255, 0.62);
+    }
+
+    .note-card strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+
+    .note-card span {
+      color: #7c8492;
+      font-size: 13px;
+      line-height: 1.65;
+    }
+
+    .runtime-anchor {
+      position: fixed;
+      right: max(16px, env(safe-area-inset-right));
+      bottom: max(16px, env(safe-area-inset-bottom));
+      z-index: 50;
+      width: var(--widget-width);
+      pointer-events: none;
+    }
+
+    .runtime-widget {
+      width: 100%;
+      pointer-events: auto;
+    }
+
+    .agent-card {
+      overflow: hidden;
+      width: 100%;
+      padding: 10px;
+      border: 1px solid rgba(221, 225, 232, 0.94);
+      border-radius: var(--radius);
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(20px) saturate(130%);
+      transform-origin: right bottom;
+      animation: widget-enter 180ms cubic-bezier(.2, .8, .2, 1);
+    }
+
+    .agent-list {
+      display: grid;
+      gap: 3px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .agent-row {
+      --accent: #2f6fed;
+      position: relative;
+      min-height: 66px;
+      padding: 13px 10px 13px 12px;
+      border-radius: 12px;
+      transition:
+        background 150ms ease,
+        transform 150ms ease;
+    }
+
+    .agent-row:hover,
+    .agent-row:focus-within {
+      background: #f7f8fa;
+    }
+
+    .agent-row-main {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto 28px;
+      align-items: center;
+      gap: 8px;
+      min-height: 27px;
+    }
+
+    .agent-name {
+      min-width: 0;
+      overflow: hidden;
+      color: var(--accent);
+      font-size: 14px;
+      font-weight: 680;
+      letter-spacing: -0.01em;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 24px;
+      padding: 0 9px;
+      border-radius: 999px;
+      color: var(--status-fg, #68758d);
+      background: var(--status-bg, #f1f4f8);
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      white-space: nowrap;
+    }
+
+    .agent-stop {
+      position: relative;
+      display: inline-grid;
+      place-items: center;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: 0;
+      border-radius: 50%;
+      color: #676e79;
+      background: transparent;
+      cursor: pointer;
+      opacity: 0.52;
+      transition:
+        opacity 140ms ease,
+        background 140ms ease,
+        color 140ms ease,
+        transform 140ms ease;
+    }
+
+    .agent-row:hover .agent-stop,
+    .agent-row:focus-within .agent-stop,
+    .agent-stop:hover,
+    .agent-stop:focus-visible {
+      color: #2d323a;
+      background: #e9ecf1;
+      opacity: 1;
+    }
+
+    .agent-stop:active {
+      transform: scale(0.92);
+    }
+
+    .agent-stop[disabled] {
+      cursor: progress;
+      opacity: 0.35;
+    }
+
+    .agent-stop::after {
+      content: attr(data-tooltip);
+      position: absolute;
+      right: 0;
+      bottom: calc(100% + 8px);
+      z-index: 5;
+      width: max-content;
+      max-width: 160px;
+      padding: 6px 8px;
+      border-radius: 7px;
+      color: #fff;
+      background: #252a32;
+      box-shadow: 0 6px 18px rgba(20, 24, 32, 0.18);
+      font-size: 11px;
+      line-height: 1.25;
+      pointer-events: none;
+      opacity: 0;
+      transform: translateY(3px);
+      transition:
+        opacity 120ms ease,
+        transform 120ms ease;
+    }
+
+    .agent-stop:hover::after,
+    .agent-stop:focus-visible::after {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .progress {
+      position: absolute;
+      right: 12px;
+      bottom: 8px;
+      left: 12px;
+      height: 2px;
+      overflow: hidden;
+      border-radius: 999px;
+      background: var(--rail);
+    }
+
+    .progress-fill {
+      width: var(--progress, 0%);
+      height: 100%;
+      border-radius: inherit;
+      background: var(--progress-color, var(--accent));
+      transition: width 460ms cubic-bezier(.2, .8, .2, 1);
+    }
+
+    .agent-row[data-state="running"] {
+      --status-bg: #eef3ff;
+      --status-fg: #6879a0;
+    }
+
+    .agent-row[data-state="starting"] {
+      --status-bg: #f0f3fb;
+      --status-fg: #707a98;
+    }
+
+    .agent-row[data-state="waiting"] {
+      --status-bg: #edf7f5;
+      --status-fg: #65817c;
+    }
+
+    .agent-row[data-state="queued"] {
+      --status-bg: #fff3e8;
+      --status-fg: #9b704b;
+    }
+
+    .agent-row[data-state="completed"] {
+      --status-bg: #edf8f2;
+      --status-fg: #5a806a;
+      --progress-color: #32a06f;
+    }
+
+    .agent-row[data-state="failed"] {
+      --status-bg: #fff0f0;
+      --status-fg: #a65d5d;
+      --progress-color: #e45d5d;
+    }
+
+    .agent-row[data-state="stopped"] {
+      --status-bg: #f1f3f5;
+      --status-fg: #777f8a;
+      --progress-color: #979eaa;
+    }
+
+    .agent-row[data-state="stopping"] {
+      --status-bg: #f3f0fa;
+      --status-fg: #7b7091;
+      --progress-color: #8b7bb5;
+    }
+
+    .agent-row[data-state="starting"] .progress-fill,
+    .agent-row[data-state="waiting"] .progress-fill,
+    .agent-row[data-state="stopping"] .progress-fill {
+      min-width: 22px;
+      background:
+        linear-gradient(
+          90deg,
+          color-mix(in srgb, var(--progress-color, var(--accent)) 45%, white),
+          var(--progress-color, var(--accent)),
+          color-mix(in srgb, var(--progress-color, var(--accent)) 45%, white)
+        );
+      background-size: 160% 100%;
+      animation: shimmer 1.2s linear infinite;
+    }
+
+    .empty-state {
+      display: grid;
+      min-height: 190px;
+      place-items: center;
+      padding: 24px;
+      text-align: center;
+    }
+
+    .empty-content {
+      max-width: 260px;
+    }
+
+    .empty-mark {
+      display: grid;
+      grid-template-columns: repeat(3, 6px);
+      gap: 5px;
+      width: max-content;
+      margin: 0 auto 16px;
+    }
+
+    .empty-mark i {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #abc1ff;
+    }
+
+    .empty-mark i:nth-child(1),
+    .empty-mark i:nth-child(3) {
+      opacity: 0.45;
+    }
+
+    .empty-title {
+      margin: 0;
+      font-size: 15px;
+      font-weight: 650;
+    }
+
+    .empty-hint {
+      margin: 8px 0 0;
+      color: #969daa;
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .collapsed-wrap {
+      display: flex;
+      justify-content: flex-end;
+    }
+
+    .collapsed-trigger {
+      display: inline-flex;
+      align-items: center;
+      gap: 11px;
+      min-height: 46px;
+      padding: 0 16px;
+      border: 1px solid rgba(218, 224, 233, 0.95);
+      border-radius: 999px;
+      color: #333943;
+      background: rgba(255, 255, 255, 0.94);
+      box-shadow: 0 12px 32px rgba(29, 36, 50, 0.10);
+      cursor: pointer;
+      backdrop-filter: blur(18px);
+      transition:
+        box-shadow 150ms ease,
+        transform 150ms ease,
+        border-color 150ms ease;
+      animation: widget-enter 180ms cubic-bezier(.2, .8, .2, 1);
+    }
+
+    .collapsed-trigger:hover {
+      border-color: #cbd3df;
+      box-shadow: 0 16px 36px rgba(29, 36, 50, 0.13);
+      transform: translateY(-1px);
+    }
+
+    .activity-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .activity-dots i {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: #2f6fed;
+    }
+
+    .activity-dots i:nth-child(2) {
+      background: #0f9b8e;
+    }
+
+    .activity-dots i:nth-child(3) {
+      background: #f27a2a;
+    }
+
+    .collapsed-label {
+      font-size: 13px;
+      font-weight: 620;
+    }
+
+    .chevron {
+      width: 8px;
+      height: 8px;
+      margin-left: 2px;
+      border-right: 1.5px solid #8e98aa;
+      border-bottom: 1.5px solid #8e98aa;
+      transform: rotate(45deg) translateY(-2px);
+    }
+
+    .visually-hidden {
+      position: absolute !important;
+      width: 1px !important;
+      height: 1px !important;
+      padding: 0 !important;
+      margin: -1px !important;
+      overflow: hidden !important;
+      clip: rect(0, 0, 0, 0) !important;
+      white-space: nowrap !important;
+      border: 0 !important;
+    }
+
+    @keyframes shimmer {
+      from { background-position: 100% 0; }
+      to { background-position: -60% 0; }
+    }
+
+    @keyframes widget-enter {
+      from {
+        opacity: 0;
+        transform: translateY(8px) scale(0.985);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0) scale(1);
+      }
+    }
+
+    @media (max-width: 760px) {
+      .demo-page {
+        padding: 32px 20px 210px;
+      }
+
+      .design-notes {
+        grid-template-columns: 1fr;
+      }
+
+      .runtime-anchor {
+        left: 16px;
+        right: 16px;
+        width: auto;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        scroll-behavior: auto !important;
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="demo-page">
+    <header class="demo-header">
+      <p class="eyebrow">Component Playground</p>
+      <h1>SubAgent 运行控件</h1>
+      <p class="lead">
+        将切图中的运行、排队、启动、等待资源、完成、失败、停止、单任务、空状态和收起状态，
+        统一为一个可交互、可访问、可直接接入业务数据的网页组件。
+      </p>
+    </header>
+
+    <section class="control-panel" aria-labelledby="scenario-heading">
+      <p class="control-label" id="scenario-heading">场景切换</p>
+      <div class="scenario-list" id="scenario-list"></div>
+      <div class="action-row">
+        <button class="action-button primary" id="advance-button" type="button">推进进度</button>
+        <button class="action-button" id="toggle-button" type="button">收起 / 展开</button>
+        <button class="action-button" id="reset-button" type="button">重置当前场景</button>
+      </div>
+    </section>
+
+    <section class="design-notes" aria-label="设计原则">
+      <article class="note-card">
+        <strong>控制信息密度</strong>
+        <span>状态标签弱化，进度线仅 2px；没有标题、图标、日志入口和批量操作。</span>
+      </article>
+      <article class="note-card">
+        <strong>保留操作可发现性</strong>
+        <span>停止按钮默认低对比，行 Hover 或键盘聚焦后再增强，同时提供 Tooltip。</span>
+      </article>
+      <article class="note-card">
+        <strong>终态语义明确</strong>
+        <span>运行态点击叉号执行停止；完成、失败和已停止状态点击叉号则移除记录。</span>
+      </article>
+    </section>
+  </main>
+
+  <aside class="runtime-anchor" aria-live="polite">
+    <div class="runtime-widget" id="runtime-widget"></div>
+  </aside>
+
+  <script>
+    const palette = {
+      blue: "#2f6fed",
+      teal: "#0f9b8e",
+      orange: "#f27a2a",
+      violet: "#7c63d9"
+    };
+
+    const stateLabels = {
+      running: "运行中",
+      starting: "启动中",
+      waiting: "等待资源",
+      queued: "排队中",
+      completed: "已完成",
+      failed: "失败",
+      stopped: "已停止",
+      stopping: "停止中"
+    };
+
+    const activeStates = new Set(["running", "starting", "waiting", "queued", "stopping"]);
+    const terminalStates = new Set(["completed", "failed", "stopped"]);
+
+    const scenarios = {
+      default: {
+        label: "运行 + 排队",
+        expanded: true,
+        agents: [
+          { id: "research", name: "资料整理 Agent", state: "running", progress: 62, accent: palette.blue },
+          { id: "risk", name: "风险检查 Agent", state: "running", progress: 48, accent: palette.teal },
+          { id: "summary", name: "总结生成 Agent", state: "queued", progress: 0, accent: palette.orange }
+        ]
+      },
+      initializing: {
+        label: "启动 / 等待",
+        expanded: true,
+        agents: [
+          { id: "research", name: "资料整理 Agent", state: "starting", progress: 8, accent: palette.blue },
+          { id: "risk", name: "风险检查 Agent", state: "waiting", progress: 0, accent: palette.teal },
+          { id: "summary", name: "总结生成 Agent", state: "queued", progress: 0, accent: palette.orange }
+        ]
+      },
+      completed: {
+        label: "全部完成",
+        expanded: true,
+        agents: [
+          { id: "research", name: "资料整理 Agent", state: "completed", progress: 100, accent: palette.blue },
+          { id: "risk", name: "风险检查 Agent", state: "completed", progress: 100, accent: palette.teal },
+          { id: "summary", name: "总结生成 Agent", state: "completed", progress: 100, accent: palette.orange }
+        ]
+      },
+      exception: {
+        label: "异常混合",
+        expanded: true,
+        agents: [
+          { id: "research", name: "资料整理 Agent", state: "failed", progress: 35, accent: "#d84f4f" },
+          { id: "risk", name: "风险检查 Agent", state: "stopped", progress: 18, accent: palette.teal },
+          { id: "summary", name: "总结生成 Agent", state: "running", progress: 52, accent: palette.orange }
+        ]
+      },
+      single: {
+        label: "单任务",
+        expanded: true,
+        agents: [
+          { id: "research", name: "资料整理 Agent", state: "running", progress: 68, accent: palette.blue }
+        ]
+      },
+      empty: {
+        label: "空状态",
+        expanded: true,
+        agents: []
+      },
+      collapsed: {
+        label: "收起状态",
+        expanded: false,
+        agents: [
+          { id: "research", name: "资料整理 Agent", state: "running", progress: 62, accent: palette.blue },
+          { id: "risk", name: "风险检查 Agent", state: "running", progress: 48, accent: palette.teal },
+          { id: "summary", name: "总结生成 Agent", state: "queued", progress: 0, accent: palette.orange }
+        ]
+      }
+    };
+
+    let selectedScenario = "default";
+    let model = cloneScenario(selectedScenario);
+    let stopTimer = null;
+
+    const widget = document.querySelector("#runtime-widget");
+    const scenarioList = document.querySelector("#scenario-list");
+    const advanceButton = document.querySelector("#advance-button");
+    const toggleButton = document.querySelector("#toggle-button");
+    const resetButton = document.querySelector("#reset-button");
+
+    function cloneScenario(key) {
+      return {
+        expanded: scenarios[key].expanded,
+        agents: scenarios[key].agents.map(agent => ({ ...agent }))
+      };
+    }
+
+    function renderScenarioButtons() {
+      scenarioList.innerHTML = "";
+      Object.entries(scenarios).forEach(([key, scenario]) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "scenario-button";
+        button.textContent = scenario.label;
+        button.dataset.scenario = key;
+        button.setAttribute("aria-pressed", String(key === selectedScenario));
+        button.addEventListener("click", () => {
+          selectedScenario = key;
+          clearTimeout(stopTimer);
+          model = cloneScenario(key);
+          renderScenarioButtons();
+          renderWidget();
+        });
+        scenarioList.append(button);
+      });
+    }
+
+    function getActiveCount() {
+      return model.agents.filter(agent => activeStates.has(agent.state)).length;
+    }
+
+    function renderWidget() {
+      if (!model.expanded) {
+        const activeCount = getActiveCount();
+        const countText = activeCount > 0 ? `${activeCount} 个任务进行中` : "查看 Agent 状态";
+        widget.innerHTML = `
+          <div class="collapsed-wrap">
+            <button class="collapsed-trigger" type="button" aria-expanded="false">
+              <span class="activity-dots" aria-hidden="true">
+                <i></i><i></i><i></i>
+              </span>
+              <span class="collapsed-label">${countText}</span>
+              <span class="chevron" aria-hidden="true"></span>
+            </button>
+          </div>
+        `;
+        widget.querySelector(".collapsed-trigger").addEventListener("click", () => {
+          model.expanded = true;
+          renderWidget();
+        });
+        return;
+      }
+
+      const rows = model.agents.map(agent => createAgentRow(agent)).join("");
+      const content = model.agents.length
+        ? `<ul class="agent-list">${rows}</ul>`
+        : `
+          <div class="empty-state">
+            <div class="empty-content">
+              <span class="empty-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+              <p class="empty-title">暂无运行中的 Agent</p>
+              <p class="empty-hint">新的任务开始后会显示在这里</p>
+            </div>
+          </div>
+        `;
+
+      widget.innerHTML = `
+        <section class="agent-card" aria-label="SubAgent 运行状态">
+          ${content}
+        </section>
+      `;
+
+      widget.querySelectorAll(".agent-stop").forEach(button => {
+        button.addEventListener("click", () => handleAgentAction(button.dataset.agentId));
+      });
+    }
+
+    function createAgentRow(agent) {
+      const isTerminal = terminalStates.has(agent.state);
+      const actionLabel = isTerminal ? `移除${agent.name}记录` : `停止${agent.name}`;
+      const tooltip = isTerminal ? "移除记录" : agent.state === "stopping" ? "正在停止" : "停止任务";
+      const disabled = agent.state === "stopping" ? "disabled" : "";
+      const ariaNow = Number.isFinite(agent.progress) ? `aria-valuenow="${agent.progress}"` : "";
+      const progress = Math.max(0, Math.min(100, agent.progress ?? 0));
+
+      return `
+        <li
+          class="agent-row"
+          data-state="${agent.state}"
+          style="--accent:${agent.accent}; --progress:${progress}%"
+        >
+          <div class="agent-row-main">
+            <span class="agent-name" title="${escapeHtml(agent.name)}">${escapeHtml(agent.name)}</span>
+            <span class="status-badge">${stateLabels[agent.state]}</span>
+            <button
+              class="agent-stop"
+              type="button"
+              aria-label="${actionLabel}"
+              data-agent-id="${agent.id}"
+              data-tooltip="${tooltip}"
+              ${disabled}
+            >
+              <span aria-hidden="true">×</span>
+            </button>
+          </div>
+          <div
+            class="progress"
+            role="progressbar"
+            aria-label="${escapeHtml(agent.name)}进度"
+            aria-valuemin="0"
+            aria-valuemax="100"
+            ${ariaNow}
+          >
+            <div class="progress-fill"></div>
+          </div>
+        </li>
+      `;
+    }
+
+    function handleAgentAction(agentId) {
+      const agent = model.agents.find(item => item.id === agentId);
+      if (!agent) return;
+
+      if (terminalStates.has(agent.state)) {
+        model.agents = model.agents.filter(item => item.id !== agentId);
+        renderWidget();
+        return;
+      }
+
+      if (agent.state === "stopping") return;
+
+      agent.state = "stopping";
+      renderWidget();
+
+      clearTimeout(stopTimer);
+      stopTimer = setTimeout(() => {
+        const current = model.agents.find(item => item.id === agentId);
+        if (!current) return;
+        current.state = "stopped";
+        renderWidget();
+      }, 720);
+    }
+
+    function advanceProgress() {
+      let changed = false;
+
+      model.agents.forEach(agent => {
+        if (agent.state === "queued") {
+          agent.state = "starting";
+          agent.progress = Math.max(5, agent.progress);
+          changed = true;
+          return;
+        }
+
+        if (agent.state === "waiting") {
+          agent.state = "running";
+          agent.progress = Math.max(12, agent.progress);
+          changed = true;
+          return;
+        }
+
+        if (agent.state === "starting") {
+          agent.state = "running";
+          agent.progress = Math.max(18, agent.progress + 8);
+          changed = true;
+          return;
+        }
+
+        if (agent.state === "running") {
+          agent.progress = Math.min(100, agent.progress + 12);
+          if (agent.progress >= 100) {
+            agent.state = "completed";
+          }
+          changed = true;
+        }
+      });
+
+      if (!changed && model.agents.length === 0) {
+        model.agents = cloneScenario("default").agents;
+      }
+
+      model.expanded = true;
+      renderWidget();
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    advanceButton.addEventListener("click", advanceProgress);
+
+    toggleButton.addEventListener("click", () => {
+      model.expanded = !model.expanded;
+      renderWidget();
+    });
+
+    resetButton.addEventListener("click", () => {
+      clearTimeout(stopTimer);
+      model = cloneScenario(selectedScenario);
+      renderWidget();
+    });
+
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && model.expanded) {
+        model.expanded = false;
+        renderWidget();
+      }
+    });
+
+    renderScenarioButtons();
+    renderWidget();
+  </script>
+</body>
+</html>

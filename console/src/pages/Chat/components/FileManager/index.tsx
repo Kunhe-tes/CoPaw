@@ -45,6 +45,7 @@ const shortcutRoots: Array<{
   icon: React.ReactNode;
 }> = [
   { root: "working", label: "工作目录", icon: <FolderOpenOutlined /> },
+  { root: "source_scope", label: "根目录", icon: <FolderOpenOutlined /> },
   { root: "upload", label: "上传目录", icon: <UploadOutlined /> },
   { root: "download", label: "下载目录", icon: <DownloadOutlined /> },
   { root: "conversation", label: "对话目录", icon: <MessageOutlined /> },

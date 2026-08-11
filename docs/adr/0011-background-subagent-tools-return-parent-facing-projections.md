@@ -1,0 +1,3 @@
+# Background SubAgent Tools Return Parent-Facing Projections
+
+Background SubAgent tools will return parent-facing projections by default instead of full run records. `start_subagent` returns only the run handle and basic identity, while `wait_subagent` and default `get_subagent` return basic run identity, lifecycle status, and a compact terminal result; routing metadata such as definition matches, worker process metadata, raw errors, stderr tails, policies, metrics, and artifacts remain in per-run records, structured application logs, or explicit diagnostic reads. This keeps Main Agent context focused on delegation decisions and results while preserving operational diagnosability outside the default tool surface.

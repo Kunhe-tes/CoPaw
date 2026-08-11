@@ -777,12 +777,9 @@ class TestResolveCwd:
         self,
         mock_working_dir: Path,
     ):
-        """default + source should accept cwd under encoded scope."""
+        """default + source should accept cwd under default_{source}."""
         workspace_dir = (
-            mock_working_dir
-            / encode_scope_id("default", "RMASSIST")
-            / "workspaces"
-            / "default"
+            mock_working_dir / "default_RMASSIST" / "workspaces" / "default"
         )
         workspace_dir.mkdir(parents=True)
 

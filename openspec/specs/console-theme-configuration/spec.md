@@ -29,4 +29,3 @@ Calibrated management surfaces SHALL consume semantic theme roles instead of dup
 
 - **WHEN** Header/navigation, `/models`, or a related management dialog renders the color
 - **THEN** it SHALL obtain the color through the management token or CSS variable role appropriate to that purpose
-

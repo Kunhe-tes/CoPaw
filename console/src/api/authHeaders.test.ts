@@ -27,7 +27,7 @@ describe("buildAuthHeaders", () => {
     expect(buildAuthHeaders()).toMatchObject({
       "X-User-Id": "default",
       "X-Tenant-Id": "default",
-      "X-Source-Id": "default",
+      "X-Source-Id": "RMASSIST",
     });
   });
 

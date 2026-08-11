@@ -107,6 +107,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 TASK_RUNS_STATE_KEY = "task_runs"
 _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
+_PLAN_INTERACTION_CARD_METADATA_KEY = "plan_interaction_card"
 _SKILL_FRESHNESS_NOTICE_METADATA_KEY = "swe_skill_freshness_notice"
 _EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
 _APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
@@ -235,6 +236,7 @@ class _QueryTurnOutcome:
     max_stop_turns: int = 0
     automatic_follow_up_turns: int = 0
     max_automatic_follow_up_turns: int = 0
+    plan_interaction_turn_boundary: bool = False
     stop_hook_active: bool = False
     completion_blocked: bool = False
     completion_block_reason: str = ""
@@ -1093,6 +1095,7 @@ async def _create_mcp_client_with_headers(
     merged_headers = build_mcp_http_headers(
         client_config.headers,
         passthrough_headers=passthrough_headers,
+        url=client_config.url,
         session_id=session_id,
         chat_id=chat_id,
         trace_id=trace_id,
@@ -2619,8 +2622,19 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay,
         auth_token: str | None,
         approved_tool_call: dict[str, Any] | None,
+        current_user_text: str = "",
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
+        request_enable_subagents = getattr(request, "enable_subagents", False)
+        if isinstance(request_enable_subagents, str):
+            request_enable_subagents = (
+                request_enable_subagents.strip().lower()
+                in {
+                    "true",
+                    "1",
+                    "yes",
+                }
+            )
         request_context = {
             "session_id": session_id,
             "user_id": user_id,
@@ -2629,10 +2643,13 @@ class AgentRunner(Runner):
             "turn_id": turn_id,
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
+            "agent_role": "main",
+            "enable_subagents": bool(request_enable_subagents),
             "source_id": _request_source_id(request),
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "current_user_text": current_user_text,
             "channel_manager": getattr(
                 getattr(self, "_workspace", None),
                 "channel_manager",
@@ -3242,6 +3259,7 @@ class AgentRunner(Runner):
             hook_overlay=inputs.hook_overlay,
             auth_token=inputs.auth_token,
             approved_tool_call=preflight.approved_tool_call,
+            current_user_text=query or _get_last_user_text(msgs) or "",
         )
         await agent.register_mcp_clients()
         agent.set_console_output_enabled(enabled=False)
@@ -3338,6 +3356,12 @@ class AgentRunner(Runner):
                     runtime.chat.id if runtime.chat is not None else None
                 ),
             ):
+                metadata = getattr(msg, "metadata", None)
+                if isinstance(metadata, dict) and isinstance(
+                    metadata.get(_PLAN_INTERACTION_CARD_METADATA_KEY),
+                    dict,
+                ):
+                    outcome.plan_interaction_turn_boundary = True
                 yield msg, last
         except PreToolUseTerminalStop as exc:
             consume_terminal_stop = getattr(
@@ -3380,6 +3404,8 @@ class AgentRunner(Runner):
     ) -> MergedHookResult | None:
         """执行 Stop completion gate，active guard 已设置时跳过递归触发。"""
         if outcome.stop_hook_active:
+            return None
+        if outcome.plan_interaction_turn_boundary:
             return None
         if not outcome.assistant_response:
             return None

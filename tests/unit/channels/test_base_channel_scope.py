@@ -7,6 +7,13 @@ from swe.app.channels.base import BaseChannel
 from swe.config.context import encode_scope_id
 
 
+def _new_base_channel() -> BaseChannel:
+    """构造只包含待测状态的 BaseChannel 实例，避免加载完整通道配置。"""
+    channel = object.__new__(BaseChannel)
+    channel._pending_content_by_session = {}
+    return channel
+
+
 def test_resolve_bound_identity_uses_payload_source_meta() -> None:
     """后台消费必须从 payload meta 还原 source，而不是只带 opaque scope。"""
     channel = object.__new__(BaseChannel)
@@ -40,3 +47,18 @@ def test_resolve_bound_identity_decodes_workspace_scope_before_source() -> (
         "source-a",
         scope_id,
     )
+
+
+def test_no_text_debounce_accepts_dict_text_content() -> None:
+    """Console 原始 JSON 文本块是 dict，也必须被识别为完整用户输入。"""
+    channel = _new_base_channel()
+    content = [{"type": "text", "text": "1+1=?", "status": "created"}]
+
+    should_process, merged = channel._apply_no_text_debounce(
+        "session-a",
+        content,
+    )
+
+    assert should_process is True
+    assert merged == content
+    assert channel._pending_content_by_session == {}

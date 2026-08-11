@@ -1,0 +1,565 @@
+# -*- coding: utf-8 -*-
+"""Background SubAgent management tools."""
+
+from __future__ import annotations
+
+from datetime import datetime
+import json
+from pathlib import Path
+from typing import Any, Callable
+
+from agentscope.message import TextBlock
+from agentscope.tool import ToolResponse
+
+from ...app.subagents import (
+    AgentRegistry,
+    BackgroundSubAgentNotManageable,
+    BackgroundSubAgentScope,
+    BackgroundSubAgentStartBlocked,
+    BackgroundSubAgentSupervisor,
+    BackgroundSubAgentWaitSnapshot,
+    DelegationSpec,
+    DefinitionMatchMetadata,
+    PermissionPolicy,
+    SubAgentDefinitionService,
+    SubAgentDefinitionStore,
+    SubAgentRegistrationRequest,
+    SubAgentStartRequest,
+    builtin_definition_provider,
+)
+from ...config.config import AgentProfileConfig
+from ...config.utils import get_tenant_working_dir
+
+_SUBAGENT_INTENT_TERMS = (
+    "subagent",
+    "SubAgent",
+    "subAgent",
+    "子代理",
+    "子 agent",
+    "子Agent",
+    "后台子代理",
+)
+_SUBAGENT_REGISTRATION_INTENT_TERMS = (
+    "register subagent",
+    "register_subagent",
+    "SubAgent Definition",
+    "subagent definition",
+    "subagent",
+    "SubAgent",
+    "subAgent",
+    "definition",
+    "Definition",
+    "子代理",
+    "子Agent",
+)
+_SUBAGENT_REGISTRATION_ACTION_TERMS = (
+    "register",
+    "registration",
+    "注册",
+    "登记",
+    "可复用",
+)
+_TEXT_CONTEXT_KEYS = (
+    "current_user_text",
+    "user_message",
+    "query",
+    "prompt",
+    "message_text",
+)
+_RUN_ID_CONTEXT_KEYS = (
+    "subagent_run_id",
+    "requested_subagent_run_id",
+)
+_FAILURE_SUMMARY_MAX_CHARS = 1024
+_DEFAULT_SUPERVISOR = BackgroundSubAgentSupervisor()
+
+
+def get_default_background_subagent_supervisor() -> (
+    BackgroundSubAgentSupervisor
+):
+    """Return the process-local default Background SubAgent supervisor."""
+    return _DEFAULT_SUPERVISOR
+
+
+def has_subagent_intent(request_context: dict[str, Any]) -> bool:
+    """Return whether the current turn explicitly asks for SubAgents."""
+    if request_context.get("subagent_tools_requested") is True:
+        return True
+    text = "\n".join(
+        str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
+    )
+    return any(term in text for term in _SUBAGENT_INTENT_TERMS)
+
+
+def has_subagent_registration_intent(
+    request_context: dict[str, Any],
+) -> bool:
+    """Return whether the current turn explicitly asks to register definitions."""
+    if request_context.get("subagent_registration_tools_requested") is True:
+        return True
+    text = "\n".join(
+        str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
+    )
+    return any(
+        term in text for term in _SUBAGENT_REGISTRATION_INTENT_TERMS
+    ) and any(term in text for term in _SUBAGENT_REGISTRATION_ACTION_TERMS)
+
+
+def has_explicit_subagent_run_id(request_context: dict[str, Any]) -> bool:
+    """Return whether this request explicitly carries a Background Run id."""
+    return any(
+        str(request_context.get(key) or "").strip()
+        for key in _RUN_ID_CONTEXT_KEYS
+    )
+
+
+def build_background_subagent_scope(
+    *,
+    parent_agent_config: AgentProfileConfig,
+    request_context: dict[str, Any],
+) -> BackgroundSubAgentScope:
+    """Build the current tenant-and-agent Background SubAgent scope."""
+    tenant_id = str(request_context.get("tenant_id") or "default")
+    agent_id = str(
+        request_context.get("agent_id") or parent_agent_config.id or "default",
+    )
+    explicit_run_store_dir = request_context.get("_subagent_run_store_dir")
+    if explicit_run_store_dir:
+        run_store_dir = Path(explicit_run_store_dir)
+    else:
+        run_store_dir = (
+            get_tenant_working_dir(tenant_id)
+            / "workspaces"
+            / agent_id
+            / "subagent_runs"
+        )
+    return BackgroundSubAgentScope(
+        tenant_id=tenant_id,
+        agent_id=agent_id,
+        run_store_dir=run_store_dir,
+    )
+
+
+def create_background_subagent_tools(
+    *,
+    supervisor: BackgroundSubAgentSupervisor,
+    parent_agent_config: AgentProfileConfig,
+    workspace_dir: Path,
+    request_context: dict[str, Any],
+    include_registration_tool: bool = False,
+) -> dict[str, Callable[..., Any]]:
+    """Create start/wait/get/cancel Background SubAgent tool callables."""
+    tool_scope = build_background_subagent_scope(
+        parent_agent_config=parent_agent_config,
+        request_context=request_context,
+    )
+    definition_service = _definition_service_for_tool(
+        request_context=request_context,
+        tool_scope=tool_scope,
+    )
+
+    async def start_subagent(
+        name: str | None = None,
+        instruction: str | None = None,
+        objective: str | None = None,
+        background: str = "",
+        **extra: Any,
+    ) -> ToolResponse:
+        """Start a Background SubAgent Run and return its run identity."""
+        try:
+            if extra:
+                raise ValueError(
+                    "unexpected fields: " + ", ".join(sorted(extra)),
+                )
+            start_request = SubAgentStartRequest.model_validate(
+                {
+                    "name": name,
+                    "instruction": instruction,
+                    "objective": objective,
+                    "background": background,
+                },
+            )
+        except Exception as exc:
+            return _json_response(
+                {
+                    "status": "failed",
+                    "reason": "invalid_request",
+                    "message": str(exc),
+                },
+            )
+        try:
+            match = definition_service.match_start_request(start_request)
+            if match is None:
+                definition_match = DefinitionMatchMetadata(matched=False)
+                definition = definition_service.build_run_scoped_definition(
+                    start_request,
+                    owner_scope=(
+                        f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"
+                    ),
+                )
+            else:
+                definition_match = match.metadata
+                definition = match.definition
+            spec = DelegationSpec(
+                parent_thread_id=str(request_context.get("session_id") or ""),
+                name=start_request.name,
+                objective=start_request.objective,
+                background=start_request.background,
+            )
+            result = await supervisor.start(
+                scope=tool_scope,
+                spec=spec,
+                parent_agent_config=parent_agent_config,
+                workspace_dir=workspace_dir,
+                parent_policy=_parent_policy_from_config(
+                    parent_agent_config,
+                ),
+                request_context=request_context,
+                definition=definition,
+                start_request=start_request,
+                definition_match=definition_match,
+            )
+        except Exception as exc:
+            return _json_response(
+                {
+                    "status": "failed",
+                    "reason": "invalid_request",
+                    "message": str(exc),
+                },
+            )
+        return _json_response(_serialize_start_result(result))
+
+    async def register_subagent_definition(
+        name: str,
+        instruction: str,
+        description: str,
+        trigger_keywords: list[str] | None = None,
+        task_types: list[str] | None = None,
+        priority: int = 100,
+        budget: dict[str, Any] | None = None,
+        output_contract: str = "Return only valid AgentResult JSON.",
+        enabled: bool = True,
+        nickname: str | None = None,
+    ) -> ToolResponse:
+        """Register or update one stored SubAgent definition."""
+        try:
+            request = SubAgentRegistrationRequest.model_validate(
+                {
+                    "name": name,
+                    "instruction": instruction,
+                    "description": description,
+                    "nickname": nickname,
+                    "trigger_keywords": trigger_keywords or [],
+                    "task_types": task_types or [],
+                    "priority": priority,
+                    "budget": budget or {},
+                    "output_contract": output_contract,
+                    "enabled": enabled,
+                },
+            )
+            payload = definition_service.register(request)
+        except Exception as exc:
+            return _json_response(
+                {
+                    "status": "failed",
+                    "reason": "invalid_request",
+                    "message": str(exc),
+                },
+            )
+        return _json_response(payload)
+
+    async def wait_subagent(timeout_ms: int = 3000) -> ToolResponse:
+        """Wait briefly and return current Background SubAgent statuses."""
+        snapshot = await supervisor.wait(
+            tool_scope,
+            timeout_ms=timeout_ms,
+        )
+        return _json_response(_serialize_wait_snapshot(snapshot))
+
+    async def get_subagent(
+        run_id: str,
+        include_details: bool = False,
+    ) -> ToolResponse:
+        """Fetch one Background SubAgent Run in the current scope."""
+        try:
+            record = await supervisor.get(
+                tool_scope,
+                run_id,
+            )
+        except ValueError:
+            return _json_response({"status": "not_found", "run_id": run_id})
+        if record is None:
+            return _json_response({"status": "not_found", "run_id": run_id})
+        return _json_response(
+            _compact_record(
+                record,
+                include_details,
+                manageable=_is_manageable(supervisor, tool_scope, run_id),
+                run_store_dir=tool_scope.run_store_dir,
+            ),
+        )
+
+    async def cancel_subagent(run_id: str) -> ToolResponse:
+        """Cancel one active Background SubAgent Run in the current scope."""
+        try:
+            result = await supervisor.cancel(
+                tool_scope,
+                run_id,
+            )
+        except ValueError:
+            return _json_response({"status": "not_found", "run_id": run_id})
+        if result is None:
+            return _json_response({"status": "not_found", "run_id": run_id})
+        if isinstance(result, BackgroundSubAgentNotManageable):
+            return _json_response(result.model_dump(mode="json"))
+        return _json_response(
+            _compact_record(
+                result,
+                include_details=False,
+                manageable=False,
+                run_store_dir=tool_scope.run_store_dir,
+            ),
+        )
+
+    tools: dict[str, Callable[..., Any]] = {
+        "start_subagent": start_subagent,
+        "wait_subagent": wait_subagent,
+        "get_subagent": get_subagent,
+        "cancel_subagent": cancel_subagent,
+    }
+    if include_registration_tool:
+        tools["register_subagent_definition"] = register_subagent_definition
+    return tools
+
+
+def _definition_service_for_tool(
+    *,
+    request_context: dict[str, Any],
+    tool_scope: BackgroundSubAgentScope,
+) -> SubAgentDefinitionService:
+    explicit_definition_store_dir = request_context.get(
+        "_subagent_definition_store_dir",
+    )
+    if explicit_definition_store_dir:
+        store_dir = Path(explicit_definition_store_dir)
+    else:
+        store_dir = tool_scope.run_store_dir.parent / "subagent_definitions"
+    owner_scope = f"{tool_scope.tenant_id}/{tool_scope.agent_id}"
+    return SubAgentDefinitionService(
+        store=SubAgentDefinitionStore(store_dir),
+        builtin_registry=AgentRegistry([builtin_definition_provider()]),
+        owner_scope=owner_scope,
+    )
+
+
+def _json_response(payload: dict[str, Any]) -> ToolResponse:
+    return ToolResponse(
+        content=[
+            TextBlock(
+                type="text",
+                text=json.dumps(payload, ensure_ascii=False),
+            ),
+        ],
+    )
+
+
+def _serialize_start_result(
+    result: Any,
+) -> dict[str, Any]:
+    if isinstance(result, BackgroundSubAgentStartBlocked):
+        payload = result.model_dump(mode="json")
+        payload["accepted"] = False
+        return payload
+    return {
+        **_parent_facing_record(result, include_result=False),
+        "accepted": True,
+    }
+
+
+def _serialize_wait_snapshot(
+    snapshot: BackgroundSubAgentWaitSnapshot,
+) -> dict[str, Any]:
+    return {
+        "timed_out": snapshot.timed_out,
+        "active_runs": [
+            _parent_facing_record(record, include_result=False)
+            for record in snapshot.active_runs
+        ],
+        "terminal_runs": [
+            _parent_facing_record(record, include_result=True)
+            for record in snapshot.terminal_runs
+        ],
+    }
+
+
+def _parent_facing_record(
+    record: Any,
+    *,
+    include_result: bool,
+) -> dict[str, Any]:
+    payload = {
+        "run_id": record.run_id,
+        "status": record.status,
+        "agent_name": record.spec.name,
+        "nickname": getattr(record, "nickname", None),
+        "objective": record.spec.objective,
+    }
+    result = getattr(record, "result", None)
+    if include_result and result is not None:
+        payload["result"] = _compact_agent_result(result)
+    elif include_result:
+        failure_result = _compact_failure_without_result(record)
+        if failure_result is not None:
+            payload["result"] = failure_result
+    return payload
+
+
+def _compact_failure_without_result(record: Any) -> dict[str, str] | None:
+    if getattr(record, "status", None) != "failed":
+        return None
+    errors = getattr(record, "errors", []) or []
+    if not errors:
+        return None
+    error = errors[-1]
+    code = str(getattr(error, "code", "") or "").strip()
+    message = str(getattr(error, "message", "") or "").strip()
+    if code and message.startswith(f"{code}:"):
+        summary = message
+    else:
+        summary = ": ".join(part for part in (code, message) if part)
+    if not summary:
+        return None
+    return {
+        "status": "failed",
+        "summary": summary[:_FAILURE_SUMMARY_MAX_CHARS],
+    }
+
+
+def _compact_agent_result(result: Any) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "summary": result.summary,
+        "findings": _dump_json_value(getattr(result, "findings", [])),
+        "relevant_files": _dump_json_value(
+            getattr(result, "relevant_files", []),
+        ),
+        "risks": _dump_json_value(getattr(result, "risks", [])),
+        "recommendations": _dump_json_value(
+            getattr(result, "recommendations", []),
+        ),
+        "open_questions": _dump_json_value(
+            getattr(result, "open_questions", []),
+        ),
+        "suggested_next_steps": _dump_json_value(
+            getattr(result, "suggested_next_steps", []),
+        ),
+    }
+
+
+def _compact_record(
+    record: Any,
+    include_details: bool,
+    manageable: bool = False,
+    run_store_dir: Path | None = None,
+) -> dict[str, Any]:
+    payload = _parent_facing_record(record, include_result=True)
+    stderr_tail = _stderr_tail(record, run_store_dir)
+    if include_details:
+        payload.update(
+            {
+                "definition_match": _dump_json_value(
+                    getattr(record, "definition_match", None),
+                ),
+                "created_at": _dump_json_value(
+                    getattr(record, "created_at", None),
+                ),
+                "started_at": _dump_json_value(
+                    getattr(record, "started_at", None),
+                ),
+                "finished_at": _dump_json_value(
+                    getattr(record, "finished_at", None),
+                ),
+                "errors": _dump_json_value(getattr(record, "errors", [])),
+                "worker": _compact_worker(
+                    getattr(record, "worker", None),
+                ),
+                "manageable": manageable,
+            },
+        )
+        if stderr_tail is not None:
+            payload["stderr_tail"] = stderr_tail
+        payload["delegation_spec"] = record.spec.model_dump(mode="json")
+        payload["effective_policy"] = record.effective_policy.model_dump(
+            mode="json",
+        )
+    return payload
+
+
+def _compact_worker(worker: Any) -> dict[str, Any] | None:
+    if worker is None:
+        return None
+    return {
+        "pid": getattr(worker, "pid", None),
+        "started_at": _dump_json_value(getattr(worker, "started_at", None)),
+        "exit_code": getattr(worker, "exit_code", None),
+        "exited_at": _dump_json_value(getattr(worker, "exited_at", None)),
+    }
+
+
+def _parent_policy_from_config(parent_agent_config: Any) -> PermissionPolicy:
+    """Build parent readonly policy from enabled parent built-in tools."""
+    readonly = PermissionPolicy.readonly()
+    readonly_tools = set(readonly.tools.allow)
+    tools_config = getattr(parent_agent_config, "tools", None)
+    builtin_tools = getattr(tools_config, "builtin_tools", None)
+    if not isinstance(builtin_tools, dict):
+        return readonly
+    enabled = {
+        name
+        for name, config in builtin_tools.items()
+        if name in readonly_tools and getattr(config, "enabled", True)
+    }
+    return PermissionPolicy.readonly(
+        allow_tools=sorted(enabled),
+        deny_tools=sorted(readonly_tools - enabled),
+    )
+
+
+def _is_manageable(
+    supervisor: BackgroundSubAgentSupervisor,
+    scope: BackgroundSubAgentScope,
+    run_id: str,
+) -> bool:
+    checker = getattr(supervisor, "is_manageable", None)
+    if checker is None:
+        return False
+    return bool(checker(scope, run_id))
+
+
+def _stderr_tail(record: Any, run_store_dir: Path | None) -> str | None:
+    if getattr(record, "status", "") not in {"failed", "cancelled"}:
+        return None
+    worker = getattr(record, "worker", None)
+    stderr_log_path = getattr(worker, "stderr_log_path", None)
+    if not stderr_log_path or run_store_dir is None:
+        return None
+    path = Path(stderr_log_path)
+    try:
+        path.resolve().relative_to(run_store_dir.resolve())
+    except (OSError, ValueError):
+        return None
+    if not path.exists():
+        return None
+    return path.read_text(encoding="utf-8", errors="replace")[-4096:]
+
+
+def _dump_json_value(value: Any) -> Any:
+    if value is None:
+        return None
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, list):
+        return [_dump_json_value(item) for item in value]
+    return value
