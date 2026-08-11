@@ -24,7 +24,6 @@ def _builtin(
             "description": description,
             "role": "researcher",
             "instruction": instruction,
-            "output_contract": "Return only valid AgentResult JSON.",
             "tools": {
                 "allow": [
                     "execute_shell_command",
@@ -72,11 +71,11 @@ def builtin_definition_provider() -> InMemoryDefinitionProvider:
             ),
             _builtin(
                 name="research-analyst",
-                description="Readonly analyst for structured research tasks.",
+                description="Readonly analyst for research tasks.",
                 instruction=(
                     "You are a readonly research analyst. Break down the "
-                    "question, gather available context, and return structured "
-                    "findings, recommendations, risks, and practical next steps."
+                    "question, gather available context, and return a concise "
+                    "evidence-based final summary."
                 ),
                 task_types=["research", "analysis"],
                 trigger_keywords=["research", "analysis", "analyze"],

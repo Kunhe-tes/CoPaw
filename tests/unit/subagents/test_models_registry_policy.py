@@ -18,6 +18,7 @@ from swe.app.subagents import (
     LocalJsonSubAgentRunStore,
     PermissionPolicy,
     SubAgentDefinition,
+    SubAgentRegistrationRequest,
     builtin_definition_provider,
     compose_effective_policy,
     validate_tool_call,
@@ -41,7 +42,7 @@ def test_definition_uses_instruction_and_top_level_routing_fields() -> None:
 
     assert definition.name == "customer-aum-analyst"
     assert definition.instruction == "Act as a customer strategy analyst."
-    assert definition.output_contract == "Return only valid AgentResult JSON."
+    assert "output_contract" not in definition.model_dump()
     assert definition.trigger_keywords == ["AUM", "客户维护"]
     assert definition.task_types == ["research", "analysis"]
     assert definition.priority == 20
@@ -105,6 +106,74 @@ def test_definition_rejects_legacy_field_names(payload: dict) -> None:
         SubAgentDefinition.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    "model, payload",
+    [
+        (
+            SubAgentDefinition,
+            {
+                "name": "analyst",
+                "source": "stored",
+                "description": "Analyzes repository evidence.",
+                "instruction": "Inspect repository evidence.",
+                "output_contract": "Return JSON.",
+            },
+        ),
+        (
+            SubAgentRegistrationRequest,
+            {
+                "name": "analyst",
+                "instruction": "Inspect repository evidence.",
+                "description": "Analyzes repository evidence.",
+                "output_contract": "Return JSON.",
+            },
+        ),
+        (
+            DelegationSpec,
+            {
+                "name": "analyst",
+                "objective": "Inspect repository evidence.",
+                "expected_output": {"format": "json"},
+            },
+        ),
+    ],
+)
+def test_subagent_contract_rejects_retired_structured_fields(
+    model,
+    payload: dict,
+) -> None:
+    """New SubAgent inputs reject retired structured-output fields."""
+    with pytest.raises(ValidationError):
+        model.model_validate(payload)
+
+
+def test_agent_result_has_summary_as_its_only_model_content() -> None:
+    """Runtime metadata remains while structured content fields are gone."""
+    result = AgentResult(
+        task_id="task-1",
+        agent_run_id="run-1",
+        agent_name="analyst",
+        status="completed",
+        summary="Repository evidence is sufficient.",
+    )
+
+    assert result.model_dump() == {
+        "task_id": "task-1",
+        "agent_run_id": "run-1",
+        "agent_name": "analyst",
+        "status": "completed",
+        "summary": "Repository evidence is sufficient.",
+        "metrics": {
+            "turns_used": 0,
+            "tool_calls_used": 0,
+            "input_tokens": None,
+            "output_tokens": None,
+            "elapsed_ms": 0,
+        },
+        "errors": [],
+    }
+
+
 def test_budget_does_not_accept_max_tokens() -> None:
     """SubAgent budgets no longer expose token limits."""
     with pytest.raises(ValidationError):
@@ -164,7 +233,6 @@ def test_registration_request_accepts_full_definition_metadata() -> None:
             "task_types": ["analysis"],
             "priority": 20,
             "budget": {"max_turns": 4, "max_tool_calls": 20},
-            "output_contract": "Return JSON.",
             "enabled": False,
         },
     )
