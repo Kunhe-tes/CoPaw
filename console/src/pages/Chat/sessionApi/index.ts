@@ -60,6 +60,7 @@ const ROLE_ASSISTANT = "assistant";
 const TYPE_PLUGIN_CALL_OUTPUT = "plugin_call_output";
 // const CARD_REQUEST = "AgentScopeRuntimeRequestCard";
 const CARD_RESPONSE = "AgentScopeRuntimeResponseCard";
+const CARD_RESPONSE_FEEDBACK = "ResponseFeedback";
 const CARD_APPROVAL_ACTION = "ApprovalAction";
 const CARD_PLAN_INTERACTION = "PlanInteraction";
 const CARD_TASK_RUN = "TaskRunGroupCard";
@@ -612,6 +613,10 @@ const buildResponseCard = (
         headerMeta: {
           timestamp,
         },
+        planReviewCard:
+          planInteractionCard?.card_type === "plan_review"
+            ? planInteractionCard
+            : undefined,
       } as unknown as ChatRuntimeResponseCardData,
     },
   ];
@@ -629,6 +634,11 @@ const buildResponseCard = (
       data: planInteractionCard,
     });
   }
+
+  cards.push({
+    code: CARD_RESPONSE_FEEDBACK,
+    data: cards[0].data,
+  });
 
   return {
     id: generateId(),

@@ -18,7 +18,9 @@ import type {
 import { formatMessageTime } from "../../messageMeta";
 import ApprovalActionCard from "../ApprovalActionCard";
 import RuntimeRequestCard from "../RuntimeRequestCard";
-import RuntimeResponseCard from "../RuntimeResponseCard";
+import RuntimeResponseCard, {
+  RuntimeResponseFeedbackCard,
+} from "../RuntimeResponseCard";
 import type { ResponseFeedbackTaskMeta } from "../ResponseFeedbackCard";
 
 const MARKDOWN_LINK_PATTERN = /!?\[([^\]]*)\]\(([^)]+)\)/g;
@@ -368,20 +370,29 @@ function NestedTaskRunMessages(props: {
                 <RuntimeResponseCard
                   key={key}
                   data={card.data as ChatRuntimeResponseCardData}
-                  chatId={props.chatId}
                   isLast={
                     messageIndex === props.messages.length - 1 &&
                     cardIndex === (message.cards || []).length - 1
                   }
+                />
+              );
+            }
+            if (card.code === "ResponseFeedback") {
+              const response = card.data as ChatRuntimeResponseCardData;
+              return (
+                <RuntimeResponseFeedbackCard
+                  key={key}
+                  chatId={props.chatId}
+                  data={response}
+                  existingFeedback={findFeedbackForResponse(
+                    props.feedbackLookup,
+                    response,
+                  )}
+                  loadingFeedback={props.loadingFeedback}
+                  onFeedbackSaved={props.onFeedbackSaved}
                   sessionId={props.sessionId}
                   showFeedback={props.showFeedback}
                   task={props.task}
-                  loadingFeedback={props.loadingFeedback}
-                  existingFeedback={findFeedbackForResponse(
-                    props.feedbackLookup,
-                    card.data as ChatRuntimeResponseCardData,
-                  )}
-                  onFeedbackSaved={props.onFeedbackSaved}
                 />
               );
             }

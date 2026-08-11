@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { type ReactNode, useMemo } from "react";
 import {
   AgentScopeRuntimeContentType,
   AgentScopeRuntimeMessageType,
@@ -254,6 +254,7 @@ function renderResponseItem(item: IAgentScopeRuntimeMessage) {
 export default function AgentScopeRuntimeResponseCard(props: {
   data: IAgentScopeRuntimeResponse;
   isLast?: boolean;
+  beforeActions?: ReactNode;
 }) {
   // const avatar = useChatAnywhereOptions((v) => v.welcome.avatar);
   // const nick = useChatAnywhereOptions((v) => v.welcome.nick);
@@ -345,6 +346,7 @@ export default function AgentScopeRuntimeResponseCard(props: {
       {groupedMessages.direct.map(renderResponseItem)}
       {reasoningFallbackText && <Markdown content={reasoningFallbackText} />}
       {props.data.error && <Error data={props.data.error} />}
+      {props.beforeActions}
       <Actions {...props} />
       {props.data.suggestions?.length > 0 && (
         <Suggestions

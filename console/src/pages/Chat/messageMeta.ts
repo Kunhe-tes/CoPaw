@@ -16,6 +16,7 @@ export interface ChatRuntimeRequestCardData extends IAgentScopeRuntimeRequest {
 export interface ChatRuntimeResponseCardData
   extends IAgentScopeRuntimeResponse {
   headerMeta?: ChatMessageHeaderMeta;
+  planReviewCard?: ChatPlanReviewCardData;
 }
 
 function readMetadataOriginalId(metadata: unknown): string | null {

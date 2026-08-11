@@ -16,7 +16,10 @@ import {
   extractTaskProgress,
 } from "@/pages/Chat/taskProgressEvents";
 import { emitSubAgentRunsRefreshIfPresent } from "@/pages/Chat/subAgentRunEvents";
-import { extractPlanInteractionCard } from "@/pages/Chat/messageMeta";
+import {
+  extractPlanInteractionCard,
+  type ChatRuntimeResponseCardData,
+} from "@/pages/Chat/messageMeta";
 import {
   isActiveChatRequestOwner,
   type ChatRequestOwner,
@@ -463,10 +466,20 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             isOwnerActive() &&
             isLiveResponseMounted()
           ) {
+            const planInteractionCard =
+              extractPlanInteractionCard(chunkData) ||
+              extractPlanInteractionCard(res);
+            const responseData = {
+              ...withResponseHeaderMeta(res, responseHeaderTimestamp),
+              planReviewCard:
+                planInteractionCard?.card_type === "plan_review"
+                  ? planInteractionCard
+                  : undefined,
+            } as ChatRuntimeResponseCardData;
             const cards: any[] = [
               {
                 code: "AgentScopeRuntimeResponseCard",
-                data: withResponseHeaderMeta(res, responseHeaderTimestamp),
+                data: responseData,
               },
             ];
 
@@ -480,13 +493,17 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               });
             }
 
-            const planInteractionCard =
-              extractPlanInteractionCard(chunkData) ||
-              extractPlanInteractionCard(res);
             if (planInteractionCard) {
               cards.push({
                 code: "PlanInteraction",
                 data: planInteractionCard,
+              });
+            }
+
+            if (res.status === AgentScopeRuntimeRunStatus.Completed) {
+              cards.push({
+                code: "ResponseFeedback",
+                data: responseData,
               });
             }
 

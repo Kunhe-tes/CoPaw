@@ -121,12 +121,13 @@ import {
   createChatStreamAbortReason,
   shouldStopBackendForFetchAbort,
 } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/abortReasons";
-import RuntimeResponseCard from "./components/RuntimeResponseCard";
+import RuntimeResponseCard, {
+  RuntimeResponseFeedbackCard,
+} from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import {
   ActivePlanInteractionComposer,
-  PlanReviewMessageCard,
 } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
@@ -198,10 +199,11 @@ const chatCardRenderers = {
   AgentScopeRuntimeResponseCard: (props: {
     data: ChatRuntimeResponseCardData;
     isLast?: boolean;
-  }) => {
+  }) => <RuntimeResponseCard {...props} />,
+  ResponseFeedback: (props: { data: ChatRuntimeResponseCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     return (
-      <RuntimeResponseCard
+      <RuntimeResponseFeedbackCard
         {...props}
         chatId={feedback.feedbackChatId}
         existingFeedback={
@@ -225,17 +227,7 @@ const chatCardRenderers = {
       />
     );
   },
-  PlanInteraction: (props: { data: unknown }) => {
-    const data = props.data;
-    if (
-      !data ||
-      typeof data !== "object" ||
-      (data as { card_type?: unknown }).card_type !== "plan_review"
-    ) {
-      return null;
-    }
-    return <PlanReviewMessageCard data={data as ChatPlanReviewCardData} />;
-  },
+  PlanInteraction: () => null,
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();

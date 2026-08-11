@@ -1474,7 +1474,22 @@ describe("archived conversation card conversion", () => {
     const cards = convertArchivedPage(
       [
         { id: "user-1", role: "user", content: "first" },
-        { id: "assistant-1", role: "assistant", content: "answer" },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "answer",
+          metadata: {
+            plan_interaction_card: {
+              card_type: "plan_review",
+              plan_id: "plan-1",
+              title: "Implementation plan",
+              summary: "Review before execution",
+              steps: [],
+              risks: [],
+              verification: [],
+            },
+          },
+        },
         { id: "user-2", role: "user", content: "second" },
       ],
       [
@@ -1494,6 +1509,17 @@ describe("archived conversation card conversion", () => {
       "ConversationCompactionBoundary",
       "AgentScopeRuntimeRequestCard",
     ]);
+    expect(cards[1]?.cards?.map((card) => card.code)).toEqual([
+      "AgentScopeRuntimeResponseCard",
+      "PlanInteraction",
+      "ResponseFeedback",
+    ]);
+    expect(cards[1]?.cards?.[0]?.data).toMatchObject({
+      planReviewCard: {
+        card_type: "plan_review",
+        plan_id: "plan-1",
+      },
+    });
   });
 
   it("places a compaction boundary after the final runtime fragment of its source message", () => {

@@ -1580,6 +1580,11 @@ describe("Plan interaction cards", () => {
     );
     expect(stylesheet).toContain("min-height: 40px");
     expect(stylesheet).toContain("height: 32px");
+    expect(stylesheet).toContain("height: 48vh");
+    expect(stylesheet).toContain("min-height: 270px");
+    expect(stylesheet).toContain("max-height: 480px");
+    expect(stylesheet).toContain("height: 45vh");
+    expect(stylesheet).toContain("min-height: 240px");
     expect(stylesheet).not.toContain("#4f6f63");
   });
 });
