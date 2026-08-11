@@ -10,8 +10,6 @@ from pathlib import Path
 from typing import Any
 
 from agentscope.message import Msg
-from pydantic import ValidationError
-
 from ...config.config import AgentProfileConfig, ToolsConfig
 from .models import (
     AgentError,
@@ -21,7 +19,6 @@ from .models import (
     Metrics,
     PermissionPolicy,
     SubAgentDefinition,
-    SubAgentResponse,
     SubAgentRunRecord,
 )
 from .run_store import InMemorySubAgentRunStore
@@ -34,13 +31,13 @@ _RESEARCH_TURN_LIMIT_MESSAGE = (
     "SubAgent research reached its turn limit before a natural-language "
     "research synthesis was produced."
 )
-_STRUCTURED_FINALIZATION_MESSAGE = (
-    "SubAgent structured finalization did not produce a valid response."
+_TEXT_FINALIZATION_MESSAGE = (
+    "SubAgent text finalization did not produce a summary."
 )
 
 
 class SubAgentRuntime:
-    """Run one fresh-context SubAgent and validate its compact result."""
+    """Run one fresh-context SubAgent and persist its final summary."""
 
     def __init__(self, store: InMemorySubAgentRunStore | None = None):
         self._store = store or InMemorySubAgentRunStore()
@@ -240,8 +237,7 @@ class SubAgentRuntime:
                 f"Effective allowed tools: {', '.join(policy.tools.allow)}",
                 "When research is complete, reply without a tool call using "
                 "a concise natural-language research synthesis. Preserve "
-                "conclusions, evidence, relevant files, risks, and open "
-                "questions for a later structured finalization step.",
+                "conclusions and evidence for a later text finalization step.",
                 f"Task id: {spec.task_id}",
             ],
         )
@@ -263,34 +259,28 @@ class SubAgentRuntime:
     ) -> AgentResult:
         is_turn_limit = research.status == "turn_limit_reached"
         synthesis = self._research_synthesis(research.reply)
-        context = (
-            self._turn_limit_finalization_context(research, spec)
-            if is_turn_limit
-            else self._normal_finalization_context(spec, synthesis)
+        context = self._finalization_context(
+            research,
+            spec,
         )
         finalization_attempted = False
         try:
             if deadline <= time.monotonic():
                 raise asyncio.TimeoutError
             finalization_attempted = True
-            payload = await self._finalization_with_remaining_timeout(
+            summary = await self._finalization_with_remaining_timeout(
                 agent,
                 context,
-                definition.output_contract,
                 deadline,
             )
-            if payload is None:
-                raise ValueError(
-                    "Structured finalization metadata is missing.",
-                )
-        except (asyncio.TimeoutError, ValidationError, ValueError) as exc:
+        except (asyncio.TimeoutError, ValueError) as exc:
             return self._partial_result(
                 spec=spec,
                 run_id=run_id,
                 definition=definition,
                 summary=synthesis,
-                code="structured_finalization_failed",
-                message=f"{_STRUCTURED_FINALIZATION_MESSAGE} {exc}",
+                code="text_finalization_failed",
+                message=f"{_TEXT_FINALIZATION_MESSAGE} {exc}",
                 turns_used=research.turns_used + int(finalization_attempted),
                 tool_calls_used=self._tool_calls_used(request_context),
                 elapsed_ms=self._elapsed_ms(started),
@@ -301,8 +291,8 @@ class SubAgentRuntime:
                 run_id=run_id,
                 definition=definition,
                 summary=synthesis,
-                code="structured_finalization_failed",
-                message=f"{_STRUCTURED_FINALIZATION_MESSAGE} {exc}",
+                code="text_finalization_failed",
+                message=f"{_TEXT_FINALIZATION_MESSAGE} {exc}",
                 turns_used=research.turns_used + int(finalization_attempted),
                 tool_calls_used=self._tool_calls_used(request_context),
                 elapsed_ms=self._elapsed_ms(started),
@@ -320,11 +310,11 @@ class SubAgentRuntime:
                 ),
             )
         return AgentResult(
-            **payload.model_dump(),
             task_id=spec.task_id,
             agent_run_id=run_id,
             agent_name=definition.name,
             status=status,
+            summary=summary,
             metrics=self._metrics(
                 turns_used=research.turns_used + 1,
                 tool_calls_used=self._tool_calls_used(request_context),
@@ -337,14 +327,13 @@ class SubAgentRuntime:
         self,
         agent: Any,
         context: str,
-        output_contract: str,
         deadline: float,
-    ) -> SubAgentResponse | None:
+    ) -> str:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise asyncio.TimeoutError
         return await asyncio.wait_for(
-            self._finalize_once(agent, context, output_contract),
+            self._finalize_once(agent, context),
             timeout=remaining,
         )
 
@@ -352,51 +341,35 @@ class SubAgentRuntime:
         self,
         agent: Any,
         context: str,
-        output_contract: str,
-    ) -> SubAgentResponse | None:
+    ) -> str:
         prompt = await agent.formatter.format(
             [
                 Msg(
                     "system",
-                    "You are performing the terminal structured finalization "
+                    "You are performing the terminal text finalization "
                     "for a SubAgent. Use only the supplied research context. "
                     "Do not use tools, perform more research, or generate "
-                    "runtime identity, metrics, status, or errors.\n\n"
-                    f"Output contract: {output_contract}",
+                    "runtime identity, metrics, status, or errors. Return "
+                    "only a concise natural-language final summary.",
                     "system",
                 ),
                 Msg("user", context, "user"),
             ],
         )
-        response = await agent.model(
-            prompt,
-            structured_model=SubAgentResponse,
-        )
+        response = await agent.model(prompt)
         if hasattr(response, "__aiter__"):
             last_response = None
             async for chunk in response:
                 last_response = chunk
             response = last_response
-        metadata = getattr(response, "metadata", None)
-        if not isinstance(metadata, dict):
-            return None
-        payload = metadata.get("structured_output", metadata)
-        return SubAgentResponse.model_validate(payload)
+        summary = (
+            response.get_text_content() if response is not None else ""
+        ).strip()
+        if not summary:
+            raise ValueError("Text finalization returned no summary.")
+        return summary
 
-    def _normal_finalization_context(
-        self,
-        spec: DelegationSpec,
-        synthesis: str,
-    ) -> str:
-        return json.dumps(
-            {
-                "delegation_spec": spec.model_dump(mode="json"),
-                "research_synthesis": synthesis,
-            },
-            ensure_ascii=False,
-        )
-
-    def _turn_limit_finalization_context(
+    def _finalization_context(
         self,
         research: Any,
         spec: DelegationSpec,
@@ -414,20 +387,43 @@ class SubAgentRuntime:
         records: list[str] = []
         remaining = _TURN_LIMIT_RECORD_MAX_CHARS
         for message in reversed(messages):
-            rendered = json.dumps(
-                {
-                    "name": getattr(message, "name", ""),
-                    "role": getattr(message, "role", ""),
-                    "content": getattr(message, "content", ""),
-                },
-                ensure_ascii=False,
-                default=str,
-            )
+            entry = {
+                "name": getattr(message, "name", ""),
+                "role": getattr(message, "role", ""),
+                "content": getattr(message, "content", ""),
+            }
+            rendered = self._render_research_record_entry(entry)
             if len(rendered) > remaining:
-                continue
+                rendered = self._truncate_research_record_entry(
+                    entry,
+                    remaining,
+                )
+            if rendered is None:
+                break
             records.append(rendered)
             remaining -= len(rendered) + 1
         return "\n".join(reversed(records))
+
+    def _render_research_record_entry(self, entry: dict[str, Any]) -> str:
+        return json.dumps(entry, ensure_ascii=False, default=str)
+
+    def _truncate_research_record_entry(
+        self,
+        entry: dict[str, Any],
+        remaining: int,
+    ) -> str | None:
+        truncated = {**entry, "content": "", "truncated": True}
+        overhead = len(self._render_research_record_entry(truncated))
+        if overhead > remaining:
+            return None
+        content = str(entry["content"])
+        available = max(remaining - overhead, 0)
+        truncated["content"] = content[:available]
+        rendered = self._render_research_record_entry(truncated)
+        while len(rendered) > remaining and truncated["content"]:
+            truncated["content"] = truncated["content"][:-1]
+            rendered = self._render_research_record_entry(truncated)
+        return rendered
 
     def _research_synthesis(self, reply: Msg | None) -> str:
         if reply is None:
