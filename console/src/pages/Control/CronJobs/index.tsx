@@ -29,6 +29,8 @@ import { PageHeader } from "@/components/PageHeader";
 import { TenantSelector } from "@/components/TenantSelector";
 import { useAppMessage } from "../../../hooks/useAppMessage";
 import { getUserId } from "../../../utils/identity";
+import { getIframeContext } from "../../../stores/iframeStore";
+import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import {
   buildExecutionModelKey,
   useExecutionModelOptions,
@@ -36,8 +38,11 @@ import {
 import {
   buildCronJobFormValues,
   buildCronJobSubmitPayload,
+  buildSkillSelectOptions,
   getBroadcastResultMessage,
   getBroadcastTaskProgressText,
+  type CronJobFormValues,
+  type SkillSelectOption,
 } from "./helpers";
 import styles from "./index.module.less";
 
@@ -46,6 +51,10 @@ type BroadcastDispatchMode = "normal" | "batch";
 const DEFAULT_BROADCAST_OFFSET_WINDOW_HOURS = 4;
 const DEFAULT_TABLE_PAGE_SIZE = 10;
 const TABLE_PAGE_SIZE_OPTIONS = ["10", "20", "50", "100"];
+
+function getCurrentSourceId(): string {
+  return getIframeContext().source || DEFAULT_SOURCE_ID;
+}
 
 function isBatchDispatchEnabled(job: CronJob): boolean {
   return job.meta?.broadcast_dispatch_intents_enabled === true;
@@ -98,9 +107,11 @@ function CronJobsPage() {
   const [broadcasting, setBroadcasting] = useState(false);
   const [broadcastRefreshing, setBroadcastRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [skillOptions, setSkillOptions] = useState<SkillSelectOption[]>([]);
+  const [skillOptionsLoading, setSkillOptionsLoading] = useState(false);
   const [tablePage, setTablePage] = useState(1);
   const [tablePageSize, setTablePageSize] = useState(DEFAULT_TABLE_PAGE_SIZE);
-  const [form] = Form.useForm<CronJob>();
+  const [form] = Form.useForm<CronJobFormValues>();
   const userTimezoneRef = useRef("UTC");
   const currentTenantId = getUserId();
   const {
@@ -124,6 +135,20 @@ function CronJobsPage() {
   }, []);
 
   useEffect(() => {
+    setSkillOptionsLoading(true);
+    api
+      .listSweSkills(getCurrentSourceId())
+      .then((res) => {
+        setSkillOptions(buildSkillSelectOptions(res.skills ?? []));
+      })
+      .catch((err) => {
+        console.error("Failed to fetch cron skill options:", err);
+        message.error("技能列表加载失败");
+      })
+      .finally(() => setSkillOptionsLoading(false));
+  }, [message]);
+
+  useEffect(() => {
     const maxPage = Math.max(1, Math.ceil(jobs.length / tablePageSize));
     setTablePage((current) => Math.min(current, maxPage));
   }, [jobs.length, tablePageSize]);
@@ -131,21 +156,22 @@ function CronJobsPage() {
   const handleCreate = () => {
     setEditingJob(null);
     form.resetFields();
-    form.setFieldsValue({
+    const nextValues: Partial<CronJobFormValues> = {
       ...DEFAULT_FORM_VALUES,
       schedule: {
         ...DEFAULT_FORM_VALUES.schedule,
         timezone: userTimezoneRef.current,
       },
       execution_model_key: buildExecutionModelKey(undefined),
-    } as any);
+    };
+    form.setFieldsValue(nextValues);
     setDrawerOpen(true);
   };
 
   const handleEdit = (job: CronJob) => {
     setEditingJob(job);
     form.resetFields();
-    form.setFieldsValue(buildCronJobFormValues(job) as any);
+    form.setFieldsValue(buildCronJobFormValues(job));
     setDrawerOpen(true);
   };
 
@@ -356,7 +382,7 @@ function CronJobsPage() {
     setEditingJob(null);
   };
 
-  const handleSubmit = async (values: any) => {
+  const handleSubmit = async (values: CronJobFormValues) => {
     let processedValues;
     try {
       processedValues = buildCronJobSubmitPayload(values);
@@ -435,6 +461,8 @@ function CronJobsPage() {
         executionModelOptions={executionModelOptions}
         executionModelLoading={executionModelLoading}
         tenantDefaultModelLabel={tenantDefaultLabel}
+        skillOptions={skillOptions}
+        skillOptionsLoading={skillOptionsLoading}
         onClose={handleDrawerClose}
         onSubmit={handleSubmit}
       />

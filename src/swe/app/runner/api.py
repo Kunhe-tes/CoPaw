@@ -3,20 +3,29 @@
 
 from __future__ import annotations
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict
 from agentscope.memory import InMemoryMemory
 
-from .session import SafeJSONSession
+from .session import (
+    SafeJSONSession,
+    _normalize_state_for_load,
+)
 from .manager import ChatManager
 from .models import (
+    ChatArchiveMetadata,
+    ChatArchivePage,
+    ChatCompactionBoundary,
     ChatPage,
     ChatSpec,
     ChatHistory,
     ChatMessage,
 )
+from ...agents.memory.conversation_archive import ConversationArchiveStore
 from .model_call_error_detail import MODEL_CALL_FAILED_MESSAGES_STATE_KEY
+from .hidden_context_injection import HIDDEN_CONTEXT_METADATA_KEY
 from .utils import agentscope_msg_to_message
 from ..approvals import get_approval_service
 
@@ -25,6 +34,53 @@ TASK_MESSAGES_STATE_KEY = "task_messages"
 TASK_RUNS_STATE_KEY = "task_runs"
 TASK_RUN_SECTION_STEP = "step"
 TASK_RUN_SECTION_FINAL = "final"
+
+
+class ChatUpdateRequest(BaseModel):
+    """聊天更新请求，允许调用方只提交本次需要修改的字段。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = None
+    name: str | None = None
+    session_id: str | None = None
+    user_id: str | None = None
+    channel: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    meta: dict[str, Any] | None = None
+    status: str | None = None
+
+
+def _merge_chat_update(
+    existing: ChatSpec,
+    patch: ChatUpdateRequest,
+) -> ChatSpec:
+    """将部分更新合并到已有会话，保留调用方没有提交的字段。"""
+    updates = patch.model_dump(exclude_unset=True)
+    merged = existing.model_dump()
+
+    for field_name in (
+        "name",
+        "session_id",
+        "user_id",
+        "channel",
+        "created_at",
+        "updated_at",
+        "status",
+    ):
+        if field_name in updates and updates[field_name] is not None:
+            merged[field_name] = updates[field_name]
+
+    if "meta" in updates:
+        # Plan Mode 只会提交一个 meta 开关，合并可避免覆盖其他会话元数据。
+        incoming_meta = updates["meta"] or {}
+        merged["meta"] = {
+            **(existing.meta or {}),
+            **incoming_meta,
+        }
+
+    return ChatSpec.model_validate(merged)
 
 
 async def _annotate_approval_action_statuses(
@@ -57,6 +113,48 @@ async def _annotate_approval_action_statuses(
         approval_action["status"] = request.status
 
     return messages
+
+
+def _redact_hidden_context_messages(
+    messages: list[ChatMessage],
+) -> list[ChatMessage]:
+    """Build display-safe chat-history messages without mutating memory."""
+    redacted: list[ChatMessage] = []
+    for message in messages:
+        if message.role != "user" or not isinstance(message.metadata, dict):
+            redacted.append(message)
+            continue
+
+        nested_metadata = message.metadata.get("metadata")
+        marker = message.metadata.get(HIDDEN_CONTEXT_METADATA_KEY)
+        if marker is None and isinstance(nested_metadata, dict):
+            marker = nested_metadata.get(HIDDEN_CONTEXT_METADATA_KEY)
+        if not isinstance(marker, dict):
+            redacted.append(message)
+            continue
+
+        visible_text = marker.get("visible_text")
+        suffix = marker.get("suffix")
+        if not isinstance(visible_text, str) or not isinstance(suffix, str):
+            redacted.append(message)
+            continue
+
+        payload = message.model_dump(mode="json")
+        metadata = {
+            key: value
+            for key, value in message.metadata.items()
+            if key != HIDDEN_CONTEXT_METADATA_KEY
+        }
+        if isinstance(nested_metadata, dict):
+            metadata["metadata"] = {
+                key: value
+                for key, value in nested_metadata.items()
+                if key != HIDDEN_CONTEXT_METADATA_KEY
+            }
+        payload["metadata"] = metadata
+        payload["content"] = [{"type": "text", "text": visible_text}]
+        redacted.append(ChatMessage.model_validate(payload))
+    return redacted
 
 
 def _task_session_messages_from_state(state: dict) -> list[ChatMessage]:
@@ -127,7 +225,8 @@ async def _messages_from_memory_state(
         return []
 
     memory = InMemoryMemory()
-    memory.load_state_dict(memory_state, strict=False)
+    normalized_state = _normalize_state_for_load(memory_state)
+    memory.load_state_dict(normalized_state, strict=False)
     memories = await memory.get_memory(prepend_summary=False)
     return agentscope_msg_to_message(memories)
 
@@ -411,11 +510,13 @@ async def _build_chat_history(
     status = await workspace.task_tracker.get_status(chat_spec.id)
     task_messages = _task_session_messages_from_state(state)
     model_call_failed_messages = _model_call_failed_messages_from_state(state)
+    archive = await _archive_metadata(workspace, chat_spec.id)
     if not state:
         return ChatHistory(
             chat=chat_spec,
             messages=[*task_messages, *model_call_failed_messages],
             status=status,
+            archive=archive,
         )
     memory_state = state.get("agent", {}).get("memory", {})
     messages: list[ChatMessage] = []
@@ -435,7 +536,62 @@ async def _build_chat_history(
     messages.extend(model_call_failed_messages)
     messages.sort(key=_message_sort_key)
     messages = await _annotate_approval_action_statuses(messages)
-    return ChatHistory(chat=chat_spec, messages=messages, status=status)
+    messages = _redact_hidden_context_messages(messages)
+    return ChatHistory(
+        chat=chat_spec,
+        messages=messages,
+        status=status,
+        archive=archive,
+    )
+
+
+def _archive_store(workspace) -> ConversationArchiveStore | None:
+    workspace_dir = getattr(workspace, "workspace_dir", None)
+    if workspace_dir is None:
+        return None
+    return ConversationArchiveStore(workspace_dir / "dialog")
+
+
+def _boundary_model(boundary) -> ChatCompactionBoundary:
+    return ChatCompactionBoundary(
+        id=boundary.id,
+        archived_message_count=boundary.archived_message_count,
+        first_message_id=boundary.first_message_id,
+        last_message_id=boundary.last_message_id,
+        created_at=boundary.created_at,
+        first_timestamp=boundary.first_timestamp,
+        last_timestamp=boundary.last_timestamp,
+    )
+
+
+async def _archive_metadata(workspace, chat_id: str) -> ChatArchiveMetadata:
+    store = _archive_store(workspace)
+    if store is None:
+        return ChatArchiveMetadata()
+    page = await store.read_page(chat_id, limit=1)
+    return ChatArchiveMetadata(
+        has_more=bool(page.messages),
+        boundaries=[_boundary_model(boundary) for boundary in page.boundaries],
+    )
+
+
+async def _archive_page(
+    workspace,
+    chat_id: str,
+    before: str | None,
+    limit: int,
+) -> ChatArchivePage:
+    store = _archive_store(workspace)
+    if store is None:
+        return ChatArchivePage()
+    page = await store.read_page(chat_id, before=before, limit=limit)
+    messages = agentscope_msg_to_message(page.messages)
+    return ChatArchivePage(
+        messages=_redact_hidden_context_messages(messages),
+        boundaries=[_boundary_model(boundary) for boundary in page.boundaries],
+        has_more=page.has_more,
+        next_cursor=page.next_cursor,
+    )
 
 
 def _message_original_id(message: ChatMessage) -> str | None:
@@ -485,7 +641,7 @@ async def list_chats(
     ),
     cursor: Optional[str] = Query(
         None,
-        description="Opaque cursor for stable chat pagination",
+        description="Opaque cursor for live best-effort chat pagination",
     ),
     mgr: ChatManager = Depends(get_chat_manager),
     workspace=Depends(get_workspace),
@@ -494,6 +650,8 @@ async def list_chats(
 
     Omitting both pagination parameters preserves the legacy array response.
     Providing both returns a ``ChatPage`` ordered by latest update first.
+    Cursor pages are live and best-effort: updates between requests can move
+    records across the cursor boundary.
 
     Args:
         user_id: Optional user ID to filter chats
@@ -648,6 +806,27 @@ async def get_answer_turn(
     )
 
 
+@router.get("/{chat_id}/history", response_model=ChatArchivePage)
+async def get_chat_history_page(
+    chat_id: str,
+    before: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=50),
+    mgr: ChatManager = Depends(get_chat_manager),
+    workspace=Depends(get_workspace),
+):
+    """Load one display-safe page of compacted history for a chat record."""
+    chat_spec = await mgr.get_chat(chat_id)
+    if not chat_spec:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Chat not found: {chat_id}",
+        )
+    try:
+        return await _archive_page(workspace, chat_spec.id, before, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 @router.get("/{chat_id}", response_model=ChatHistory)
 async def get_chat(
     chat_id: str,
@@ -686,14 +865,14 @@ async def get_chat(
 @router.put("/{chat_id}", response_model=ChatSpec)
 async def update_chat(
     chat_id: str,
-    spec: ChatSpec,
+    patch: ChatUpdateRequest,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Update an existing chat.
 
     Args:
         chat_id: Chat UUID
-        spec: Updated chat specification
+        patch: Updated chat fields
         mgr: Chat manager dependency
 
     Returns:
@@ -702,13 +881,12 @@ async def update_chat(
     Raises:
         HTTPException: If chat_id mismatch (400) or not found (404)
     """
-    if spec.id != chat_id:
+    if patch.id is not None and patch.id != chat_id:
         raise HTTPException(
             status_code=400,
             detail="chat_id mismatch",
         )
 
-    # Check if exists
     existing = await mgr.get_chat(chat_id)
     if not existing:
         raise HTTPException(
@@ -716,6 +894,7 @@ async def update_chat(
             detail=f"Chat not found: {chat_id}",
         )
 
+    spec = _merge_chat_update(existing, patch)
     updated = await mgr.update_chat(spec)
     return updated
 

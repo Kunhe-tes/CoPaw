@@ -79,9 +79,9 @@ class Span(BaseModel):
         default=None,
         description="Skill name for skill events",
     )
-    skill_description: Optional[str] = Field(
+    skill_id: Optional[str] = Field(
         default=None,
-        description="Skill description from SKILL.md",
+        description="Skill unique identifier",
     )
     mcp_server: Optional[str] = Field(
         default=None,
@@ -198,6 +198,14 @@ class SkillUsage(BaseModel):
     """Skill usage statistics with weighted attribution."""
 
     skill_name: str
+    skill_id: Optional[str] = Field(
+        default=None,
+        description="技能唯一标识符",
+    )
+    cn_name: Optional[str] = Field(
+        default=None,
+        description="技能中文名（来自 swe_skills，由前端决定如何回退展示）",
+    )
     skill_description: Optional[str] = Field(
         default=None,
         description="技能描述",
@@ -762,3 +770,49 @@ class InputTokensFixItem(BaseModel):
     old_input_tokens: int = Field(description="修复前的输入 token")
     new_input_tokens: int = Field(description="修复后的输入 token")
     span_input_sum: int = Field(description="span 汇总值（作为修复依据）")
+
+
+class InitSpanSkillIdRequest(BaseModel):
+    """历史 span skill_id 初始化请求."""
+
+    source_id: Optional[str] = Field(
+        default=None,
+        description="限定数据源；为空表示全部",
+    )
+    batch_size: int = Field(
+        default=1000,
+        ge=1,
+        le=10000,
+        description="每批处理 span 数量",
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="仅匹配，不写库",
+    )
+
+
+class InitSpanSkillIdResponse(BaseModel):
+    """历史 span skill_id 初始化响应."""
+
+    dry_run: bool
+    scanned: int = Field(default=0, description="扫描的待初始化 span 数量")
+    matched: int = Field(default=0, description="唯一匹配并回填的数量")
+    updated: int = Field(default=0, description="实际写入数据库的数量")
+    unmatched: int = Field(default=0, description="无技能表匹配的数量")
+    skipped: int = Field(default=0, description="未写入的 span 数量")
+    ambiguous: int = Field(
+        default=0,
+        description="同一 source_id+skill_name 存在多个候选的数量",
+    )
+    selected_from_ambiguous: int = Field(
+        default=0,
+        description="歧义时按稳定规则选一个并写入的数量",
+    )
+    samples: list[dict] = Field(
+        default_factory=list,
+        description="未匹配和歧义样本（最多 20 条）",
+    )
+    errors: list[dict] = Field(
+        default_factory=list,
+        description="处理过程中的异常",
+    )

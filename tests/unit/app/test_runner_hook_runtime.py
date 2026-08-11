@@ -21,12 +21,14 @@ from swe.agents.hook_runtime.models import (
     AdditionalContext,
     MergedHookResult,
 )
+from swe.agents.tool_guard_mixin import PreToolUseTerminalStop
 from swe.app.runner.runner import (
     AgentRunner,
     _build_and_connect_mcp_clients,
     _create_session_skill_detector,
     _QueryAttemptInput,
     _QueryAttemptState,
+    _QueryRuntimeInputs,
     _hook_config_enabled,
     _QueryPreflight,
     _QueryRuntime,
@@ -43,6 +45,7 @@ from swe.tracing.manager import (
     get_current_trace,
     set_current_trace,
 )
+from swe.tracing.models import TraceStatus
 
 
 def _agent_config(hooks: HookConfig | None = None):
@@ -152,6 +155,115 @@ def _patch_normal_agent_path(monkeypatch):
     )
 
 
+def test_query_runtime_inputs_keep_request_scoped_values() -> None:
+    from swe.app.runner.runner import _QueryRuntimeInputs
+
+    inputs = _QueryRuntimeInputs(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        agent_config=SimpleNamespace(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        env_context="base context",
+        selected_context_directives=["<SKILL-USE>"],
+        auth_token="token",
+        passthrough_headers={"cookie": "session=abc"},
+    )
+
+    assert inputs.session_id == "session-1"
+    assert inputs.selected_context_directives == ["<SKILL-USE>"]
+    assert inputs.passthrough_headers == {"cookie": "session=abc"}
+
+
+@pytest.mark.asyncio
+async def test_selected_skill_hooks_load_after_session_start_without_detector_use(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.app.runner.skill_selection import SkillUseDirective
+
+    skill_root = tmp_path / "skills" / "sample"
+    (skill_root / "hooks").mkdir(parents=True)
+    (skill_root / "scripts").mkdir()
+    (skill_root / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+    (skill_root / "scripts" / "stop.py").write_text(
+        "print('ok')\n",
+        encoding="utf-8",
+    )
+    (skill_root / "hooks" / "hooks.json").write_text(
+        '{"enabled": true, "events": {"Stop": [{"hooks": '
+        '[{"id": "stop", "type": "command", "argv": ["python", "scripts/stop.py"]}]}]}}',
+        encoding="utf-8",
+    )
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    inputs = _QueryRuntimeInputs(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        agent_config=_agent_config(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        env_context="base",
+        selected_context_directives=[],
+        auth_token=None,
+        passthrough_headers={},
+        selected_skill_directives=[
+            SkillUseDirective(
+                name="sample",
+                description="sample",
+                path=skill_root / "SKILL.md",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_get_or_create_chat",
+        AsyncMock(return_value=SimpleNamespace(id="chat-1")),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_generate_session_title_before_stream",
+        AsyncMock(),
+    )
+    directive = inputs.selected_skill_directives[0]
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        AsyncMock(return_value=[directive]),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.skill_selection.build_skill_use_directives",
+        lambda **kwargs: [],
+    )
+    session_start = AsyncMock(return_value=("base", None))
+    monkeypatch.setattr(runner, "_emit_session_start_hook", session_start)
+
+    resources, blocked = await runner._start_query_runtime_resources(
+        request=SimpleNamespace(channel_meta={}),
+        msgs=[Msg(name="user", role="user", content="hello")],
+        inputs=inputs,
+        mcp_clients=[],
+    )
+
+    assert blocked is None
+    assert resources.env_context == "base"
+    assert (
+        session_start.await_args.kwargs["hook_overlay"].loaded_skill_sources
+        == []
+    )
+    assert [
+        source.source_id for source in inputs.hook_overlay.loaded_skill_sources
+    ] == [
+        "skill:sample",
+    ]
+
+
 def test_hook_config_enabled_accepts_loaded_skill_sources() -> None:
     state = HookSessionState(
         loaded_skill_sources=[
@@ -241,6 +353,7 @@ async def test_create_session_skill_detector_loads_skill_hooks(
         "xlsx",
         trigger_tool="user_message",
         trigger_reason="declared",
+        load_hooks=True,
     )
 
     assert state.loaded_skill_sources[0].source_id == "skill:xlsx"
@@ -306,6 +419,7 @@ async def test_create_session_skill_detector_loads_http_skill_hooks_without_appr
         "xlsx",
         trigger_tool="user_message",
         trigger_reason="declared",
+        load_hooks=True,
     )
 
     handler = (
@@ -435,6 +549,61 @@ async def test_stream_single_query_attempt_skips_duplicate_detector_setup(
             pass
 
     fake_agent.setup_skill_detector.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stream_single_query_attempt_binds_chat_id_to_runtime_claims(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.runtime_invocation_claims import build_runtime_invocation_claims
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    fake_agent = SimpleNamespace(
+        setup_skill_detector=AsyncMock(),
+        rebuild_sys_prompt=lambda: None,
+    )
+    runtime = _QueryRuntime(
+        agent=fake_agent,
+        agent_config=_agent_config(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        chat=SimpleNamespace(id="chat-uuid-1"),
+        session_skill_detector=object(),
+        mcp_clients=[],
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        pending_confirmed_skill_snapshots={},
+    )
+    monkeypatch.setattr(
+        runner,
+        "_prepare_query_runtime",
+        AsyncMock(return_value=_RuntimeStartResult(runtime=runtime)),
+    )
+
+    async def assert_chat_claim(*args, **kwargs):
+        del args, kwargs
+        assert build_runtime_invocation_claims().chat_id == "chat-uuid-1"
+        raise RuntimeError("stop after chat claim")
+
+    monkeypatch.setattr(runner, "get_state_loaded", assert_chat_claim)
+
+    with pytest.raises(RuntimeError, match="stop after chat claim"):
+        async for _ in runner._stream_single_query_attempt(
+            attempt_input=_QueryAttemptInput(
+                request=SimpleNamespace(),
+                msgs=[],
+                query=None,
+                preflight=_QueryPreflight(),
+                trace_id=None,
+            ),
+            outcome=_QueryTurnOutcome(),
+            retry_state=_RetryState(),
+            attempt_state=_QueryAttemptState(),
+        ):
+            pass
 
 
 @pytest.mark.asyncio
@@ -621,6 +790,56 @@ async def test_query_handler_no_config_does_not_emit_hook(
 
 
 @pytest.mark.asyncio
+async def test_query_handler_traces_conversation_commands(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SimpleNamespace(
+        get_session_state_dict=AsyncMock(return_value={}),
+        mutate_session_state=AsyncMock(return_value={}),
+    )
+    setattr(runner, "_chat_manager", None)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(),
+    )
+    runner._start_query_trace = AsyncMock(return_value="trace-command")
+    runner._end_trace_if_needed = AsyncMock()
+
+    async def fake_run_command_path(request, msgs, runner):
+        del request, msgs, runner
+        yield Msg(name="Friday", role="assistant", content="command"), True
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner.run_command_path",
+        fake_run_command_path,
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    msgs = [Msg(name="user", role="user", content="/compact")]
+
+    outputs = [
+        item async for item in runner.query_handler(msgs, request=request)
+    ]
+
+    assert outputs[-1][0].get_text_content() == "command"
+    runner._start_query_trace.assert_awaited_once_with(request, msgs)
+    runner._end_trace_if_needed.assert_awaited_once_with(
+        "trace-command",
+        TraceStatus.COMPLETED,
+    )
+
+
+@pytest.mark.asyncio
 async def test_query_handler_loads_session_skill_hooks_for_media_message(
     monkeypatch,
     tmp_path,
@@ -705,7 +924,6 @@ async def test_query_handler_loads_session_skill_hooks_for_media_message(
     assert HookEventName.USER_PROMPT_SUBMIT not in emitted_events
     assert emitted_events == [
         HookEventName.SESSION_START,
-        HookEventName.BEFORE_STOP,
         HookEventName.STOP,
     ]
 
@@ -1126,7 +1344,142 @@ async def test_prepare_query_runtime_logs_agent_build_duration(
 
 
 @pytest.mark.asyncio
-async def test_prepare_query_runtime_restores_confirmed_skill_from_session_snapshot(
+async def test_prepare_query_runtime_resolves_chat_before_connecting_mcp(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    chat = SimpleNamespace(id="chat-uuid-1")
+    events: list[object] = []
+
+    def get_or_create_chat(*args, **kwargs):
+        del args, kwargs
+        events.append("chat")
+        return chat
+
+    async def build_context_reference_directives(*args, **kwargs):
+        del args, kwargs
+        from swe.runtime_invocation_claims import (
+            build_runtime_invocation_claims,
+        )
+
+        events.append(("discovery", build_runtime_invocation_claims().chat_id))
+        return []
+
+    setattr(
+        runner,
+        "_chat_manager",
+        SimpleNamespace(
+            get_or_create_chat=AsyncMock(side_effect=get_or_create_chat),
+        ),
+    )
+    _patch_normal_agent_path(monkeypatch)
+
+    async def build_clients(*args, **kwargs):
+        del args
+        events.append(("mcp", kwargs.get("chat_id")))
+        return []
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        build_clients,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        build_context_reference_directives,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        AsyncMock(return_value=MergedHookResult()),
+    )
+
+    result = await runner._prepare_query_runtime(
+        request=SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            channel_meta={},
+        ),
+        msgs=[Msg(name="user", role="user", content="hello")],
+        query="hello",
+        preflight=_QueryPreflight(),
+    )
+
+    assert result.runtime is not None
+    assert events == [
+        "chat",
+        ("discovery", "chat-uuid-1"),
+        ("mcp", "chat-uuid-1"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_prepare_query_runtime_returns_blocked_start_result(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    chat = SimpleNamespace(id="chat-1")
+    setattr(
+        runner,
+        "_chat_manager",
+        SimpleNamespace(get_or_create_chat=AsyncMock(return_value=chat)),
+    )
+    _patch_normal_agent_path(monkeypatch)
+    enabled_hooks = HookConfig(enabled=True)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(enabled_hooks),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: enabled_hooks,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._resolve_active_model_label",
+        lambda *args, **kwargs: "openai/gpt-test",
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        AsyncMock(
+            return_value=MergedHookResult(
+                decision=HookDecision.BLOCK,
+                reason="blocked",
+            ),
+        ),
+    )
+
+    result = await runner._prepare_query_runtime(
+        request=SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            channel_meta={},
+        ),
+        msgs=[Msg(name="user", role="user", content="hello")],
+        query="hello",
+        preflight=_QueryPreflight(),
+    )
+
+    assert result.runtime is None
+    assert result.block_response is not None
+    assert result.blocked_chat is chat
+    assert result.blocked_mcp_clients == []
+    assert result.blocked_session_id == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_prepare_query_runtime_does_not_restore_skill_continuation_from_snapshot(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1177,7 +1530,7 @@ async def test_prepare_query_runtime_restores_confirmed_skill_from_session_snaps
             "fill-metadata": {
                 "skill_name": "fill-metadata",
                 "resolved_skill_dir": str(
-                    tmp_path / "skills" / "fill-metadata"
+                    tmp_path / "skills" / "fill-metadata",
                 ),
                 "freshness_token": "v1",
                 "confirmed_at": 2.0,
@@ -1228,11 +1581,11 @@ async def test_prepare_query_runtime_restores_confirmed_skill_from_session_snaps
     )
 
     assert result.runtime is not None
-    assert restored == [("fill-metadata", True)]
+    assert restored == []
 
 
 @pytest.mark.asyncio
-async def test_query_handler_before_stop_allow_emits_stop_and_completes(
+async def test_query_handler_stop_allow_completes(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1252,7 +1605,7 @@ async def test_query_handler_before_stop_allow_emits_stop_and_completes(
 
     async def fake_emit_runner_hook(event_name, **kwargs):
         await emit_hook(event_name, **kwargs)
-        if event_name == HookEventName.BEFORE_STOP:
+        if event_name == HookEventName.STOP:
             assert kwargs["assistant_response"] == "agent reply"
             return MergedHookResult(
                 decision=HookDecision.ALLOW,
@@ -1283,13 +1636,12 @@ async def test_query_handler_before_stop_allow_emits_stop_and_completes(
     assert [call.args[0] for call in emit_hook.await_args_list] == [
         HookEventName.USER_PROMPT_SUBMIT,
         HookEventName.SESSION_START,
-        HookEventName.BEFORE_STOP,
         HookEventName.STOP,
     ]
 
 
 @pytest.mark.asyncio
-async def test_query_handler_before_stop_block_continues_without_stop(
+async def test_query_handler_stop_block_continues_until_allow(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1305,14 +1657,13 @@ async def test_query_handler_before_stop_block_continues_without_stop(
         "swe.app.runner.runner._load_tenant_hook_config",
         lambda *args, **kwargs: HookConfig(enabled=True),
     )
-    before_stop_calls = 0
     stop_calls = 0
 
     async def fake_emit_runner_hook(event_name, **kwargs):
-        nonlocal before_stop_calls, stop_calls
-        if event_name == HookEventName.BEFORE_STOP:
-            before_stop_calls += 1
-            if before_stop_calls == 1:
+        nonlocal stop_calls
+        if event_name == HookEventName.STOP:
+            stop_calls += 1
+            if stop_calls == 1:
                 return MergedHookResult(
                     decision=HookDecision.BLOCK,
                     reason="test tests before stopping",
@@ -1321,8 +1672,6 @@ async def test_query_handler_before_stop_block_continues_without_stop(
                 decision=HookDecision.ALLOW,
                 reason="completion approved",
             )
-        if event_name == HookEventName.STOP:
-            stop_calls += 1
         return MergedHookResult()
 
     monkeypatch.setattr(
@@ -1346,12 +1695,11 @@ async def test_query_handler_before_stop_block_continues_without_stop(
         "agent reply",
         "agent reply",
     ]
-    assert before_stop_calls == 2
-    assert stop_calls == 1
+    assert stop_calls == 2
 
 
 @pytest.mark.asyncio
-async def test_query_handler_before_stop_block_exhausts_default_budget(
+async def test_query_handler_stop_blocking_failure_finishes_without_follow_up(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1367,15 +1715,133 @@ async def test_query_handler_before_stop_block_exhausts_default_budget(
         "swe.app.runner.runner._load_tenant_hook_config",
         lambda *args, **kwargs: HookConfig(enabled=True),
     )
-    before_stop_calls = 0
+    stop_calls = 0
 
     async def fake_emit_runner_hook(event_name, **kwargs):
-        nonlocal before_stop_calls
-        if event_name == HookEventName.BEFORE_STOP:
-            before_stop_calls += 1
+        nonlocal stop_calls
+        if event_name == HookEventName.STOP:
+            stop_calls += 1
             return MergedHookResult(
                 decision=HookDecision.BLOCK,
-                reason=f"reason-{before_stop_calls}",
+                reason="policy requires review",
+                has_blocking_failure=True,
+                blocking_failure_reason="audit service failed",
+            )
+        return MergedHookResult()
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        fake_emit_runner_hook,
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="hello")],
+            request=request,
+        )
+    ]
+
+    assert stop_calls == 1
+    assert len(outputs) == 2
+    assert "任务未完成" in outputs[-1][0].get_text_content()
+    assert "audit service failed" in outputs[-1][0].get_text_content()
+
+
+@pytest.mark.asyncio
+async def test_query_handler_skips_stop_when_turn_has_no_new_assistant_response(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    class NoResponseAgent(_FakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.memory.content.append(
+                (
+                    Msg(name="Friday", role="assistant", content="old reply"),
+                    [],
+                ),
+            )
+
+        async def __call__(self, turn_msgs):
+            for msg in turn_msgs:
+                self.memory.content.append((msg, []))
+            return []
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    setattr(runner, "_chat_manager", None)
+    _patch_normal_agent_path(monkeypatch)
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", NoResponseAgent)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(HookConfig(enabled=True)),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(enabled=True),
+    )
+    stop_calls = 0
+
+    async def fake_emit_runner_hook(event_name, **kwargs):
+        nonlocal stop_calls
+        if event_name == HookEventName.STOP:
+            stop_calls += 1
+        return MergedHookResult()
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        fake_emit_runner_hook,
+    )
+
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="hello")],
+            request=SimpleNamespace(
+                session_id="session-1",
+                user_id="user-1",
+                channel="console",
+                channel_meta={},
+            ),
+        )
+    ]
+
+    assert outputs == []
+    assert stop_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_query_handler_stop_block_exhausts_default_budget(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    setattr(runner, "_chat_manager", None)
+    _patch_normal_agent_path(monkeypatch)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(HookConfig(enabled=True)),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(enabled=True),
+    )
+    stop_calls = 0
+
+    async def fake_emit_runner_hook(event_name, **kwargs):
+        nonlocal stop_calls
+        if event_name == HookEventName.STOP:
+            stop_calls += 1
+            return MergedHookResult(
+                decision=HookDecision.BLOCK,
+                reason=f"reason-{stop_calls}",
             )
         return MergedHookResult()
 
@@ -1400,11 +1866,11 @@ async def test_query_handler_before_stop_block_exhausts_default_budget(
     assert output_texts[:3] == ["agent reply", "agent reply", "agent reply"]
     assert "任务未完成" in output_texts[-1]
     assert "reason-3" in output_texts[-1]
-    assert before_stop_calls == 3
+    assert stop_calls == 3
 
 
 @pytest.mark.asyncio
-async def test_query_handler_before_stop_budget_exhaustion_finalizes_trace(
+async def test_query_handler_stop_budget_exhaustion_finalizes_trace(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1425,7 +1891,7 @@ async def test_query_handler_before_stop_budget_exhaustion_finalizes_trace(
     runner._end_trace_if_needed = AsyncMock()
 
     async def fake_emit_runner_hook(event_name, **kwargs):
-        if event_name == HookEventName.BEFORE_STOP:
+        if event_name == HookEventName.STOP:
             return MergedHookResult(
                 decision=HookDecision.BLOCK,
                 reason="still incomplete",
@@ -1456,7 +1922,7 @@ async def test_query_handler_before_stop_budget_exhaustion_finalizes_trace(
 
 
 @pytest.mark.asyncio
-async def test_query_handler_before_stop_budget_exhaustion_persists_notice(
+async def test_query_handler_stop_budget_exhaustion_persists_notice(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1474,7 +1940,7 @@ async def test_query_handler_before_stop_budget_exhaustion_persists_notice(
     )
 
     async def fake_emit_runner_hook(event_name, **kwargs):
-        if event_name == HookEventName.BEFORE_STOP:
+        if event_name == HookEventName.STOP:
             return MergedHookResult(
                 decision=HookDecision.BLOCK,
                 reason="still incomplete",
@@ -1510,7 +1976,7 @@ async def test_query_handler_before_stop_budget_exhaustion_persists_notice(
 
 
 @pytest.mark.asyncio
-async def test_query_handler_before_stop_defers_completion_side_effects(
+async def test_query_handler_stop_defers_completion_side_effects(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1529,13 +1995,13 @@ async def test_query_handler_before_stop_defers_completion_side_effects(
     runner._generate_backend_suggestions_if_needed = AsyncMock()
     runner._index_model_output_if_needed = AsyncMock()
     runner._end_trace_if_needed = AsyncMock()
-    before_stop_calls = 0
+    stop_calls = 0
 
     async def fake_emit_runner_hook(event_name, **kwargs):
-        nonlocal before_stop_calls
-        if event_name == HookEventName.BEFORE_STOP:
-            before_stop_calls += 1
-            if before_stop_calls == 1:
+        nonlocal stop_calls
+        if event_name == HookEventName.STOP:
+            stop_calls += 1
+            if stop_calls == 1:
                 runner._generate_backend_suggestions_if_needed.assert_not_awaited()
                 runner._index_model_output_if_needed.assert_not_awaited()
                 runner._end_trace_if_needed.assert_not_awaited()
@@ -1619,7 +2085,7 @@ async def test_stream_single_query_attempt_ends_trace_when_runtime_blocked(
 
 
 @pytest.mark.asyncio
-async def test_query_handler_aggregate_budget_counts_before_stop_only(
+async def test_query_handler_aggregate_budget_counts_stop_only(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1628,7 +2094,7 @@ async def test_query_handler_aggregate_budget_counts_before_stop_only(
     setattr(runner, "_chat_manager", None)
     _patch_normal_agent_path(monkeypatch)
     agent_config = _agent_config(HookConfig(enabled=True))
-    agent_config.running.max_before_stop_turns = 2
+    agent_config.running.max_stop_turns = 2
     agent_config.running.max_automatic_follow_up_turns = 2
     monkeypatch.setattr(
         "swe.app.runner.runner.load_agent_config",
@@ -1638,15 +2104,15 @@ async def test_query_handler_aggregate_budget_counts_before_stop_only(
         "swe.app.runner.runner._load_tenant_hook_config",
         lambda *args, **kwargs: HookConfig(enabled=True),
     )
-    before_stop_calls = 0
+    stop_calls = 0
 
     async def fake_emit_runner_hook(event_name, **kwargs):
-        nonlocal before_stop_calls
-        if event_name == HookEventName.BEFORE_STOP:
-            before_stop_calls += 1
+        nonlocal stop_calls
+        if event_name == HookEventName.STOP:
+            stop_calls += 1
             return MergedHookResult(
                 decision=HookDecision.BLOCK,
-                reason=f"gate-{before_stop_calls}",
+                reason=f"gate-{stop_calls}",
             )
         return MergedHookResult()
 
@@ -1676,11 +2142,11 @@ async def test_query_handler_aggregate_budget_counts_before_stop_only(
     ]
     assert "任务未完成" in output_texts[-1]
     assert "gate-3" in output_texts[-1]
-    assert before_stop_calls == 3
+    assert stop_calls == 3
 
 
 @pytest.mark.asyncio
-async def test_emit_before_stop_hook_respects_active_guard(
+async def test_emit_stop_hook_respects_active_guard(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1692,7 +2158,7 @@ async def test_emit_before_stop_hook_respects_active_guard(
             HookConfig(
                 enabled=True,
                 events={
-                    HookEventName.BEFORE_STOP: [
+                    HookEventName.STOP: [
                         HookMatcherGroupConfig(
                             hooks=[
                                 CommandHookHandlerConfig(
@@ -1727,7 +2193,7 @@ async def test_emit_before_stop_hook_respects_active_guard(
     emit_hook = AsyncMock()
     monkeypatch.setattr("swe.app.runner.runner._emit_runner_hook", emit_hook)
 
-    result = await runner._emit_before_stop_hook_if_needed(
+    result = await runner._emit_stop_hook_if_needed(
         request=SimpleNamespace(
             session_id="session-1",
             user_id="user-1",
@@ -1744,7 +2210,7 @@ async def test_emit_before_stop_hook_respects_active_guard(
 
 
 @pytest.mark.asyncio
-async def test_before_stop_hook_conversation_snapshot_uses_live_memory(
+async def test_stop_hook_conversation_snapshot_uses_live_memory(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1768,7 +2234,7 @@ async def test_before_stop_hook_conversation_snapshot_uses_live_memory(
             HookConfig(
                 enabled=True,
                 events={
-                    HookEventName.BEFORE_STOP: [
+                    HookEventName.STOP: [
                         HookMatcherGroupConfig(
                             hooks=[
                                 CommandHookHandlerConfig(
@@ -1809,7 +2275,7 @@ async def test_before_stop_hook_conversation_snapshot_uses_live_memory(
         fake_execute_handler_result,
     )
 
-    await runner._emit_before_stop_hook_if_needed(
+    await runner._emit_stop_hook_if_needed(
         request=SimpleNamespace(
             session_id="session-1",
             user_id="user-1",
@@ -1834,7 +2300,7 @@ async def test_before_stop_hook_conversation_snapshot_uses_live_memory(
 
 
 @pytest.mark.asyncio
-async def test_before_stop_hook_conversation_snapshot_does_not_fall_back_to_stale_persisted_memory(
+async def test_stop_hook_conversation_snapshot_does_not_fall_back_to_stale_persisted_memory(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1875,7 +2341,7 @@ async def test_before_stop_hook_conversation_snapshot_does_not_fall_back_to_stal
     )
 
     await _emit_runner_hook(
-        HookEventName.BEFORE_STOP,
+        HookEventName.STOP,
         request=SimpleNamespace(
             session_id="session-1",
             user_id="user-1",
@@ -1888,7 +2354,7 @@ async def test_before_stop_hook_conversation_snapshot_does_not_fall_back_to_stal
             HookConfig(
                 enabled=True,
                 events={
-                    HookEventName.BEFORE_STOP: [
+                    HookEventName.STOP: [
                         HookMatcherGroupConfig(
                             hooks=[
                                 CommandHookHandlerConfig(
@@ -2083,7 +2549,7 @@ async def test_session_start_hook_conversation_snapshot_uses_persisted_memory(
 
 
 @pytest.mark.asyncio
-async def test_query_handler_stop_hook_blocks_completion(
+async def test_query_handler_stop_hook_ignores_handler_effects(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -2127,13 +2593,168 @@ async def test_query_handler_stop_hook_blocks_completion(
         item async for item in runner.query_handler(msgs, request=request)
     ]
 
-    assert [item[0].get_text_content() for item in outputs] == [
-        "agent reply",
-        "stop blocked",
-    ]
+    assert [item[0].get_text_content() for item in outputs] == ["agent reply"]
     stop_call = emit_hook.await_args_list[-1]
     assert stop_call.args[0] == HookEventName.STOP
     assert stop_call.kwargs["assistant_response"] == "agent reply"
+
+
+def _make_terminal_stop_runner(
+    monkeypatch,
+    tmp_path,
+    stop_reason,
+) -> tuple[AgentRunner, type[_FakeAgent], SimpleNamespace, AsyncMock]:
+    class TerminalStopAgent(_FakeAgent):
+        calls = 0
+        consume_calls = 0
+        pre_tool_output_suppressed = False
+        reset_calls = 0
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self._pre_tool_terminal_stop_reason = None
+
+        def consume_pre_tool_terminal_stop(self):
+            type(self).consume_calls += 1
+            reason = self._pre_tool_terminal_stop_reason
+            self._pre_tool_terminal_stop_reason = None
+            return reason
+
+        def reset_pre_tool_terminal_stop(self):
+            type(self).reset_calls += 1
+            self.consume_pre_tool_terminal_stop()
+
+        async def __call__(self, turn_msgs):
+            type(self).calls += 1
+            for msg in turn_msgs:
+                self.memory.content.append((msg, []))
+            if type(self).calls == 1:
+                self._pre_tool_terminal_stop_reason = stop_reason
+                self.pre_tool_hook_result = MergedHookResult(
+                    decision=HookDecision.STOP,
+                    reason=stop_reason or "",
+                    suppress_output=True,
+                )
+                type(self).pre_tool_output_suppressed = (
+                    self.pre_tool_hook_result.suppress_output
+                )
+                await self.memory.add(
+                    Msg(
+                        name="system",
+                        role="system",
+                        content="hook_stopped",
+                    ),
+                )
+                raise PreToolUseTerminalStop(stop_reason)
+            reply = Msg(
+                name="Friday",
+                role="assistant",
+                content="normal second-turn reply",
+            )
+            await self.memory.add(reply)
+            return [reply]
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    setattr(runner, "_chat_manager", None)
+    _patch_normal_agent_path(monkeypatch)
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", TerminalStopAgent)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(HookConfig(enabled=True)),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(enabled=True),
+    )
+    emit_hook = AsyncMock(return_value=MergedHookResult())
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        emit_hook,
+    )
+    runner._generate_backend_suggestions_if_needed = AsyncMock()
+    runner._index_model_output_if_needed = AsyncMock()
+    runner._end_trace_if_needed = AsyncMock()
+
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    return runner, TerminalStopAgent, request, emit_hook
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "expected_reason"),
+    [
+        ("policy stopped tool", "policy stopped tool"),
+        (None, "Hook requested stop"),
+    ],
+)
+async def test_query_handler_pre_tool_terminal_stop_is_final_and_allows_next_turn(
+    monkeypatch,
+    tmp_path,
+    stop_reason,
+    expected_reason,
+) -> None:
+    runner, terminal_stop_agent, request, emit_hook = (
+        _make_terminal_stop_runner(
+            monkeypatch,
+            tmp_path,
+            stop_reason,
+        )
+    )
+    first_outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="run a tool")],
+            request=request,
+        )
+    ]
+    saved_state = await runner.session.get_session_state_dict(
+        session_id="session-1",
+        user_id="user-1",
+    )
+
+    assert [item[0].get_text_content() for item in first_outputs] == [
+        expected_reason,
+    ]
+    assert first_outputs[-1][1] is True
+    persisted_content = saved_state["agent"]["memory"]["content"]
+    assert [entry[0]["content"] for entry in persisted_content[-2:]] == [
+        "hook_stopped",
+        expected_reason,
+    ]
+    assert terminal_stop_agent.pre_tool_output_suppressed is True
+    assert [call.args[0] for call in emit_hook.await_args_list] == [
+        HookEventName.USER_PROMPT_SUBMIT,
+        HookEventName.SESSION_START,
+    ]
+    runner._generate_backend_suggestions_if_needed.assert_not_awaited()
+    runner._index_model_output_if_needed.assert_not_awaited()
+    runner._end_trace_if_needed.assert_awaited_once_with(
+        None,
+        "completed",
+    )
+    assert terminal_stop_agent.calls == 1
+    assert terminal_stop_agent.consume_calls == 2
+    assert terminal_stop_agent.reset_calls == 1
+
+    second_outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="try again")],
+            request=request,
+        )
+    ]
+
+    assert [item[0].get_text_content() for item in second_outputs] == [
+        "normal second-turn reply",
+    ]
+    assert terminal_stop_agent.calls == 2
+    assert terminal_stop_agent.reset_calls == 2
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ import {
   IContent,
 } from "../AgentScopeRuntime/types";
 import { IAgentScopeRuntimeWebUISession } from "./ISessions";
+import type { SkillMentionsData } from "../../../SkillMentions/useSkillMentions";
 
 /**
  * @description API 配置选项
@@ -228,6 +229,7 @@ export interface IAgentScopeRuntimeWebUIWelcomeOptions {
  * @descriptionEn Sender configuration options
  */
 export interface IAgentScopeRuntimeWebUISenderOptions {
+  skillMentions?: SkillMentionsData;
   /**
    * @description 输入框占位符
    * @descriptionEn Input placeholder
@@ -249,10 +251,17 @@ export interface IAgentScopeRuntimeWebUISenderOptions {
    */
   afterUI?: React.ReactElement | React.ReactElement[];
   /**
+   * @description 自定义渲染输入框主体，可用来用阻塞式交互卡片替换默认输入框
+   * @descriptionEn Custom renderer for the main composer body, useful for replacing the default composer with a blocking interaction card
+   */
+  renderComposer?: (defaultComposer: React.ReactElement) => React.ReactElement;
+  /**
    * @description 提交前的钩子函数
    * @descriptionEn Hook function before submit
    */
-  beforeSubmit?: () => Promise<boolean>;
+  beforeSubmit?: (
+    data: IAgentScopeRuntimeWebUIInputData,
+  ) => Promise<ChatBeforeSubmitResult>;
   /**
    * @description 提交回调函数
    * @descriptionEn Submit callback function
@@ -278,6 +287,11 @@ export interface IAgentScopeRuntimeWebUISenderOptions {
    * @descriptionEn Prefix UI displayed in the bottom action bar of the input
    */
   prefix?: React.ReactNode | React.ReactNode[];
+  /**
+   * @description 输入框快捷菜单项，显示在左下角加号弹层中
+   * @descriptionEn Quick menu items shown inside the bottom-left plus menu
+   */
+  quickMenuItems?: React.ReactNode | React.ReactNode[];
   /**
    * @description 是否支持语音输入
    * @descriptionEn Whether to allow speech input
@@ -520,5 +534,13 @@ export interface IAgentScopeRuntimeWebUIInputData {
    */
   biz_params?: {
     user_prompt_params?: Record<string, string>;
-  };
+  } & Record<string, unknown>;
 }
+
+export type ChatBeforeSubmitResult =
+  | boolean
+  | IAgentScopeRuntimeWebUIInputData
+  | {
+      shouldSubmit: false;
+      clearInput?: boolean;
+    };

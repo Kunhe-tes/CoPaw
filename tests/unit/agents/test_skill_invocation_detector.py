@@ -11,6 +11,7 @@ This test module covers:
 # pylint: disable=protected-access,redefined-outer-name
 
 import asyncio
+import json
 from datetime import datetime
 import pytest
 from unittest.mock import AsyncMock
@@ -39,6 +40,7 @@ from swe.agents.skill_invocation_detector import (
     reset_skill_invocation_detector,
 )
 from swe.agents.skill_runtime_profile import SkillRuntimeProfile
+from swe.agents.skills_manager import get_workspace_skill_manifest_path
 
 
 @pytest.fixture(autouse=True)
@@ -601,9 +603,44 @@ class TestSkillInvocationDetector:
         assert "xlsx" in detector._enabled_skills
         assert "pdf" in detector._enabled_skills
 
+    def test_set_enabled_skills_reads_metadata_from_v2_manifest(
+        self,
+        tmp_path,
+    ):
+        workspace_dir = tmp_path / "workspace"
+        manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "workspace-skill-manifest.v1",
+                    "layout_version": 2,
+                    "version": 0,
+                    "skills": {
+                        "demo": {
+                            "enabled": True,
+                            "metadata": {
+                                "description": "v2 description",
+                                "skill_id": "skill-1",
+                                "cn_name": "演示技能",
+                            },
+                        },
+                    },
+                },
+            ),
+            encoding="utf-8",
+        )
+        detector = SkillInvocationDetector(workspace_dir=workspace_dir)
+
+        detector.set_enabled_skills(["demo"])
+
+        assert detector._skill_descriptions["demo"] == "v2 description"
+        assert detector._skill_ids["demo"] == "skill-1"
+        assert detector._skill_cn_names["demo"] == "演示技能"
+
     @pytest.mark.asyncio
-    async def test_declared_skill_attribution(self):
-        """显式声明 + 输入证据仍可识别技能。"""
+    async def test_declared_skill_does_not_attribute_tool_call(self):
+        """declared tool 不是 Actual Skill Use 的证据。"""
         registry = SkillToolRegistry()
         registry.register_skill_tools("xlsx", ["read_file"])
 
@@ -615,12 +652,12 @@ class TestSkillInvocationDetector:
             {"path": "/data/test.xlsx"},
         )
 
-        assert skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
-    async def test_inferred_skill_from_extension(self):
-        """Test skill inference from file extension."""
+    async def test_file_extension_does_not_attribute_tool_call(self):
+        """文件后缀不能建立 Actual Skill Use。"""
         detector = SkillInvocationDetector()
         detector.set_enabled_skills(["xlsx"])
 
@@ -629,8 +666,8 @@ class TestSkillInvocationDetector:
             {"command": "python process data.xlsx"},
         )
 
-        assert skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_inferred_skill_from_keyword(self):
@@ -673,10 +710,10 @@ class TestSkillInvocationDetector:
         assert weights == {}
 
     @pytest.mark.asyncio
-    async def test_detector_should_keep_xlsx_inference_for_execute_shell(
+    async def test_detector_does_not_infer_xlsx_from_execute_shell(
         self,
     ):
-        """文件型技能在执行型工具上的扩展名识别能力应保留。"""
+        """执行命令中的文件后缀不能产生 skill 归因。"""
         detector = SkillInvocationDetector()
         detector.set_enabled_skills(["xlsx"])
 
@@ -685,12 +722,12 @@ class TestSkillInvocationDetector:
             {"command": "python analyze.py report.xlsx"},
         )
 
-        assert skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
-    async def test_detector_should_keep_xlsx_inference_for_read_file(self):
-        """文件型技能在 read_file 上的扩展名识别能力应保留。"""
+    async def test_detector_does_not_infer_xlsx_from_read_file(self):
+        """普通文件读取的后缀不能产生 skill 归因。"""
         detector = SkillInvocationDetector()
         detector.set_enabled_skills(["xlsx"])
 
@@ -699,8 +736,8 @@ class TestSkillInvocationDetector:
             {"file_path": "report.xlsx"},
         )
 
-        assert skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_detector_semantic_skill_still_detected_by_keywords(self):
@@ -726,10 +763,10 @@ class TestSkillInvocationDetector:
         assert weights == {}
 
     @pytest.mark.asyncio
-    async def test_detector_prefers_file_skill_for_xlsx_when_multiple_skills(
+    async def test_detector_does_not_prefer_file_skill_from_extension(
         self,
     ):
-        """多技能并存时，真正的 xlsx 输入应归因到文件型技能。"""
+        """多技能并存时，文件后缀仍不能建立归因。"""
         inferencer = SkillFeatureInferencer(
             builtin_features={
                 "xlsx": BUILTIN_SKILL_FEATURES["xlsx"],
@@ -748,8 +785,8 @@ class TestSkillInvocationDetector:
             {"command": "python analyze.py report.xlsx"},
         )
 
-        assert skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_detector_keeps_semantic_skill_for_keyword_only_command(
@@ -888,10 +925,10 @@ class TestSkillInvocationDetector:
         assert weights == {}
 
     @pytest.mark.asyncio
-    async def test_non_hook_declared_skill_keeps_continuation_after_message_activation(
+    async def test_message_match_does_not_continue_declared_skill(
         self,
     ):
-        """显式激活后，非 hook declared skill 仍应持续接管共享工具。"""
+        """正文关键词与 declared tool 不能建立或续接归因。"""
         registry = SkillToolRegistry()
         registry.register_skill_tools(
             "weather",
@@ -936,15 +973,15 @@ class TestSkillInvocationDetector:
             {"command": 'curl -s "wttr.in/Beijing?format=3"'},
         )
 
-        assert skill == "weather"
-        assert weights.get("weather", 0) >= 0.7
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
-    async def test_non_hook_declared_skill_keeps_continuation_after_skill_md_activation(
+    async def test_skill_md_read_does_not_continue_declared_skill(
         self,
         tmp_path,
     ):
-        """读取 SKILL.md 显式激活后，非 hook declared skill 应持续接管共享工具。"""
+        """读取 SKILL.md 后，declared tool 仍不能续接归因。"""
         registry = SkillToolRegistry()
         registry.register_skill_tools(
             "weather",
@@ -981,8 +1018,8 @@ class TestSkillInvocationDetector:
             "execute_shell_command",
             {"command": 'curl -s "wttr.in/Beijing?format=3"'},
         )
-        assert skill2 == "weather"
-        assert weights2 == {"weather": 1.0}
+        assert skill2 is None
+        assert weights2 == {}
 
     def test_hook_runtime_skill_still_detectable_from_user_message(self):
         """带 hook 配置的技能仍应支持显式消息触发。"""
@@ -1142,10 +1179,10 @@ class TestSkillInvocationDetector:
         assert skill == "hook-http-demo"
 
     @pytest.mark.asyncio
-    async def test_message_activated_hook_skill_keeps_declared_continuation(
+    async def test_message_match_does_not_continue_hook_skill(
         self,
     ):
-        """消息显式激活后的 hook 技能应持续接管共享工具。"""
+        """正文关键词不能让 hook skill 接管后续工具。"""
         registry = SkillToolRegistry()
         registry.register_skill_tools(
             "hook-http-demo",
@@ -1187,22 +1224,22 @@ class TestSkillInvocationDetector:
             "execute_shell_command",
             {"command": "echo first"},
         )
-        assert skill1 == "hook-http-demo"
-        assert weights1 == {"hook-http-demo": 0.95}
+        assert skill1 is None
+        assert weights1 == {}
 
         skill2, weights2 = await detector.on_tool_call(
             "execute_shell_command",
             {"command": "echo second"},
         )
-        assert skill2 == "hook-http-demo"
-        assert weights2 == {"hook-http-demo": 1.0}
+        assert skill2 is None
+        assert weights2 == {}
 
     @pytest.mark.asyncio
-    async def test_skill_md_activated_hook_skill_keeps_declared_continuation(
+    async def test_skill_md_read_does_not_continue_hook_skill(
         self,
         tmp_path,
     ):
-        """SKILL.md 激活后的 hook 技能应持续接管共享工具。"""
+        """读取 SKILL.md 后也不能由 declared tool 续接 hook skill。"""
         registry = SkillToolRegistry()
         registry.register_skill_tools(
             "hook-http-demo",
@@ -1239,15 +1276,15 @@ class TestSkillInvocationDetector:
             "execute_shell_command",
             {"command": "echo first"},
         )
-        assert skill2 == "hook-http-demo"
-        assert weights2 == {"hook-http-demo": 1.0}
+        assert skill2 is None
+        assert weights2 == {}
 
         skill3, weights3 = await detector.on_tool_call(
             "execute_shell_command",
             {"command": "echo second"},
         )
-        assert skill3 == "hook-http-demo"
-        assert weights3 == {"hook-http-demo": 1.0}
+        assert skill3 is None
+        assert weights3 == {}
 
     @pytest.mark.asyncio
     async def test_multi_skill_attribution(self):
@@ -1265,10 +1302,8 @@ class TestSkillInvocationDetector:
             {"path": "/data/test.xlsx"},
         )
 
-        # Should attribute to xlsx due to file extension
-        assert skill == "xlsx"
-        assert "xlsx" in weights
-        assert weights["xlsx"] > 0
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_skill_context_tracking(self):
@@ -1429,10 +1464,10 @@ class TestSkillInvocationDetector:
         assert context_manager.current_skill is None
 
     @pytest.mark.asyncio
-    async def test_active_declared_skill_switches_on_stronger_file_evidence(
+    async def test_active_skill_does_not_switch_from_file_extension(
         self,
     ):
-        """已有 declared-skill 活跃时，明确的新文件证据仍可切换技能。"""
+        """普通文件后缀不能让活跃 skill 切换。"""
         registry = SkillToolRegistry()
         registry.register_skill_tools("weather", ["execute_shell_command"])
 
@@ -1455,15 +1490,15 @@ class TestSkillInvocationDetector:
             {"file_path": "report.xlsx"},
         )
 
-        assert primary_skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
-        assert context_manager.current_skill == "xlsx"
+        assert primary_skill is None
+        assert weights == {}
+        assert context_manager.current_skill == "weather"
 
     @pytest.mark.asyncio
-    async def test_active_hook_skill_switches_on_stronger_file_evidence(
+    async def test_active_hook_skill_does_not_switch_from_file_extension(
         self,
     ):
-        """hook 技能活跃时，明确的新文件证据不应被旧上下文卡住。"""
+        """普通文件后缀不能让 hook skill 切换。"""
         registry = SkillToolRegistry()
         registry.register_skill_tools(
             "hook-http-demo",
@@ -1501,16 +1536,16 @@ class TestSkillInvocationDetector:
             {"file_path": "report.xlsx"},
         )
 
-        assert primary_skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
-        assert context_manager.current_skill == "xlsx"
+        assert primary_skill is None
+        assert weights == {}
+        assert context_manager.current_skill == "hook-http-demo"
 
     @pytest.mark.asyncio
-    async def test_restored_confirmed_skill_allows_one_shot_continuation(
+    async def test_skill_asset_use_is_not_limited_to_one_shot_continuation(
         self,
         tmp_path,
     ):
-        """从 session 恢复的已确认 skill 仅允许一次无证据续接。"""
+        """每次命中真实 skill 资产都可建立 Actual Skill Use。"""
         skill_dir = tmp_path / "skills" / "fill-metadata" / "steps"
         skill_dir.mkdir(parents=True)
         (skill_dir / "step1.md").write_text("# step1", encoding="utf-8")
@@ -1525,17 +1560,17 @@ class TestSkillInvocationDetector:
 
         skill1, weights1 = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
         assert skill1 == "fill-metadata"
         assert weights1 == {"fill-metadata": 1.0}
 
         skill2, weights2 = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step2.md"},
+            {"file_path": "skills/fill-metadata/steps/step2.md"},
         )
-        assert skill2 is None
-        assert weights2 == {}
+        assert skill2 == "fill-metadata"
+        assert weights2 == {"fill-metadata": 1.0}
 
     @pytest.mark.asyncio
     async def test_restored_confirmed_skill_does_not_consume_unrelated_shell_command(
@@ -1578,7 +1613,7 @@ class TestSkillInvocationDetector:
 
         skill, weights = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
 
         assert skill == "fill-metadata"
@@ -1604,8 +1639,8 @@ class TestSkillInvocationDetector:
             {"file_path": "report.xlsx"},
         )
 
-        assert skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_unrelated_tool_does_not_consume_pending_continuation(
@@ -1630,7 +1665,7 @@ class TestSkillInvocationDetector:
         )
         related_skill, related_weights = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
 
         assert unrelated_skill is None
@@ -1657,7 +1692,7 @@ class TestSkillInvocationDetector:
 
         skill, weights = await detector.on_tool_call(
             "read_file",
-            {"payload": {"paths": ["steps/step1.md"]}},
+            {"payload": {"paths": ["skills/fill-metadata/steps/step1.md"]}},
         )
 
         assert skill == "fill-metadata"
@@ -1690,7 +1725,7 @@ class TestSkillInvocationDetector:
         )
         related_skill, related_weights = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
 
         assert unrelated_skill is None
@@ -1721,7 +1756,7 @@ class TestSkillInvocationDetector:
         )
         related_skill, related_weights = await detector.on_tool_call(
             "read_file",
-            {"file_path": "steps/step1.md"},
+            {"file_path": "skills/fill-metadata/steps/step1.md"},
         )
 
         assert unrelated_skill is None
@@ -1804,7 +1839,7 @@ class TestSkillInvocationDetector:
     async def test_start_skill_invokes_session_hook_loader_without_tracing(
         self,
     ):
-        """Skill hook loading should not depend on trace emission."""
+        """只有明确请求加载时才调用 session hook loader。"""
         loaded = []
 
         async def load_skill_hooks(skill_name: str) -> None:
@@ -1818,9 +1853,128 @@ class TestSkillInvocationDetector:
             "xlsx",
             trigger_tool="user_message",
             trigger_reason="declared",
+            load_hooks=True,
         )
 
         assert loaded == ["xlsx"]
+
+    @pytest.mark.asyncio
+    async def test_skill_asset_use_does_not_load_hooks(self, tmp_path):
+        """读取 skill 内资源建立使用归因，但不能单独加载 hook。"""
+        skill_dir = tmp_path / "skills" / "fill-metadata" / "steps"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "step1.md").write_text("# step 1", encoding="utf-8")
+        loaded: list[str] = []
+
+        async def load_skill_hooks(skill_name: str) -> None:
+            loaded.append(skill_name)
+
+        detector = SkillInvocationDetector(
+            workspace_dir=tmp_path,
+            skill_hook_loader=load_skill_hooks,
+        )
+        detector.set_enabled_skills(["fill-metadata"])
+
+        skill, weights = await detector.on_tool_call(
+            "read_file",
+            {"file_path": str(skill_dir / "step1.md")},
+        )
+
+        assert skill == "fill-metadata"
+        assert weights == {"fill-metadata": 1.0}
+        assert loaded == []
+
+    @pytest.mark.asyncio
+    async def test_reading_resolved_skill_md_loads_hooks(self, tmp_path):
+        """读取已解析的 SKILL.md 才允许 detector 加载 hook。"""
+        skill_root = tmp_path / "skills" / "sample"
+        skill_root.mkdir(parents=True)
+        skill_md = skill_root / "SKILL.md"
+        skill_md.write_text("# sample\n", encoding="utf-8")
+        loader = AsyncMock()
+        detector = SkillInvocationDetector(
+            workspace_dir=tmp_path,
+            skill_hook_loader=loader,
+        )
+        detector.set_enabled_skills(["sample"])
+
+        skill, weights = await detector.on_tool_call(
+            "read_file",
+            {"file_path": str(skill_md)},
+        )
+
+        assert skill == "sample"
+        assert weights == {"sample": 1.0}
+        loader.assert_awaited_once_with("sample")
+
+    @pytest.mark.asyncio
+    async def test_reading_workspace_relative_skill_md_loads_hooks(
+        self,
+        tmp_path,
+    ):
+        """read_file 的 workspace 相对 SKILL.md 路径应被正确归因。"""
+        skill_root = tmp_path / "skills" / "sample"
+        skill_root.mkdir(parents=True)
+        (skill_root / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+        loader = AsyncMock()
+        detector = SkillInvocationDetector(
+            workspace_dir=tmp_path,
+            skill_hook_loader=loader,
+        )
+        detector.set_enabled_skills(["sample"])
+
+        skill, weights = await detector.on_tool_call(
+            "read_file",
+            {"file_path": "skills/sample/SKILL.md"},
+        )
+
+        assert skill == "sample"
+        assert weights == {"sample": 1.0}
+        loader.assert_awaited_once_with("sample")
+
+    @pytest.mark.asyncio
+    async def test_bare_relative_asset_name_does_not_attribute_skill(
+        self,
+        tmp_path,
+    ):
+        """普通命令中的裸相对脚本名不能证明它属于某个 skill。"""
+        skill_root = tmp_path / "skills" / "sample"
+        skill_root.mkdir(parents=True)
+        (skill_root / "run.py").write_text(
+            "print('sample')\n",
+            encoding="utf-8",
+        )
+        detector = SkillInvocationDetector(workspace_dir=tmp_path)
+        detector.set_enabled_skills(["sample"])
+
+        skill, weights = await detector.on_tool_call(
+            "execute_shell_command",
+            {"command": "python run.py"},
+        )
+
+        assert skill is None
+        assert weights == {}
+
+    @pytest.mark.asyncio
+    async def test_skill_asset_path_cannot_escape_the_skill_directory(
+        self,
+        tmp_path,
+    ):
+        """相对路径穿越到 skill 目录外不能建立 Actual Skill Use。"""
+        skill_dir = tmp_path / "skills" / "sample"
+        skill_dir.mkdir(parents=True)
+        outside_asset = tmp_path / "outside.py"
+        outside_asset.write_text("print('outside')\n", encoding="utf-8")
+        detector = SkillInvocationDetector(workspace_dir=tmp_path)
+        detector.set_enabled_skills(["sample"])
+
+        skill, weights = await detector.on_tool_call(
+            "execute_shell_command",
+            {"path": "../outside.py"},
+        )
+
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_start_skill_invokes_confirmed_skill_callback(
@@ -1840,6 +1994,7 @@ class TestSkillInvocationDetector:
             "hook-http-demo",
             trigger_tool="read_file",
             trigger_reason="skill_md",
+            load_hooks=True,
         )
 
         assert confirmed == ["hook-http-demo"]
@@ -1879,6 +2034,7 @@ class TestSkillInvocationDetector:
             "hook-http-demo",
             trigger_tool="read_file",
             trigger_reason="skill_md",
+            load_hooks=True,
         )
 
         assert confirmed == ["hook-http-demo"]
@@ -1912,18 +2068,16 @@ class TestSkillInvocationDetector:
         )
         detector.set_enabled_skills(["xlsx"])
 
-        # Start skill with declared tool
+        # Declared tools do not start a skill.
         await detector.on_tool_call("read_file", {"path": "test.xlsx"})
-        assert context_manager.current_skill == "xlsx"
+        assert context_manager.current_skill is None
 
         # Call non-declared tools to increment idle counter
         # The idle counter only increments when current skill is NOT in declared skills
         # For tools not in registry, no attribution happens, so idle counter won't increment
         # This test verifies the skill stays active until reasoning ends
         await detector.on_tool_call("unknown_tool", {})
-        # The skill should still be active because the tool call didn't trigger any skill
-        # Idle threshold logic only applies when a tool belongs to different skills
-        assert context_manager.current_skill == "xlsx"
+        assert context_manager.current_skill is None
 
         # End reasoning to clear skill context
         await detector.on_reasoning_end()
@@ -2003,9 +2157,9 @@ class TestSkillDetectionIntegration:
             {"path": "/data/report.xlsx"},
         )
 
-        assert skill1 == "xlsx"
-        assert "xlsx" in weights1
-        assert context_manager.current_skill == "xlsx"
+        assert skill1 is None
+        assert weights1 == {}
+        assert context_manager.current_skill is None
 
         # Step 2: Call write_file (declared for xlsx only)
         skill2, _ = await detector.on_tool_call(
@@ -2013,8 +2167,8 @@ class TestSkillDetectionIntegration:
             {"path": "/data/output.xlsx"},
         )
 
-        assert skill2 == "xlsx"
-        assert context_manager.current_skill == "xlsx"
+        assert skill2 is None
+        assert context_manager.current_skill is None
 
         # Step 3: 弱关键词不能切走当前技能；若有 runtime 续接则保持当前技能
         skill3, _ = await detector.on_tool_call(
@@ -2022,8 +2176,8 @@ class TestSkillDetectionIntegration:
             {"command": "convert to pdf"},
         )
 
-        assert skill3 == "xlsx"
-        assert context_manager.current_skill == "xlsx"
+        assert skill3 is None
+        assert context_manager.current_skill is None
 
     @pytest.mark.asyncio
     async def test_custom_skill_feature_inference(self):
@@ -2050,10 +2204,8 @@ class TestSkillDetectionIntegration:
             {"command": "resize photo.png"},
         )
 
-        assert skill == "image_processor"
-        # on_tool_call returns (skill_name, weights_dict)
-        # weights dict contains the confidence for the skill
-        assert weights.get("image_processor", 0) >= 0.8
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_mcp_tool_attribution(self):
@@ -2139,22 +2291,22 @@ class TestEdgeCases:
         detector = SkillInvocationDetector(registry=registry)
         detector.set_enabled_skills(["xlsx", "pdf"])
 
-        # First call with xlsx file - should start xlsx skill
+        # File suffixes cannot start skills.
         skill1, _ = await detector.on_tool_call(
             "read_file",
             {"path": "/data/file.xlsx"},
         )
-        assert skill1 == "xlsx"
+        assert skill1 is None
 
         # Reset for next call (simulating new conversation)
         detector.reset()
 
-        # Second call with pdf file - should start pdf skill
+        # Nor can they start a different skill after reset.
         skill2, _ = await detector.on_tool_call(
             "read_file",
             {"path": "/data/file.pdf"},
         )
-        assert skill2 == "pdf"
+        assert skill2 is None
 
 
 # =============================================================================
@@ -2301,8 +2453,8 @@ class TestUserMessageDetection:
             {"command": "python analyze.py report.xlsx"},
         )
 
-        assert skill == "xlsx"
-        assert weights.get("xlsx", 0) >= 0.8
+        assert skill is None
+        assert weights == {}
 
 
 class TestMcpServerInference:
@@ -2399,8 +2551,8 @@ class TestMcpServerInference:
             mcp_server="filesystem",
         )
 
-        assert skill == "filesystem_skill"
-        assert weights.get("filesystem_skill", 0) >= 0.85
+        assert skill is None
+        assert weights == {}
 
     @pytest.mark.asyncio
     async def test_mcp_server_evidence_keeps_higher_priority_than_tool_input(
@@ -2438,8 +2590,8 @@ class TestMcpServerInference:
             mcp_server="filesystem",
         )
 
-        assert skill == "filesystem_skill"
-        assert weights.get("filesystem_skill", 0) >= 0.85
+        assert skill is None
+        assert weights == {}
 
 
 class TestInferencerUserMessageMethods:
@@ -2615,10 +2767,10 @@ class TestSkillMdReadDetection:
         assert weights == {"xlsx": 1.0}
 
     @pytest.mark.asyncio
-    async def test_skill_md_read_continues_active_skill_without_new_evidence(
+    async def test_skill_md_read_does_not_attribute_unrelated_follow_up(
         self,
     ):
-        """Test active skill continues after SKILL.md read without new evidence."""
+        """读取 SKILL.md 后，无关工具不产生续接归因。"""
         detector = SkillInvocationDetector()
         detector.set_enabled_skills(["weather"])
 
@@ -2635,12 +2787,12 @@ class TestSkillMdReadDetection:
             {"location": "Shanghai"},
         )
 
-        assert skill2 == "weather"
-        assert weights2 == {"weather": 1.0}
+        assert skill2 is None
+        assert weights2 == {}
 
     @pytest.mark.asyncio
-    async def test_skill_md_read_continuation_only_applies_once(self):
-        """SKILL.md 不应把后续无关工具整轮锁死到当前技能。"""
+    async def test_skill_md_read_does_not_apply_continuation(self):
+        """SKILL.md 不会启用隐式 one-shot continuation。"""
         detector = SkillInvocationDetector()
         detector.set_enabled_skills(["weather"])
 
@@ -2653,8 +2805,8 @@ class TestSkillMdReadDetection:
             "weather_query",
             {"location": "Shanghai"},
         )
-        assert skill1 == "weather"
-        assert weights1 == {"weather": 1.0}
+        assert skill1 is None
+        assert weights1 == {}
 
         skill2, weights2 = await detector.on_tool_call(
             "unknown_tool",
@@ -2664,10 +2816,10 @@ class TestSkillMdReadDetection:
         assert weights2 == {}
 
     @pytest.mark.asyncio
-    async def test_skill_md_read_continuation_expires_after_next_tool_attempt(
+    async def test_skill_md_read_does_not_switch_from_file_extension(
         self,
     ):
-        """SKILL.md 之后出现更强的新证据时，应允许切换到新技能。"""
+        """SKILL.md 之后的文件后缀不能切换到其他技能。"""
         detector = SkillInvocationDetector()
         detector.set_enabled_skills(["weather", "xlsx"])
 
@@ -2680,8 +2832,8 @@ class TestSkillMdReadDetection:
             "execute_shell_command",
             {"command": "python analyze.py report.xlsx"},
         )
-        assert skill1 == "xlsx"
-        assert weights1.get("xlsx", 0) >= 0.8
+        assert skill1 is None
+        assert weights1 == {}
 
         skill2, weights2 = await detector.on_tool_call(
             "unknown_tool",
@@ -2691,10 +2843,10 @@ class TestSkillMdReadDetection:
         assert weights2 == {}
 
     @pytest.mark.asyncio
-    async def test_skill_md_read_continuation_consumed_by_next_same_skill_match(
+    async def test_skill_md_read_does_not_continue_from_same_file_extension(
         self,
     ):
-        """同技能强证据仍应正常续接，但不应继续污染后续无关工具。"""
+        """同一技能的文件后缀也不能建立续接归因。"""
         detector = SkillInvocationDetector()
         detector.set_enabled_skills(["xlsx"])
 
@@ -2707,8 +2859,8 @@ class TestSkillMdReadDetection:
             "execute_shell_command",
             {"command": "python analyze.py report.xlsx"},
         )
-        assert skill1 == "xlsx"
-        assert weights1.get("xlsx", 0) >= 0.8
+        assert skill1 is None
+        assert weights1 == {}
 
         skill2, weights2 = await detector.on_tool_call(
             "unknown_tool",
@@ -2762,8 +2914,8 @@ class TestSkillMdReadDetection:
             "execute_shell_command",
             {"command": "python analyze.py report.xlsx"},
         )
-        assert skill2 == "xlsx"
-        assert weights2.get("xlsx", 0) >= 0.8
+        assert skill2 is None
+        assert weights2 == {}
 
         detector.detect_from_user_message("please use pdf skill")
         skill3, weights3 = await detector.on_tool_call(
@@ -2792,10 +2944,10 @@ class TestSkillMdReadDetection:
             "execute_shell_command",
             {"command": "python analyze.py report.xlsx"},
         )
-        assert skill2 == "xlsx"
-        assert weights2.get("xlsx", 0) >= 0.8
-        assert detector._context_manager.current_skill == "xlsx"
-        assert detector._context_manager.active_skills == ["xlsx"]
+        assert skill2 is None
+        assert weights2 == {}
+        assert detector._context_manager.current_skill is None
+        assert detector._context_manager.active_skills == []
 
     @pytest.mark.asyncio
     async def test_set_enabled_skills_clears_disabled_active_context(self):

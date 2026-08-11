@@ -8,6 +8,66 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 A named, versioned worker profile that describes what kind of delegated work a SubAgent can perform. One **SubAgent Definition** can be used by many **SubAgent Runs**.
 _Avoid_: custom subagent, subagent template, agent config
 
+**Run-scoped SubAgent Definition**:
+A temporary **SubAgent Definition** supplied by the Main Agent for one **SubAgent Run**. It is validated like other SubAgent Definitions but is not stored for reuse, versioned as a reusable profile, or visible as a long-lived registry entry.
+_Avoid_: persistent custom subagent, saved worker profile
+
+**Run-scoped Definition Source**:
+The definition source value `run_scoped`, used to identify a **Run-scoped SubAgent Definition** in runtime records and audit data.
+_Avoid_: builtin, user, stored
+
+**Stored SubAgent Definition**:
+A reusable **SubAgent Definition** available through the definition registry across more than one **SubAgent Run**. Stored definitions may be built-in or user-owned, but user-owned persistence and CRUD are separate from run-scoped delegation.
+_Avoid_: temporary subagent, inline worker profile
+
+**SubAgent Definition Store**:
+The tenant-and-agent scoped store for **Stored SubAgent Definitions**. The first implementation stores one definition per JSON file and does not provide cross-pod registry consistency.
+_Avoid_: tenant-global registry, distributed definition database
+
+**Stored Definition Source**:
+The definition source value `stored`, used for reusable non-built-in **Stored SubAgent Definitions** regardless of whether they were created by a user, tenant admin, system import, or another registration flow.
+_Avoid_: user source, customized source
+
+**SubAgent Start Request**:
+The compact Main Agent tool request for starting one **SubAgent Run** with a **Run-scoped SubAgent Definition**. It must include a **SubAgent Name**, **Instruction**, and objective; it does not start a built-in or stored definition by name alone.
+_Avoid_: registration payload, full definition schema
+
+**SubAgent Definition Short-circuit Match**:
+The start-time decision to use an existing **Stored SubAgent Definition** or built-in definition instead of the **Run-scoped SubAgent Definition** described by a **SubAgent Start Request**. The request's **Instruction** may inform matching and audit records, but the matched definition's own **Instruction** controls execution.
+_Avoid_: instruction override, silent definition rewrite
+
+**Definition Match Metadata**:
+The audit data written to a **SubAgent Run** and returned by start/status tools to show whether a **SubAgent Definition Short-circuit Match** occurred, which definition was used, and why.
+_Avoid_: hidden routing decision, implicit reuse
+
+**Unknown SubAgent**:
+An error condition for registry-facing operations that require an existing **Stored SubAgent Definition** or built-in definition by name. It is not part of the compact **SubAgent Start Request**, which falls back to a **Run-scoped SubAgent Definition** when no short-circuit match is used.
+_Avoid_: start_subagent fallback failure, missing temporary worker
+
+**SubAgent Definition Registration Request**:
+The full request for creating or updating a **Stored SubAgent Definition** through a registry-facing entry point. It may include routing metadata, trigger keywords, execution budgets, tool policy, and other reusable profile fields.
+_Avoid_: start request, one-off delegation payload
+
+**SubAgent Definition Upsert**:
+The registration behavior that creates a new **Stored SubAgent Definition** or replaces the existing same-name definition in the same tenant-and-agent scope as a whole object. It does not patch-merge partial fields and cannot shadow a built-in definition name.
+_Avoid_: partial update, builtin override
+
+**Instruction**:
+The role and operating instructions for a **SubAgent Definition**. It is the canonical SubAgent term across user-facing requests, registration contracts, and runtime records, because it describes the delegated worker contract rather than a raw model-message implementation detail.
+_Avoid_: system_prompt, prompt text, hidden prompt, prompt.system
+
+**Instruction Size Limit**:
+An **Instruction** must be present and non-empty after trimming. Compact start requests reject instructions larger than 8 KB so the worker contract does not become a substitute for delegated task background or source material.
+_Avoid_: unlimited system prompt, embedded document payload
+
+**SubAgent Name**:
+The stable identifier field named `name`, used by the Main Agent or another runtime entry point to identify a **SubAgent Definition**. It is not the display label shown to users.
+_Avoid_: agent_name, display name, nickname, frontend title
+
+**SubAgent Nickname**:
+The user-facing display label for a **SubAgent Run** or **Stored SubAgent Definition**. It may be configured by a registration request or assigned from a built-in nickname pool; compact **SubAgent Start Requests** do not accept nickname input, but their run responses may still include an assigned nickname for display.
+_Avoid_: agent_name, registry key, stable identifier
+
 **SubAgent Run**:
 A single observable execution instance created when the main agent delegates work to a SubAgent Definition. A **SubAgent Run** is not a new SubAgent Definition.
 _Avoid_: create subagent, custom subagent, subagent profile
@@ -16,37 +76,349 @@ _Avoid_: create subagent, custom subagent, subagent profile
 Alias for **SubAgent Run** when emphasizing the parent-to-worker handoff rather than the worker identity.
 _Avoid_: subagent creation
 
+**Background SubAgent Run**:
+A **SubAgent Run** that is started by the Main Agent and observed later through status, result retrieval, or cancellation. It is still one run of a **SubAgent Definition**, not a new definition.
+_Avoid_: detached subagent, subprocess subagent
+
+**SubAgent Research Phase**:
+The portion of a **SubAgent Run** in which the worker gathers task evidence and may use its effective read-only tools. It ends before the worker produces its terminal **AgentResult**.
+_Avoid_: final response, structured-output phase, unbounded agent loop
+
+**SubAgent Research Completion**:
+The normal end of a **SubAgent Research Phase**, reached when the worker replies without requesting a tool. It supplies a **SubAgent Research Synthesis** to **SubAgent Structured Finalization**; reaching the turn limit instead follows the distinct **SubAgent Turn-limit Finalization** path.
+_Avoid_: implicit final tool call, budget-exhaustion normal completion, forced completion
+
+**SubAgent Research Synthesis**:
+The concise natural-language, tool-free reply emitted at **SubAgent Research Completion**. It summarizes the research evidence for **SubAgent Structured Finalization** and is not an **AgentResult**.
+_Avoid_: final JSON, terminal result, user-facing completion claim
+
+**SubAgent Research Turn Budget**:
+The maximum number of ReAct reasoning turns available to a **SubAgent Research Phase**. It does not include the one terminal **SubAgent Structured Finalization** call; both phases share the run's total time budget.
+_Avoid_: total model-call budget, finalization turn limit, per-phase timeout
+
+**SubAgent Research Phase Controller**:
+The SubAgent-specific agent operation that runs the ReAct research loop and reports whether it ended normally or reached its turn limit. It prevents a turn-limit fallback summary from being mistaken for **SubAgent Research Completion**.
+_Avoid_: opaque reply outcome, automatic ReAct summarization, runtime-owned protected loop
+
+**SubAgent Turn Usage**:
+The actual number of model calls made by a **SubAgent Run**. It includes each research reasoning turn and the one **SubAgent Finalization Attempt**, when one occurs; it can therefore exceed the **SubAgent Research Turn Budget** by one.
+_Avoid_: research-only call count, hidden terminal-call cost, turn-budget alias
+
+**SubAgent Structured Finalization**:
+The terminal, tool-free step after a **SubAgent Research Phase** that produces the run's validated **SubAgent Response Payload**. The runtime then constructs the **SubAgent Application Result**; finalization does not gather new evidence or execute work tools.
+_Avoid_: ordinary ReAct turn, tool-call loop, free-form final answer
+
+**SubAgent Response Payload**:
+The validated structured task content produced by **SubAgent Structured Finalization**. It contains research conclusions and suggested follow-up, but no run identity, lifecycle status, budget usage, or runtime errors.
+_Avoid_: persisted run record, execution envelope, model-generated metrics
+
+**SubAgent Finalization Context**:
+The bounded handoff supplied to **SubAgent Structured Finalization**: the original delegation request and the **SubAgent Research Synthesis**, together with the terminal response contract. It excludes ReAct memory, tool-call records, and raw tool output.
+_Avoid_: full transcript replay, tool-result dump, implicit memory access
+
+**SubAgent Turn-limit Finalization**:
+The one terminal **SubAgent Structured Finalization** call made after a **SubAgent Research Phase** reaches its turn budget without a **SubAgent Research Synthesis**. Its finalization context includes a size-limited research record of assistant replies, tool calls, and tool results so it can produce a structured response without further research.
+_Avoid_: unbounded transcript replay, extra research turn, skipped terminal response
+
+**SubAgent Turn-limit Partial Result**:
+The **SubAgent Application Result** emitted when a **SubAgent Turn-limit Finalization** produces a valid **SubAgent Response Payload**. It retains the structured response while reporting `partial` and `research_turn_limit_reached`, because the research phase did not complete normally.
+_Avoid_: completed after turn exhaustion, discarded structured evidence, runtime failure
+
+**SubAgent Finalization Attempt**:
+The single **SubAgent Structured Finalization** call allowed after **SubAgent Research Completion** or through **SubAgent Turn-limit Finalization**. A failed or invalid attempt produces a **SubAgent Partial Result** and is not retried.
+_Avoid_: JSON repair loop, schema retry, repeated terminal calls
+
+**SubAgent Structured Finalization Compatibility**:
+The requirement that terminal output be read from native structured-response metadata. A Provider endpoint that rejects the tool-free structured-response request yields a **SubAgent Partial Result**; the runtime does not fall back to parsing free-form JSON or perform a separate capability probe.
+_Avoid_: text JSON fallback, tool-choice workaround, startup capability call
+
+**SubAgent Application Result**:
+The application-constructed terminal result of a **SubAgent Run**. It combines a **SubAgent Response Payload**, when available, with runtime-owned identity, lifecycle status, metrics, and errors.
+_Avoid_: model-authored result envelope, raw model response, unvalidated payload
+
+**SubAgent Result Projection**:
+The stable, flat caller-facing representation of a **SubAgent Application Result** returned by the Background SubAgent tools. The internal **SubAgent Response Payload** is merged into this representation rather than exposed as a nested API object.
+_Avoid_: payload-only API, nested response migration, internal schema leak
+
+**SubAgent Partial Result**:
+An **AgentResult** that retains available research evidence without representing the delegated task as completed. It is produced when **SubAgent Structured Finalization** cannot produce a validated terminal result, or when **SubAgent Turn-limit Finalization** produces a valid payload after research exhausted its budget.
+_Avoid_: completed result with warning, discarded research, research timeout result
+
+**Background SubAgent Concurrency Limit**:
+The maximum number of **Background SubAgent Runs** that one runtime scope may have running at the same time. When the limit is reached, a new background start request is rejected as blocked rather than queued.
+_Avoid_: queue size, worker pool size, soft recommendation
+
+**Background SubAgent Run Status**:
+The lifecycle state of a **Background SubAgent Run** as observed by the Main Agent: `pending`, `running`, `paused`, `completed`, `partial`, `failed`, `cancelled`, or `expired`. `partial` retains usable research evidence when terminal validation cannot complete. It is separate from the `status` field inside an **AgentResult**, which describes the delegated task outcome. `expired` is reserved for future supervisor cleanup semantics and is not emitted by the first background-tool implementation.
+_Avoid_: AgentResult status, tool call status, process exit code
+
+**Background SubAgent Tools**:
+The Main Agent tools for managing **Background SubAgent Runs**: `start_subagent`, `wait_subagent`, `get_subagent`, and `cancel_subagent`. They are the intended SubAgent tool surface for the next implementation stage.
+_Avoid_: agent tools, generic worker tools, synchronous delegate tool
+
+**wait_subagent Tool**:
+A Main Agent tool that performs a bounded wait and returns basic run identity, status information, and terminal run results for the current tenant-and-agent scope's observable **Background SubAgent Runs**. It is not a diagnostic, routing-audit, worker-inspection, or historical run-browsing surface.
+_Avoid_: list agents, background queue browser, automatic completion callback, debug inspector, routing audit
+
+**SubAgent Run Cancellation**:
+The act of cancelling the execution handle that owns a **Background SubAgent Run** and marking that run as cancelled. It does not imply recursively terminating tool-owned subprocesses unless a later execution backend explicitly supports that behavior.
+_Avoid_: kill process tree, hard stop all tools
+
+**SubAgent Run Monitor**:
+A user-facing view that shows the **Background SubAgent Runs** associated with the current Main Agent conversation. It is scoped to the current conversation and is not an agent-wide operations console.
+_Avoid_: global subagent dashboard, worker pool monitor, all-agent status panel
+
+**SubAgent Run Snapshot**:
+A point-in-time observable summary of the current conversation's **Background SubAgent Runs**. It is the authoritative state used by user-facing monitoring surfaces, while live stream events may only prompt refresh.
+_Avoid_: stream-only state, frontend cache, tool result transcript
+
+**SubAgent Budget Consumption**:
+The portion of a **Background SubAgent Run**'s execution budget that has been used. In the first monitoring surface this means elapsed time against the run's time budget, not task completion percentage.
+_Avoid_: task progress, completion percent, model confidence
+
+**Frontend SubAgent Stop Request**:
+A user action from a **SubAgent Run Monitor** that asks the runtime to cancel one specific **Background SubAgent Run** directly. It is not a natural-language instruction for the Main Agent to decide whether to call a tool.
+_Avoid_: chat stop message, assistant-mediated cancellation, generic task stop
+
+**SubAgent Run Stop Eligibility**:
+The rule that only an actively running **Background SubAgent Run** can expose a user stop action in the **SubAgent Run Monitor**. Terminal, pending, paused, expired, and already-cancelled runs remain visible as status records but are not clickable stop targets.
+_Avoid_: remove record action, terminal cleanup button, clickable status row
+
+**SubAgent Stop Pending State**:
+The temporary user-facing state shown after a **Frontend SubAgent Stop Request** has been submitted and before the next **SubAgent Run Snapshot** confirms the run's terminal status. It disables repeated stop actions without implying the run has already been cancelled.
+_Avoid_: confirmed cancellation, terminal stopped state, retry button state
+
+**SubAgent Execution Backend**:
+The runtime mechanism used to execute a **SubAgent Run**, such as an in-process task or a separate operating-system process. It is an implementation boundary and does not change the meaning of **SubAgent Run**.
+_Avoid_: subagent type, agent definition source
+
 **Main Agent**:
 The user-facing agent that owns global task understanding, user interaction, mode decisions, and final responses.
 _Avoid_: parent bot, orchestrator bot
+
+**Chat Checkpoint**:
+A Chat-scoped recoverable state container that identifies the current task and retains a compact index of earlier completed tasks in the same Chat. Starting an explicit new task replaces its current task; `/new` resets the Chat Checkpoint.
+_Avoid_: global task state, session summary, cross-chat checkpoint
+
+**Checkpoint Record**:
+The versioned, structured source of truth for a Chat Checkpoint. A Checkpoint Record distinguishes confirmed state from unresolved work and retains references to its supporting evidence.
+_Avoid_: free-form summary, model-only memory, untraceable state
+
+**Evidence Recovery**:
+The on-demand, Chat-scoped restoration of an original conversation or tool-result fragment identified by a Checkpoint Record. Exact evidence references take precedence; a bounded current-epoch lookup may otherwise narrow by text, kind, and time interval. It adds only the evidence needed for the Current Task and does not replace the checkpoint state.
+_Avoid_: cross-chat history search, automatic full-history injection, summary reconstruction
+
+**Checkpoint Update**:
+The validated replacement of a Checkpoint Record from deterministic conversation facts and semantic task-state interpretation. It cannot discard evidence before the replacement record has passed validation.
+_Avoid_: markdown-only rewrite, unvalidated summarization, destructive compaction
+
+**Compaction Transaction**:
+The per-Chat operation that validates and durably installs a Checkpoint Update together with its archived source history. It either exposes a recoverable checkpoint or retains enough pending state to finish safely after recovery.
+_Avoid_: overwrite-in-place compaction, archive-without-state, lost concurrent event
+
+**Checkpoint Event Journal**:
+The ordered, append-only Chat-scoped record of deterministic events that occurred after the event sequence incorporated by the active Checkpoint Record. It preserves the current-state delta until a later Checkpoint Update incorporates it.
+_Avoid_: second free-form summary, mutable progress list, discarded pre-compaction event
+
+**Recent Event Delta**:
+The budget-bounded model-context projection of unincorporated entries from the Checkpoint Event Journal. It supplies current deterministic facts without duplicating the original interaction or becoming another semantic summary.
+_Avoid_: all event history, raw tool output duplication, per-turn resummarization
+
+**Context Budget Stage**:
+One of the ordered context-capacity states—Lightweight Governance, Active Compaction, or Emergency Degradation—that determines how a Chat Checkpoint and its online history are reduced before a model call.
+_Avoid_: single hard truncation threshold, post-overflow-only compaction
+
+**Proactive Incremental Compaction**:
+The asynchronous, non-blocking preparation and validation of a bounded Chat Checkpoint update before an Active Compaction threshold is reached. Its prepared candidate is installed only when its snapshot remains valid at an Active Compaction or Emergency Degradation threshold.
+_Avoid_: threshold-only bulk compaction, blocking reply-path compression, per-message full resummarization
+
+**Precompaction Candidate**:
+A validated but inactive Checkpoint Update derived from a stable Chat snapshot and its exact source-message prefix. It may be installed without another ReMe call only when its base record revision, event sequence, and source prefix remain valid.
+_Avoid_: stale summary cache, immediately active checkpoint, overwrite of newer events
+
+**Elastic Context Budget**:
+The allocatable capacity remaining after permanent context and model-output safety space are protected. Checkpoint projection, recent original interaction, and recovered evidence compete within it according to the Current Task rather than occupying fixed partitions.
+_Avoid_: fixed percentage partition, unused reserved context, unbounded recovery injection
+
+**Context Epoch**:
+The portion of a Chat's context history eligible for default model-context assembly after a `/new` or `/clear` boundary. Earlier epochs remain durable Chat evidence but require explicit user intent before they may be recovered.
+_Avoid_: automatic pre-reset recovery, physical deletion on context reset, cross-epoch default context
+
+**Task Transition**:
+The explicit change of the Current Task within a Chat Checkpoint. It occurs only when the user introduces an independent goal after completion, explicitly starts a new task, or resets the Chat; corrective and incremental requests remain part of the Current Task.
+_Avoid_: every user turn is a new task, inferred task split, destructive history reset
+
+**Agent Profile**:
+A tenant-owned runtime configuration and workspace identity for one runnable Agent. An **Agent Profile** is distinct from a **SubAgent Definition**, which is a versioned delegation worker description.
+_Avoid_: agent-level config, subagent profile, worker profile
+
+**Default Agent Profile**:
+The tenant's built-in **Agent Profile** with the stable identifier `default`. It is the sole scope of the first Agent Profile Hook console release and remains available rather than being disabled or removed.
+_Avoid_: selected agent, active-agent selector
+
+**Default Agent Profile Hook Access**:
+The ordinary tenant-scoped access boundary for changing Default Agent Profile Hooks and their scripts. The first release adds no separate manager or administrator role requirement.
+_Avoid_: manager-only hook access, global hook administrator
+
+**Default Agent Profile Hook Audit Record**:
+A best-effort structured application-log event for a Default Agent Profile Hook or Hook Script change. It identifies the actor, time, action, affected script and digest when applicable, and a configuration-delta summary without retaining script content or runtime hook payloads; a logging failure does not prevent the action.
+_Avoid_: audit database table, hook execution log, full script archive, hook payload audit
+
+**Agent Profile Hook**:
+A lifecycle-hook configuration owned by exactly one **Agent Profile**. It applies only while that Agent Profile runs, rather than across a tenant or through a reusable Skill.
+_Avoid_: agent-level hook, tenant hook, skill hook
+
+**Agent Profile Hook Handler**:
+One configured action within an **Agent Profile Hook**. It is either a command handler, an HTTP handler, or a prompt handler; only a command handler may reference one or more **Agent Profile Hook Scripts**.
+_Avoid_: shell hook, script hook configuration
+
+**Agent Profile Hook Script**:
+A Python or shell executable asset owned by one **Agent Profile** and referenced through a command handler's ordered arguments. One command handler may reference multiple Agent Profile Hook Scripts; scripts cannot be deleted, but a same-name upload replaces the stored content after an explicit warning.
+_Avoid_: shared hook script, skill hook script, arbitrary binary, disposable script
+
+**Agent Profile Hook Script Replacement**:
+The explicit same-name upload that replaces an Agent Profile Hook Script's content for later Hook events. It records both the prior and replacement script digests and does not interrupt an executing Hook.
+_Avoid_: silent overwrite, script deletion
+
+**Agent Profile Hook Script Path Boundary**:
+The rule that a command handler may reference executable programs and ordinary arguments freely, but every argument used as a script must resolve to an Agent Profile Hook Script owned by the Default Agent Profile. Paths outside that controlled script set are not script references.
+_Avoid_: workspace script reference, absolute script path, path escape
+
+**Agent Profile Hook Script Type Boundary**:
+The first-release upload policy accepts only Python and shell source files with `.py`, `.sh`, `.bash`, or `.zsh` names. It excludes extensionless files and binary assets.
+_Avoid_: extensionless script, binary hook asset
+
+**Agent Profile Hook Script Safety Scan**:
+The application security scan applied to every Agent Profile Hook Script upload or replacement. It follows the active scan policy: disabled, warning-only, or blocking for unsafe findings.
+_Avoid_: unconditional script rejection, unscanned replacement
+
+**Agent Profile Hook Script Upload Batch**:
+One or more Hook Script files submitted together to the script library. Each file is validated and scanned independently, so successful files are retained while failed files report their own reasons.
+_Avoid_: all-or-nothing script upload, silent partial upload
+
+**Agent Profile Hook Script Upload Limit**:
+The first-release storage boundary of at most 1 MB per Hook Script and at most 20 files per Upload Batch.
+_Avoid_: unrestricted script upload, general file storage
+
+**Agent Profile Hook Activation Boundary**:
+The point after a saved Agent Profile Hook configuration has reloaded, from which later Hook events use it. A Hook already executing continues with its prior configuration and scripts.
+_Avoid_: immediate interruption, retroactive Hook update
+
+**Agent Profile Hook Configuration Removal**:
+The saved removal of a Handler or Matcher Group from the Default Agent Profile Hook configuration. It stops later Hook events from resolving that configuration while leaving its Hook Scripts retained in the script library.
+_Avoid_: script deletion, immediate Hook interruption
+
+**Agent Profile Hook Configuration Revision**:
+The version token for the complete Default Agent Profile Hook configuration. A save must name the revision it was based on; a mismatched current revision is a conflict rather than a silent overwrite.
+_Avoid_: last-writer-wins configuration save, invisible concurrent overwrite
+
+**Agent Profile Hook Manual Test**:
+An explicitly confirmed execution of one draft Agent Profile Hook Handler with an editable sample context. It does not save configuration, activate a reload, or consume once-only state; it performs the handler's real external effects, and its result is audited and presented in a redacted, bounded form.
+_Avoid_: full Hook replay, production event replay, unsandboxed preview
+
+**Agent Profile Hook Console**:
+The Default Agent Profile's user interface for maintaining its Hooks, Handlers, Scripts, and manual tests. It is a dedicated Run Center page with configuration and script-library areas; its changes emit audit logs, which are viewed through the application log system rather than the console.
+_Avoid_: raw configuration editor, partial Hook form
+
+**Agent Profile Hook Handler Identifier**:
+The stable identifier of one Agent Profile Hook Handler. It is generated by the console by default, may be edited, and must be unique across the Default Agent Profile Hook configuration.
+_Avoid_: duplicate handler ID, display-only handler name
+
+**Agent Profile Hook Matcher Group Identifier**:
+The stable identifier of one Agent Profile Hook Matcher Group. It is generated by the console by default, may be edited, and must be unique across the Default Agent Profile Hook configuration.
+_Avoid_: duplicate group ID, event-local-only group ID
 
 **Plan Mode**:
 A user-visible planning state where the Main Agent itself runs under reduced planning permissions and interacts with the user through planning cards before execution continues.
 _Avoid_: dry run, planning prompt
 
 **Proposed Plan**:
-A planning artifact presented by the Main Agent for user review before continuing work. A Proposed Plan contains a plan id, title, summary, steps, risks, verification items, open questions, and confidence.
+A planning artifact presented by the Main Agent for user review before continuing work. A Proposed Plan contains a plan id, title, summary, steps, risks, and verification items.
 _Avoid_: permission request, execution unlock
 
 **Plan Review Decision**:
-The user's response to a Proposed Plan: `revise`, `execute`, or `exit_plan`. `revise` keeps Plan Mode active for replanning, `execute` accepts the persisted Proposed Plan and continues in normal mode, and `exit_plan` closes Plan Mode without starting a Main Agent execution run by default.
+The user's response to a Proposed Plan: `revise`, `execute`, or `exit_plan`. `revise` enters or keeps Plan Mode active for replanning, `execute` accepts the persisted Proposed Plan and continues in normal mode, and `exit_plan` closes Plan Mode without starting a Main Agent execution run by default.
 _Avoid_: tool approval, permission grant
 
 **Plan Interaction Card**:
 A structured chat UI card used by the Main Agent to ask for planning clarification or present a Proposed Plan. A Plan Interaction Card is user-facing and is not emitted directly by a SubAgent.
 _Avoid_: subagent question card, free-form prompt hack
 
+**Plan Interaction Composer Replacement**:
+A blocking chat composer state where one active Plan Interaction Card replaces the normal user input panel until the user completes or dismisses that card. It owns the visible input controls for that moment; the normal composer input, send action, attachments, quick menu, and Plan Mode prefix controls are not concurrently available.
+_Avoid_: card above composer, floating plan card, parallel input form
+
+**Active Plan Interaction Card**:
+The latest non-superseded Plan Interaction Card in the chat timeline that is currently waiting for user action. At most one Active Plan Interaction Card owns the Plan Interaction Composer Replacement at a time.
+_Avoid_: all pending cards, card type priority, parallel active cards
+
 **Planning Clarification Card**:
 A Plan Interaction Card that asks the user for missing planning information using single choice, multiple choice, or text input.
 _Avoid_: generic form, survey
+
+**Custom Clarification Response**:
+A user-authored text answer shown as an always-visible input on a top-level single-choice or multiple-choice Planning Clarification Card. For single choice it is mutually exclusive with selecting a listed option; for multiple choice it may be submitted together with listed options. It is not a field-level option inside a structured clarification form.
+_Avoid_: collapsed other option, form field other option, generated option, hidden option id
 
 **Plan Interaction Response**:
 The user's structured answer to a Plan Interaction Card, submitted as the next normal chat turn with metadata that identifies the card and selected or entered value.
 _Avoid_: hidden plan API update, out-of-band form submission
 
+**Plan Interaction Event**:
+A persisted chat-context event that records a user's submitted action on a Plan Interaction Card, such as answering a clarification or deciding on a Proposed Plan. It is metadata, not user-visible prose, and it identifies the card by stable source identity first with runtime instance identity only as a fallback.
+_Avoid_: browser cache flag, local UI state, hidden text command
+
+**Plan Review Submission**:
+A Plan Interaction Event that records the user's `revise`, `execute`, or `exit_plan` decision for a Proposed Plan. Restored Plan Review Cards use this event and any backend-submitted status as the sources of truth for whether the review has already been handled.
+_Avoid_: browser-submitted flag, frontend-only review state
+
+**Plan Revision Input**:
+The next user-authored chat turn after the user chooses to continue modifying a Proposed Plan. It is the content submitted with a `revise` Plan Review Decision and keeps Plan Mode active.
+_Avoid_: empty revise click, implicit plan rejection
+
+**Plan Mode Exit Feedback**:
+The user-visible confirmation that an `exit_plan` Plan Review Decision succeeded. It is expressed by the Plan Mode control leaving the composer area, not by adding a chat message or starting a Main Agent run.
+_Avoid_: assistant exit message, plan execution result
+
+**Plan Review Snapshot**:
+A read-only historical presentation of a Proposed Plan after it has appeared in the chat history. A **Plan Review Snapshot** preserves review context but is not the active place for submitting a Plan Review Decision.
+_Avoid_: stale actionable card, replayed plan approval
+
+**Accepted Plan Review Snapshot**:
+A Plan Review Snapshot for a Proposed Plan whose `execute` Plan Review Decision has been submitted. It shows that the plan was accepted and normal Main Agent execution has started or will start.
+_Avoid_: active execution approval, editable accepted plan
+
+**Revised Plan Review Snapshot**:
+A Plan Review Snapshot for a Proposed Plan whose `revise` Plan Review Decision has been submitted. It shows that the previous proposal was sent back for modification and may include the user's Plan Revision Input as review context.
+_Avoid_: active revision form, rejected plan
+
+**Planning Clarification Dismissal**:
+The user's decision to close the current Planning Clarification Card without submitting a Plan Interaction Response. It is a current-runtime UI action, leaves Plan Mode active, and restores normal chat input for the user; after session restore it is not remembered unless the clarification was superseded by a later user message.
+_Avoid_: exit Plan Mode, reject plan, submit empty response
+
+**Planning Clarification Replay**:
+The behavior of showing a Planning Clarification Card again after a page reload or session restore. It is not part of the intended user flow for a card that was already displayed once in the current chat.
+_Avoid_: history replay, reload restoration, persistent clarification prompt
+
+**Planning Clarification Supersession**:
+The point where a Planning Clarification Instance is overtaken by any later user message in the same chat session. A superseded clarification is not shown again when the session is restored, while a later assistant message may still create a new Planning Clarification Instance with the same content.
+_Avoid_: render-seen state, frontend cache flag, browser storage marker
+
+**Planning Clarification Instance**:
+One visible Planning Clarification Card occurrence tied to a specific assistant message. Two cards with the same内容 but different assistant messages are different instances.
+_Avoid_: content fingerprint, semantic duplicate, shared clarification prompt
+
 **Plan Interaction Tool**:
 A built-in Main Agent tool that emits Plan Interaction Cards through validated structured metadata.
 _Avoid_: markdown JSON card, frontend text parser
+
+**Plan Interaction Tool Availability**:
+The source-scoped runtime rule that the Plan Clarification Tool and Proposed Plan Tool are available together in Plan Mode and, outside Plan Mode, only when enabled by that source's Source System Configuration. A configuration change applies to subsequent Agent requests; enabling ordinary-mode availability makes the tools callable without applying Plan Mode's planning instructions or permission restrictions.
+_Avoid_: automatic Plan Mode, forced planning workflow, global tenant switch
+
+**Plan Interaction Turn Boundary**:
+The conversation boundary created when the Main Agent emits a Plan Interaction Card through a Plan Interaction Tool. The current Main Agent turn finishes the already-started tool-call batch, then ends without another reasoning step and waits for a user Plan Interaction Response, regardless of the current Plan Mode State.
+_Avoid_: optional pause, prompt-only guideline, Plan Mode-only stop, sibling tool cancellation
 
 **Plan Clarification Tool**:
 The Plan Interaction Tool used by the Main Agent to ask the user a single planning clarification question.
@@ -55,6 +427,50 @@ _Avoid_: generic question tool, subagent prompt
 **Proposed Plan Tool**:
 The Plan Interaction Tool used by the Main Agent to present a Proposed Plan for `revise`, `execute`, or `exit_plan` review.
 _Avoid_: final answer tool, permission approval tool
+
+**Structured Interaction Envelope**:
+A runtime transport contract that carries validated interactive state and user responses between an agent workflow and a specialized CoPaw interface. Its first product consumer is the W+ SOP Workspace; it does not by itself create a generic interactive-skill product surface. For W+ SOP clarification, a question batch contains one to three typed questions; supported response controls are single-select, multi-select, and free text, including evidence-backed options with an Other text path. A batch is submitted atomically after all required responses are complete. Each submitted batch becomes one auditable owning-Chat response summary carrying the clarification session ID, round number, and revision number, and it triggers exactly one subsequent Miner turn. During generation the UI may stream lifecycle progress, but answer controls appear only after the complete question batch passes envelope validation and then become available atomically.
+_Avoid_: Plan Interaction Card, markdown JSON card, generic skill workspace
+
+**W+ SOP Answer Revision**:
+An append-only correction to an earlier answer in the current clarification history. Submitting it increments the revision, invalidates every downstream question, answer, and derived result, and regenerates from the corrected point. The owning Chat retains the original messages, appends a revision record containing the old value, new value, revision number, and affected rounds, and visually marks invalidated records; the Miner consumes only the current valid revision. Editing is allowed only while the session is active; a paused session must be resumed first, and completed or terminated sessions are permanently read-only.
+_Avoid_: edited Chat message, deleted audit history, branching valid answers
+
+**W+ SOP Workspace**:
+The W+-specific CoPaw interface for conducting and reviewing one W+ SOP Clarification Session. It is a specialized view of the owning Chat, not a separate conversation or a generic interface for all skills. It is the sole answer-submission surface while the session is active. The owning Chat renders each current question batch as a read-only audit card with session status and a Return to SOP Workspace action; it must not duplicate active answer controls. Navigating away from the workspace does not pause or otherwise mutate the session: the owning Chat remains locked until the user explicitly saves and exits, completes, or terminates the session.
+_Avoid_: Plan Mode, standalone chat, generic skill workspace
+
+**W+ SOP Session Control Card**:
+The single mutable Chat card representing one W+ SOP Clarification Session and serving as its stable navigation or recovery entry. Its state changes in place across Active, Pending Exit, Paused, Completed, and Terminated, while question, answer, and revision audit cards remain append-only and immutable. While the session is Active or Paused, the owning Chat also derives a non-message sticky bar above the input area: Return to SOP Workspace when active and Resume SOP when paused. The sticky bar disappears after completion or termination.
+_Avoid_: one resume card per transition, latest question as resume state, multiple active controls
+
+**W+ SOP Clarification Session**:
+A revisioned clarification process produced by `wplus-sop-miner`, bound to one owning Chat and containing the currently valid questions, answers, confirmed facts, and SOP result state. An owning Chat may have at most one active or paused session at a time. After that session is terminated, a new session may be created in the same Chat while the earlier session and its cards remain available as history. Producing and validating the final SOP does not by itself complete the session: the workspace must then present the Miner's evidence-backed memory candidates for explicit per-candidate consent, with a Skip All action. The session completes normally only after those choices are resolved. Normal completion restores the owning Chat input immediately but leaves the user on the final workspace result view; the Chat card becomes a read-only Completed entry that can reopen the result and history. Pausing restores normal Chat input, but later ordinary Chat turns remain outside the saved SOP state; resuming uses only the session's current valid revision unless the user explicitly adds information from inside the workspace.
+_Avoid_: Chat session, skill invocation, Plan Mode session
+
+**Pending W+ SOP Exit**:
+A transitional session state created when the user requests Save and Exit or Terminate while the Miner is generating. The workspace stops accepting new answers, allows the in-flight response to finish and persist, and only then applies the requested exit action so frontend and agent state remain consistent.
+_Avoid_: immediate stream disconnect, discarded response, disabled exit control
+
+**W+ SOP Recoverable Failure**:
+A terminal generation failure recorded against the last stable session revision after reconnecting to the same in-flight Chat run is no longer possible. The workspace preserves that stable state and offers an idempotent Retry Current Turn, Save and Exit, and Terminate; retrying must not append a duplicate answer audit record.
+_Avoid_: duplicate turn, automatic new generation, forced pause
+
+**W+ SOP Termination Summary**:
+The read-only artifact retained when a user permanently terminates an incomplete clarification session. It lists confirmed facts, explicit unknowns, unresolved questions, completed and incomplete stages, and the termination point, and must state that it is not a valid SOP. It cannot be passed to `wplus-skill-builder`.
+_Avoid_: partial SOP, assumed completion, builder-ready result
+
+**W+ SOP Result Bundle**:
+The validated final output of a normally completed clarification session: the readable SOP, `sop_spec.json`, and escaped HTML visualization. The first workspace release supports viewing and downloading these artifacts and states that they are ready for a later explicit `wplus-skill-builder` invocation; it neither invokes nor embeds the Builder.
+_Avoid_: automatic Builder invocation, incomplete SOP bundle, implicit handoff
+
+**W+ SOP Workspace V1 Privacy Scope**:
+The first workspace release adds no dedicated client or server feature for detecting, blocking, or automatically redacting sensitive text in clarification answers. Existing CoPaw controls and the Miner's privacy rules remain applicable, but new workspace-specific sensitive-input enforcement is outside this feature scope.
+_Avoid_: claimed PII protection, implicit redaction, weakening Miner policy
+
+**W+ SOP Workspace Entry**:
+The explicit transition from an owning Chat into a W+ SOP Workspace. A direct user invocation of `wplus-sop-miner` may enter immediately; an implicitly detected invocation must first render a clickable Chat confirmation card with Confirm and Reject actions. Confirm creates the W+ SOP Clarification Session, uses the already-submitted original request as the Miner's initial input, navigates to the new workspace, and begins producing the first clarification question without requiring resubmission. Reject cancels the Miner invocation, keeps the user in normal Chat, and returns the original request to the normal Chat agent for processing. The rejected turn must suppress `wplus-sop-miner` re-detection so the confirmation card cannot loop, and it does not create or activate a W+ SOP Clarification Session.
+_Avoid_: silent route switch, automatic implicit entry, Plan Mode entry
 
 **Plan Delegation**:
 An optional Main Agent action in Plan Mode that creates a SubAgent Run through the normal delegation mechanism. Plan Delegation is allowed but is never automatic or required by Plan Mode.
@@ -75,6 +491,10 @@ _Avoid_: one-shot plan flag, global plan switch
 **Scheduled Job**:
 A recurring task definition owned by a tenant and executed by the runtime at configured times. One **Scheduled Job** can have many **Scheduled Runs**.
 _Avoid_: cron config, timer task
+
+**Scheduled Firing Count**:
+The number of planned firing occurrences produced by enabled, active **Scheduled Job** definitions within a selected time range. One Scheduled Job contributes once for every matching cron occurrence. A **Scheduled Firing Count** describes planned schedule density only; it does not prove that runs are queued, delayed, executing, or backlogged.
+_Avoid_: backlog count, running task count, execution count
 
 **Scheduled Run**:
 A single execution of a **Scheduled Job**, whether triggered by schedule or manually.
@@ -172,6 +592,129 @@ _Avoid_: output_len=0, blank reply, empty cron output
 A source-scoped runtime configuration surface for behavior shared by requests from the same external source. It is not a tenant configuration and does not describe user, organization, or workspace identity.
 _Avoid_: system feature configuration, system feature config, 系统特性配置, tenant config, user config
 
+**Source Built-in Tool**:
+An executable custom tool asset owned by one source and available to every tenant under that source. A Source Built-in Tool is distinct from an Agent Profile's built-in-tool configuration, and no tenant owns or may alter it.
+_Avoid_: source tool config, shared tenant tool, tenant tool script
+
+**Source Built-in Tool Contract**:
+The AgentScope-compatible callable identity, purpose, and input shape of one Source Built-in Tool. Its identity is a stable restricted tool name, independent of its script filename; the first release establishes it through statically inspectable declarations for a complete tool JSON Schema, credentials, and a Python script with one fixed invocation entry point. Neither the number of active tools nor individual Schema size or complexity is capped.
+_Avoid_: free-form script invocation, filename-only tool definition, dynamic Schema, dynamic credential declaration, tool-count quota, Schema complexity quota
+
+**Source Built-in Tool Adapter**:
+The Swe-owned adapter that registers a Source Built-in Tool with the regular Toolkit, validates calls against its Source Built-in Tool Contract, invokes the script across its execution boundary, and normalizes the result into the regular tool response contract.
+_Avoid_: in-process uploaded script, custom model protocol, raw script result
+
+**Source Built-in Tool Execution Boundary**:
+The per-invocation boundary that runs a Source Built-in Tool with only the current tenant's workspace and authorized runtime capabilities. Every call passes the ordinary Tool Guard and approval chain and enforces the Python tenant path guard, resource boundary, and credential declaration; if any guard cannot be established, the call fails closed. The source shares tool code, never tenant data, credentials, or management authority.
+_Avoid_: source-wide tenant access, shared credential context, backend-process execution, guard bypass, permissive fallback
+
+**Source Built-in Tool Resource Boundary**:
+The resource boundary for a Source Built-in Tool call. It inherits the current tenant's process CPU, memory, and concurrency limits and has the standard sixty-second timeout; a source tool cannot raise those limits.
+_Avoid_: source-level resource escalation, unlimited shared tool, script-defined resource cap
+
+**Source Built-in Tool Async Execution**:
+The first-release execution mode for Source Built-in Tools. Newly added source tools run synchronously; only an Override of `execute_shell_command` inherits that Agent's existing asynchronous-execution choice.
+_Avoid_: general source-tool background mode, source-owned async toggle, lost shell async choice
+
+**Source Built-in Tool Credential Declaration**:
+The explicit list of runtime environment variable names a Source Built-in Tool needs. A call receives only the declared values from its current tenant; missing values produce a structured configuration failure, and source or backend credentials are never eligible.
+_Avoid_: whole tenant environment, source secret, backend secret, implicit credential access
+
+**Source Built-in Tool Dependency Boundary**:
+The first-release rule that a Source Built-in Tool is one Python source file of at most 1 MB, using only the standard library and Swe's fixed runtime interface. It cannot install, bundle, or select third-party dependencies or a custom runtime.
+_Avoid_: requirements file, package upload, runtime installation, custom virtual environment, oversized source file
+
+**Source Built-in Tool Safety Gate**:
+The mandatory upload scan for every Source Built-in Tool version. A safety finding or unavailable scan rejects publication; source management cannot bypass this gate.
+_Avoid_: warning-only publication, scan bypass, unscanned source tool
+
+**Source Built-in Tool Manual Test**:
+An explicitly confirmed real execution of an unpublished Source Built-in Tool version using the current Source Tool Administrator's selected Agent Profile, tenant workspace, declared credentials, and JSON input validated against the draft's Contract. Its displayed result uses the normal redaction and output limits; audit excludes test inputs, script content, and credentials. It neither publishes the version nor changes availability for other tenants.
+_Avoid_: dry-run, source-wide test, implicit publish, side-effect-free preview, unchecked test input, unrelated Agent context, unbounded test output
+
+**Source Built-in Tool Activation Boundary**:
+The start of an Agent run, when it snapshots its effective Source Built-in Tool catalog. Publication, replacement, and deactivation affect the next Agent run only; a running Agent retains its starting catalog.
+_Avoid_: mid-run tool mutation, next-call-only reload, retroactive catalog change
+
+**Source Built-in Tool Historical Record**:
+The retained scripts, version snapshots, content identities, and audit records for a Source Built-in Tool. The first release permits deactivation but no rollback or permanent deletion of this record.
+_Avoid_: destructive source-tool deletion, erased audit trail, rollback history
+
+**Source Built-in Tool Result Boundary**:
+The rule that a Source Built-in Tool returns only a JSON-serializable business result. The Source Built-in Tool Adapter turns it into the normal tool response and applies Swe's standard failure, redaction, output-limit, conversation-record, and observability behavior. A runtime failure never falls back to a code-defined built-in, even for an Override.
+_Avoid_: script-defined UI card, raw script output, custom error transport, fallback to built-in implementation
+
+**Source Built-in Tool Network Boundary**:
+The rule that a Source Built-in Tool may use only the platform's existing network egress policy. It cannot configure or bypass network destinations, and external authentication remains limited to its current tenant's declared credentials.
+_Avoid_: source-controlled egress allowlist, network bypass, shared integration credential
+
+**Source Built-in Tool Invocation Attribution**:
+The source-tool identity, tool name, and published version or content identity recorded with a standard tool invocation, alongside its tenant, source, Agent, and result. It excludes call arguments, script bodies, and credential values.
+_Avoid_: unattributed shared-tool call, logged tool secret, persisted script body
+
+**Source Built-in Tool Change Notification**:
+The cross-tenant notification of a Source Built-in Tool publication, replacement, or deactivation. The first release sends none; the change is observable through the next Agent run's effective catalog and source-level audit records.
+_Avoid_: tenant broadcast, source-tool change message, silent untraceable change
+
+**Source Built-in Tool Override**:
+The precedence rule under which a Source Built-in Tool with the same tool name replaces a Swe code-defined built-in tool for that source. An Override retains the built-in's complete tool JSON Schema while changing only implementation and description. It never overrides a Skill- or MCP-provided tool; such a name collision is invalid.
+_Avoid_: registration-order override, Schema-changing built-in override, Skill override, MCP override
+
+**Source Built-in Tool Replacement**:
+The explicitly confirmed publication of a staged same-name Source Built-in Tool draft. It is audited and affects later calls only; a call already executing retains the version with which it began.
+_Avoid_: retroactive replacement, execution interruption, silent overwrite, unconfirmed replacement
+
+**Source Built-in Tool Draft**:
+An unpublished Source Built-in Tool version that has passed static validation and the Source Built-in Tool Safety Gate. A Source Tool Administrator may manually test it or explicitly publish it; it does not change any Agent's effective catalog before publication.
+_Avoid_: implicit publication, unscanned test script, active source tool
+
+**Source Built-in Tool Draft Discard**:
+The explicit removal of an unpublished Source Built-in Tool Draft by a Source Tool Administrator. It does not remove published tool history; its creation, testing, and discard remain auditable as metadata.
+_Avoid_: published-version deletion, unaudited draft removal, source-tool rollback
+
+**Source Built-in Tool Draft Uniqueness**:
+The rule that each source and tool name has at most one unpublished Source Built-in Tool Draft. A later upload must explicitly replace or discard the existing draft before it can become the sole draft.
+_Avoid_: multiple pending versions, ambiguous publication target, parallel draft set
+**Source Built-in Tool Availability**:
+The source determines which Source Built-in Tools are available to an Agent, while the Agent's own enabled or disabled choice determines whether an available tool is callable for that Agent. An Override replaces implementation only and cannot bypass a disabled choice.
+_Avoid_: source-forced enablement, override bypass, tenant implementation ownership
+
+**Source Built-in Tool Default Enablement**:
+A newly published non-conflicting Source Built-in Tool is initially enabled for every Agent under its source through lazily resolved source defaults, without bulk-writing Agent configuration. Each Agent may later disable it through its own tool configuration.
+_Avoid_: opt-in-only source tool, permanently forced tool, bulk tenant configuration write
+
+**Source Built-in Tool Agent Choice Persistence**:
+An Agent's explicit enabled or disabled choice for a Source Built-in Tool survives that tool's source-level deactivation and later reactivation. Only an Agent that has never encountered the tool receives its default enablement.
+_Avoid_: reactivation reset, source-forced re-enable, forgotten Agent choice
+
+**Source Built-in Tool Catalog Exposure**:
+The complete registration of every source-enabled Source Built-in Tool that the Agent has not disabled when an Agent run begins. It is not filtered by user intent, keywords, or on-demand discovery.
+_Avoid_: lazy source tool, keyword-selected tool, partial source catalog
+
+**Source Tool Library**:
+The source-scoped management collection of Source Built-in Tools. It is presented within the Source System Configuration page but has independent storage and lifecycle from Source System Configuration. Its first release accepts complete-file upload and same-name replacement, not browser-based script editing, and does not cap the number of enabled Source Built-in Tools.
+_Avoid_: source configuration JSON, agent tool list, tenant script library, browser script editor, source tool-count quota
+
+**Source Tool Library Storage**:
+The Swe-controlled, source-isolated storage of Source Built-in Tool scripts and their version history. It is separate from Marketplace storage while retaining atomic publication, content identity, and audit history.
+_Avoid_: Marketplace item storage, tenant workspace storage, Source System Configuration storage, rollback store
+
+**Source Built-in Tool Script Read Access**:
+The read-only viewing or download of current and historical Source Built-in Tool scripts by a Source Tool Administrator. Ordinary tenants may see effective tool metadata but not script content.
+_Avoid_: tenant script download, browser editing, public source code
+
+**Source Built-in Tool Deactivation**:
+The source-level withdrawal of a Source Built-in Tool. It affects later calls only: a deactivated Override restores the code-defined built-in, while a deactivated unique source tool is unavailable; historical versions and audit records remain for tracing only.
+_Avoid_: destructive deletion, interrupted call, disabled Agent tool, rollback
+
+**Source Built-in Tool Failure Availability**:
+The rule that a runtime failure of a Source Built-in Tool affects only that invocation and does not deactivate the tool. Source-level availability changes only through an explicit Source Tool Administrator action.
+_Avoid_: automatic circuit-breaker deactivation, failure-driven source mutation, implicit source disablement
+
+**Source Tool Administrator**:
+The manager or administrator authorized for the current source and permitted to upload or replace a Source Built-in Tool. A tenant administrator may use such a tool but may not manage it.
+_Avoid_: tenant tool administrator, any tenant uploader
+
 **Source System Configuration Override**:
 A value explicitly saved in **Source System Configuration** that replaces the corresponding broader runtime setting for requests from that source. Missing values are inheritance, not implicit overrides.
 _Avoid_: source default, tenant override, page default
@@ -179,6 +722,10 @@ _Avoid_: source default, tenant override, page default
 **Runtime Request Identity**:
 The tenant and source context that determines which runtime configuration and model selection a request observes. One **Runtime Request Identity** resolves to one **Tenant Provider Configuration** view for provider and active-model reads.
 _Avoid_: cache key, auth header set, iframe context
+
+**Background SubAgent Launch Identity**:
+The **Runtime Request Identity** carried from the Main Agent runtime into a **Background SubAgent Run** so the worker observes the same source-scoped runtime configuration and model selection as its parent run.
+_Avoid_: effective tenant only, provider cache key, worker tenant
 
 **Tenant Scaffold Bootstrap**:
 The tenant setup state in which a runtime scope has the required tenant-local workspace structure and baseline files. A **Tenant Scaffold Bootstrap** does not imply that the first-run conversational onboarding has happened.
@@ -188,9 +735,125 @@ _Avoid_: chat bootstrap, BOOTSTRAP.md flow, onboarding chat
 The first-run conversational onboarding in which an Agent learns and records identity, style, and user preferences. A **Bootstrap Chat Flow** is separate from **Tenant Scaffold Bootstrap** and may be skipped for a tenant that still has a valid scaffold.
 _Avoid_: tenant bootstrap, scaffold bootstrap, workspace initialization
 
+**Disabled Skill**:
+A managed skill package retained by the control plane but excluded from the **Skill Runtime View** and ordinary Agent skill discovery for later runs. Disabled status alone is not a filesystem security boundary.
+_Avoid_: hidden skill, unregistered skill, inactive skill
+
+**Disabled Skill Store**:
+A Workspace-scoped retention area for **Disabled Skill** packages outside the conventional runtime skill path. It is managed through skill-management surfaces but remains ordinary filesystem content that generic file or shell searches may discover.
+_Avoid_: skill sandbox, secure skill store, deleted skills
+
+**Skill Management State**:
+The authoritative backend-managed record of installed skills, enablement, channel availability, and configuration for one Workspace. It is accessed through skill-management surfaces rather than ordinary Workspace browsing, search, or editing.
+_Avoid_: workspace skill file, user-editable skill manifest, runtime skill list
+
+**Skill Management Surface**:
+A user-visible service or API that performs a managed skill lifecycle operation, including enablement, disablement, deletion, re-import, distribution, or editing. It resolves a registered package from **Skill Management State** to either the **Skill Runtime View** or **Disabled Skill Store**; a surface may write enablement state and rely on later reconciliation for package placement when that is its established service boundary. Market may also perform an **Explicit Skill Claim**.
+_Avoid_: skill-directory browser, active-directory-only management surface
+
+**Managed Skill Package Resolution**:
+The management-surface rule for locating a registered package from its **Skill Management State**. It prefers the root selected by enablement and falls back to the other managed root during a **Skill State Conflict**. An **Active Collision Promotion** takes precedence when both copies exist. A Market mutation receives both the resolved package and an explicit promotion result: it is true only when the collision changes a registered skill from disabled to enabled, so only that case requires the one Agent reload. It does not resolve **Unmanaged Skill Content** that has no registered-name collision.
+_Avoid_: enumerate every skill-looking directory, manifest-only package lookup
+
+**Active Collision Promotion**:
+The default resolution of a same-name active and disabled package: the `skills/` package is retained as the **Canonical Skill Package**, the `.disabled_skills/` package is deleted, and the registered skill becomes enabled. SWE reconciliation and Market explicit management both apply this rule.
+_Avoid_: preserve disabled state on active collision, ambiguous duplicate skill
+
+**State-Preserving Distribution**:
+Market distribution that installs an unregistered skill as enabled, but updates an already registered package at its managed location without changing its enablement. In particular, updating a **Disabled Skill** does not make it part of the **Skill Runtime View**.
+_Avoid_: update means enable, replace-active-directory-only
+
+**Disabled Skill Maintenance**:
+Management-surface viewing, downloading, editing, and publishing of a **Disabled Skill** at its resolved package location. Maintenance changes package content or related metadata but does not change enablement.
+_Avoid_: disabled means immutable, maintenance means enable
+
+**Canonical Skill Package**:
+The authoritative package content when the same skill exists in both the **Skill Runtime View** and **Disabled Skill Store**. The runtime-view copy wins for content; **Active Collision Promotion** is the exception to ordinary **Skill Management State**-driven placement and changes the registered skill to enabled.
+_Avoid_: newest skill copy, enabled skill state, manifest-selected content
+
+**Skill State Conflict**:
+A disagreement between **Skill Management State** and the retained location of a skill package. A skill in conflict is unavailable to Agent Runs until the disagreement is reconciled.
+_Avoid_: partially enabled skill, best-effort skill state, usable mismatch
+
+**Unmanaged Skill Content**:
+Workspace content that resembles a skill package but has no entry in **Skill Management State**. It is neither registered nor governed by disabled-skill discovery guarantees, even when it remains visible to model-initiated file or shell tools. Market may retain its legacy list, viewing, download, editing, publishing, and direct-delete behavior for this ordinary content; only an **Explicit Skill Claim** creates managed state, except that a same-name registered disabled package triggers **Active Collision Promotion**.
+_Avoid_: disabled skill, automatically installed skill, runtime skill
+
+**Explicit Skill Claim**:
+A user-initiated Market enablement of **Unmanaged Skill Content** in the ordinary skill directory. After the established security scan, it creates the corresponding **Skill Management State** entry as enabled. Except for **Active Collision Promotion**, SWE never claims unmanaged content automatically, and the **Disabled Skill Store** contains only registered packages.
+_Avoid_: automatic skill discovery, reconciliation registration, disabled-skill import
+
+**Skill Runtime View**:
+The current set of registered and enabled skill packages selected from a Workspace's ordinary skill directory. It excludes **Unmanaged Skill Content**, changes immediately when skill enablement changes, and gives existing Agent Runs no guarantee that earlier skill files remain available.
+_Avoid_: skill snapshot, immutable skill view, complete skill directory
+
+**Console Skill Selection Panel**:
+The command-style panel opened by `@` in Console chat for selecting ordered **User-Selected Skills**, including duplicates, from the current **Skill Runtime View**. A selection is represented both by an **Inline Skill Tag** in the message and by trusted structured selection context; the panel does not list built-in tools, MCP tools, or other callable runtime capabilities.
+_Avoid_: tool panel, MCP menu, all-capabilities menu
+
+**Inline Skill Tag**:
+The visible, atomic `@` label for one **User-Selected Skill** occurrence inside a Console chat message, created only by confirmation in the **Console Skill Selection Panel**. It is user-message content for readability, but does not replace the trusted structured selection context that resolves the selected skill; deleting the tag removes its corresponding selection occurrence as well.
+_Avoid_: trusted skill directive, tool call, execution proof
+
+**User-Selected Skill**:
+A **Skill Runtime View** member that a user explicitly selects for a single chat turn and remains available when that turn starts. A turn may contain repeated **User-Selected Skills**; their **Skill Use Directives** are injected in selection order after duplicate runtime identifiers are removed. Each selection records user intent as structured turn context with a readable message marker, but is not evidence that the skill actually executed.
+_Avoid_: skill mention, forced tool call, permanently active skill, single selected skill
+
+**Explicit Skill Selection Activation**:
+The session-scoped activation of a **User-Selected Skill** after the server validates its structured selection against the current **Skill Runtime View** and resolves its readable `SKILL.md`. It loads that skill's Hooks after the current turn's `UserPromptSubmit` and `SessionStart` events, before subsequent tool calls, and persists them for the rest of the session; it does not establish **Actual Skill Use**, set a current skill, create a skill invocation trace, or prove the model read the skill document.
+_Avoid_: plain-text skill mention, filename match, automatic semantic inference, confirmed skill use
+
+**Skill Runtime Identifier**:
+The stable `name` of a skill package in one Workspace: its managed skill-directory name and **Skill Management State** key. It is the identity used for runtime selection, channel availability, and injection de-duplication; a frontmatter or market `skill_id` is not a substitute.
+_Avoid_: display name, frontmatter name, market skill id
+
+**Skill Use Directive**:
+A trusted instruction block for one **User-Selected Skill** whose server-resolved `SKILL.md` exists and is readable. It names the skill, describes it, and supplies that path; it requires the Agent to read the document before acting, but does not include the document's full content. With multiple directives, every document is read in directive order before task execution begins.
+_Avoid_: skill prompt copy, user-supplied file path, complete skill document
+
+**Skill-Use Enforcement**:
+The runtime policy that verifies an Agent followed a **Skill Use Directive** before it acts. The first rollout has no Skill-Use Enforcement; the directive is a trusted model instruction rather than a runtime gate.
+_Avoid_: prompt injection, tool attribution, guaranteed skill execution
+
+**Actual Skill Use**:
+The runtime-detected participation of a skill in a turn, established only by reading its resolved `SKILL.md` or by a tool input that targets an asset under its resolved skill directory. It is distinct from **User-Selected Skill** and is the only basis for tool-call skill attribution.
+_Avoid_: selected skill, requested skill, assumed skill invocation, filename suffix match, keyword match
+
+**Non-Authoritative Skill Signal**:
+A file suffix, prose-derived keyword, tool hint, tool sequence, or MCP server name associated with a skill. It may support offline analysis but never activates, continues, attributes, or loads Hooks for a skill at runtime.
+_Avoid_: activation evidence, continuation evidence, attribution evidence, hook trigger
+
+**Skill Asset Evidence**:
+A tool input that resolves to a path inside one enabled skill's effective directory. It may establish **Actual Skill Use**, but loads that skill's Hooks only when the skill was already explicitly selected or its resolved `SKILL.md` was read in the session.
+_Avoid_: extension match, text substring, arbitrary workspace path, hook bootstrap
+
+**Session Skill Hook Order**:
+The deterministic hook order for a session with explicitly selected skills: tenant Hooks, then Agent Profile Hooks, then one deduplicated Hook source for each selected skill in its first-selection order. Later selections append only previously unloaded skills; normal Hook result merging resolves conflicts.
+_Avoid_: arbitrary hook order, repeat-selection duplication, last-selected-first execution
+
+**Unavailable Skill Selection**:
+A user-requested skill choice that is no longer in the **Skill Runtime View** when its chat turn starts. The choice is discarded without skill guidance or selection-based attribution, while other **User-Selected Skills** in the same turn may still apply; the turn is ordinary chat only when none remain.
+_Avoid_: failed chat turn, disabled skill invocation, deferred selection, auditable selection
+
+**Skill Isolation Guarantee**:
+The stronger platform-independent boundary under which disabled skill content is inaccessible to model-initiated tools on every supported operating system. **Skill Isolation Guarantee** is distinct from **Skill Discovery Suppression**.
+_Avoid_: best-effort skill hiding, platform-specific skill safety, shell path filter
+
+**Skill Discovery Suppression**:
+The default disabled-skill behavior that removes a package from Agent registration, prompting, and conventional skill-directory discovery. It reduces accidental reuse but does not deny generic file searches or deliberately crafted shell access.
+_Avoid_: skill isolation, filesystem sandbox, disabled-skill authorization
+
 **Runtime Invocation Claims**:
 Session, trace, tenant, and source claims that Swe passes across a runtime invocation boundary for a receiving tool or integration to interpret inside an already trusted channel. **Runtime Invocation Claims** are distinct from **Runtime Request Identity**, which is internal request context, and are not independently verifiable credentials.
 _Avoid_: runtime metadata, env/header info, credential, signed token
+
+**Execution Trace ID**:
+The unique identifier for one Swe execution. Spans, Subtasks, execution records, feedback, and Runtime Invocation Claims correlate through this identifier even when several executions share one external distributed trace.
+_Avoid_: B3 trace ID, batch ID, request header trace ID
+
+**B3 Trace ID**:
+The external distributed-tracing identifier received through B3 transport metadata. It may be shared by multiple executions in one Dispatch Batch and therefore is not an execution identity.
+_Avoid_: execution trace ID, Subtask trace ID, unique run ID
 
 **Canonical Runtime Claim Name**:
 The preferred external name for one **Runtime Invocation Claim** at a specific transport boundary. Canonical names are stable and transport-appropriate; compatibility aliases may exist only for boundaries that already require them.
@@ -259,6 +922,14 @@ _Avoid_: file compaction, historical tool result compaction
 **Tool Output Controls**:
 The user-facing grouping for source-scoped controls over historical tool-result compaction and file-read output truncation.
 _Avoid_: tool result compression configuration
+
+**Context Window**:
+The bounded model input budget available to a Main Agent turn. A **Context Window** is measured as the configured capacity used to decide whether the next turn can fit its prompt, memory, conversation history, and current user input.
+_Avoid_: token bill, monthly quota, historical usage
+
+**Persisted Context Occupancy**:
+An estimate of how much of the **Context Window** is occupied by the persisted state and fixed runtime context that would actually enter the next Main Agent model input after any completed compaction. It includes system prompt, completed compressed summary, effective history messages, and compacted tool results; it excludes unsent composer text, already-compacted raw history, and tokens already billed by previous model calls.
+_Avoid_: token usage, usage statistics, cost usage
 
 **Tool Call Status**:
 The user-visible lifecycle state of one user-visible tool invocation during a Main Agent run. A **Tool Call Status** describes an individual tool invocation as running, successful, or failed; failed means the tool itself failed, not that the user stopped or cancelled the overall Main Agent run. The start of a tool invocation carries the running status, and the tool's returned output carries the successful or failed terminal status.
@@ -339,6 +1010,14 @@ _Avoid_: raw prompt, raw tool input, raw tool output, full updated input
 **Current Tool Response**:
 The successful output produced by the current tool invocation for the active `PostToolUse` boundary. A **Current Tool Response** is the tool's business output, not the full persisted `tool_result` block and not a **Hook Conversation Snapshot**.
 _Avoid_: full tool result block, conversation snapshot, AgentScope acting return value
+
+**PreToolUse Terminal Stop**:
+A `PreToolUse` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}` and available to every handler type, that rejects the pending tool invocation and ends the current Main Agent turn without another model call. The first `stop` in handler order is authoritative and cannot be replaced by another decision or input update; handler failures and `failPolicy:block` never imply it. Its reason, or the stable fallback `Hook requested stop`, is always emitted and persisted as the turn's final assistant message while the failed tool result remains available for tool presentation and audit as `hook_stopped`. It blocks unstarted peer calls and requests best-effort cancellation of already-started peer calls; it does not promise rollback of external side effects. It bypasses the later `Stop` hook. It is distinct from `deny` and `block`, which reject the invocation but allow the Main Agent to choose a different next action.
+_Avoid_: terminal deny, blocked tool, cancelled session
+
+**PostTool Terminal Stop**:
+A `PostToolUse` or `PostToolUseFailure` hook outcome with the explicitly returned `stop` decision, expressed as `{"decision":"stop","reason":"…"}`, that ends the current Main Agent turn after the tool outcome is known. It requests best-effort cancellation of unfinished peer calls while retaining completed outcomes and without promising external rollback. It records the completed tool outcome and post-hook context before the final assistant reason, then bypasses the `Stop` hook. It does not rewrite the completed tool outcome; for a failed tool, it replaces propagation of the original tool exception while retaining that failure for presentation and audit. Hook failure, `failPolicy:block`, `deny`, and `block` never imply it. It is distinct from `deny` and `block`, which remain non-terminal for post-tool events.
+_Avoid_: post-tool denial, tool rollback, completed session
 
 **Hook Conversation Snapshot**:
 A bounded hook-facing snapshot of the current session's message list at one Hook Runtime boundary, including normal user, assistant, tool-call, and tool-result messages while excluding reasoning content. A **Hook Conversation Snapshot** is not the saved transcript file and is not the full Agent state.
@@ -496,10 +1175,38 @@ _Avoid_: final answer text, assistant-only bubble, latest response, answer-only 
 The stable conversation identity used to continue chat context across turns. A **Logical Chat Session** is distinct from the persisted chat record used to load or display the conversation.
 _Avoid_: chat UUID, UI session row, temporary frontend id
 
+**Chat Record**:
+The persisted, displayable record for one conversation, identified by a chat UUID and returned by chat-list APIs. A **Chat Record** is distinct from the **Logical Chat Session** that carries conversational continuity.
+_Avoid_: logical chat session, UI session, conversation identity
+
+**Chat Record Last Updated Time**:
+The timestamp of the most recent persisted change to a **Chat Record**. It establishes recency when Chat Records are listed.
+_Avoid_: Chat Record creation time, message timestamp, Logical Chat Session time
+
+**Conversation Compaction Boundary**:
+The durable, user-visible separator within one **Chat Record** marking the point where automatic context compaction or an explicit `/compact` archived earlier messages. It appears immediately through a non-message stream event and is restored from the archive on reload; its archived-message count is the number of display-safe history messages, not rendered cards; it never represents `/new` or `/clear`.
+_Avoid_: history-clear marker, new-conversation marker, summary message
+
+**Conversation Compaction Archive**:
+The Chat-Record-scoped durable store of messages removed by **Conversation Compaction Boundaries**, with exactly one committed immutable message batch per boundary. Deleting its **Chat Record** permanently deletes this archive, while existing Logical Chat Session state follows its separate retention policy.
+_Avoid_: shared daily dialog file, chat transcript, session state
+
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
-Resolved to mean creating a **SubAgent Run**, not creating a new **SubAgent Definition**. User-defined SubAgent Definition CRUD/UI is outside the next stage.
+Resolved to distinguish two cases: starting work creates a **SubAgent Run**, while a Main Agent may also supply a **Run-scoped SubAgent Definition** for that single run. Creating a **Stored SubAgent Definition** with reusable persistence remains outside the next stage.
+
+**"Start Built-in SubAgent By Name"**:
+Resolved as outside the compact **SubAgent Start Request**. The Main Agent must provide a **SubAgent Name**, **Instruction**, and objective when calling the start tool; built-in or stored definition matching belongs to a separate registry-facing entry point.
+
+**"Async SubAgent Creation"**:
+Resolved to mean starting a **Background SubAgent Run** that can be queried, completed, or cancelled by run id.
+
+**"SubAgent Subprocess"**:
+Resolved as the next **SubAgent Execution Backend** for **Background SubAgent Runs**. It remains an execution mechanism, not a new kind of **SubAgent Definition**.
+
+**"Cancel SubAgent"**:
+Resolved for the next stage as **SubAgent Run Cancellation** of the subprocess process group that owns the run. If a terminal result has already been written, cancellation does not overwrite it.
 
 **"Enter Plan Mode"**:
 Resolved to require an **Explicit Plan Entry** such as a chat-window toggle or `/plan` command. Automatic silent switching is outside the next stage.
@@ -580,16 +1287,43 @@ Resolved as outside the next Plan Mode design. The existing SubAgent runtime and
 Resolved as a **Hook Telemetry Log Message** emitted for log collection and analysis, not a Trace Span persisted in tracing storage and not a global logging format change.
 
 **"Plan Mode Delegation"**:
-Resolved as allowed but optional. Plan Mode may expose `delegate_to_subagent`, but it does not auto-call `plan-researcher` or any other built-in SubAgent.
+Resolved as allowed but optional. Plan Mode may expose readonly **Background SubAgent Tools**, but it does not auto-call `plan-researcher` or any other built-in SubAgent.
 
 **"Plan Mode Tool Scope"**:
-Resolved as the **Planning Readonly Policy**: `read_file`, `grep_search`, `glob_search`, `get_current_time`, readonly shell, and readonly `delegate_to_subagent` are allowed; `write_file`, `edit_file`, `copy_file_to_static`, `update_task_progress`, mutating shell, test commands, deployment commands, and migration commands are forbidden.
+Resolved as the **Planning Readonly Policy**: `read_file`, `grep_search`, `glob_search`, `get_current_time`, readonly shell, and readonly **Background SubAgent Tools** are allowed; `write_file`, `edit_file`, `copy_file_to_static`, `update_task_progress`, mutating shell, test commands, deployment commands, and migration commands are forbidden.
 
 **"Plan Interaction Types"**:
-Resolved to support only `single_choice`, `multi_choice`, `text_input`, and `plan_review` in the first version.
+Resolved to support only `single_choice`, `multi_choice`, `text`, and `plan_review` in the first version.
 
 **"Plan Card Submission"**:
 Resolved as a normal next chat turn carrying **Plan Interaction Response** metadata, not a separate plan-state API call.
+
+**"Planning Clarification Replay"**:
+Resolved to not reappear after a page reload or session restore once the card has already been shown in the current chat flow.
+
+**"Planning Clarification Instance"**:
+Resolved as assistant-message scoped. A later assistant message that repeats the same clarification content is treated as a new instance and may render again.
+
+**"Planning Clarification Submission Scope"**:
+Resolved as assistant-message scoped. Submitting a Planning Clarification Card marks that assistant message's clarification instance as handled, and does not suppress a repeated clarification from a later assistant message.
+
+**"Planning Clarification Display Memory"**:
+Resolved as derived from chat history instead of browser storage. A displayed Planning Clarification Card is not hidden merely because it rendered once; it is hidden on restore only after **Planning Clarification Supersession** or a submitted response can be inferred from later chat context.
+
+**"Planning Clarification First Display Timing"**:
+Resolved as realtime stream display. A Planning Clarification Card may render as soon as its structured metadata first appears in the active assistant stream, but that displayed instance must not reappear after reload or session restore.
+
+**"Planning Clarification Seen Moment"**:
+Replaced by **Planning Clarification Supersession**. First client render alone does not make the clarification seen, resolved, or hidden on restore.
+
+**"Planning Clarification Live Update"**:
+Resolved as continuing to update the currently visible Planning Clarification Card while its live assistant response changes. The seen state only prevents replay after reload or session restore; it does not freeze the active card.
+
+**"Dismiss Planning Clarification"**:
+Resolved as a **Planning Clarification Dismissal** that closes only the current clarification, restores normal chat input, keeps Plan Mode active, and submits no message.
+
+**"Custom Multi-choice Clarification Response"**:
+Resolved as an alternative to all predefined choices. Choosing a custom response clears previously selected predefined choices, and choosing any predefined choice clears the custom response.
 
 **"Plan Card Emission"**:
 Resolved as a **Plan Interaction Tool** call. The frontend must not infer planning cards from free-form assistant text JSON.
@@ -598,7 +1332,7 @@ Resolved as a **Plan Interaction Tool** call. The frontend must not infer planni
 Resolved as two built-in tools: `ask_plan_clarification` for clarification cards and `submit_proposed_plan` for final plan review cards.
 
 **"Proposed Plan Fields"**:
-Resolved as `plan_id`, `title`, `summary`, `steps[]`, `risks[]`, `verification[]`, `open_questions[]`, and `confidence` for the first version.
+Resolved as `plan_id`, `title`, `summary`, `steps[]`, `risks[]`, and `verification[]`. `open_questions[]` and `confidence` are not part of the Proposed Plan protocol or user review card because they do not drive the Plan Review Decision.
 
 **"Scheduled Job Default Model"**:
 Resolved as execution-time model resolution: if a **Scheduled Job** has no **Execution Model Slot**, each run uses the current **Tenant Default Model** rather than the default model that existed when the job was created.
@@ -735,6 +1469,12 @@ Resolved as exposing absence for **File Read Truncation** as inheriting the hist
 **"Tool Output Controls Scope"**:
 Resolved as limited to the Source System Configuration page and runtime resolution for current user-facing controls. The Agent configuration page no longer exposes historical tool-result compaction controls, while existing Agent runtime configuration remains available as inherited baseline behavior.
 
+**"Current Session Context Usage"**:
+Resolved as **Persisted Context Occupancy**, meaning the estimated persisted session context divided by the configured **Context Window**. It excludes the current unsent composer text and does not mean cumulative token usage across completed calls.
+
+**"Context Window Capacity"**:
+Resolved as the Main Agent running configuration `max_input_length`, not provider-reported model metadata. The indicator follows Swe's runtime budget because compaction and fit checks are governed by that configuration.
+
 **"System Self-Check"**:
 Resolved as **System Runtime Diagnostic**. The existing lightweight health endpoint remains a liveness probe, while the scheduled `HEARTBEAT.md` run remains an Agent Heartbeat.
 
@@ -765,6 +1505,252 @@ Resolved as a **Runtime Instance**, meaning one running Swe service container. I
 **"Logging System"**:
 Resolved as the **Application Log Output Pipeline** when discussing asynchronous logging output. It does not mean changing **Hook Telemetry Log Message** schema, business operation logs, tracing storage, or **Tool Output Frames**.
 
+**Context Reference**:
+A user-selected runtime resource in a chat message. A Context Reference has one type—Skill, MCP Tool, or Workspace File—and is translated into that type's own trusted instruction context for the current turn.
+_Avoid_: plain @ text, forced tool invocation, file upload
+
+**Workspace File Context Reference**:
+A Context Reference for a file owned by the current workspace, scoped to either its `media` directory or its `static` directory. It identifies an existing runtime file; it is not a new uploaded attachment.
+_Avoid_: arbitrary local file, public file, chat upload
+
+**Chat File Manager**:
+The tenant-scoped browser for files in the current Agent workspace. It presents five controlled root directories and never exposes arbitrary host filesystem paths.
+_Avoid_: file preview drawer, host file browser, general file storage
+
+**Working Directory**:
+The root path of the current tenant's Agent workspace. It is the default root shown when the **Chat File Manager** opens.
+_Avoid_: global workspace, source checkout, host home directory
+
+**File Manager Hidden Managed Directories**:
+The two tenant-workspace directories omitted from the Working Directory view: `sessions`, which is reached through the read-only Conversation Directory, and `governance`, which is reached only through the controlled File Manager Recycle Bin. All other workspace files and directories remain visible in the Working Directory.
+_Avoid_: hidden workspace policy, governance root browser, sessions bypass
+
+**Upload Directory**:
+The `media` root within the current tenant's Agent workspace, containing files uploaded through chat.
+_Avoid_: attachment list, arbitrary upload location
+
+**Download Directory**:
+The `static` root within the current tenant's Agent workspace, containing files made available for download or generated for the user.
+_Avoid_: browser download history, client download folder
+
+**File Manager Recycle Bin**:
+The controlled file-manager view of the current tenant's governance archive. It presents archived files by their original file identity and permits only supported restore or permanent-delete operations; it is not a browser for the `governance` root or its control records.
+_Avoid_: governance directory browser, raw archive files, ordinary directory
+
+**File Manager Restore Conflict**:
+The outcome when a File Manager Recycle Bin item cannot return to its original path because a file already exists there. Restore does not overwrite the existing file and leaves the archive item available until the user resolves the conflict.
+_Avoid_: overwrite-on-restore, automatic rename, lost archive item
+
+**File Manager Permanent Deletion Confirmation**:
+The explicit, irreversible confirmation required before permanently deleting a File Manager Recycle Bin item. It displays the file's original path, uses a dangerous-action affordance, and provides no undo after confirmation.
+_Avoid_: one-click permanent delete, generic confirmation, undoable purge
+
+**File Manager Entry Date**:
+The weak secondary date shown for one file-manager row. Ordinary directories show the file's modification time, while the File Manager Recycle Bin shows the time the file entered the archive.
+_Avoid_: file size metadata, one date meaning for every root, recycle-bin modification time
+
+**File Manager Directory Incremental Loading**:
+The independent waterfall-style loading behavior for each directory column. It loads the first 100 stable-order entries and loads later pages as the user approaches that column's bottom; Current Directory Search uses the same server-side paging behavior.
+_Avoid_: one global scroll, capped flat workspace list, client-only large-directory filtering
+
+**File Manager Symbolic Link Boundary**:
+The safety rule for a symbolic link encountered in a visible workspace directory. The file manager displays it as restricted but never resolves, follows, previews, edits, downloads, deletes, or uses it as an upload destination.
+_Avoid_: workspace-escaping link traversal, hidden symlink, supported symlink file operation
+
+**File Manager HTML Preview Sandbox**:
+The isolated frame used to preview an HTML file. It permits scripts to execute but withholds same-origin access, top-level navigation, popups, and downloads from the embedded document.
+_Avoid_: trusted HTML preview, same-origin embedded file, unrestricted preview frame
+
+**File Manager Breadcrumb Root**:
+The first clickable segment of a file-manager breadcrumb: the active shortcut directory. It returns to that root and replaces the non-navigable `Home` label.
+_Avoid_: synthetic Home breadcrumb, host filesystem root, inactive shortcut root
+
+**File Manager Breadcrumb Reanchor**:
+The navigation behavior after a user selects any file-manager breadcrumb segment. Its directory becomes the left-column starting point, its default path repopulates the following columns, and the previously visible path and file preview are cleared.
+_Avoid_: partial breadcrumb rewind, preserved stale preview, in-place ancestor jump
+
+**File Manager Directory Capability**:
+The permitted user operations for a **Chat File Manager** root. Working, Upload, and Download Directories permit browsing, upload, editing, downloading, and recoverable deletion; the Conversation Directory permits browsing, previewing, and downloading only; the **File Manager Recycle Bin** permits restoring or permanently deleting archived files only.
+_Avoid_: uniform directory permissions, session-file editing, recycle-bin upload
+
+**File Manager Initial Column State**:
+The state after the **Chat File Manager** enters a root directory. The root's items occupy the left column, its default first folder becomes the middle directory, and that folder's default first child folder becomes the right directory; each column lists the direct contents of its directory.
+_Avoid_: synthetic Home column, selection-empty initial state, inaccessible parent layer
+
+**File Manager Default Directory Order**:
+The stable order used by the **Chat File Manager** to display directory entries and choose each default folder for the initial path. Folders precede files, and entries within each kind use case-insensitive natural name order.
+_Avoid_: modification-time default order, filesystem enumeration order, files-first default path
+
+**File Manager Default Path Termination**:
+The rule when initial automatic traversal reaches a directory without a child folder before all three columns are populated. Traversal stops, the remaining columns identify the absent child-folder level, and no file is selected or previewed automatically.
+_Avoid_: auto-previewed first file, fabricated directory level, file-based auto traversal
+
+**File Manager Current Directory Search**:
+The non-recursive, case-insensitive filename filter for the direct child entries of the directory represented by the middle column. It does not change the selected item or path; when no middle directory exists, it instead filters the current shortcut-root directory.
+_Avoid_: workspace-wide search, recursive search, search-driven navigation
+
+**File Manager Column Advance**:
+The selection rule for the three-column browser. Selecting a folder in a non-rightmost column displays its direct children in the next column without moving the window. Selecting either a folder or a file in the rightmost column moves the three-column window one level left.
+_Avoid_: double-click-to-enter, manual navigation confirmation, fixed parent-current-preview columns
+
+**File Manager File Advance Result**:
+The newly exposed rightmost column after a file triggers a **File Manager Column Advance**. It presents that file's preview or details in place, including its applicable editing action, rather than opening a separate preview overlay or leaving the column empty.
+_Avoid_: nested preview modal, empty trailing column, detached file inspector
+
+**File Manager Editable Text File**:
+A file whose content is safely classified as plain UTF-8 text, including text, Markdown, and HTML files. It supports in-place editing in the **Chat File Manager**; binary, Office, PDF, image, audio, and video files do not.
+_Avoid_: universal file editor, Office editing, binary-text coercion
+
+**File Manager Large Text Preview**:
+The bounded text-file reading rule. A text file of at most 1 MB is read in full and is eligible for editing; a larger text file previews only its first 1 MB, remains downloadable, and is not editable.
+_Avoid_: character-count truncation, unbounded text read, large-text editing
+
+**File Manager Save Conflict**:
+The outcome when a **File Manager Editable Text File** has changed after its editor loaded it but before the user saves. The save is rejected without overwriting the current file, and the user's unsaved draft remains available for comparison or resolution.
+_Avoid_: last-writer-wins save, silent overwrite, discarded draft
+
+**File Manager Unsaved-Edit Guard**:
+The confirmation required before closing the file manager or taking a navigation action that would replace an unsaved text-editor draft. The user may save, discard the draft, or cancel the pending action; the action proceeds after a successful save or an explicit discard only.
+_Avoid_: implicit draft discard, navigation-first save, silent editor reset
+
+**File Manager Recoverable Deletion**:
+The file-only deletion operation that moves one file from a mutable **Chat File Manager** directory into the **File Manager Recycle Bin**. Directories cannot be deleted through the first file-manager release.
+_Avoid_: recursive directory deletion, permanent ordinary-directory delete, file-system-wide trash
+
+**File Manager Upload Availability**:
+The Upload action is unavailable in the Conversation Directory and the File Manager Recycle Bin, with an explanation of that restriction. A successful upload refreshes its destination directory without selecting the new file automatically.
+_Avoid_: session upload, recycle-bin upload, upload-driven file selection
+
+**File Manager Upload Name Conflict**:
+The outcome when an upload's filename already exists in its destination directory. The upload is rejected without overwriting or automatically renaming either file; the user must rename the local file and retry.
+_Avoid_: overwrite upload, auto-suffixed upload, silent replacement
+
+**File Manager Mutation Audit Record**:
+The application-audit record for a file-manager upload, save, recoverable deletion, restore, or permanent deletion. It identifies the actor, time, operation, path, and result without retaining file contents; previews and downloads create no such record.
+_Avoid_: file-content audit, unlogged workspace mutation, preview analytics
+
+**File Manager File Download**:
+The detail-panel action that downloads one selected file from the Working, Upload, Download, or Conversation Directory. It is unavailable in the File Manager Recycle Bin and does not create archive downloads for folders.
+_Avoid_: directory ZIP download, recycle-bin download, list-row bulk download
+
+**Conversation Directory**:
+The `sessions` root within the current tenant's Agent workspace, containing conversation-scoped files.
+_Avoid_: chat transcript, current browser session, global sessions directory
+
+**On-Demand File Reference Instruction**:
+The trusted instruction context created from a Workspace File Context Reference after the backend re-resolves and validates it within the current workspace. It tells the Main Agent that the file is user-selected and may be read or analyzed on demand, without inlining its contents or binary data.
+_Avoid_: automatic file attachment, inline file content, unvalidated file path
+
+**Context Reference Search**:
+The non-empty query after `@` that searches the current Agent's Skills, Callable MCP Tools, and Workspace File Context References. Skills and MCP Tools retain their default presence when the query is empty; files are searched only after the user supplies a query.
+_Avoid_: eager workspace file enumeration, empty-query file listing
+
+**Context Reference Turn Scope**:
+The lifecycle shared by all Context References: their typed instruction contexts apply only to the next submitted user message and are cleared immediately after that request is created. They do not persist implicitly across later conversation turns.
+_Avoid_: persistent mention, conversation-scoped reference, sticky tool selection
+
+**Context Reference Selection Set**:
+The unique set of Context References chosen for one request. It deduplicates repeated choices by stable type-specific identity while allowing same-named resources of different types to coexist.
+_Avoid_: duplicate mention list, name-only deduplication, persistent selection
+
+**Context Reference Token**:
+The non-editable, type-icon-bearing inline representation of a selected Context Reference in the message editor. Skills display `@skill`, MCP Tools display `@server/tool`, and Workspace Files display `@filename` with the root-prefixed path available as supplementary text; token deletion changes the structured selection set.
+_Avoid_: editable reference text, text-parsed selection, untyped mention token
+
+**Context Reference Discovery Hint**:
+The footer message shown only while the user has typed `@` without a search term. It tells the user that further input searches tools and files; a non-empty query replaces it with results or an empty-result state.
+_Avoid_: persistent search footer, query-time instruction
+
+**Context Reference Result Group**:
+A typed category shown in the mention overlay only when it has one or more matching Context References. Empty categories are omitted rather than rendered as empty sections.
+_Avoid_: empty category section, category-level no-results row
+
+**Context Reference Result Group Order**:
+The fixed mention-overlay order for non-empty result groups: Skills, then MCP Tools, then Files.
+_Avoid_: relevance-shuffled groups, files-first grouping
+
+**Context Reference Empty Result State**:
+The single mention-overlay state displayed when a non-empty Context Reference Search finds no Skills, Callable MCP Tools, or Workspace File Context References. It replaces all result groups.
+_Avoid_: per-category empty states, blank search overlay
+
+**Workspace File Search Result**:
+A filename-matched Workspace File Context Reference from either the `media` or `static` directory. Both directories appear together in the single Files group, with no separate source grouping; each result category is limited to four items.
+_Avoid_: media group, static group, path-content search
+
+**Workspace File Result Path Label**:
+The secondary display text for a Workspace File Search Result. It uses the source-root-prefixed relative path, such as `media/image.png` or `static/reports/summary.pdf`, to distinguish same-named files while keeping them in one Files group.
+_Avoid_: filename-only file selection, separate source group
+
+**Callable MCP Tool**:
+An MCP Tool that is enabled for the current Agent and was successfully discovered for the current Context Reference lookup. A failed MCP service contributes no tool or error placeholder to the mention overlay.
+_Avoid_: configured MCP tool, unavailable MCP tool, failed-server row
+
+**MCP Tool Result Identity**:
+The stable identity and primary label for a Callable MCP Tool in the mention overlay: its MCP server identifier paired with its tool name. The UI presents it as `server / tool` and uses the tool description as secondary text.
+_Avoid_: tool-name-only identity, ambiguous MCP tool label
+
+**Preferred MCP Tool Instruction**:
+The typed instruction context for a selected Callable MCP Tool. It tells the Main Agent to prefer that tool when appropriate for the current request, but does not require a call or grant access beyond the tool's existing runtime availability.
+_Avoid_: forced MCP invocation, tool authorization grant, automatic tool call
+
+**Context Reference Directory Cache**:
+The process-local in-memory cache of Context Reference discovery snapshots and filename indexes. It is keyed by effective tenant and Agent identity, stores no file contents, and is never shared across processes or workspace scopes.
+_Avoid_: global reference cache, cross-tenant cache, file-content cache
+
+**Context Reference Cache Freshness**:
+The per-resource maximum age for a Context Reference Directory Cache snapshot, measured with a monotonic clock: five minutes for Skills and three minutes for Callable MCP Tools and the merged Workspace File filename index.
+_Avoid_: one shared TTL, wall-clock expiry, indefinite discovery cache
+
+**Context Reference Cache Hard Expiry**:
+The cache-failure policy that discards an expired discovery snapshot rather than serving it when refresh fails. The failed category contributes no results, and each selected reference is independently revalidated before instruction context is created.
+_Avoid_: stale-on-error reference list, unverified selected reference, stale MCP fallback
+
+**Context Reference Cache Invalidation**:
+The first-release cache invalidation policy: snapshots expire only through their configured TTLs. Configuration updates, uploads, and filesystem changes do not evict Context Reference Directory Cache entries early.
+_Avoid_: mutation-triggered cache eviction, filesystem watcher invalidation, instant discovery refresh
+
+**Context Reference Cache Admission and Capacity**:
+A Context Reference Directory Cache entry is created lazily only when a user opens the mention overlay with `@`. The cache holds at most 128 tenant-and-Agent-scoped entries, removes expired entries during cache access, and evicts the least recently used entry when full.
+_Avoid_: eager startup cache warming, unbounded reference cache, FIFO eviction
+
+**Context Reference Cache Single-Flight Refresh**:
+The refresh rule that permits one in-progress discovery refresh for each tenant-and-Agent scope and resource category. Concurrent cache misses wait for that refresh and consume its shared success result or shared empty failure result.
+_Avoid_: cache stampede, duplicate MCP discovery, parallel directory scans
+
+**Context Reference Cache TTL Configuration**:
+The first-release decision that Context Reference Cache Freshness values are fixed backend constants, not a source-system setting, environment override, or public API configuration surface.
+_Avoid_: runtime TTL tuning, cache settings UI, per-tenant cache TTL
+
+**Context Reference MCP Discovery Budget**:
+The bounded discovery window used when refreshing Callable MCP Tools: each MCP service has two seconds to respond, all services discover in parallel, and the overall overlay request waits at most three seconds. Only services that succeed within the budget contribute tools; timeout is silent.
+_Avoid_: unbounded MCP discovery, serial MCP lookup, timeout error row
+
+**Workspace File Index Capacity**:
+The maximum number of files retained in each source-root portion of a Workspace File filename index. `media` and `static` each retain at most 5,000 files, selecting the most recently modified files when their directory has more.
+_Avoid_: unbounded directory index, whole-directory search at request time, source-combined capacity limit
+
+## Stop Hook Language
+
+**Stop Hook**:
+The single completion lifecycle event for every candidate Assistant Response. Each configured handler runs once and may perform its own attempt-recording or notification work. Its merged decision approves or blocks completion.
+_Avoid_: BeforeStop hook, observation-only stop hook
+
+**Stop Decision**:
+The only valid completion decision from a Stop Hook: `allow` approves the candidate Assistant Response and `block` rejects that completion attempt. An explicit `block` may schedule a bounded automatic follow-up Agent turn; if any matched handler blocks, the merged decision blocks.
+_Avoid_: deny, stop, implicit retry
+
+**Stop Handler Failure**:
+An execution failure from a Stop Hook handler. With `failPolicy: block`, it ends the request as incomplete with the failure reason and never schedules an automatic follow-up; with `failPolicy: allow`, it is diagnostic only. Only an explicit Stop Decision of `block` may request another Agent turn.
+_Avoid_: retryable hook failure, silent completion failure
+
+**Stop Migration**:
+The non-compatible removal of the `BeforeStop` event. Configuration must use `Stop`; a residual `BeforeStop` configuration is invalid rather than silently translated.
+_Avoid_: BeforeStop compatibility alias, automatic event translation
+
+**Stop Trigger**:
+The boundary at which a normal candidate Assistant Response is about to complete a request. Tool-hook terminal-stop paths and turns without a candidate Assistant Response skip Stop.
+_Avoid_: tool termination audit, no-output completion hook
+
 ## Example Dialogue
 
 Developer: "When Plan Mode starts, should we create a SubAgent?"
@@ -786,3 +1772,15 @@ Domain Expert: "Yes. In Plan Mode, the Main Agent itself is permission-limited u
 Developer: "Does executing a plan unlock write tools?"
 
 Domain Expert: "`execute` accepts the persisted Proposed Plan and can move the chat back to normal execution, where the Main Agent regains its normal permissions."
+
+Developer: "Is the hook attached to a SubAgent Definition or to an Agent Profile?"
+
+Domain Expert: "It is an Agent Profile Hook. Its script belongs to that Agent Profile and is not a shared Skill asset."
+
+Developer: "Can a tenant administrator replace the source's `read_file` implementation?"
+
+Domain Expert: "No. Only a Source Tool Administrator may publish a Source Built-in Tool. An Override keeps `read_file`'s complete tool Schema, runs through the normal safety boundaries, and still respects each Agent's enabled or disabled choice."
+
+Developer: "Will a new source tool appear only when the model asks for it?"
+
+Domain Expert: "No. Every source-enabled tool that the Agent has not disabled is part of the Agent run's catalog from the start of that run."

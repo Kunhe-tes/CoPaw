@@ -6,12 +6,22 @@ from __future__ import annotations
 import json
 import logging
 import mimetypes
+import os
 import re
 import asyncio
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncGenerator, Literal, Union, Any, Optional, Dict
+from typing import (
+    Any,
+    AsyncGenerator,
+    Callable,
+    Dict,
+    Literal,
+    Optional,
+    Union,
+)
+from urllib.parse import quote, unquote, urlparse
 
 from fastapi import (
     APIRouter,
@@ -25,7 +35,32 @@ from pydantic import BaseModel, Field
 from starlette.responses import StreamingResponse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
-from ..agent_context import get_agent_for_request
+from ..agent_context import (
+    get_agent_and_config_for_request,
+    get_agent_for_request,
+    resolve_file_manager_source_scope_location,
+    resolve_file_manager_workspace_dir,
+)
+from ..context_references import (
+    ContextReferencesResponse,
+    context_reference_directory,
+)
+from ..file_manager import (
+    FileManagerConflictError,
+    FileManagerDirectoryListing,
+    FileManagerItem,
+    FileManagerNotFoundError,
+    FileManagerPathError,
+    FileManagerService,
+    FileManagerTextPreview,
+    FileManagerUploadTooLargeError,
+    get_file_manager_service,
+)
+from ..file_manager_execution import (
+    run_file_manager_mutation,
+    run_file_manager_read,
+)
+from ..runner.context_references import MAX_CONTEXT_REFERENCES
 from ...config.context import resolve_request_effective_tenant_id
 
 logger = logging.getLogger(__name__)
@@ -209,6 +244,159 @@ class GeneratedFilesResponse(BaseModel):
     """聊天相关文件列表响应。"""
 
     files: list[GeneratedFileItem] = Field(default_factory=list)
+
+
+def _file_manager_http_error(error: FileManagerPathError) -> HTTPException:
+    """Map controlled filesystem errors without revealing host paths."""
+
+    if isinstance(error, FileManagerNotFoundError):
+        return HTTPException(
+            status_code=404,
+            detail="File manager item not found",
+        )
+    if isinstance(error, FileManagerConflictError):
+        return HTTPException(status_code=409, detail=str(error))
+    return HTTPException(status_code=403, detail=str(error))
+
+
+class FileManagerTextSaveRequest(BaseModel):
+    root: str
+    path: str
+    content: str
+    revision: str
+
+
+def _file_manager_actor(request: Request) -> str:
+    """Return a bounded audit actor without depending on one auth scheme."""
+
+    for candidate in (
+        request.headers.get("X-Actor"),
+        request.headers.get("X-User-Id"),
+        getattr(request.state, "actor", None),
+        getattr(request.state, "user_id", None),
+    ):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()[:256]
+    return "unknown"
+
+
+def _audit_file_manager_mutation(
+    request: Request,
+    *,
+    action: str,
+    path: str,
+    outcome: str,
+) -> None:
+    """Best-effort mutation audit; never include or log file contents."""
+
+    try:
+        logger.info(
+            "file_manager.audit",
+            extra={
+                "actor": _file_manager_actor(request),
+                "time": datetime.now(timezone.utc).isoformat(),
+                "action": action,
+                "path": path,
+                "outcome": outcome,
+            },
+        )
+    except Exception:
+        # Audit delivery must not turn a successful filesystem mutation into a
+        # request failure.
+        pass
+
+
+def _file_manager_upload_audit_path(directory: str, filename: str) -> str:
+    """Keep early upload-rejection audit paths bounded and path-shaped."""
+
+    safe_filename = _safe_filename(filename or "file")
+    safe_parts = [
+        part
+        for part in directory.split("/")
+        if part not in {"", ".", ".."}
+        and "\\" not in part
+        and "\x00" not in part
+    ]
+    return "/".join([*safe_parts, safe_filename])
+
+
+def _file_manager_download_disposition(filename: str) -> str:
+    """Create a header-safe attachment filename without leaking a path."""
+
+    if (
+        filename.isascii()
+        and all(32 <= ord(character) <= 126 for character in filename)
+        and '"' not in filename
+        and "\\" not in filename
+    ):
+        return f'attachment; filename="{filename}"'
+    return f"attachment; filename*=UTF-8''{quote(filename, safe='')}"
+
+
+class _FileManagerDownloadStream:
+    """A bounded, idempotently-closeable streaming download descriptor."""
+
+    def __init__(self, file_descriptor: int, size_bytes: int) -> None:
+        self._file_descriptor: int | None = file_descriptor
+        self._remaining = size_bytes
+
+    def __iter__(self):
+        return self
+
+    def __next__(self) -> bytes:
+        if self._file_descriptor is None or self._remaining <= 0:
+            self.close()
+            raise StopIteration
+        try:
+            chunk = os.read(
+                self._file_descriptor,
+                min(64 * 1024, self._remaining),
+            )
+        except OSError:
+            self.close()
+            raise
+        if not chunk:
+            self.close()
+            raise StopIteration
+        self._remaining -= len(chunk)
+        if self._remaining == 0:
+            self.close()
+        return chunk
+
+    def close(self) -> None:
+        """Release the descriptor even when a response never starts streaming."""
+
+        file_descriptor, self._file_descriptor = self._file_descriptor, None
+        if file_descriptor is None:
+            return
+        try:
+            os.close(file_descriptor)
+        except OSError:
+            # A cancelled stream or a completed iterator may already close it.
+            pass
+
+
+class _FileManagerDownloadResponse(StreamingResponse):
+    """A download response that closes its descriptor on every exit path."""
+
+    def __init__(
+        self,
+        stream: _FileManagerDownloadStream,
+        *,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        self._file_manager_stream = stream
+        super().__init__(
+            stream,
+            media_type="application/octet-stream",
+            headers=headers,
+        )
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            self._file_manager_stream.close()
 
 
 def _looks_like_text_file(path: Path) -> bool:
@@ -403,9 +591,16 @@ def _extract_content_parts_from_mapping(request_data: dict) -> list[Any]:
 
 def _extract_payload_fields_from_request(
     request_data: AgentRequest,
-) -> tuple[str, str, str, Any, Any, Any, Any, list[Any]]:
+) -> tuple[str, str, str, Any, Any, Any, Any, Any, list[Any]]:
     """提取 AgentRequest 形态请求的核心字段。"""
     channel_meta = getattr(request_data, "channel_meta", None) or {}
+    selected_skill_names = getattr(
+        request_data,
+        "selected_skill_names",
+        None,
+    )
+    if selected_skill_names is None:
+        selected_skill_names = channel_meta.get("selected_skill_names")
     return (
         getattr(request_data, "channel", None) or "console",
         request_data.user_id or "default",
@@ -415,13 +610,14 @@ def _extract_payload_fields_from_request(
         getattr(request_data, "bbk_id", None) or channel_meta.get("bbk_id"),
         getattr(request_data, "system_prompt_injections", None),
         getattr(request_data, "file_url_network", None),
+        selected_skill_names,
         list(request_data.input[0].content) if request_data.input else [],
     )
 
 
 def _extract_payload_fields_from_mapping(
     request_data: dict,
-) -> tuple[str, str, str, Any, Any, Any, Any, list[Any]]:
+) -> tuple[str, str, str, Any, Any, Any, Any, Any, list[Any]]:
     """提取 dict 形态请求的核心字段。"""
     return (
         request_data.get("channel", "console"),
@@ -431,8 +627,129 @@ def _extract_payload_fields_from_mapping(
         request_data.get("bbk_id"),
         request_data.get("system_prompt_injections"),
         request_data.get("file_url_network"),
+        request_data.get("selected_skill_names"),
         _extract_content_parts_from_mapping(request_data),
     )
+
+
+def _extract_context_references(
+    request_data: Union[AgentRequest, dict],
+) -> Any:
+    """Keep structured one-turn context references intact for the runner."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "context_references", None)
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("context_references")
+        return value
+    return request_data.get("context_references")
+
+
+def _local_path_from_console_attachment_url(url: object) -> Path | None:
+    """Resolve the local path encoded in a Console attachment preview URL."""
+    if not isinstance(url, str) or not url:
+        return None
+    parsed = urlparse(url)
+    preview_prefix = "/files/preview/"
+    path = parsed.path
+    if path.startswith(preview_prefix):
+        return Path("/" + unquote(path.removeprefix(preview_prefix)))
+    if not parsed.scheme:
+        return Path(url)
+    return None
+
+
+async def _append_uploaded_attachment_references(
+    native_payload: dict[str, Any],
+    workspace: Any,
+) -> None:
+    """Expose same-turn Console attachments as trusted workspace references."""
+    workspace_dir_value = getattr(workspace, "workspace_dir", None)
+    if not workspace_dir_value:
+        return
+    try:
+        workspace_dir = Path(workspace_dir_value).resolve()
+        workspace_media_dir = (workspace_dir / "media").resolve()
+        workspace_media_dir.relative_to(workspace_dir)
+    except OSError:
+        return
+    except ValueError:
+        return
+
+    existing_references = native_payload.get("meta", {}).get(
+        "context_references",
+    )
+    if existing_references is None:
+        existing_references = []
+    if not isinstance(existing_references, list):
+        return
+
+    attachment_references: list[dict[str, str]] = []
+    for content in native_payload.get("content_parts", []):
+        file_url = (
+            content.get("file_url")
+            if isinstance(content, dict)
+            else getattr(content, "file_url", None)
+        )
+        attachment_path = _local_path_from_console_attachment_url(file_url)
+        if attachment_path is None:
+            continue
+        try:
+            resolved_path = attachment_path.resolve()
+            relative_path = resolved_path.relative_to(workspace_media_dir)
+        except (OSError, ValueError):
+            continue
+        if not resolved_path.is_file():
+            continue
+        relative_path_text = relative_path.as_posix()
+        reference_id = f"workspace_file:media/{relative_path_text}"
+        attachment_references.append(
+            {
+                "type": "workspace_file",
+                "id": reference_id,
+                "root": "media",
+                "relative_path": relative_path_text,
+            },
+        )
+
+    if attachment_references:
+        attachment_ids = {
+            reference["id"] for reference in attachment_references
+        }
+        existing_references = [
+            reference
+            for reference in existing_references
+            if not (
+                isinstance(reference, dict)
+                and reference.get("id") in attachment_ids
+            )
+        ]
+        existing_references = [
+            *[
+                reference
+                for reference in existing_references
+                if isinstance(reference, dict)
+                and reference.get("type") == "skill"
+            ],
+            *[
+                reference
+                for reference in existing_references
+                if not (
+                    isinstance(reference, dict)
+                    and reference.get("type") == "skill"
+                )
+            ],
+        ]
+        attachment_limit = max(
+            1,
+            MAX_CONTEXT_REFERENCES - len(existing_references),
+        )
+        attachment_references = attachment_references[:attachment_limit]
+        existing_limit = MAX_CONTEXT_REFERENCES - len(attachment_references)
+        native_payload["meta"]["context_references"] = [
+            *existing_references[:existing_limit],
+            *attachment_references,
+        ]
 
 
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
@@ -445,29 +762,33 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """
     if isinstance(request_data, AgentRequest):
         (
-            channel_id,
+            _channel_id,
             sender_id,
             session_id,
             user_name,
             bbk_id,
             system_prompt_injections,
             file_url_network,
+            selected_skill_names,
             content_parts,
         ) = _extract_payload_fields_from_request(request_data)
     else:
         (
-            channel_id,
+            _channel_id,
             sender_id,
             session_id,
             user_name,
             bbk_id,
             system_prompt_injections,
             file_url_network,
+            selected_skill_names,
             content_parts,
         ) = _extract_payload_fields_from_mapping(request_data)
 
     native_payload: dict[str, Any] = {
-        "channel_id": channel_id,
+        # /console/chat always executes through the Console runtime.  Do not
+        # trust the client-provided channel when resolving effective skills.
+        "channel_id": _channel_id,
         "sender_id": sender_id,
         "content_parts": content_parts,
         "meta": {
@@ -481,6 +802,11 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         ] = system_prompt_injections
     if file_url_network is not None:
         native_payload["meta"]["file_url_network"] = file_url_network
+    if selected_skill_names is not None:
+        native_payload["meta"]["selected_skill_names"] = selected_skill_names
+    context_references = _extract_context_references(request_data)
+    if context_references is not None:
+        native_payload["meta"]["context_references"] = context_references
     if user_name:
         native_payload["meta"]["user_name"] = user_name
     if bbk_id:
@@ -582,6 +908,7 @@ async def _start_new_chat(
             else None
         ),
     )
+    native_payload["meta"]["chat_id"] = chat.id
     # Inject session_channel from chat record so downstream (e.g. session-end
     # push) can identify the session's original channel (e.g. zhaohu).
     if chat.channel and chat.channel != "console":
@@ -592,6 +919,38 @@ async def _start_new_chat(
         console_channel.stream_one,
     )
     return queue, chat.id, msgid
+
+
+def _validate_console_chat_identity(
+    request: Request,
+    workspace,
+    native_payload: dict,
+) -> None:
+    authenticated_user_id = str(
+        getattr(request.state, "user_id", None) or "",
+    ).strip()
+    payload_sender_id = str(native_payload.get("sender_id") or "").strip()
+    if authenticated_user_id and payload_sender_id != authenticated_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Console sender does not match authenticated user",
+        )
+
+    authenticated_agent_id = str(
+        getattr(request.state, "agent_id", None) or "",
+    ).strip()
+    workspace_agent_id = str(
+        getattr(workspace, "agent_id", None) or "",
+    ).strip()
+    if (
+        authenticated_agent_id
+        and workspace_agent_id
+        and authenticated_agent_id != workspace_agent_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Console Agent does not match authenticated Agent",
+        )
 
 
 @router.post(
@@ -619,6 +978,7 @@ async def post_console_chat(
         native_payload = _extract_session_and_payload(request_data)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    await _append_uploaded_attachment_references(native_payload, workspace)
 
     b3_trace_id = _extract_b3_trace_id(request)
     if b3_trace_id:
@@ -638,6 +998,8 @@ async def post_console_chat(
             detail="X-Source-Id header is required",
         )
     native_payload["meta"]["source_id"] = source_id
+
+    _validate_console_chat_identity(request, workspace, native_payload)
 
     # 从 request.state 获取 user_name 和 bbk_id（由 TenantIdentityMiddleware 设置）
     request_state = getattr(request, "state", None)
@@ -664,9 +1026,12 @@ async def post_console_chat(
     )
     tracker = workspace.task_tracker
 
-    is_reconnect = False
-    if isinstance(request_data, dict):
-        is_reconnect = request_data.get("reconnect") is True
+    request_mapping = (
+        request_data
+        if isinstance(request_data, dict)
+        else request_data.model_dump()
+    )
+    is_reconnect = request_mapping.get("reconnect") is True
 
     msgid: str | None = None
     if is_reconnect:
@@ -764,8 +1129,21 @@ async def post_console_upload(
 
     path = (media_dir / stored_name).resolve()
     path.write_bytes(data)
+    context_path = path
+    workspace_dir_value = getattr(workspace, "workspace_dir", None)
+    if workspace_dir_value:
+        try:
+            workspace_dir = Path(workspace_dir_value).resolve()
+            workspace_media_dir = (workspace_dir / "media").resolve()
+            workspace_media_dir.relative_to(workspace_dir)
+            if workspace_media_dir != media_dir.resolve():
+                workspace_media_dir.mkdir(parents=True, exist_ok=True)
+                context_path = workspace_media_dir / stored_name
+                context_path.write_bytes(data)
+        except (OSError, ValueError):
+            context_path = path
     return {
-        "url": path,
+        "url": context_path,
         "file_name": safe_name,
         "size": len(data),
     }
@@ -816,6 +1194,339 @@ async def get_console_generated_files(
     items.sort(key=lambda item: item.modified_at, reverse=reverse)
     return GeneratedFilesResponse(
         files=items[:_CHAT_FILE_LIST_LIMIT],
+    )
+
+
+async def _get_file_manager_service_for_request(
+    request: Request,
+) -> FileManagerService:
+    """Construct a request-bound service with its tenant source root."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    source_scope_location = resolve_file_manager_source_scope_location(request)
+    return get_file_manager_service(
+        workspace_dir,
+        source_scope_base_dir=source_scope_location.base_dir,
+        source_scope_component=source_scope_location.component,
+    )
+
+
+@router.get(
+    "/file-manager/directories",
+    response_model=FileManagerDirectoryListing,
+    summary="List a controlled chat file-manager directory",
+)
+async def get_file_manager_directory(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query("", description="Relative POSIX directory path"),
+    cursor: str | None = Query(None, description="Signed directory cursor"),
+    q: str = Query("", max_length=512, description="Direct-child name filter"),
+) -> FileManagerDirectoryListing:
+    """List direct children for the workspace bound to this request only."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        return await run_file_manager_read(
+            service.list_directory,
+            root,
+            path,
+            cursor=cursor,
+            query=q or None,
+        )
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+
+
+@router.get(
+    "/file-manager/files/read",
+    response_model=FileManagerTextPreview,
+    summary="Read a bounded controlled text-file preview",
+)
+async def get_file_manager_file_preview(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative POSIX file path"),
+) -> FileManagerTextPreview:
+    """Return at most one MiB of UTF-8 text without auditing reads."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        return await run_file_manager_read(
+            service.read_text_preview,
+            root,
+            path,
+        )
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+
+
+@router.get(
+    "/file-manager/files/download",
+    summary="Download one controlled regular file as an attachment",
+)
+async def get_file_manager_file_download(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative POSIX file path"),
+) -> StreamingResponse:
+    """Stream a single regular file from a no-follow descriptor, unaudited."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        download = await run_file_manager_read(
+            service.open_file_for_download,
+            root,
+            path,
+        )
+    except FileManagerPathError as exc:
+        raise _file_manager_http_error(exc) from exc
+    stream = _FileManagerDownloadStream(
+        download.file_descriptor,
+        download.size_bytes,
+    )
+    return _FileManagerDownloadResponse(
+        stream,
+        headers={
+            "Content-Disposition": _file_manager_download_disposition(
+                download.filename,
+            ),
+            "Content-Length": str(download.size_bytes),
+        },
+    )
+
+
+@router.put(
+    "/file-manager/files/text",
+    response_model=FileManagerTextPreview,
+    summary="Save one revision-checked controlled text file",
+)
+async def put_file_manager_text_file(
+    request: Request,
+    body: FileManagerTextSaveRequest,
+) -> FileManagerTextPreview:
+    """Save small UTF-8 text only, rejecting stale revisions instead of overwrite."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        result = await run_file_manager_mutation(
+            service.save_text,
+            body.root,
+            body.path,
+            body.content,
+            body.revision,
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="save",
+            path=body.path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="save",
+        path=body.path,
+        outcome="success",
+    )
+    return result
+
+
+@router.post(
+    "/file-manager/files/upload",
+    response_model=FileManagerItem,
+    summary="Upload a new controlled file without replacing an existing name",
+)
+async def post_file_manager_upload(
+    request: Request,
+    file: UploadFile = File(..., description="File to upload"),
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(
+        "",
+        description="Existing relative destination directory",
+    ),
+) -> FileManagerItem:
+    """Upload to the currently browsed directory, never renaming or replacing."""
+
+    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=_file_manager_upload_audit_path(path, file.filename or ""),
+            outcome="failure",
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"
+            ),
+        )
+    service = await _get_file_manager_service_for_request(request)
+    filename = file.filename or ""
+    try:
+        item = await run_file_manager_mutation(
+            service.upload_stream,
+            root,
+            path,
+            filename,
+            file.file,
+        )
+    except FileManagerUploadTooLargeError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=_file_manager_upload_audit_path(path, filename),
+            outcome="failure",
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="upload",
+            path=path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="upload",
+        path=item.path,
+        outcome="success",
+    )
+    return item
+
+
+@router.delete(
+    "/file-manager/files",
+    summary="Recoverably archive one controlled regular file",
+)
+async def delete_file_manager_file(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative regular file path"),
+) -> dict[str, str]:
+    """Move a file-manager file into the governance recycle-bin archive."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        archived = await run_file_manager_mutation(
+            service.archive_file,
+            root,
+            path,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="archive",
+            path=path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="archive",
+        path=archived.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": archived.archive_item_id,
+        "original_path": archived.original_path,
+    }
+
+
+@router.post(
+    "/file-manager/recycle/{archive_item_id}/restore",
+    summary="Restore one recycle item to its original path without overwrite",
+)
+async def post_file_manager_recycle_restore(
+    request: Request,
+    archive_item_id: str,
+) -> dict[str, str]:
+    """Restore one archive item; a collision leaves the archive untouched."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        restored = await run_file_manager_mutation(
+            service.restore_recycle_item,
+            archive_item_id,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="restore",
+            path=archive_item_id,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="restore",
+        path=restored.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": restored.archive_item_id,
+        "original_path": restored.original_path,
+    }
+
+
+@router.delete(
+    "/file-manager/recycle/{archive_item_id}",
+    summary="Permanently delete one recycle item",
+)
+async def delete_file_manager_recycle_item(
+    request: Request,
+    archive_item_id: str,
+) -> dict[str, str]:
+    """Remove archived bytes and index entry after the UI confirmation."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        purged = await run_file_manager_mutation(
+            service.purge_recycle_item,
+            archive_item_id,
+            actor=_file_manager_actor(request),
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="purge",
+            path=archive_item_id,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="purge",
+        path=purged.original_path,
+        outcome="success",
+    )
+    return {
+        "archive_item_id": purged.archive_item_id,
+        "original_path": purged.original_path,
+    }
+
+
+@router.get(
+    "/context-references",
+    response_model=ContextReferencesResponse,
+    summary="Discover context references for the Console composer",
+)
+async def get_context_references(
+    request: Request,
+    q: str = Query("", max_length=512),
+) -> ContextReferencesResponse:
+    """Return cached, scope-bound Skills, MCP tools, and matching files."""
+    workspace, agent_config = await get_agent_and_config_for_request(request)
+    workspace_dir = Path(workspace.workspace_dir)
+    return await context_reference_directory.discover(
+        workspace=workspace,
+        agent_config=agent_config,
+        query=q,
+        media_dir=await _resolve_console_media_dir(workspace, workspace_dir),
     )
 
 

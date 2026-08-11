@@ -21,6 +21,9 @@ const monitorApiMock = vi.hoisted(() => ({
   getManagerCustomers: vi.fn(),
   getExecutions: vi.fn(),
 }));
+const iframeStoreMock = vi.hoisted(() => ({
+  bbk: undefined as string | undefined,
+}));
 
 vi.mock("../../../api/modules/monitor", async () => {
   const actual = await vi.importActual<
@@ -32,9 +35,17 @@ vi.mock("../../../api/modules/monitor", async () => {
   };
 });
 
+vi.mock("../../../stores/iframeStore", () => ({
+  useIframeStore: (selector: (state: unknown) => unknown) =>
+    selector({
+      bbk: iframeStoreMock.bbk,
+    }),
+}));
+
 describe("CronJobOverview summary cards", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    iframeStoreMock.bbk = undefined;
     monitorApiMock.getCronJobOverviewPageData.mockResolvedValue({
       summaryMetrics: [
         { key: "branches", value: "12" },
@@ -157,6 +168,43 @@ describe("CronJobOverview summary cards", () => {
     );
   });
 
+  it("locks branch filter to current branch for branch users", async () => {
+    iframeStoreMock.bbk = "200";
+
+    const { container } = render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      const selectedItem = container.querySelector(
+        ".ant-select-selection-item",
+      );
+      expect(selectedItem?.textContent).toContain("北京分行");
+    });
+    expect(container.querySelector(".ant-select")).toHaveClass(
+      "ant-select-disabled",
+    );
+    await waitFor(() => {
+      expect(
+        monitorApiMock.getCronJobOverviewPageData,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bbk_ids: "200",
+        }),
+      );
+    });
+    expect(
+      container.querySelector(".ant-select-disabled"),
+    ).toBeInTheDocument();
+  });
+
   it("renders expanded manager detail without extra drill-down scroll wrapper", async () => {
     monitorApiMock.getCronJobOverviewPageData.mockResolvedValueOnce({
       summaryMetrics: [
@@ -248,5 +296,56 @@ describe("CronJobOverview summary cards", () => {
     expect(
       container.querySelector(`.${styles.drillDownTableScroll}`),
     ).toBeNull();
+  });
+
+  it("renders branch skill details returned by the backend without local filtering", async () => {
+    monitorApiMock.getCronBranchTaskBehavior.mockResolvedValueOnce({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      items: [
+        {
+          rank: 1,
+          bbk_id: "100",
+          bbk_name: "测试分行",
+          manager_count: 1,
+          total_tasks: 2,
+          success_count: 2,
+          success_rate: 1,
+          read_tasks: 1,
+          read_rate: 0.5,
+        },
+      ],
+    });
+    monitorApiMock.getBranchSkills.mockResolvedValueOnce({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      bbk_id: "100",
+      bbk_name: "测试分行",
+      items: [
+        {
+          skill_name: "insurance_mkt",
+          cron_task_count: 2,
+          success_count: 2,
+          success_rate: 1,
+          read_count: 1,
+          error_count: 0,
+        },
+      ],
+    });
+
+    render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("测试分行"));
+
+    expect(await screen.findByText("insurance_mkt")).toBeInTheDocument();
   });
 });

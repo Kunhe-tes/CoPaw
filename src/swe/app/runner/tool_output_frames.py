@@ -8,13 +8,16 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Iterator, Literal
 
+from ...config.context import get_current_recent_max_bytes
+from ...tool_output_budget import DEFAULT_MAX_BYTES
+
 ToolOutputSource = Literal["stdout", "stderr", "message"]
 ToolOutputFrame = dict[str, Any]
 ToolOutputEmitter = Callable[[ToolOutputFrame], Awaitable[None]]
 
-LIVE_TOOL_OUTPUT_MAX_BYTES = 64 * 1024
 LIVE_TOOL_OUTPUT_MAX_LINES = 2000
 LIVE_TOOL_OUTPUT_OMISSION_TEXT = "\n[早期实时输出已省略]\n"
+TOOL_OUTPUT_TRUNCATION_PREFIX = "\n[工具输出已截断："
 
 _LIVE_OUTPUT_TOOL_ALLOWLIST = frozenset({"execute_shell_command"})
 
@@ -76,36 +79,126 @@ def _line_count(text: str) -> int:
     return text.count("\n") + int(not text.endswith("\n"))
 
 
+def _text_bytes(text: str) -> int:
+    return len(text.encode("utf-8", errors="replace"))
+
+
+def _take_prefix_lines(
+    lines: list[str],
+    *,
+    max_bytes: int,
+    max_lines: int,
+) -> list[str]:
+    selected: list[str] = []
+    used_bytes = 0
+    for line in lines:
+        line_bytes = _text_bytes(line)
+        if len(selected) >= max_lines or used_bytes + line_bytes > max_bytes:
+            break
+        selected.append(line)
+        used_bytes += line_bytes
+    return selected
+
+
+def _take_suffix_lines(
+    lines: list[str],
+    *,
+    max_bytes: int,
+    max_lines: int,
+) -> list[str]:
+    selected: list[str] = []
+    used_bytes = 0
+    for line in reversed(lines):
+        line_bytes = _text_bytes(line)
+        if len(selected) >= max_lines or used_bytes + line_bytes > max_bytes:
+            break
+        selected.append(line)
+        used_bytes += line_bytes
+    return list(reversed(selected))
+
+
+def normalize_tool_output(
+    text: str,
+    *,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+    max_lines: int = LIVE_TOOL_OUTPUT_MAX_LINES,
+) -> str:
+    """Return a bounded UTF-8-safe head-and-tail tool result."""
+    if not text or max_bytes <= 0 or max_lines <= 0:
+        return text
+    if _text_bytes(text) <= max_bytes and _line_count(text) <= max_lines:
+        return text
+
+    original_bytes = _text_bytes(text)
+    marker = (
+        f"{TOOL_OUTPUT_TRUNCATION_PREFIX}原始 {original_bytes} bytes，"
+        f"省略 {original_bytes} bytes]\n"
+    )
+    marker_bytes = _text_bytes(marker)
+    marker_lines = _line_count(marker)
+    if marker_bytes > max_bytes or marker_lines > max_lines:
+        return marker.encode("utf-8", errors="replace")[:max_bytes].decode(
+            "utf-8",
+            errors="ignore",
+        )
+
+    available_bytes = max_bytes - marker_bytes
+    available_lines = max_lines - marker_lines
+    lines = text.splitlines(keepends=True)
+    head = _take_prefix_lines(
+        lines,
+        max_bytes=available_bytes // 2,
+        max_lines=available_lines // 2,
+    )
+    tail = _take_suffix_lines(
+        lines[len(head) :],
+        max_bytes=available_bytes - _text_bytes("".join(head)),
+        max_lines=available_lines - len(head),
+    )
+    retained = "".join(head) + "".join(tail)
+    omitted_bytes = original_bytes - _text_bytes(retained)
+    marker = (
+        f"{TOOL_OUTPUT_TRUNCATION_PREFIX}原始 {original_bytes} bytes，"
+        f"省略 {omitted_bytes} bytes]\n"
+    )
+    return "".join(head) + marker + "".join(tail)
+
+
+def _live_output_budget_bytes() -> int:
+    return get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
+
+
 def _bounded_text(
     state: _ToolOutputInvocation,
     text: str,
-) -> tuple[str, bool]:
+) -> tuple[str, bool, int]:
+    budget_bytes = _live_output_budget_bytes()
     if state.truncated:
-        return "", False
+        return "", False, budget_bytes
 
-    remaining_bytes = LIVE_TOOL_OUTPUT_MAX_BYTES - state.emitted_bytes
+    remaining_bytes = budget_bytes - state.emitted_bytes
     remaining_lines = LIVE_TOOL_OUTPUT_MAX_LINES - state.emitted_lines
     if remaining_bytes <= 0 or remaining_lines <= 0:
         state.truncated = True
-        return LIVE_TOOL_OUTPUT_OMISSION_TEXT, True
+        return "", True, budget_bytes
 
     encoded = text.encode("utf-8", errors="replace")
-    truncated = False
-    if len(encoded) > remaining_bytes:
-        encoded = encoded[:remaining_bytes]
-        text = encoded.decode("utf-8", errors="replace")
-        truncated = True
-
     lines = text.splitlines(keepends=True)
-    if len(lines) > remaining_lines:
-        text = "".join(lines[:remaining_lines])
-        truncated = True
+    omission_bytes = _text_bytes(LIVE_TOOL_OUTPUT_OMISSION_TEXT)
+    omission_lines = _line_count(LIVE_TOOL_OUTPUT_OMISSION_TEXT)
+    content_bytes = max(0, remaining_bytes - omission_bytes)
+    content_lines = max(0, remaining_lines - omission_lines)
+    truncated = len(encoded) > content_bytes or len(lines) > content_lines
+    if truncated:
+        encoded = encoded[:content_bytes]
+        text = encoded.decode("utf-8", errors="replace")
+        text = "".join(text.splitlines(keepends=True)[:content_lines])
 
     if truncated:
         state.truncated = True
         text += LIVE_TOOL_OUTPUT_OMISSION_TEXT
 
-    return text, truncated
+    return text, truncated, budget_bytes
 
 
 async def emit_tool_output_text(
@@ -123,7 +216,7 @@ async def emit_tool_output_text(
     if state.tool_name not in _LIVE_OUTPUT_TOOL_ALLOWLIST:
         return
 
-    frame_text, truncated = _bounded_text(state, text)
+    frame_text, truncated, budget_bytes = _bounded_text(state, text)
     if not frame_text:
         return
 
@@ -140,5 +233,6 @@ async def emit_tool_output_text(
             "source": source,
             "text": frame_text,
             "truncated": truncated,
+            "budget_bytes": budget_bytes,
         },
     )

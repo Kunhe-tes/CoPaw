@@ -735,7 +735,8 @@ class TestTraceManager:
             span_id
         ]  # pylint: disable=protected-access
         assert span.skill_name is None
-        assert span.skill_description == "desc:hook-http-demo"
+        # skill_description 字段已从 Span 模型移除，不再写入 span
+        assert not hasattr(span, "skill_description")
 
         await manager.close()
 
@@ -785,7 +786,8 @@ class TestTraceManager:
             span_id
         ]  # pylint: disable=protected-access
         assert span.skill_name == "weather"
-        assert span.skill_description == "desc:weather"
+        # skill_description 字段已从 Span 模型移除
+        assert not hasattr(span, "skill_description")
 
         await manager.close()
 
@@ -840,7 +842,8 @@ class TestTraceManager:
             span_id
         ]  # pylint: disable=protected-access
         assert span.skill_name == "fill-metadata"
-        assert span.skill_description == "desc:fill-metadata"
+        # skill_description 字段已从 Span 模型移除
+        assert not hasattr(span, "skill_description")
 
         await manager.close()
 
@@ -1237,13 +1240,13 @@ class TestSessionName:
         await manager.close()
 
     @pytest.mark.asyncio
-    async def test_setup_skill_detector_does_not_start_skill_immediately(
+    async def test_setup_skill_detector_does_not_infer_from_user_message(
         self,
         enabled_config,
         mock_db,
         monkeypatch,
     ):
-        """Layer 0 仅做检测缓存，正式 skill span 由会话 detector 启动。"""
+        """追踪初始化不会从用户正文推断 skill。"""
         manager = TraceManager(enabled_config, mock_db)
         await manager.initialize()
 
@@ -1272,7 +1275,7 @@ class TestSessionName:
             enabled_skills=["xlsx"],
         )
 
-        detector_instance.detect_from_user_message.assert_called_once()
+        detector_instance.detect_from_user_message.assert_not_called()
         detector_instance.start_skill.assert_not_awaited()
         await manager.close()
 

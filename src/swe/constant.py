@@ -571,3 +571,15 @@ USER_INFO_API_URL = EnvVarLoader.get_str(
     "SWE_USER_INFO_API_URL",
     "",
 )
+
+# market 服务内部端点配置。
+# bootstrap 完成后回调 market 同步 swe_skills 表，仅限集群内部访问；
+# token 留空表示 market 侧不校验（开发模式）。
+MARKET_INTERNAL_URL = EnvVarLoader.get_str(
+    "SWE_MARKET_INTERNAL_URL",
+    "http://market:8090",
+)
+MARKET_INTERNAL_TOKEN = EnvVarLoader.get_str(
+    "SWE_MARKET_INTERNAL_TOKEN",
+    "",
+)

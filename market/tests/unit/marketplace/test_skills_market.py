@@ -31,6 +31,73 @@ def _make_app(tmp_path):
     return app
 
 
+@pytest.mark.asyncio
+async def test_process_workspace_skills_writes_workspace_manifest_path(
+    tmp_path,
+    monkeypatch,
+):
+    from market.marketplace import skill_sync
+    from market.marketplace.fs import get_workspace_skill_manifest_path
+
+    workspace_dir = tmp_path / "workspace"
+    (workspace_dir / "skills" / "demo").mkdir(parents=True)
+
+    async def _record_skill(
+        skill_dir,
+        user_id,
+        source_id,
+        skills_dict,
+        registry,
+        force,
+        dry_run,
+        result,
+    ):
+        del (
+            skill_dir,
+            user_id,
+            source_id,
+            registry,
+            force,
+            dry_run,
+            result,
+        )
+        skills_dict["demo"] = {"enabled": True}
+
+    monkeypatch.setattr(
+        skill_sync,
+        "_process_single_skill",
+        _record_skill,
+    )
+
+    await skill_sync._process_workspace_skills(
+        workspace_dir,
+        "user1",
+        "source_a",
+        object(),
+        False,  # force
+        False,  # dry_run
+        True,  # write_manifest_back
+        {
+            "tenant_id": "user1",
+            "total_workspaces": 1,
+            "total_skills": 0,
+            "synced": 0,
+            "errors": [],
+            "details": [],
+        },
+    )
+
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    assert json.loads(manifest_path.read_text(encoding="utf-8")) == {
+        "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": 2,
+        "version": 0,
+        "skills": {"demo": {"enabled": True}},
+    }
+    assert manifest_path == workspace_dir / "skill.json"
+    assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
+
+
 def test_publish_skill_returns_201(tmp_path):
     app = _make_app(tmp_path)
     client = TestClient(app)
@@ -154,6 +221,62 @@ def test_distribute_skill_returns_200(tmp_path, monkeypatch):
     data = resp.json()
     assert data["status"] == "queued"
     assert data["task_id"]
+
+
+def test_distribute_skill_writes_workspace_manifest(tmp_path):
+    from market.marketplace.fs import get_user_skills_dir
+    from market.marketplace.schemas import (
+        DistributeRequest,
+        PublishSkillRequest,
+    )
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    item, _ = asyncio.run(
+        svc.publish_skill(
+            "src_a",
+            PublishSkillRequest(
+                name="skill_z",
+                description="",
+                creator_id="u1",
+                creator_name="",
+                skill_json={},
+                skill_md="",
+            ),
+        ),
+    )
+    svc.db.fetch_all = AsyncMock(
+        return_value=[
+            {"tenant_id": "user1", "tenant_name": "User One", "bbk_id": "200"},
+        ],
+    )
+    result = asyncio.run(
+        svc.distribute_skill(
+            "src_a",
+            item.item_id,
+            operator_id="u1",
+            operator_name="User",
+            req=DistributeRequest(target_type="all"),
+        ),
+    )
+    assert result.distributed_count == 1
+    assert result.conflict_count == 0
+
+    workspace_dir = get_user_skills_dir(
+        tmp_path / "swe",
+        "user1",
+        "default",
+        "src_a",
+    ).parent
+    manifest_path = workspace_dir / "skill.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["skills"]["skill_z"]["source"] == (
+        f"marketplace:{item.item_id}"
+    )
+    assert manifest["skills"]["skill_z"]["metadata"]["distributed_by"] == (
+        "u1"
+    )
+    assert not (workspace_dir / ".skill_state" / "manifest.json").exists()
 
 
 def test_publish_skill_missing_source_id_returns_400(tmp_path):
@@ -416,3 +539,118 @@ def test_switch_version_falls_back_to_created_by_when_no_source_user(tmp_path):
     item = items[0]
     assert item.creator_id == "admin_id"
     assert item.creator_name == "Admin"
+
+
+def test_update_statistics_config_returns_200(tmp_path):
+    """测试更新统计配置接口."""
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    req = PublishSkillRequest(
+        name="skill_stats",
+        description="test",
+        creator_id="u1",
+        creator_name="User",
+        skill_json={},
+        skill_md="",
+    )
+    item, _ = asyncio.run(svc.publish_skill("src_a", req))
+
+    client = TestClient(app)
+    resp = client.patch(
+        f"/api/market/skills/{item.item_id}/statistics",
+        json={"include_in_statistics": False},
+        headers={
+            "X-Source-Id": "src_a",
+            "X-Manager": "true",
+            "X-User-Id": "u1",
+            "X-User-Name": "User",
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["success"] is True
+
+
+def test_list_skills_reads_statistics_eligible_marketplace_skills(tmp_path):
+    """测试定时任务技能下拉列表读取统计白名单市场技能."""
+    app = _make_app(tmp_path)
+    app.state.marketplace.db.fetch_all.return_value = [
+        {
+            "skill_id": "skill_a",
+            "skill_name": "skill_a_name",
+            "cn_name": "技能A",
+        },
+    ]
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/market/skills/list",
+        json={"source_id": "src_a"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data == {
+        "source_id": "src_a",
+        "count": 1,
+        "skills": [
+            {
+                "skill_id": "skill_a",
+                "skill_name": "skill_a_name",
+                "cn_name": "技能A",
+            },
+        ],
+    }
+    sql = app.state.marketplace.db.fetch_all.call_args.args[0]
+    assert "FROM swe_marketplace_skills" in sql
+    assert "include_in_statistics = 1" in sql
+
+
+def test_update_statistics_config_non_manager_returns_403(tmp_path):
+    """测试非管理员无法更新统计配置."""
+    from market.marketplace.schemas import PublishSkillRequest
+
+    app = _make_app(tmp_path)
+    svc = app.state.marketplace
+    req = PublishSkillRequest(
+        name="skill_stats2",
+        description="test",
+        creator_id="u1",
+        creator_name="User",
+        skill_json={},
+        skill_md="",
+    )
+    item, _ = asyncio.run(svc.publish_skill("src_a", req))
+
+    client = TestClient(app)
+    resp = client.patch(
+        f"/api/market/skills/{item.item_id}/statistics",
+        json={"include_in_statistics": False},
+        headers={
+            "X-Source-Id": "src_a",
+            "X-User-Id": "u1",
+        },
+    )
+    assert resp.status_code == 403
+
+
+def test_init_statistics_returns_200(tmp_path):
+    """测试初始化历史数据接口（dry_run 模式）."""
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    # dry_run 模式会检查数据库连接
+    resp = client.post(
+        "/api/market/admin/skills/init-statistics",
+        json={
+            "source_ids": ["src_a"],
+            "default_include": True,
+            "dry_run": True,
+        },
+    )
+    # 由于 mock 数据库连接，dry_run 模式应该成功
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "processed" in data
+    assert "errors" in data

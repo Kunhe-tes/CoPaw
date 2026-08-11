@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 import pytest
 
-from swe.config.context import encode_scope_id, tenant_context
+from swe.config.context import tenant_context
 from swe.constant import WORKING_DIR
 from swe.security.tenant_path_boundary import (
     get_current_tenant_root,
@@ -106,10 +106,7 @@ class TestGetCurrentTenantRoot:
         mock_working_dir: Path,
     ):
         """default + source should resolve to the source-scoped tenant root."""
-        effective_root = mock_working_dir / encode_scope_id(
-            "default",
-            "RMASSIST",
-        )
+        effective_root = mock_working_dir / "default_RMASSIST"
         effective_root.mkdir(parents=True)
 
         with tenant_context(tenant_id="default", source_id="RMASSIST"):
@@ -163,12 +160,9 @@ class TestGetCurrentToolBaseDir:
         self,
         mock_working_dir: Path,
     ):
-        """default + source should accept workspace_dir under encoded scope."""
+        """default + source should accept workspace_dir under default_{source}."""
         workspace_dir = (
-            mock_working_dir
-            / encode_scope_id("default", "RMASSIST")
-            / "workspaces"
-            / "default"
+            mock_working_dir / "default_RMASSIST" / "workspaces" / "default"
         )
         workspace_dir.mkdir(parents=True)
 

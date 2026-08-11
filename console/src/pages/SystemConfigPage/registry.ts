@@ -17,11 +17,6 @@ export interface ToolResultCompactConfig {
   retention_days: number;
 }
 
-export interface ImmediateTruncationConfig {
-  enabled: boolean;
-  max_bytes: number;
-}
-
 export interface CronUnreadAutoPauseConfig {
   enabled: boolean;
   threshold: number;
@@ -63,13 +58,7 @@ export interface LlmRateLimiterConfig {
   llm_cron_acquire_timeout: number | null;
 }
 
-export type ImmediateTruncationConfigKey = "file_read_truncation";
 export type ModelCallPolicyConfigKey = "query_retry" | "llm_rate_limiter";
-
-export interface ImmediateTruncationState {
-  explicit: boolean;
-  config: ImmediateTruncationConfig;
-}
 
 export interface ModelCallPolicyState<T> {
   explicit: boolean;
@@ -110,6 +99,13 @@ export const CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES: CurrentSourceConfigSwitchDef
         "关闭后不再注入 task progress 提示词，也不会写入或展示步骤进度。",
     },
     {
+      key: "feature_switches.normal_mode_plan_interaction_tools_enabled",
+      path: ["feature_switches", "normal_mode_plan_interaction_tools_enabled"],
+      defaultValue: false,
+      title: "计划交互工具开放",
+      description: "开启后，普通模式可使用计划澄清与计划提案提交工具。",
+    },
+    {
       key: "feature_switches.database_access_guard_enabled",
       path: ["feature_switches", "database_access_guard_enabled"],
       defaultValue: true,
@@ -132,11 +128,6 @@ export const TOOL_RESULT_COMPACT_DEFAULTS: ToolResultCompactConfig = {
   old_max_bytes: 3000,
   recent_max_bytes: 50000,
   retention_days: 5,
-};
-
-export const FILE_READ_TRUNCATION_DEFAULTS: ImmediateTruncationConfig = {
-  enabled: true,
-  max_bytes: 50000,
 };
 
 export const CRON_UNREAD_AUTO_PAUSE_DEFAULTS: CronUnreadAutoPauseConfig = {
@@ -202,8 +193,6 @@ export const CRON_UNREAD_AUTO_PAUSE_MIN_THRESHOLD = 1;
 
 export const CRON_TASK_SESSION_CLEANUP_MIN_RETENTION_DAYS = 1;
 
-export const IMMEDIATE_TRUNCATION_MIN_BYTES = 1000;
-
 export const QUERY_RETRY_BACKOFF_BASE_MIN = 0.5;
 export const QUERY_RETRY_BACKOFF_CAP_MIN = 1;
 
@@ -220,13 +209,13 @@ export const TOOL_RESULT_COMPACT_NUMBER_FIELDS: CurrentSourceConfigNumberDefinit
     },
     {
       key: "old_max_bytes",
-      title: "旧结果预览字节数",
+      title: "历史工具输出字节数",
       min: 100,
       step: 100,
     },
     {
       key: "recent_max_bytes",
-      title: "近期结果预览字节数",
+      title: "新产生与近期工具输出字节数",
       min: 1000,
       step: 1000,
     },
@@ -847,86 +836,6 @@ export function writeSystemPromptInjections(
   return nextConfig;
 }
 
-export function readImmediateTruncationConfig(
-  config: SourceSystemConfig,
-  key: ImmediateTruncationConfigKey,
-): ImmediateTruncationState {
-  const defaults = FILE_READ_TRUNCATION_DEFAULTS;
-  const rawValue = config[key];
-  if (!isPlainObject(rawValue)) {
-    return {
-      explicit: false,
-      config: { ...defaults },
-    };
-  }
-  return {
-    explicit: true,
-    config: {
-      enabled:
-        typeof rawValue.enabled === "boolean"
-          ? rawValue.enabled
-          : defaults.enabled,
-      max_bytes:
-        typeof rawValue.max_bytes === "number"
-          ? rawValue.max_bytes
-          : defaults.max_bytes,
-    },
-  };
-}
-
-export function writeImmediateTruncationValue<
-  K extends keyof ImmediateTruncationConfig,
->(
-  config: SourceSystemConfig,
-  configKey: ImmediateTruncationConfigKey,
-  key: K,
-  value: ImmediateTruncationConfig[K],
-): SourceSystemConfig {
-  const defaults = FILE_READ_TRUNCATION_DEFAULTS;
-  const nextConfig = clonePlainConfig(config);
-  const rawValue = nextConfig[configKey];
-  if (!isPlainObject(rawValue)) {
-    nextConfig[configKey] = {};
-  }
-  const section = nextConfig[configKey] as Record<string, unknown>;
-  section[key] = value;
-  if (
-    key === "enabled" &&
-    value === true &&
-    typeof section.max_bytes !== "number"
-  ) {
-    section.max_bytes = defaults.max_bytes;
-  }
-  return nextConfig;
-}
-
-export function enableImmediateTruncationConfig(
-  config: SourceSystemConfig,
-  configKey: ImmediateTruncationConfigKey,
-): SourceSystemConfig {
-  const defaults = FILE_READ_TRUNCATION_DEFAULTS;
-  const nextConfig = writeImmediateTruncationValue(
-    config,
-    configKey,
-    "enabled",
-    true,
-  );
-  const rawValue = nextConfig[configKey];
-  if (isPlainObject(rawValue) && typeof rawValue.max_bytes !== "number") {
-    rawValue.max_bytes = defaults.max_bytes;
-  }
-  return nextConfig;
-}
-
-export function clearImmediateTruncationConfig(
-  config: SourceSystemConfig,
-  configKey: ImmediateTruncationConfigKey,
-): SourceSystemConfig {
-  const nextConfig = clonePlainConfig(config);
-  delete nextConfig[configKey];
-  return nextConfig;
-}
-
 export function validateToolResultCompactConfig(
   config: ToolResultCompactConfig,
 ): string | null {
@@ -941,20 +850,6 @@ export function validateToolResultCompactConfig(
   }
   if (config.recent_max_bytes < config.old_max_bytes) {
     return "近期结果预览字节数不能小于旧结果预览字节数";
-  }
-  return null;
-}
-
-export function validateImmediateTruncationConfig(
-  state: ImmediateTruncationState,
-  title: string,
-): string | null {
-  if (!state.explicit) {
-    return null;
-  }
-  const value = state.config.max_bytes;
-  if (!Number.isInteger(value) || value < IMMEDIATE_TRUNCATION_MIN_BYTES) {
-    return `${title}不能小于 ${IMMEDIATE_TRUNCATION_MIN_BYTES}`;
   }
   return null;
 }
@@ -1077,11 +972,5 @@ export function validateSourceSystemConfig(
 export function validateToolOutputConfigs(
   config: SourceSystemConfig,
 ): string | null {
-  return (
-    validateToolResultCompactConfig(readToolResultCompactConfig(config)) ||
-    validateImmediateTruncationConfig(
-      readImmediateTruncationConfig(config, "file_read_truncation"),
-      "文件读取输出片段字节数",
-    )
-  );
+  return validateToolResultCompactConfig(readToolResultCompactConfig(config));
 }

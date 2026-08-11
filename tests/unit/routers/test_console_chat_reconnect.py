@@ -167,6 +167,59 @@ def test_console_chat_reconnect_accepts_chat_id_without_creating_new_chat(
     assert not chat_manager.get_or_create_calls
 
 
+def test_console_chat_reconnect_with_agent_request_shape_does_not_start_run(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    chat_manager = _FakeChatManager()
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=chat_manager,
+        task_tracker=_FakeTaskTracker(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    client = TestClient(app)
+
+    with client.stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json={
+            "reconnect": True,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "ignored"}],
+                },
+            ],
+            "session_id": "chat-existing",
+            "user_id": "user-1",
+            "channel": "console",
+        },
+    ) as response:
+        assert response.status_code == 200
+        assert "X-Swe-Msgid" not in response.headers
+        assert list(response.iter_lines()) == [
+            ": keep-alive",
+            "",
+            'data: {"done": true}',
+            "",
+        ]
+
+    assert not chat_manager.get_or_create_calls
+
+
 def test_console_chat_reconnect_accepts_logical_session_id(
     monkeypatch,
 ) -> None:

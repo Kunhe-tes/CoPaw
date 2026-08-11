@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 from pydantic import BaseModel
 from swe.config.context import encode_scope_id
 
@@ -665,6 +666,251 @@ def test_get_agent_for_request_uses_effective_tenant_for_source_scoped_default(
     assert request.state.tenant_id == "default"
 
 
+def test_file_manager_workspace_resolver_uses_path_agent_without_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_root = tmp_path / "default_ruice"
+    selected = tenant_root / "workspaces" / "writer"
+    selected.mkdir(parents=True)
+    (tenant_root / "workspaces" / "reader").mkdir()
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="default",
+            source_id="ruice",
+            workspace=agent_context.TenantWorkspaceContext(
+                "default_ruice",
+                tenant_root,
+            ),
+            agent_id="writer",
+        ),
+        headers={"X-Agent-Id": "reader"},
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                multi_agent_manager=SimpleNamespace(
+                    get_agent=lambda *_args, **_kwargs: pytest.fail(
+                        "File Manager must not start an Agent runtime",
+                    ),
+                ),
+            ),
+        ),
+    )
+    config = SimpleNamespace(
+        agents=SimpleNamespace(
+            active_agent="reader",
+            profiles={
+                "writer": SimpleNamespace(
+                    workspace_dir=str(selected),
+                    enabled=True,
+                ),
+                "reader": SimpleNamespace(
+                    workspace_dir=str(
+                        tenant_root / "workspaces" / "reader",
+                    ),
+                    enabled=True,
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "_get_tenant_aware_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    resolved = asyncio.run(
+        agent_context.resolve_file_manager_workspace_dir(request),
+    )
+
+    assert resolved == selected.resolve()
+
+
+def test_file_manager_workspace_resolver_falls_back_to_active_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_root = tmp_path / "tenant-a"
+    selected = tenant_root / "workspaces" / "active"
+    selected.mkdir(parents=True)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="tenant-a",
+            workspace=agent_context.TenantWorkspaceContext(
+                "tenant-a",
+                tenant_root,
+            ),
+        ),
+        headers={},
+        app=SimpleNamespace(state=SimpleNamespace()),
+    )
+    config = SimpleNamespace(
+        agents=SimpleNamespace(
+            active_agent="active",
+            profiles={
+                "active": SimpleNamespace(
+                    workspace_dir=str(selected),
+                    enabled=True,
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "_get_tenant_aware_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    resolved = asyncio.run(
+        agent_context.resolve_file_manager_workspace_dir(request),
+    )
+
+    assert resolved == selected.resolve()
+
+
+def test_file_manager_source_scope_location_uses_tenant_workspace_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_scope_base = tmp_path / "source-root"
+    tenant_workspace_dir = tmp_path / "default_ruice"
+    tenant_workspace_dir.mkdir()
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="default",
+            source_id="ruice",
+            workspace=agent_context.TenantWorkspaceContext(
+                "default_ruice",
+                tenant_workspace_dir,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "WORKING_DIR",
+        source_scope_base,
+        raising=False,
+    )
+
+    location = agent_context.resolve_file_manager_source_scope_location(
+        request,
+    )
+
+    assert location.base_dir == source_scope_base
+    assert location.component == tenant_workspace_dir.name
+
+
+def test_file_manager_source_scope_location_fails_without_tenant_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request = SimpleNamespace(state=SimpleNamespace(workspace=None))
+    source_scope_base = tmp_path / "source-root"
+    monkeypatch.setattr(
+        agent_context,
+        "FILE_MANAGER_SOURCE_SCOPE_BASE_DIR",
+        source_scope_base,
+        raising=False,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        agent_context.resolve_file_manager_source_scope_location(request)
+
+    assert raised.value.status_code == 503
+    assert str(source_scope_base) not in str(raised.value.detail)
+
+
+@pytest.mark.parametrize(
+    ("profile", "exists", "expected_status"),
+    [
+        (None, False, 404),
+        (SimpleNamespace(enabled=False), False, 403),
+        (SimpleNamespace(enabled=True), False, 404),
+    ],
+)
+def test_file_manager_workspace_resolver_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    profile: SimpleNamespace | None,
+    exists: bool,
+    expected_status: int,
+) -> None:
+    tenant_root = tmp_path / "tenant-a"
+    candidate = tenant_root / "workspaces" / "writer"
+    if exists:
+        candidate.mkdir(parents=True)
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="tenant-a",
+            workspace=agent_context.TenantWorkspaceContext(
+                "tenant-a",
+                tenant_root,
+            ),
+        ),
+        headers={"X-Agent-Id": "writer"},
+        app=SimpleNamespace(state=SimpleNamespace()),
+    )
+    profiles = {}
+    if profile is not None:
+        profile.workspace_dir = str(candidate)
+        profiles["writer"] = profile
+    config = SimpleNamespace(
+        agents=SimpleNamespace(active_agent="writer", profiles=profiles),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "_get_tenant_aware_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(agent_context.resolve_file_manager_workspace_dir(request))
+
+    assert raised.value.status_code == expected_status
+    assert str(candidate) not in str(raised.value.detail)
+
+
+def test_file_manager_workspace_resolver_rejects_path_outside_tenant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_root = tmp_path / "tenant-a"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    request = SimpleNamespace(
+        state=SimpleNamespace(
+            tenant_id="tenant-a",
+            workspace=agent_context.TenantWorkspaceContext(
+                "tenant-a",
+                tenant_root,
+            ),
+        ),
+        headers={"X-Agent-Id": "writer"},
+        app=SimpleNamespace(state=SimpleNamespace()),
+    )
+    config = SimpleNamespace(
+        agents=SimpleNamespace(
+            active_agent="writer",
+            profiles={
+                "writer": SimpleNamespace(
+                    workspace_dir=str(outside),
+                    enabled=True,
+                ),
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        agent_context,
+        "_get_tenant_aware_config",
+        lambda *_args, **_kwargs: config,
+    )
+
+    with pytest.raises(HTTPException) as raised:
+        asyncio.run(agent_context.resolve_file_manager_workspace_dir(request))
+
+    assert raised.value.status_code == 403
+    assert str(outside) not in str(raised.value.detail)
+
+
 def test_multi_agent_manager_uses_tenant_config_when_tenant_id_provided(
     monkeypatch,
 ):
@@ -1193,3 +1439,101 @@ def test_create_agent_explicit_empty_skill_names_create_empty_workspace_skills(
         ),
     )
     assert manifest["skills"] == {}
+
+
+def test_initialize_agent_workspace_registers_requested_pool_skill(
+    tmp_path,
+    monkeypatch,
+):
+    tenant_dir = tmp_path / "tenant-a"
+    workspace_dir = tenant_dir / "workspaces" / "agent-a"
+    _write_skill(
+        get_skill_pool_dir(working_dir=tenant_dir) / "guidance",
+        "tenant guidance",
+    )
+    reconcile_pool_manifest(working_dir=tenant_dir)
+    monkeypatch.setattr(
+        agents_router,
+        "_ensure_default_heartbeat_md",
+        lambda *args, **kwargs: None,
+    )
+
+    agents_router._initialize_agent_workspace(
+        workspace_dir,
+        SimpleNamespace(language="en"),
+        skill_names=["guidance"],
+        working_dir=tenant_dir,
+    )
+
+    manifest = json.loads(
+        get_workspace_skill_manifest_path(workspace_dir).read_text(
+            encoding="utf-8",
+        ),
+    )
+    assert set(manifest["skills"]) == {"guidance"}
+    assert manifest["skills"]["guidance"]["enabled"] is True
+
+
+def test_initialize_agent_workspace_fails_when_requested_pool_skill_is_missing(
+    tmp_path,
+    monkeypatch,
+):
+    tenant_dir = tmp_path / "tenant-a"
+    workspace_dir = tenant_dir / "workspaces" / "agent-a"
+    reconcile_pool_manifest(working_dir=tenant_dir)
+    monkeypatch.setattr(
+        agents_router,
+        "_ensure_default_heartbeat_md",
+        lambda *args, **kwargs: None,
+    )
+
+    with pytest.raises(RuntimeError, match="missing"):
+        agents_router._initialize_agent_workspace(
+            workspace_dir,
+            SimpleNamespace(language="en"),
+            skill_names=["missing"],
+            working_dir=tenant_dir,
+        )
+
+
+def test_initialize_agent_workspace_deduplicates_requested_pool_skills(
+    tmp_path,
+    monkeypatch,
+):
+    calls: list[str] = []
+
+    class FakeSkillPoolService:
+        def __init__(self, *, working_dir):
+            assert working_dir == tmp_path / "tenant-a"
+
+        def download_to_workspace(
+            self,
+            name,
+            workspace_dir,
+            *,
+            overwrite,
+        ):
+            calls.append(name)
+            if calls.count(name) > 1:
+                return {"success": False, "reason": "conflict"}
+            return {"success": True, "name": name}
+
+    monkeypatch.setattr(
+        skills_manager,
+        "SkillPoolService",
+        FakeSkillPoolService,
+    )
+    monkeypatch.setattr(
+        agents_router,
+        "_ensure_default_heartbeat_md",
+        lambda *args, **kwargs: None,
+    )
+
+    agents_router._initialize_agent_workspace(
+        tmp_path / "tenant-a" / "workspaces" / "agent-a",
+        SimpleNamespace(language="en"),
+        skill_names=["guidance", "guidance"],
+        working_dir=tmp_path / "tenant-a",
+    )
+
+    assert calls == ["guidance"]

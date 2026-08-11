@@ -73,6 +73,8 @@ def test_reconcile_workspace_manifest_renames_unsafe_skill_dir(
     manifest_path.write_text(
         json.dumps(
             {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
                 "version": 0,
                 "skills": {
                     "bad-skill": {
@@ -125,6 +127,31 @@ def test_reconcile_workspace_manifest_renames_conflicting_skill_dir(
     _write_skill(skills_dir / "bad-skill")
     _write_skill(skills_dir / "safe-skill")
 
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {
+                    name: {
+                        "enabled": True,
+                        "channels": ["all"],
+                        "source": "customized",
+                        "config": {},
+                        "metadata": {},
+                    }
+                    for name in ("bad-skill", "safe-skill")
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
     original = skills_manager.sanitize_fs_text
 
     def fake_sanitize(text: str) -> SanitizedFsText:
@@ -147,6 +174,35 @@ def test_reconcile_workspace_manifest_renames_conflicting_skill_dir(
     assert len(renamed_names) == 2
     assert any(name != "safe-skill" for name in renamed_names)
     assert not (skills_dir / "bad-skill").exists()
+
+
+def test_reconcile_leaves_unmanaged_unsafe_directory_unchanged(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    skills_dir = get_workspace_skills_dir(workspace_dir)
+    raw_skill_dir = skills_dir / "bad-skill"
+    _write_skill(raw_skill_dir)
+
+    original = skills_manager.sanitize_fs_text
+
+    def fake_sanitize(text: str) -> SanitizedFsText:
+        if text == "bad-skill":
+            return SanitizedFsText(
+                value="safe-skill",
+                changed=True,
+                strategy="replace",
+            )
+        return original(text)
+
+    monkeypatch.setattr(skills_manager, "sanitize_fs_text", fake_sanitize)
+
+    manifest = reconcile_workspace_manifest(workspace_dir)
+
+    assert manifest["skills"] == {}
+    assert raw_skill_dir.exists()
+    assert not (skills_dir / "safe-skill").exists()
 
 
 def test_reconcile_pool_manifest_renames_unsafe_skill_dir(
@@ -247,6 +303,30 @@ def test_load_skill_file_accepts_sanitized_path(
     references_dir = skill_dir / "references"
     references_dir.mkdir()
     (references_dir / "bad-ref.md").write_text("content", encoding="utf-8")
+
+    manifest_path = get_workspace_skill_manifest_path(workspace_dir)
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": "workspace-skill-manifest.v1",
+                "layout_version": 2,
+                "version": 0,
+                "skills": {
+                    "safe-skill": {
+                        "enabled": True,
+                        "channels": ["all"],
+                        "source": "customized",
+                        "config": {},
+                        "metadata": {},
+                    },
+                },
+            },
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
     original = skills_manager.sanitize_fs_text
 

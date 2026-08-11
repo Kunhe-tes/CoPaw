@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => {
     getCurrentCronBroadcastTask: vi.fn(),
     getCronBroadcastTask: vi.fn(),
     getCronJob: vi.fn(),
+    listSweSkills: vi.fn(),
     broadcastCronJob: vi.fn(),
     enableCronBatchDispatch: vi.fn(),
     disableCronBatchDispatch: vi.fn(),
@@ -54,6 +55,7 @@ vi.mock("../../../api", () => ({
     getCurrentCronBroadcastTask: mocks.getCurrentCronBroadcastTask,
     getCronBroadcastTask: mocks.getCronBroadcastTask,
     getCronJob: mocks.getCronJob,
+    listSweSkills: mocks.listSweSkills,
     broadcastCronJob: mocks.broadcastCronJob,
     enableCronBatchDispatch: mocks.enableCronBatchDispatch,
     disableCronBatchDispatch: mocks.disableCronBatchDispatch,
@@ -117,7 +119,24 @@ vi.mock("./components", () => ({
   DEFAULT_FORM_VALUES: {
     schedule: {},
   },
-  JobDrawer: () => null,
+  JobDrawer: ({
+    open,
+    form,
+    skillOptions,
+  }: {
+    open: boolean;
+    form: { getFieldValue: (name: string) => unknown };
+    skillOptions: Array<{ value: string; label: string }>;
+  }) => (
+    <div
+      data-testid="skill-options"
+      data-open={String(open)}
+      data-values={skillOptions.map((option) => option.value).join(",")}
+      data-skill-ids={String(form.getFieldValue("skillIds") ?? "")}
+    >
+      {skillOptions.length}
+    </div>
+  ),
   BroadcastChildrenModal: () => null,
   isBroadcastChildJob: () => false,
   useCronJobs: () => ({
@@ -133,6 +152,7 @@ vi.mock("./components", () => ({
   }),
   createColumns: (handlers: {
     onBroadcast: (job: CronJobSpecOutput) => void;
+    onEdit: (job: CronJobSpecOutput) => void;
   }) => [
     {
       title: "名称",
@@ -143,9 +163,14 @@ vi.mock("./components", () => ({
       title: "操作",
       key: "actions",
       render: (_: unknown, job: CronJobSpecOutput) => (
-        <button type="button" onClick={() => handlers.onBroadcast(job)}>
-          广播到租户
-        </button>
+        <>
+          <button type="button" onClick={() => handlers.onBroadcast(job)}>
+            广播到租户
+          </button>
+          <button type="button" onClick={() => handlers.onEdit(job)}>
+            编辑
+          </button>
+        </>
       ),
     },
   ],
@@ -156,6 +181,11 @@ describe("CronJobsPage broadcast task refresh", () => {
     vi.clearAllMocks();
     mocks.getUserTimezone.mockResolvedValue({ timezone: "UTC" });
     mocks.getCronJob.mockResolvedValue({ spec: mocks.job });
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "default",
+      count: 0,
+      skills: [],
+    });
     mocks.job.meta = {};
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({
       task: {
@@ -225,6 +255,89 @@ describe("CronJobsPage broadcast task refresh", () => {
       await screen.findByText("Broadcasting 4/5 tenants"),
     ).toBeInTheDocument();
   }, 30000);
+
+  it("deduplicates loaded skill options before passing them to the drawer", async () => {
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "default",
+      count: 2,
+      skills: [
+        {
+          skill_id: "same-skill-id",
+          skill_name: "first_skill_name",
+          cn_name: "首次展示",
+        },
+        {
+          skill_id: "same-skill-id",
+          skill_name: "second_skill_name",
+          cn_name: "重复展示",
+        },
+      ],
+    });
+
+    render(<CronJobsPage />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-options")).toHaveTextContent("1");
+    });
+    expect(screen.getByTestId("skill-options")).toHaveAttribute(
+      "data-values",
+      "same-skill-id",
+    );
+  });
+
+  it("rehydrates bound skill ids after async skill options load while editing", async () => {
+    let resolveSkills: (value: {
+      source_id: string;
+      count: number;
+      skills: Array<{
+        skill_id: string;
+        skill_name: string;
+        cn_name?: string | null;
+      }>;
+    }) => void = () => {};
+    mocks.job = {
+      ...mocks.job,
+      enabled: false,
+      skill_ids: "skill-a",
+    };
+    mocks.listSweSkills.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSkills = resolve;
+      }),
+    );
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+
+    expect(screen.getByTestId("skill-options")).toHaveAttribute(
+      "data-skill-ids",
+      "skill-a",
+    );
+
+    resolveSkills({
+      source_id: "default",
+      count: 1,
+      skills: [
+        {
+          skill_id: "skill-a",
+          skill_name: "analysis_skill",
+          cn_name: "分析技能",
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-options")).toHaveAttribute(
+        "data-values",
+        "skill-a",
+      );
+    });
+    expect(screen.getByTestId("skill-options")).toHaveAttribute(
+      "data-skill-ids",
+      "skill-a",
+    );
+  });
 
   it("prevents a second broadcast from the visible completed result", async () => {
     mocks.getCurrentCronBroadcastTask.mockResolvedValue({ task: null });

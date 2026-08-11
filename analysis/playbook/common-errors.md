@@ -2,6 +2,109 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## submit_proposed_plan 报 items must not be empty
+
+### 症状
+
+- 模型调用 `submit_proposed_plan` 时工具执行失败
+- 常见报错为：
+  - `1 validation error for ProposedPlanCreate`
+  - `steps Value error, items must not be empty`
+- 入参中的 `steps`、`risks` 或 `verification` 使用空字符串分隔段落，例如 `["阶段一", "...", "", "阶段二"]`
+
+### 典型原因
+
+- 模型把 Markdown/文本计划里的空行保留成列表中的 `""` 或空白字符串
+- `ProposedPlanCreate` 会校验计划列表字段，历史实现曾把任意空白列表项视为硬错误
+- 这类空项通常只是展示分隔符，不代表一条真实计划步骤
+
+### 第一落点
+
+- [src/swe/app/plans/models.py](../../src/swe/app/plans/models.py)
+- 重点看 `ProposedPlanCreate._non_empty_text_list()` 是否先清理空白项，再校验剩余有效项
+- 对应回归测试：
+  - [tests/unit/app/plans/test_models.py](../../tests/unit/app/plans/test_models.py)
+
+### 第一阶段处理
+
+- 工具调用侧不要主动传入空字符串作为分隔符，阶段标题可以作为普通步骤保留
+- 后端模型层可以清理空白列表项，但清理后列表为空时仍必须报 `must not be empty`
+- 不要放宽 `title`、`summary` 或未知字段校验，避免前端/模型注入未声明语义
+
+## submit_proposed_plan 报 Input should be a valid list
+
+### 症状
+
+- 模型调用 `submit_proposed_plan` 时工具执行失败
+- 常见报错为：
+  - `1 validation error for ProposedPlanCreate`
+  - `steps Input should be a valid list`
+- 入参中的 `steps`、`risks` 或 `verification` 是 JSON 字符串数组，例如 `"\n[\"阶段一\", \"阶段二\"]\n"`
+
+### 典型原因
+
+- 模型把工具参数里的数组再次序列化为 JSON 字符串
+- 工具 schema 如果只声明 `array`，部分模型仍可能把数组作为文本传入
+- `ProposedPlanCreate` 的领域字段仍是 `list[str]`，未做入口归一化时会在 Pydantic 列表类型校验处失败
+
+### 第一落点
+
+- [src/swe/agents/tools/planning.py](../../src/swe/agents/tools/planning.py)
+- 重点看 `submit_proposed_plan()` 的 `steps`、`risks`、`verification` 工具签名是否接受数组或 JSON 字符串数组
+- [src/swe/app/plans/models.py](../../src/swe/app/plans/models.py)
+- 重点看 `ProposedPlanCreate` 是否先把 JSON 字符串数组解码，再执行空白项清理和非空校验
+- 对应回归测试：
+  - [tests/unit/agents/tools/test_planning.py](../../tests/unit/agents/tools/test_planning.py)
+  - [tests/unit/app/plans/test_models.py](../../tests/unit/app/plans/test_models.py)
+
+### 第一阶段处理
+
+- 只兼容可解析为数组的 JSON 字符串，不把普通段落或 Markdown 文本自动拆成步骤
+- 解码后继续复用 `ProposedPlanCreate._non_empty_text_list()` 清理空白项，清理后为空仍报错
+- 不要把 `PlanReviewCard` 或持久化模型字段改成字符串，前端和存储协议仍统一使用 `list[str]`
+
+## ask_plan_clarification 报 str object has no attribute get
+
+### 症状
+
+- 模型调用 `ask_plan_clarification` 的表单模式时工具执行失败
+- 工具入参中的 `fields` 是 JSON 字符串，而不是原生数组
+- 常见报错为：`Error: 'str' object has no attribute 'get'`
+- 模型调用选择模式时把 `options` 作为 JSON 字符串传入，前端表现为每个字符都渲染成一个选项
+- 模型把 `kind` 传成 `clarification`、`choice` 等宽泛描述，后端报 `PlanClarificationCard.kind` 枚举校验失败
+- 模型把表单字段写成 `{"name": "机构类型", "description": "...", "options": [...]}`，没有提供 `label`，后端报 `clarification field label is required`
+
+### 典型原因
+
+- 模型把表单字段数组再次序列化成 JSON 字符串
+- 模型把选择项数组再次序列化成 JSON 字符串
+- 计划澄清工具直接遍历字符串，导致单个字符进入字段或选项归一化逻辑
+- 部分模型还会使用 `key` 代替 `id`，省略可从 `options` 推断的字段类型，或只给选项提供 `label`/`description`
+- 工具 schema 如果把 `kind` 暴露为任意字符串，模型容易把工具用途描述误传成卡片协议枚举
+- 部分模型会把 `name` 同时当字段标识和展示标签使用，而工具入口只把 `name` 当 `id` 兜底
+- 字段内部的 `options` 也可能被再次序列化为 JSON 字符串
+
+### 第一落点
+
+- [src/swe/agents/tools/planning.py](../../src/swe/agents/tools/planning.py)
+- 重点看 `_normalize_form_fields()` 是否在字段归一化前解析 JSON 字符串并验证对象数组结构
+- 重点看 `_coerce_json_array()` 是否同时兼容 `fields` 和 `options` 的 JSON 字符串数组
+- 重点看 `_normalize_form_field()` 是否兼容 `key`，以及缺失 `type` 时是否按候选项推断类型
+- 重点看 `_normalize_choice_option()` 是否兼容 label-only 选项并保留 `description`
+- 重点看 `ask_plan_clarification()` 的 `kind` 注解是否向工具 schema 暴露受控枚举
+- 对应回归测试：
+  - [tests/unit/agents/tools/test_planning.py](../../tests/unit/agents/tools/test_planning.py)
+
+### 第一阶段处理
+
+- 先记录工具实际入参，确认 `fields` 和 `options` 是原生数组还是 JSON 字符串
+- JSON 字符串只允许解析为数组，非法 JSON 或非对象字段应返回明确参数错误
+- 无候选项的缺省字段归一为 `text`，有候选项的缺省字段归一为 `single_choice`
+- `kind` 必须使用 `single_choice`、`multi_choice`、`text` 或 `form`，不要放宽 `PlanClarificationCard` 领域模型
+- 表单字段展示名按 `label/title/name/key/id` 顺序兜底，字段标识按 `id/key/name/label/title` 顺序兜底
+- 只有工具入口做宽松归一化，`PlanClarificationCard` 和 `PlanClarificationField` 继续保持严格协议
+- 错误信息需要带 `fields[index]`，便于从工具调用日志直接定位失败字段
+
 ## Shell 中运行 swe 时被 Python runtime guard 拦截 `/opt/.swe`
 
 ### 症状
@@ -131,6 +234,183 @@
 - 这一阶段只解决“外层 SSE 静默断连”
 - 不包含 MCP 内部执行进度透传；如果希望前端看到“工具执行中”，需要后续把 MCP progress/event 映射进 `TaskTracker` 或 SSE 事件流
 
+## Console SSE 只返回 keep-alive 没有 data
+
+### 症状
+
+- `/api/console/chat` 返回 `200 text/event-stream`
+- 响应头包含 `X-Accel-Buffering: no`，且首帧能收到 `: keep-alive`
+- 随后连接结束或长期没有任何 `data:` 模型事件
+
+### 典型原因
+
+- Console 请求经 `_resolve_raw_console_request_data()` 回读原始 JSON 后，`content_parts` 仍是 dict
+- `BaseChannel._apply_no_text_debounce()` 如果只按对象属性读取 `type/text`，会把 `{"type":"text","text":"..."}` 误判为无文本消息
+- 误判后消息被缓存到 `_pending_content_by_session`，`ConsoleChannel.stream_one()` 直接返回，`TaskTracker` producer 不会调用模型
+
+### 第一落点
+
+- [src/swe/app/routers/console.py](/Users/shixiangyi/code/Swe/src/swe/app/routers/console.py)
+- 重点看 `_extract_session_and_payload()` 是否把前端 JSON content 传入 `native_payload["content_parts"]`
+- [src/swe/app/channels/base.py](/Users/shixiangyi/code/Swe/src/swe/app/channels/base.py)
+- 重点看 `_content_has_text()`、`_content_has_audio()` 和 `_apply_no_text_debounce()` 是否同时兼容 runtime Content 对象与 dict
+- [src/swe/app/channels/console/channel.py](/Users/shixiangyi/code/Swe/src/swe/app/channels/console/channel.py)
+- 重点看 `stream_one()` 是否在 debounce 后继续构造 `AgentRequest`
+
+### 第一阶段处理
+
+- 用 `curl --no-buffer -N` 先确认是否至少收到首个 `: keep-alive`
+- 如果只有 keep-alive，没有 `data:`，检查 `content_parts` 的实际类型
+- dict 文本块应被识别为完整用户输入，再交给 `AgentRequest` 做 runtime content 类型转换
+- 若已能收到 `response created/in_progress/failed`，说明 SSE 和 producer 已通，后续错误应转向模型 Provider、工具或 Runner 配置
+
+## Console 第二轮提问报 System message must be at the beginning
+
+### 症状
+
+- `/api/console/chat` 首轮请求正常，沿用同一个 `session_id` 第二轮提问失败
+- SSE 返回 `Unknown agent error: BadRequestError: Error code: 400`
+- 模型后端错误内容包含：
+  - `System message must be at the beginning.`
+  - `Unexpected message role.`
+  - `{'code': 20015, 'message': 'Unexpected message role.'}`
+- query error dump 栈一般落在 `agentscope/model/_openai_model.py` 调用 OpenAI-compatible `chat.completions.create`
+
+### 典型原因
+
+- 首轮结束后的 hook additionalContext 被追加进 `agent.memory`
+- 如果追加消息使用 `role=system`，第二轮历史会变成 `system/user/assistant/system/user`
+- 严格 OpenAI-compatible 后端只允许第一条消息是 `system`，会拒绝非首位 system
+- hook 附加上下文现在会保留 `system` 角色；formatter 只允许 hook 前缀消息继续保持非首位 `system`
+- accepted plan 执行上下文现在通过内部 `assistant` tool-call 与 `tool` result 成对注入，而不是拼进主 system prompt
+- 已经落盘的旧 session 即使源头修复，也可能继续携带 legacy `developer` 历史；加载时需要先迁移成 `system`
+
+### 第一落点
+
+- [src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
+- 重点看 `_emit_stop_hook_if_needed()` 写入 STOP hook additionalContext 时是否继续保留 `role="system"`
+- [src/swe/agents/model_factory.py](/Users/shixiangyi/code/Swe/src/swe/agents/model_factory.py)
+- 重点看 OpenAI / Anthropic formatter 是否保留 hook 前缀 `system`，并保持 accepted plan tool exchange 配对
+- [src/swe/providers/openai_chat_model_compat.py](/Users/shixiangyi/code/Swe/src/swe/providers/openai_chat_model_compat.py)
+- 重点看 Provider 层是否还保留 `developer -> user` 降级重试
+- [src/swe/agents/tool_guard_mixin.py](/Users/shixiangyi/code/Swe/src/swe/agents/tool_guard_mixin.py)
+- 重点看 `_record_tool_hook_result()` 是否同样写入 `role="system"` 的 hook additionalContext
+- [src/swe/agents/react_agent.py](/Users/shixiangyi/code/Swe/src/swe/agents/react_agent.py)
+- 重点看 `_build_accepted_plan_tool_exchange()` 和 `_reasoning()` 是否把 accepted plan 作为内部 tool exchange 注入当前轮次
+- 对应测试：
+  - [tests/unit/app/test_runner_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_hook_runtime.py)
+  - [tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
+  - [tests/unit/providers/test_openai_stream_toolcall_compat.py](/Users/shixiangyi/code/Swe/tests/unit/providers/test_openai_stream_toolcall_compat.py)
+
+### 第一阶段处理
+
+- 新增 hook 附加上下文统一写成带 hook 前缀的 `system` 消息，不再改写为 `developer` 或 `user`
+- formatter 侧保留兜底：只有 hook 前缀消息允许继续保持非首位 `system`，其他非首位 system 仍降级为 `user`
+- provider 兼容层不再做 `developer -> user` 自动重试；如果后端拒绝请求，应直接暴露失败
+- accepted plan 相关问题先确认 `assistant tool_use` 与后续 `tool_result` 是否成对、`tool_call_id` / `tool_use_id` 是否一致
+- 如果仍报错，检查当前 session 落盘 JSON 中 `agent.memory.content` 的 role 顺序，确认是否还有非首位 system 绕过了 formatter
+
+## 会话恢复时报 Msg.from_dict 断言失败
+
+### 症状
+
+- 发起已有 `session_id` 的会话时，Runner 在加载 session state 阶段直接报错
+- 常见堆栈包含：
+  - `SafeJSONSession.load_session_state()`
+  - `ReMeInMemoryMemory.load_state_dict()`
+  - `Msg.from_dict(...)`
+  - `assert role in ["user", "assistant", "system"]`
+- 落盘的 session JSON 里可以看到 hook additionalContext 消息使用 `role="developer"`
+
+### 典型原因
+
+- 旧版本保存的 hook additionalContext 可能仍带 `role="developer"`
+- `Msg.from_dict()` 反序列化仍只接受 `user/assistant/system`
+- 会话恢复如果直接把落盘 JSON 交给底层 memory `load_state_dict()`，就会在反序列化阶段触发断言
+
+### 第一落点
+
+- [src/swe/app/runner/session.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/session.py)
+- 重点看 `load_session_state()` 是否在调用底层 `load_state_dict()` 前把 legacy `developer` 单向迁移成 `system`
+- [src/swe/agents/hook_runtime/messages.py](/Users/shixiangyi/code/Swe/src/swe/agents/hook_runtime/messages.py)
+- 重点看 hook 附加上下文是否仍通过 helper 生成标准 `system` 消息
+- 对应回归测试：
+  - [tests/unit/app/test_session.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_session.py)
+  - [tests/unit/app/test_runner_hook_runtime.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_runner_hook_runtime.py)
+
+### 第一阶段处理
+
+- 不要把落盘里的 legacy `developer` 直接改成普通 `user`
+- 在 session 加载边界先把 `developer` 迁移成 `system`，后续保存继续保持 `system`
+- 如果用户已经产生坏 session 文件，修复代码后重新发起同一 `session_id` 即可触发兼容恢复，不需要先手工删历史
+
+## 聊天详情接口读取 legacy developer 历史时报 500
+
+### 症状
+
+- 请求 `GET /api/chats/{chat_id}` 或 `GET /api/tracing/chats/{chat_id}` 返回 `500`
+- 常见堆栈包含：
+  - `src/swe/app/runner/api.py:_messages_from_memory_state()`
+  - `memory.load_state_dict(...)`
+  - `assert role in ["user", "assistant", "system"]`
+- 如果先绕过 `load_state_dict()`，下一层还可能继续报：
+  - `Input should be 'assistant', 'system', 'user' or 'tool'`
+
+### 典型原因
+
+- 落盘 session 的旧 hook additionalContext 消息仍可能保留 `role="developer"`
+- 聊天详情接口直接读取原始 `memory_state` 时，如果没有复用 session 加载边界的 role 兼容逻辑，会先在 AgentScope 反序列化阶段失败
+- 即使 AgentScope 内存已恢复成功，详情接口组装 `ChatMessage` 时也必须只暴露标准角色
+
+### 第一落点
+
+- [src/swe/app/runner/api.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/api.py)
+- 重点看 `_messages_from_memory_state()` 是否在 `load_state_dict()` 前调用 session 的 role 兼容逻辑
+- [src/swe/app/runner/utils.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/utils.py)
+- 重点看 `agentscope_msg_to_message()` 是否最终只暴露 `system/user/assistant/tool`
+- 对应回归测试：
+  - [tests/unit/app/test_chat_api_message_timestamp.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_chat_api_message_timestamp.py)
+  - [tests/unit/routers/test_tracing_chats_api.py](/Users/shixiangyi/code/Swe/tests/unit/routers/test_tracing_chats_api.py)
+
+### 第一阶段处理
+
+- 详情接口读取 memory 时，先复用 `session.py` 的 role 兼容逻辑，把 legacy `developer` 迁移为 `system`
+- 进入 API 响应层后，只返回标准角色，不再恢复或暴露 `developer`
+
+## accepted plan 注入后模型拒绝 tool 消息配对
+
+### 症状
+
+- 执行 accepted plan 时模型请求直接失败
+- 常见错误包含：
+  - `tool_call_id` 缺失
+  - `tool_use_id` 不匹配
+  - `tool message must follow a tool call`
+- 同一轮 prompt 里看不到成对的 `assistant tool_use` 和 `tool_result`
+
+### 典型原因
+
+- accepted plan 被重新拼回了主 system prompt
+- 内部 tool exchange 只有 `tool_result`，没有前置 `assistant` tool call
+- tool call id / tool result id 不一致
+- accepted plan 在 Plan Mode 或非服务端来源场景下被误注入
+
+### 第一落点
+
+- [src/swe/agents/react_agent.py](/Users/shixiangyi/code/Swe/src/swe/agents/react_agent.py)
+- 重点看 `_build_accepted_plan_tool_exchange()` 是否校验 `accepted_plan_source`、`plan_mode_enabled` 并生成稳定 call id
+- [src/swe/agents/model_factory.py](/Users/shixiangyi/code/Swe/src/swe/agents/model_factory.py)
+- 重点看 OpenAI / Anthropic formatter 是否保留该内部 exchange 的顺序和关联 id
+- 对应回归测试：
+  - [tests/unit/app/test_task_progress_switch.py](/Users/shixiangyi/code/Swe/tests/unit/app/test_task_progress_switch.py)
+  - [tests/unit/agents/test_model_factory_tenant.py](/Users/shixiangyi/code/Swe/tests/unit/agents/test_model_factory_tenant.py)
+
+### 第一阶段处理
+
+- accepted plan 只能通过内部 `assistant` tool-call + `tool` result 注入
+- `tool_call_id` / `tool_use_id` 必须复用同一个 call id
+- Plan Mode 或缺少 `accepted_plan_source=server_plan_store` 时直接跳过注入
+
 ## Console 切换运行中会话时 reconnect 返回 404
 
 ### 症状
@@ -202,11 +482,11 @@
 - 后端仍可能被配置型超时中止，例如 `SWE_QUERY_TIMEOUT_SECONDS`、`SWE_MCP_PER_NOTIFICATION_TIMEOUT`、`SWE_LOCAL_TOOL_EXECUTION_HARD_TIMEOUT` 或 shell tool 的 `timeout` 参数
 - 若要允许超长 MCP tool，MCP server 应定期发送 progress notification，或调大 per-notification timeout
 
-## BeforeStop 预算耗尽提示流出但历史缺失
+## Stop 预算耗尽提示流出但历史缺失
 
 ### 症状
 
-- `BeforeStop` 持续返回 `block` 后，前端能看到“任务未完成”提示
+- `Stop` 持续返回 `block` 后，前端能看到“任务未完成”提示
 - 刷新或重新加载会话后，历史最后一条仍是上一轮模型回复，看不到预算耗尽提示
 - Trace 或 Monitor 里最终输出也可能只记录模型回复，缺少用户实际看到的未完成状态
 
@@ -218,7 +498,7 @@
 ### 第一落点
 
 - [src/swe/app/runner/runner.py](/Users/shixiangyi/code/Swe/src/swe/app/runner/runner.py)
-- 重点看 `_stream_completion_lifecycle()` 的 BeforeStop 预算耗尽分支，以及 `_save_regular_session_state()` 保存前 memory 中是否包含同一条提示
+- 重点看 `_stream_completion_lifecycle()` 的 Stop 预算耗尽分支，以及 `_save_regular_session_state()` 保存前 memory 中是否包含同一条提示
 
 ### 第一阶段处理
 

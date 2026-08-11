@@ -17,39 +17,62 @@ import {
 import type { CronParts } from "./components/parseCron";
 import { parseCron, serializeCron } from "./components/parseCron";
 
-const SKILL_IDS_PATTERN = /^[A-Za-z0-9_.:-]+$/;
 const MAX_SKILL_IDS_LENGTH = 200;
+
+export type SkillSelectOption = { value: string; label: string };
 
 export type CronJobFormValues = CronJobSpecOutput & {
   cronType?: string;
   cronTime?: dayjs.Dayjs;
   cronDaysOfWeek?: string[];
   cronCustom?: string;
-  skillIds?: string;
+  skillIds?: string | string[];
   execution_model_key?: string;
   notificationDelayValue?: number;
   notificationDelayUnit?: NotificationDelayUnit;
 };
 
+export function buildSkillSelectOptions(
+  skills: Array<{
+    skill_id: string;
+    skill_name: string;
+    cn_name?: string | null;
+  }>,
+): SkillSelectOption[] {
+  const seenSkillIds = new Set<string>();
+  return skills.reduce<SkillSelectOption[]>((options, skill) => {
+    const skillId = skill.skill_id.trim();
+    if (!skillId || seenSkillIds.has(skillId)) {
+      return options;
+    }
+    seenSkillIds.add(skillId);
+    const displayName = skill.cn_name || skill.skill_name || skillId;
+    options.push({
+      value: skillId,
+      label: displayName === skillId ? skillId : `${displayName} (${skillId})`,
+    });
+    return options;
+  }, []);
+}
+
 export function normalizeSkillIdsInput(value?: unknown): string | undefined {
-  if (typeof value !== "string") {
+  const rawSkillIds = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+    ? value.trim().split(/[,\s]+/)
+    : [];
+
+  if (!rawSkillIds.length) {
     return undefined;
   }
 
   const skillIds = Array.from(
     new Set(
-      value
-        .trim()
-        .split(/[,\s]+/)
+      rawSkillIds
+        .map((skillId) => (typeof skillId === "string" ? skillId.trim() : ""))
         .filter(Boolean),
     ),
   );
-
-  for (const skillId of skillIds) {
-    if (!SKILL_IDS_PATTERN.test(skillId)) {
-      throw new Error("技能ID只能包含字母、数字、下划线、点、冒号和短横线");
-    }
-  }
 
   const normalized = skillIds.join(",");
   if (!normalized) {
@@ -81,7 +104,12 @@ export function buildCronJobFormValues(
         : "",
     },
     cronType: cronParts.type,
-    skillIds: job.skill_ids || "",
+    skillIds: job.skill_ids
+      ? job.skill_ids
+          .split(",")
+          .map((skillId) => skillId.trim())
+          .filter(Boolean)
+      : [],
     execution_model_key: buildExecutionModelKey(job.model_slot),
     notificationDelayValue: notificationDelay.value,
     notificationDelayUnit: notificationDelay.unit,
@@ -102,7 +130,7 @@ export function buildCronJobFormValues(
 }
 
 export function buildCronJobSubmitPayload(
-  values: Record<string, any>,
+  values: CronJobFormValues,
 ): CronJobSpecInput {
   const cronParts: CronParts = {
     type: values.cronType || "daily",
@@ -136,13 +164,13 @@ export function buildCronJobSubmitPayload(
     notificationDelayValue,
     notificationDelayUnit || "minutes",
   );
-  const meta = {
+  const meta: Record<string, unknown> = {
     ...(values.meta || {}),
     notification_delay_minutes: notificationDelayMinutes,
   };
   delete meta.broadcast_dispatch_intents_enabled;
   delete meta.dispatch_intents_enabled;
-  let processedValues: Record<string, any> = {
+  let processedValues: Record<string, unknown> = {
     ...rawValues,
     schedule: {
       ...values.schedule,
@@ -166,7 +194,7 @@ export function buildCronJobSubmitPayload(
     };
   }
 
-  return processedValues as CronJobSpecInput;
+  return processedValues as unknown as CronJobSpecInput;
 }
 
 export function getBroadcastResultMessage(

@@ -1,8 +1,22 @@
 import React from "react";
-import { render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  cleanup,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WelcomeCenterLayout from "./index";
 import { chatApi } from "@/api/modules/chat";
+import {
+  CHAT_INPUT_APPEND_TEXT_EVENT,
+  CHAT_INPUT_REPLACE_TEXT_EVENT,
+} from "../chatInputDraft";
+import quickMenuStyles from "../ComposerQuickMenu/index.module.less";
+
+const quickMenuItemSpy = vi.fn();
 
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => <span data-testid="attachment-icon" />,
@@ -20,6 +34,34 @@ vi.mock("@/components/agentscope-chat", () => ({
       ))}
     </div>
   ),
+  useChatAnywhereInput: (selector: (value: { disabled: boolean }) => unknown) =>
+    selector({ disabled: false }),
+}));
+
+vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => ({
+  default: ({ children }: { children?: React.ReactNode }) => (
+    <div data-testid="welcome-quick-menu">{children}</div>
+  ),
+  ComposerQuickMenuItem: (props: { label: React.ReactNode }) => {
+    quickMenuItemSpy(props);
+    return <span>{props.label}</span>;
+  },
+}));
+
+vi.mock("@/components/GlobalVoiceRecorder/VoiceRecorderQuickMenuItem", () => ({
+  default: () => <span data-testid="voice-recorder-trigger">语音录制</span>,
+}));
+
+vi.mock("@/components/GlobalVoiceRecorder/context", () => ({
+  useVoiceRecorderTrigger: () => ({
+    disabled: false,
+    label: "开始语音录制",
+    loading: false,
+    panelOpen: false,
+    recording: false,
+    unsupported: false,
+    trigger: () => undefined,
+  }),
 }));
 
 vi.mock("react-i18next", () => ({
@@ -50,10 +92,34 @@ vi.mock("@/api/modules/featuredCases", () => ({
 }));
 
 const mockedUploadFile = vi.mocked(chatApi.uploadFile);
+const skills = [
+  {
+    id: "skill:browser",
+    type: "skill" as const,
+    label: "browser",
+    name: "browser",
+    description: "Use a browser",
+  },
+  {
+    id: "skill:Build",
+    type: "skill" as const,
+    label: "Build",
+    name: "Build",
+    description: "Build an app",
+  },
+];
+
+function setTokenEditorValue(input: HTMLElement, value: string) {
+  input.textContent = value;
+  fireEvent.input(input);
+}
 
 describe("WelcomeCenterLayout", () => {
+  afterEach(cleanup);
+
   beforeEach(() => {
     vi.clearAllMocks();
+    quickMenuItemSpy.mockClear();
     mockedUploadFile.mockResolvedValue({
       url: "demo.txt",
       file_name: "demo.txt",
@@ -74,6 +140,410 @@ describe("WelcomeCenterLayout", () => {
     expect(mockedUploadFile).toHaveBeenCalledWith(file);
     await waitFor(() => {
       expect(screen.getByText("demo.txt")).toBeInTheDocument();
+    });
+  });
+
+  it("combines upload, voice recording, and caller actions in one quick menu", () => {
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        quickMenuItems={<span>计划模式</span>}
+      />,
+    );
+
+    expect(screen.getByTestId("welcome-quick-menu")).toHaveTextContent(
+      "chat.quickMenu.upload",
+    );
+    expect(screen.getByTestId("welcome-quick-menu")).toHaveTextContent(
+      "计划模式",
+    );
+    expect(screen.getByTestId("welcome-quick-menu")).toContainElement(
+      screen.getByTestId("voice-recorder-trigger"),
+    );
+    expect(quickMenuItemSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        interactive: true,
+        label: "chat.quickMenu.upload",
+      }),
+    );
+    expect(
+      screen
+        .getByText("chat.quickMenu.upload")
+        .closest(`.${quickMenuStyles.uploadTrigger}`),
+    ).toBeInTheDocument();
+  });
+
+  it("appends transcribed text to the welcome draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={onSubmit} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "已有草稿" } });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_APPEND_TEXT_EVENT, {
+        detail: { content: "语音转写" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(input).toHaveValue("已有草稿\n语音转写");
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("replaces the welcome draft without submitting", async () => {
+    const onSubmit = vi.fn();
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={onSubmit} />);
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "需要清空的原草稿" } });
+    document.dispatchEvent(
+      new CustomEvent(CHAT_INPUT_REPLACE_TEXT_EVENT, {
+        detail: { content: "完整 SOP 提示词" },
+      }),
+    );
+
+    await waitFor(() => {
+      expect(input).toHaveValue("完整 SOP 提示词");
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("opens the shared labelled skill menu and selects a matching skill by click", () => {
+    const onChange = vi.fn();
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange,
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "请用 @br");
+
+    expect(
+      screen.getByRole("listbox", { name: "可用上下文引用" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("option", { name: /browser/ }));
+
+    expect(onChange).toHaveBeenCalledWith([skills[0]]);
+    expect(input.textContent).toBe("请用 @browser ");
+  });
+
+  it("anchors the context-reference menu below the complete new-conversation card", () => {
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "@");
+    const menu = document.getElementById("context-reference-menu");
+
+    expect(menu?.parentElement).toBe(input.closest(".welcome-input-card"));
+    expect(menu).toHaveStyle({
+      top: "calc(100% + 8px)",
+    });
+    expect(menu).not.toHaveStyle({
+      bottom: "calc(100% + 8px)",
+    });
+  });
+
+  it("selects a matching skill with Enter without submitting", () => {
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange,
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "@BU");
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    expect(onChange).toHaveBeenCalledWith([skills[1]]);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(input.textContent).toBe("@Build ");
+  });
+
+  it("allows editing the skill query while the skill menu is open", () => {
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={vi.fn()}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "@br");
+    const event = createEvent.keyDown(input, { key: "Backspace" });
+    fireEvent(input, event);
+
+    expect(event.defaultPrevented).toBe(false);
+  });
+
+  it("does not submit while a loading skill menu is open", () => {
+    const onSubmit = vi.fn();
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        skillMentions={{
+          items: [],
+          selected: [],
+          loading: true,
+          onOpen: vi.fn(),
+          onChange: vi.fn(),
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "@missing");
+    const event = createEvent.keyDown(input, { key: "Enter" });
+    fireEvent(input, event);
+
+    expect(event.defaultPrevented).toBe(true);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(input.textContent).toBe("@missing");
+  });
+
+  it("preserves Enter during IME composition while a matching skill menu is open", () => {
+    const onChange = vi.fn();
+    const onSubmit = vi.fn();
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        skillMentions={{
+          items: skills,
+          selected: [],
+          onOpen: vi.fn(),
+          onChange,
+        }}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    setTokenEditorValue(input, "@br");
+    const event = createEvent.keyDown(input, {
+      key: "Enter",
+      isComposing: true,
+    });
+    fireEvent(input, event);
+
+    expect(event.defaultPrevented).toBe(false);
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("awaits beforeSubmit before sending and clearing the welcome input", async () => {
+    const onSubmit = vi.fn();
+    let resolveBeforeSubmit!: (result: boolean) => void;
+    const beforeSubmit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveBeforeSubmit = resolve;
+        }),
+    );
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        beforeSubmit={beforeSubmit}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    expect(beforeSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("hello");
+
+    resolveBeforeSubmit(true);
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({ query: "hello", fileList: [] });
+      expect(input).toHaveValue("");
+    });
+  });
+
+  it("does not submit or clear the welcome input when beforeSubmit returns false", async () => {
+    const onSubmit = vi.fn();
+    const beforeSubmit = vi.fn().mockResolvedValue(false);
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        beforeSubmit={beforeSubmit}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    await waitFor(() => expect(beforeSubmit).toHaveBeenCalledTimes(1));
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(input).toHaveValue("hello");
+  });
+
+  it("prevents duplicate sends while beforeSubmit is pending", async () => {
+    const onSubmit = vi.fn();
+    let resolveBeforeSubmit!: (result: boolean) => void;
+    const beforeSubmit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveBeforeSubmit = resolve;
+        }),
+    );
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        beforeSubmit={beforeSubmit}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    const sendButton = screen.getByRole("button", { name: "发送" });
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(sendButton);
+    fireEvent.click(sendButton);
+
+    expect(beforeSubmit).toHaveBeenCalledTimes(1);
+    expect(input).toBeDisabled();
+    expect(sendButton).toBeDisabled();
+
+    resolveBeforeSubmit(true);
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it("prevents duplicate sends while the submit handoff is pending", async () => {
+    let resolveSubmit!: () => void;
+    const onSubmit = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveSubmit = resolve;
+        }),
+    );
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        beforeSubmit={vi.fn().mockResolvedValue(true)}
+      />,
+    );
+
+    const input = screen.getByRole("textbox");
+    const sendButton = screen.getByRole("button", { name: "发送" });
+    fireEvent.change(input, { target: { value: "hello" } });
+    fireEvent.click(sendButton);
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    await Promise.resolve();
+
+    expect(input).toBeDisabled();
+    expect(sendButton).toBeDisabled();
+    fireEvent.click(sendButton);
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+
+    resolveSubmit();
+    await waitFor(() => expect(input).not.toBeDisabled());
+  });
+
+  it("does not submit or clear attachments that finish uploading during preflight", async () => {
+    const onSubmit = vi.fn();
+    let resolveBeforeSubmit!: (result: boolean) => void;
+    let resolveUpload!: (result: { url: string; file_name: string }) => void;
+    const beforeSubmit = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveBeforeSubmit = resolve;
+        }),
+    );
+    mockedUploadFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveUpload = resolve;
+        }),
+    );
+
+    render(
+      <WelcomeCenterLayout
+        greeting="你好"
+        onSubmit={onSubmit}
+        beforeSubmit={beforeSubmit}
+      />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "hello" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+
+    const file = new File(["hello"], "later.txt", { type: "text/plain" });
+    document.dispatchEvent(
+      new CustomEvent("pasteFile", {
+        detail: { file },
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("later.txt")).toBeInTheDocument(),
+    );
+
+    resolveUpload({ url: "later.txt", file_name: "later.txt" });
+    await waitFor(() =>
+      expect(chatApi.filePreviewUrl).toHaveBeenCalledWith("later.txt"),
+    );
+
+    resolveBeforeSubmit(true);
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({ query: "hello", fileList: [] });
+      expect(screen.getByText("later.txt")).toBeInTheDocument();
     });
   });
 });

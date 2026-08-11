@@ -42,10 +42,13 @@ const htmlPreviewEventsApiMock = vi.hoisted(() => ({
 }));
 const iframeStoreMock = vi.hoisted(() => ({
   source: "CMSJY",
+  bbk: undefined as string | undefined,
 }));
 
 vi.mock("../../../api/modules/tracing", () => ({
   tracingApi: tracingApiMock,
+  displaySkillName: (skill: { display_name?: string | null; skill_name?: string | null }) =>
+    skill.display_name || skill.skill_name || "-",
 }));
 
 vi.mock("../../../api/modules/htmlPreviewEvents", () => ({
@@ -57,7 +60,7 @@ vi.mock("../../../stores/iframeStore", () => ({
     selector({
       isSuperManager: true,
       source: iframeStoreMock.source,
-      bbk: undefined,
+      bbk: iframeStoreMock.bbk,
     }),
 }));
 
@@ -77,6 +80,7 @@ describe("BusinessOverview trend chart", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     iframeStoreMock.source = "CMSJY";
+    iframeStoreMock.bbk = undefined;
     tracingApiMock.getOverview.mockResolvedValue({
       it_users: 20,
       business_users: 100,
@@ -269,6 +273,36 @@ describe("BusinessOverview trend chart", () => {
         },
       ],
     });
+  });
+
+  it("locks branch filter to current branch for branch users", async () => {
+    iframeStoreMock.bbk = "200";
+
+    const { container } = render(
+      <MemoryRouter>
+        <BusinessOverviewPage />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      const selectedItem = container.querySelector(
+        ".ant-select-selection-item",
+      );
+      expect(selectedItem?.textContent).toContain("北京分行");
+    });
+    expect(container.querySelector(".ant-select")).toHaveClass(
+      "ant-select-disabled",
+    );
+    await waitFor(() => {
+      expect(tracingApiMock.getOverview).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(String),
+        "200",
+      );
+    });
+    expect(
+      container.querySelector(".ant-select-disabled"),
+    ).toBeInTheDocument();
   });
 
   function renderBusinessOverview() {

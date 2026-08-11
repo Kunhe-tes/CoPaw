@@ -21,6 +21,14 @@ export interface RecordDataRequest {
   templateId: string;
 }
 
+export interface RecordDataResponse {
+  TRACE_ID: string;
+  CRON_JOB_ID: string;
+  custUid: string,
+  custName: string,
+  [key: string]: unknown;
+}
+
 // Dynamic Render API
 export const dynamicRenderApi = {
   getTemplateList: () =>
@@ -37,7 +45,7 @@ export const dynamicRenderApi = {
     ),
 
   getRecordData: (resultId: string, templateId: string) =>
-    request<Record<string, unknown>>("/template/result", {
+    request<RecordDataResponse>("/template/result", {
       method: "POST",
       body: JSON.stringify({
         resultId,

@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class ConversationCommandHandlerMixin:
     """Mixin for conversation (system) commands: /compact, /new, /clear, etc.
 
-    Expects self to have: agent_name, memory, formatter, memory_manager,
+    Expects self to have: agent_name, memory, memory_manager,
     _enable_memory_manager.
     """
 
@@ -101,7 +101,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
         """Check if the query is a system command (alias for mixin)."""
         return self.is_conversation_command(query)
 
-    async def _make_system_msg(self, text: str) -> Msg:
+    async def _make_system_msg(
+        self,
+        text: str,
+        metadata: dict | None = None,
+    ) -> Msg:
         """Create a system response message.
 
         Args:
@@ -114,6 +118,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
             name=self.agent_name,
             role="assistant",
             content=[TextBlock(type="text", text=text)],
+            metadata=metadata or {},
         )
 
     def _has_memory_manager(self) -> bool:
@@ -124,6 +129,20 @@ class CommandHandler(ConversationCommandHandlerMixin):
         """返回当前会话对应的 summary 任务作用域。"""
         request_context = getattr(self, "_request_context", {}) or {}
         return str(request_context.get("session_id") or "").strip() or None
+
+    async def _reset_checkpoint_epoch(self, reason: str) -> None:
+        """Reset Chat checkpoint state when a command starts fresh context."""
+        if not self._has_memory_manager():
+            return
+        chat_id = str(
+            (getattr(self, "_request_context", {}) or {}).get("chat_id") or "",
+        )
+        if not chat_id:
+            return
+        await self.memory_manager.reset_context_epoch(
+            chat_id=chat_id,
+            reason=reason,
+        )
 
     async def _process_compact(
         self,
@@ -146,15 +165,11 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
         self.memory_manager.add_async_summary_task(
             messages=messages,
-            chat_model=self.model,
-            formatter=self.formatter,
             scope_id=self._summary_task_scope_id(),
         )
         compact_content = await self.memory_manager.compact_memory(
             messages=messages,
             previous_summary=self.memory.get_compressed_summary(),
-            _bound_chat_model=self.model,
-            _bound_formatter=self.formatter,
         )
 
         if not compact_content:
@@ -164,6 +179,21 @@ class CommandHandler(ConversationCommandHandlerMixin):
                 "- Please check the logs for details\n"
                 "- If context exceeds max length, "
                 "please use `/new` or `/clear` to clear the context",
+            )
+
+        archive_messages = getattr(
+            self.memory,
+            "archive_compacted_messages",
+            None,
+        )
+        if archive_messages is not None:
+            boundary = await archive_messages(messages)
+            await self.memory.update_compressed_summary(compact_content)
+            return await self._make_system_msg(
+                "",
+                metadata={
+                    "conversation_compaction_boundary": boundary.to_dict(),
+                },
             )
 
         await self.memory.update_compressed_summary(compact_content)
@@ -179,6 +209,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
     async def _process_new(self, messages: list[Msg], _args: str = "") -> Msg:
         """Process /new command."""
         if not messages:
+            await self._reset_checkpoint_epoch("new")
             self.memory.clear_compressed_summary()
             return await self._make_system_msg(
                 "**No messages to summarize.**\n\n"
@@ -195,10 +226,9 @@ class CommandHandler(ConversationCommandHandlerMixin):
 
         self.memory_manager.add_async_summary_task(
             messages=messages,
-            chat_model=self.model,
-            formatter=self.formatter,
             scope_id=self._summary_task_scope_id(),
         )
+        await self._reset_checkpoint_epoch("new")
         self.memory.clear_compressed_summary()
 
         self.memory.clear_content()
@@ -214,6 +244,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
         _args: str = "",
     ) -> Msg:
         """Process /clear command."""
+        await self._reset_checkpoint_epoch("clear")
         self.memory.clear_content()
         self.memory.clear_compressed_summary()
         return await self._make_system_msg(
@@ -462,6 +493,8 @@ class CommandHandler(ConversationCommandHandlerMixin):
                             has_summary_marker = True
                         if len(loaded_messages) >= MAX_LOAD_HISTORY_COUNT:
                             break
+
+            await self._reset_checkpoint_epoch("load_history")
 
             # Clear existing memory
             self.memory.content.clear()

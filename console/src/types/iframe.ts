@@ -70,6 +70,8 @@ export interface IframeUserDataMessage {
     bbkId?: string;
     /** 其他任意参数 */
     [key: string]: unknown;
+    bbkOrgId?: string;
+    userId?: string;
     /** 是否隐藏聊天菜单（支持 boolean 或字符串 "true"/"false"） */
     hideChat?: boolean | string;
   };

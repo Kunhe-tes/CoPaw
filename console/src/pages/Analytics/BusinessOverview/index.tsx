@@ -30,6 +30,7 @@ import { useIframeStore } from "../../../stores/iframeStore";
 import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import {
   tracingApi,
+  displaySkillName,
   type BranchMetricItem,
   type ErrorSummary,
   type OverviewStats,
@@ -40,7 +41,11 @@ import {
 import UserDetailModal from "./components/UserDetailModal";
 import SkillDetailModal from "./components/SkillDetailModal";
 import ErrorDetailModal from "./components/ErrorDetailModal";
-import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
+import { BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
+import {
+  ensureBranchOptions,
+  getScopedBranchFilter,
+} from "../../../utils/branchScope";
 import {
   formatChange,
   formatDuration,
@@ -723,11 +728,22 @@ function buildTrendChartOption(
 export default function BusinessOverviewPage() {
   const navigate = useNavigate();
   const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
+  const currentBbkId = useIframeStore((state) => state.bbk);
+  const branchScope = useMemo(
+    () => getScopedBranchFilter(currentBbkId),
+    [currentBbkId],
+  );
+  const branchOptions = useMemo(
+    () => ensureBranchOptions(branchScope.lockedBbkId),
+    [branchScope.lockedBbkId],
+  );
 
   const [timeRange, setTimeRange] = useState<TimeRange>("day");
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs(), dayjs()]);
   // 管理员多选分行；非管理员使用用户所属分行
-  const [bbkIds, setBbkIds] = useState<string[]>([]);
+  const [bbkIds, setBbkIds] = useState<string[]>(
+    () => branchScope.lockedBbkId ? [branchScope.lockedBbkId] : [],
+  );
 
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(
     null,
@@ -787,6 +803,9 @@ export default function BusinessOverviewPage() {
   const [selectedUserName, setSelectedUserName] = useState<string | null>(null);
   const [skillModalOpen, setSkillModalOpen] = useState(false);
   const [selectedSkillName, setSelectedSkillName] = useState("");
+  const [selectedSkillDisplayName, setSelectedSkillDisplayName] = useState<
+    string | null
+  >(null);
   const [errorModalOpen, setErrorModalOpen] = useState(false);
 
   const startDateText = useMemo(
@@ -801,6 +820,17 @@ export default function BusinessOverviewPage() {
   const effectiveBbkIds = useMemo(() => {
     return bbkIds.length === 0 ? undefined : bbkIds;
   }, [bbkIds]);
+
+  useEffect(() => {
+    if (!branchScope.lockedBbkId) {
+      return;
+    }
+    setBbkIds((previous) =>
+      previous.length === 1 && previous[0] === branchScope.lockedBbkId
+        ? previous
+        : [branchScope.lockedBbkId],
+    );
+  }, [branchScope.lockedBbkId]);
   const cronJobOverviewPath = useMemo(() => {
     const params = new URLSearchParams();
     params.set("start_date", startDateText);
@@ -1246,22 +1276,31 @@ export default function BusinessOverviewPage() {
               className={styles.scopeSelect}
               mode="multiple"
               value={bbkIds}
-              onChange={setBbkIds}
+              onChange={(value) => {
+                if (!branchScope.lockedBbkId) {
+                  setBbkIds(value);
+                }
+              }}
               placeholder="全部分行"
-              maxTagCount="responsive"
-              maxTagPlaceholder={(omittedValues) => (
-                <Tooltip
-                  title={omittedValues
-                    .map((item) => {
-                      const value = String(item.value ?? "");
-                      return BBK_ID_TO_NAME_MAP[value] || value;
-                    })
-                    .join("、")}
-                >
-                  <span>+{omittedValues.length} 个分行</span>
-                </Tooltip>
-              )}
-              allowClear
+              disabled={!branchScope.isHeadOffice}
+              maxTagCount={branchScope.isHeadOffice ? "responsive" : 1}
+              maxTagPlaceholder={
+                branchScope.isHeadOffice
+                  ? (omittedValues) => (
+                      <Tooltip
+                        title={omittedValues
+                          .map((item) => {
+                            const value = String(item.value ?? "");
+                            return BBK_ID_TO_NAME_MAP[value] || value;
+                          })
+                          .join("、")}
+                      >
+                        <span>+{omittedValues.length} 个分行</span>
+                      </Tooltip>
+                    )
+                  : undefined
+              }
+              allowClear={branchScope.isHeadOffice}
               showSearch
               filterOption={(input, option) => {
                 const searchValue = input.toLowerCase();
@@ -1274,7 +1313,7 @@ export default function BusinessOverviewPage() {
                 );
               }}
             >
-              {BBK_ID_MAP.map((item) => (
+              {branchOptions.map((item) => (
                 <Option key={item.value} value={item.value}>
                   {item.label}
                 </Option>
@@ -1661,6 +1700,7 @@ export default function BusinessOverviewPage() {
                     : styles.rankBadge;
                 const descLen = skill.skill_description?.length || 0;
                 const tooltipWidth = descLen <= 30 ? 240 : descLen <= 60 ? 320 : descLen <= 100 ? 400 : 520;
+                const skillLabel = displaySkillName(skill);
                 return (
                   <button
                     key={`${skill.skill_name}-${rank}`}
@@ -1668,6 +1708,7 @@ export default function BusinessOverviewPage() {
                     className={styles.skillRankRow}
                     onClick={() => {
                       setSelectedSkillName(skill.skill_name);
+                      setSelectedSkillDisplayName(skill.cn_name ?? null);
                       setSkillModalOpen(true);
                     }}
                   >
@@ -1679,19 +1720,19 @@ export default function BusinessOverviewPage() {
                         skill.skill_description ? (
                           <div className={styles.skillTooltip}>
                             <div className={styles.skillTooltipName}>
-                              {skill.skill_name}
+                              {skillLabel}
                             </div>
                             <div className={styles.skillTooltipDesc}>
                               {skill.skill_description}
                             </div>
                           </div>
                         ) : (
-                          skill.skill_name
+                          skillLabel
                         )
                       }
                     >
                       <span className={styles.rankUser}>
-                        {truncateName(skill.skill_name, 20)}
+                        {truncateName(skillLabel, 20)}
                       </span>
                     </Tooltip>
                     <span className={styles.skillRankCalls}>
@@ -1810,11 +1851,13 @@ export default function BusinessOverviewPage() {
       <SkillDetailModal
         open={skillModalOpen}
         skillName={selectedSkillName}
+        skillDisplayName={selectedSkillDisplayName ?? undefined}
         startDate={startDateText}
         endDate={endDateText}
         onClose={() => {
           setSkillModalOpen(false);
           setSelectedSkillName("");
+          setSelectedSkillDisplayName(null);
         }}
       />
 

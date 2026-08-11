@@ -2,7 +2,7 @@
 
 本文档聚焦 `src/swe/agents/`，说明 Agent 的核心对象、提示词拼装、工具体系、技能管理和内存子系统。
 
-补充说明：回合级执行收口在 `src/swe/app/runner/runner.py`。当前后处理链路以 `BeforeStop`/`Stop` Hook、suggestions 与 tracing 为主；历史上的“回答后校验 -> 自动续跑”逻辑已退役，不再参与正常请求路径。
+补充说明：回合级执行收口在 `src/swe/app/runner/runner.py`。当前后处理链路以 `Stop` 完成门禁、suggestions 与 tracing 为主；历史上的“回答后校验 -> 自动续跑”逻辑已退役，不再参与正常请求路径。
 
 ## 目录结构
 

@@ -1,0 +1,717 @@
+.page {
+  min-width: 0;
+  padding: 24px;
+  background: var(--console-management-canvas);
+  color: var(--console-management-text);
+}
+.header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.header h1 {
+  margin: 0;
+  font-size: 20px;
+}
+.header p {
+  margin: 8px 0 0;
+  color: var(--console-management-text-secondary);
+}
+.editor {
+  max-width: 760px;
+  padding: 24px;
+}
+.editor label {
+  display: block;
+  margin: 0 0 14px;
+  color: var(--console-management-text-secondary);
+  font-size: 13px;
+}
+.editor label :global(.ant-input),
+.editor label :global(.ant-select) {
+  margin-top: 5px;
+}
+.editorHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.editorHeader h2 {
+  margin: 0;
+}
+.editorHeader span {
+  color: var(--console-management-text-muted);
+}
+.sectionTitle {
+  margin: 18px 0 8px;
+  font-weight: 600;
+}
+.advanced {
+  display: grid;
+  gap: 10px;
+}
+.switchLine {
+  display: flex !important;
+  justify-content: space-between;
+  align-items: center;
+  max-width: 360px;
+}
+.scripts {
+  max-width: 980px;
+}
+.scriptActions {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 16px;
+  color: var(--console-management-text-muted);
+}
+.uploadInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+.uploadResult {
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--console-management-surface-subtle);
+  border: 1px solid var(--console-management-border);
+  border-radius: 8px;
+}
+.uploadResult p {
+  margin: 4px 0;
+}
+.summary {
+  max-height: 240px;
+  overflow: auto;
+  margin-top: 16px;
+  padding: 12px;
+  background: var(--console-management-surface-subtle);
+  border-radius: 6px;
+}
+.formError,
+.fieldError {
+  margin: 0 0 16px;
+  color: var(--console-management-error);
+}
+.fieldError {
+  margin: 0;
+}
+.overview {
+  display: grid;
+  gap: 20px;
+}
+.overviewHeader,
+.overviewActions,
+.globalSwitch,
+.eventCard :global(.ant-card-head-title),
+.createActions,
+.templateList,
+.groupSummary {
+  display: flex;
+  align-items: center;
+}
+.overviewHeader {
+  justify-content: space-between;
+  gap: 16px;
+}
+.overviewHeader h2,
+.drawerSection h3 {
+  margin: 0;
+}
+.overviewHeader p,
+.eventCard p,
+.drawerSection p {
+  color: var(--console-management-text-secondary);
+}
+.overviewActions {
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.globalSwitch {
+  gap: 8px;
+}
+.eventGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 16px;
+}
+.eventCard {
+  min-height: 220px;
+}
+.eventCard :global(.ant-card-body) {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+.eventLabel {
+  margin-left: 8px;
+  color: var(--console-management-text-muted);
+  font-weight: 400;
+}
+.eventStats {
+  font-weight: 600;
+}
+.eventEmpty {
+  margin: 0;
+}
+.eventEmpty :global(.ant-empty-image) {
+  height: 26px;
+  margin-bottom: 4px;
+}
+.drawerSection {
+  margin-bottom: 24px;
+}
+.groupSummary {
+  justify-content: space-between;
+  margin-top: 8px;
+  padding: 12px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 8px;
+}
+.groupSummary span {
+  color: var(--console-management-text-muted);
+}
+.groupPanel {
+  margin-top: 8px;
+}
+.handlerCards {
+  display: grid;
+  gap: 6px;
+  padding: 8px 12px;
+  border: 1px solid var(--console-management-border);
+  border-top: 0;
+  border-radius: 0 0 8px 8px;
+}
+.handlerCard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.handlerTypeSelect {
+  width: 180px;
+}
+.createActions,
+.templateList {
+  align-items: stretch;
+  flex-direction: column;
+  gap: 12px;
+}
+.templateList :global(.ant-btn) {
+  height: auto;
+  padding: 12px;
+  text-align: left;
+}
+.templateList :global(.ant-btn span) {
+  display: block;
+}
+.templateList :global(.ant-btn span + span) {
+  margin-top: 4px;
+  color: var(--console-management-text-secondary);
+  white-space: normal;
+}
+
+.statusBanner,
+.statusCopy,
+.metricGrid,
+.sectionHeading,
+.lifecycleTrack,
+.lifecycleItem,
+.eventRow,
+.eventName,
+.processorChain,
+.unconfiguredList,
+.unconfiguredEvent {
+  display: flex;
+}
+.statusBanner {
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 20px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 12px;
+  background: var(--console-management-surface-subtle);
+}
+.statusCopy {
+  min-width: 0;
+  align-items: center;
+  gap: 12px;
+}
+.statusCopy > svg {
+  flex: 0 0 auto;
+  font-size: 26px;
+}
+.statusEnabled {
+  color: var(--console-management-success);
+}
+.statusDisabled {
+  color: var(--console-management-text-muted);
+}
+.statusCopy strong,
+.statusCopy span {
+  display: block;
+}
+.statusCopy strong {
+  color: var(--console-management-text);
+  font-size: 15px;
+}
+.statusCopy span,
+.sectionHeading span,
+.metricCard small,
+.eventName span,
+.unconfiguredEvent span {
+  margin-top: 3px;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.metricGrid {
+  gap: 12px;
+}
+.metricCard {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 16px 18px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 12px;
+  background: var(--console-management-surface);
+}
+.metricCard > span,
+.metricCard strong,
+.metricCard small {
+  display: block;
+}
+.metricCard > span {
+  color: var(--console-management-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+}
+.metricCard strong {
+  margin-top: 6px;
+  color: var(--console-management-text);
+  font-size: 26px;
+  line-height: 1.1;
+}
+.lifecyclePanel,
+.eventTable,
+.unconfiguredEvents {
+  border: 1px solid var(--console-management-border);
+  border-radius: 12px;
+  background: var(--console-management-surface);
+}
+.lifecyclePanel {
+  overflow: hidden;
+}
+.sectionHeading {
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 15px 18px;
+  border-bottom: 1px solid var(--console-management-border);
+}
+.sectionHeading h3 {
+  margin: 0;
+  color: var(--console-management-text);
+  font-size: 15px;
+}
+.lifecycleTrack {
+  align-items: center;
+  gap: 2px;
+  min-height: 112px;
+  padding: 16px 18px;
+  overflow-x: auto;
+}
+.lifecycleItem {
+  flex: 1 1 0;
+  width: 0;
+  min-width: 0;
+  align-items: center;
+}
+.lifecycleStep {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--console-management-text-secondary);
+  cursor: pointer;
+  text-align: left;
+}
+.lifecycleStep:hover,
+.lifecycleStep:focus-visible {
+  border-color: var(--console-management-primary);
+  background: var(--console-management-primary-soft);
+  outline: none;
+}
+.lifecycleStep[data-configured="true"] {
+  background: var(--console-management-surface-subtle);
+  color: var(--console-management-text);
+}
+.lifecycleStep strong,
+.lifecycleStep small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lifecycleStep > span:last-child {
+  min-width: 0;
+}
+.lifecycleStep strong {
+  font-size: 12px;
+}
+.lifecycleStep small {
+  margin-top: 2px;
+  color: var(--console-management-text-muted);
+  font-size: 11px;
+}
+.lifecycleMarker {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--console-management-border);
+  border-radius: 50%;
+  color: var(--console-management-text-muted);
+  font-size: 11px;
+}
+.lifecycleStep[data-configured="true"] .lifecycleMarker {
+  border-color: transparent;
+  color: var(--console-management-primary);
+  font-size: 20px;
+}
+.lifecycleArrow {
+  flex: 0 0 auto;
+  margin: 0 2px;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.eventTable {
+  overflow: hidden;
+}
+.eventRow {
+  display: grid;
+  grid-template-columns: minmax(180px, 1.1fr) minmax(280px, 1.8fr) 88px 104px;
+  min-height: 68px;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 18px;
+  border-top: 1px solid var(--console-management-border);
+}
+.eventRow:first-child {
+  border-top: 0;
+}
+.eventRowHeader {
+  min-height: 40px;
+  background: var(--console-management-surface-subtle);
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.eventName {
+  min-width: 0;
+  flex-direction: column;
+}
+.eventName strong {
+  overflow: hidden;
+  color: var(--console-management-text);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.processorChain {
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+.processorChain > span {
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.unconfiguredEvents {
+  overflow: hidden;
+}
+.unconfiguredList {
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 18px 18px;
+}
+.unconfiguredEvent {
+  height: auto;
+  min-width: 190px;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  text-align: left;
+}
+.unconfiguredEvent strong,
+.unconfiguredEvent span {
+  display: block;
+}
+.unconfiguredEvent strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.drawerTitle,
+.pipelineHeading,
+.pipelineStep,
+.pipelineStepButton,
+.pipelineActions,
+.testPublishPanel {
+  display: flex;
+}
+.drawerTitle {
+  align-items: center;
+  gap: 8px;
+}
+.drawerTitle strong {
+  color: var(--console-management-text);
+  font-size: 16px;
+}
+.drawerTabs :global(.ant-tabs-nav) {
+  margin-bottom: 20px;
+}
+.scopeWorkspace,
+.pipelineList,
+.handlerDetailPanel,
+.testPublishPanel,
+.eventBasics {
+  min-width: 0;
+  border: 1px solid var(--console-management-border);
+  border-radius: 10px;
+  background: var(--console-management-surface);
+}
+.scopeWorkspace,
+.testPublishPanel,
+.eventBasics {
+  padding: 18px;
+}
+.scopeWorkspace {
+  display: grid;
+  gap: 12px;
+}
+.scopeWorkspace .drawerSection {
+  margin: 0;
+}
+.scopeHint {
+  margin: 0;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.pipelineWorkspace {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.9fr) minmax(340px, 1.1fr);
+  gap: 16px;
+  min-height: 560px;
+}
+.pipelineList {
+  padding: 16px;
+  background: var(--console-management-surface-subtle);
+}
+.pipelineHeading {
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.pipelineHeading h3,
+.testPublishPanel h3,
+.eventBasics h3 {
+  margin: 0;
+  color: var(--console-management-text);
+  font-size: 15px;
+}
+.pipelineHeading p,
+.testPublishPanel p,
+.eventBasics p {
+  margin: 4px 0 0;
+  color: var(--console-management-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.pipelineHeading > span {
+  flex: 0 0 auto;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.pipelineGroup + .pipelineGroup {
+  margin-top: 18px;
+}
+.pipelineGroupLabel {
+  display: block;
+  margin-bottom: 8px;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+.pipelineStep {
+  position: relative;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.pipelineStep + .pipelineStep {
+  margin-top: 8px;
+}
+.pipelineStep + .pipelineStep::before {
+  position: absolute;
+  top: -10px;
+  left: 11px;
+  width: 1px;
+  height: 10px;
+  background: var(--console-management-primary);
+  content: "";
+}
+.pipelineStepNumber {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--console-management-primary);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+.pipelineStepButton {
+  min-width: 0;
+  height: auto;
+  flex: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 4px 8px;
+  padding: 9px 10px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 8px;
+  background: var(--console-management-surface);
+  text-align: left;
+}
+.pipelineStepButton:hover,
+.pipelineStepButton:focus-visible {
+  border-color: var(--console-management-primary) !important;
+  background: var(--console-management-primary-soft) !important;
+}
+.pipelineStepButton strong,
+.pipelineStepButton span {
+  display: block;
+  min-width: 0;
+}
+.pipelineStepButton strong {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--console-management-text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pipelineStepButton > span {
+  width: 100%;
+  overflow: hidden;
+  color: var(--console-management-text-muted);
+  font-family: var(--console-font-mono);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pipelineActions {
+  flex: 0 0 auto;
+}
+.pipelineGroup .handlerTypeSelect {
+  width: 100%;
+  margin-top: 10px;
+}
+.handlerDetailPanel {
+  min-height: 0;
+  overflow: auto;
+}
+.handlerDetailPanel .editor {
+  max-width: none;
+  padding: 18px;
+}
+.testPublishPanel {
+  display: grid;
+  gap: 16px;
+}
+.testPublishPanel > :global(.ant-btn) {
+  justify-self: start;
+}
+.eventBasics {
+  max-width: 660px;
+}
+.eventCode {
+  display: inline-block;
+  margin-bottom: 12px;
+  color: var(--console-management-primary);
+  font-family: var(--console-font-mono);
+  font-size: 12px;
+}
+@media (max-width: 760px) {
+  .page {
+    padding: 16px;
+  }
+  .header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .scriptActions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .overviewHeader {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .statusBanner,
+  .sectionHeading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .metricGrid {
+    flex-direction: column;
+  }
+  .eventRow {
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px 12px;
+  }
+  .eventRowHeader,
+  .eventRow > :nth-child(2) {
+    display: none;
+  }
+  .eventRow > :nth-child(3) {
+    justify-self: start;
+  }
+  .eventRow > :nth-child(4) {
+    justify-self: end;
+  }
+  .unconfiguredEvent {
+    width: 100%;
+  }
+  .lifecycleItem {
+    min-width: 112px;
+  }
+  .pipelineWorkspace {
+    grid-template-columns: minmax(0, 1fr);
+    min-height: 0;
+  }
+  .handlerDetailPanel {
+    max-height: none;
+  }
+}

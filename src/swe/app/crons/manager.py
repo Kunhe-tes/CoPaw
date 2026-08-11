@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TypeVar, cast
 
+from ..b3_headers import PASSTHROUGH_HEADERS_META_KEY
 from ..channels.schema import DEFAULT_CHANNEL
 from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
@@ -1836,6 +1837,28 @@ class CronManager:  # pylint: disable=too-many-public-methods
             logger.debug("Job %s is disabled, skipping run", job_id)
             return
         job = await self._ensure_persisted_task_binding(job)
+        dispatch_meta = dict(dispatch_meta or {})
+        persisted_headers = (job.dispatch.meta or {}).get(
+            PASSTHROUGH_HEADERS_META_KEY
+        )
+        passthrough_headers = (
+            dict(persisted_headers)
+            if isinstance(persisted_headers, dict)
+            else {}
+        )
+        execution_headers = dispatch_meta.get(PASSTHROUGH_HEADERS_META_KEY)
+        if isinstance(execution_headers, dict):
+            for header_name, header_value in execution_headers.items():
+                folded_name = str(header_name).casefold()
+                for existing_name in list(passthrough_headers):
+                    if str(existing_name).casefold() == folded_name:
+                        del passthrough_headers[existing_name]
+                passthrough_headers[header_name] = header_value
+        for header_name in list(passthrough_headers):
+            if str(header_name).casefold() == "cron_job_id":
+                del passthrough_headers[header_name]
+        passthrough_headers["cron_job_id"] = job.id
+        dispatch_meta[PASSTHROUGH_HEADERS_META_KEY] = passthrough_headers
         logger.info(
             "cron run_job: job_id=%s channel=%s task_type=%s is_manual=%s "
             "target_user_id=%s target_session_id=%s",

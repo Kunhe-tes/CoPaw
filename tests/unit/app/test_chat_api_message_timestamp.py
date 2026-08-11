@@ -7,6 +7,9 @@ from agentscope.message import Msg
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from swe.app.runner.hidden_context_injection import (
+    append_hidden_context_to_user_message,
+)
 from src.swe.app.runner.api import (
     get_chat_manager,
     get_session,
@@ -103,3 +106,64 @@ def test_get_chat_exposes_message_timestamp(
     assert payload["messages"][0]["timestamp"] == "2026-04-17T08:00:00Z"
     assert payload["chat"]["id"] == "chat-1"
     assert payload["chat"]["session_id"] == "default:user-1"
+
+
+def test_get_chat_hides_injected_context_from_response(
+    monkeypatch,
+) -> None:
+    from src.swe.app.runner import api as chat_api_module
+
+    class _HiddenContextMemory(_FakeMemory):
+        async def get_memory(
+            self,
+            prepend_summary: bool = False,
+        ) -> list[Msg]:
+            _ = prepend_summary
+            return [
+                append_hidden_context_to_user_message(
+                    Msg(
+                        name="tester",
+                        role="user",
+                        content="hello",
+                        timestamp="2026-04-17T08:00:00Z",
+                    ),
+                    [
+                        "<FILE-REFERENCE>"
+                        "/workspace/static/report.csv"
+                        "</FILE-REFERENCE>",
+                    ],
+                ),
+            ]
+
+    monkeypatch.setattr(
+        chat_api_module,
+        "InMemoryMemory",
+        _HiddenContextMemory,
+    )
+    workspace = SimpleNamespace(
+        chat_manager=_FakeChatManager(),
+        runner=SimpleNamespace(session=_FakeSession()),
+        task_tracker=_FakeTaskTracker(),
+    )
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _get_workspace():
+        return workspace
+
+    async def _get_chat_manager_override():
+        return workspace.chat_manager
+
+    async def _get_session_override():
+        return workspace.runner.session
+
+    app.dependency_overrides[get_workspace] = _get_workspace
+    app.dependency_overrides[get_chat_manager] = _get_chat_manager_override
+    app.dependency_overrides[get_session] = _get_session_override
+
+    response = TestClient(app).get("/chats/chat-1")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["messages"][0]["content"][0]["text"] == "hello"
+    assert "<FILE-REFERENCE>" not in str(payload)

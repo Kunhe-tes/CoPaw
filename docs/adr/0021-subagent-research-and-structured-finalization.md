@@ -1,0 +1,3 @@
+# SubAgents Separate Research from Structured Finalization
+
+Background SubAgents will complete their tool-enabled research before making one tool-free native structured-response call. Models generate only a SubAgent Response Payload; the runtime constructs the caller-facing Application Result with trusted run identity, lifecycle status, metrics, and errors. Normal completion finalizes from a bounded research synthesis; a research turn-limit exception finalizes once from a bounded research record and remains partial. The runtime will not retry terminal calls, parse free-form JSON as a fallback, or probe Provider support in advance: an endpoint that rejects native structured output returns a partial result with the collected research preserved.

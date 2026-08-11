@@ -26,7 +26,12 @@ from fastapi import (
 )
 from pydantic import BaseModel, Field
 
-from ...marketplace.fs import get_skill_dir, _atomic_write_json
+from ...marketplace.fs import (
+    _atomic_write_json,
+    default_workspace_skill_manifest,
+    get_skill_dir,
+    get_workspace_skill_manifest_path,
+)
 from ...marketplace.schemas import (
     AsyncTaskSubmitResponse,
     DistributeRequest,
@@ -542,7 +547,15 @@ def _process_skill_upload_single(
     cn_name: Optional[str] = None,
     skill_id: Optional[str] = None,
     bbk_ids: Optional[list[str]] = None,
-) -> tuple[Optional[str], Optional[dict], Optional[str], str, bool]:
+    include_in_statistics: bool = False,
+) -> tuple[
+    Optional[str],
+    Optional[dict],
+    Optional[str],
+    str,
+    bool,
+    Optional[str],
+]:
     """处理单个技能的上架逻辑.
 
     Args:
@@ -550,9 +563,10 @@ def _process_skill_upload_single(
         cn_name: 用户输入的中文展示名
         skill_id: parse-zip 生成的 skill_id，前端传入确保一致性
         bbk_ids: 所属分行 ID 列表
+        include_in_statistics: 是否纳入排行榜统计
 
     Returns:
-        (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged)
+        (imported_name, conflict_info, parsed_name_for_first, resolved_cn_name, version_unchanged, item_id)
     """
     skill_json, skill_md, name, description, version = _parse_skill_metadata(
         skill_dir,
@@ -590,7 +604,7 @@ def _process_skill_upload_single(
             "existing_creator_name": existing.creator_name,
             "existing_version": existing.version,
         }
-        return None, conflict_info, name, resolved_cn_name, False
+        return None, conflict_info, name, resolved_cn_name, False, None
 
     version_unchanged = False
     cn_name_changed = False
@@ -607,6 +621,7 @@ def _process_skill_upload_single(
             category_id,
             bbk_ids,
         )
+        existing.include_in_statistics = include_in_statistics
         item = existing
     else:
         # 创建新市场条目，市场首发版本固定为 1.0.0
@@ -621,6 +636,7 @@ def _process_skill_upload_single(
             skill_id=final_skill_id,
             bbk_ids=bbk_ids or [],
         )
+        item.include_in_statistics = include_in_statistics
         items.append(item)
 
     # 复制技能文件到市场目录
@@ -644,7 +660,7 @@ def _process_skill_upload_single(
 
     save_index(svc.marketplace_root, source_id, items)
 
-    return name, None, name, resolved_cn_name, version_unchanged
+    return name, None, name, resolved_cn_name, version_unchanged, item.item_id
 
 
 async def _process_published_skill_record(
@@ -699,6 +715,37 @@ async def _process_published_skill_record(
     return parsed_name, parsed_description, parsed_cn_name
 
 
+async def _sync_skill_to_market_db(
+    svc,
+    source_id: str,
+    item_id: str | None,
+    skill_id: str,
+    imported_name: str,
+    resolved_cn_name: str,
+    include_in_statistics: bool,
+    x_user_id: str,
+    user_name: str,
+) -> None:
+    """同步技能到 swe_marketplace_skills 数据库表."""
+    if not (item_id and svc.db and svc.db.is_connected):
+        return
+    from market.marketplace.market_skill_registry import MarketSkillRegistry
+
+    registry = MarketSkillRegistry(svc.db)
+    await registry.upsert_market_skill(
+        source_id=source_id,
+        item_id=item_id,
+        skill_id=skill_id,
+        skill_name=imported_name,
+        cn_name=resolved_cn_name,
+        include_in_statistics=include_in_statistics,
+        creator_id=x_user_id,
+        creator_name=user_name,
+        updator_id=x_user_id,
+        updator_name=user_name,
+    )
+
+
 @router.post(
     "/market/skills/publish-upload",
     response_model=UploadSkillResponse,
@@ -712,6 +759,10 @@ async def publish_skill_upload(
     cn_name: str = Query(default=""),
     skill_id: str = Query(default=""),
     bbk_ids: str = Query(default=""),
+    include_in_statistics: bool = Query(
+        default=False,
+        description="是否纳入排行榜统计",
+    ),
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
     x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
@@ -769,6 +820,7 @@ async def publish_skill_upload(
                 first_name,
                 resolved_cn_name,
                 version_unchanged,
+                item_id,
             ) = await asyncio.to_thread(
                 _process_skill_upload_single,
                 skill_dir,
@@ -782,6 +834,7 @@ async def publish_skill_upload(
                 cn_name,
                 skill_id,  # 传递 parse-zip 生成的 skill_id
                 parsed_bbk_ids,  # 传递所属分行
+                include_in_statistics,  # 传递是否纳入统计
             )
 
             if conflict:
@@ -807,6 +860,19 @@ async def publish_skill_upload(
                         parsed_description,
                         parsed_cn_name,
                     )
+                )
+
+                # 同步写入 swe_marketplace_skills 表
+                await _sync_skill_to_market_db(
+                    svc=svc,
+                    source_id=source_id,
+                    item_id=item_id,
+                    skill_id=skill_id,
+                    imported_name=imported_name,
+                    resolved_cn_name=resolved_cn_name,
+                    include_in_statistics=include_in_statistics,
+                    x_user_id=x_user_id,
+                    user_name=user_name,
                 )
     finally:
         if tmp_dir.exists():
@@ -894,6 +960,7 @@ async def publish_skill(
         created_at=item.created_at,
         updated_at=item.updated_at,
         version_unchanged=version_unchanged,
+        include_in_statistics=item.include_in_statistics,
     )
 
 
@@ -1225,7 +1292,7 @@ class _InitSweSkillsRequest(BaseModel):
     )
     dry_run: bool = Field(
         default=False,
-        description="试运行模式，仅统计不实际写入",
+        description="试运行模式，true=仅统计不实际写入",
     )
 
 
@@ -1259,12 +1326,16 @@ async def list_skills(
     Returns:
         技能列表，每个 skill_id 只返回一条记录，包含 skill_id、skill_name、cn_name
     """
-    from ...marketplace.skill_registry import SkillRegistry
+    from ...marketplace.market_skill_registry import MarketSkillRegistry
 
     svc = request.app.state.marketplace
-    registry = SkillRegistry(svc.db)
+    registry = MarketSkillRegistry(svc.db)
 
-    skills = await registry.list_unique_skills_by_source_id(body.source_id)
+    skills = (
+        await registry.list_statistics_eligible_unique_skills_by_source_id(
+            body.source_id,
+        )
+    )
     return {
         "source_id": body.source_id,
         "count": len(skills),
@@ -1336,130 +1407,6 @@ def _find_tenant_dirs_for_source_id(
     return tenant_dirs
 
 
-def _read_workspace_manifest(manifest_path: Path) -> tuple[dict, str | None]:
-    """读取 workspace manifest，返回 (manifest, error)."""
-    if not manifest_path.exists():
-        return {"skills": {}}, None
-    try:
-        return json.loads(manifest_path.read_text(encoding="utf-8")), None
-    except json.JSONDecodeError as e:
-        return {}, str(e)
-
-
-def _extract_skill_fields(
-    skill_dir: Path,
-    entry: dict,
-    skill_name: str,
-    user_id: str,
-    source_id: str,
-    force: bool,
-) -> tuple[str, str]:
-    """提取技能的 skill_id 和 cn_name.
-
-    Args:
-        skill_dir: 技能目录
-        entry: skill.json 中的 entry 数据
-        skill_name: 技能名
-        user_id: 用户ID（数据库 tenant_id）
-        source_id: 租户 source_id
-        force: 是否强制重新生成
-
-    Returns:
-        (skill_id, cn_name)
-    """
-    from ...utils.skill_md import extract_skill_id, extract_cn_name_from_title
-
-    metadata = entry.get("metadata", {})
-    skill_source = entry.get("source", "customized")
-
-    # 读取 SKILL.md 内容
-    skill_md_path = skill_dir / "SKILL.md"
-    md_content = ""
-    if skill_md_path.exists():
-        md_content = skill_md_path.read_text(encoding="utf-8")
-
-    # 使用 extract_skill_id 函数生成 skill_id
-    # 优先使用 metadata.skill_id，若无则自动生成
-    if skill_source == "customized":
-        skill_id = extract_skill_id(
-            md_content,
-            skill_source,
-            skill_name,
-            creator_id=user_id,
-        )
-    else:
-        skill_id = extract_skill_id(
-            md_content,
-            skill_source,
-            skill_name,
-            creator_id="",
-        )
-
-    logger.debug(
-        "生成 skill_id: skill_name=%s, user_id=%s, source=%s, skill_id=%s",
-        skill_name,
-        user_id,
-        skill_source,
-        skill_id,
-    )
-
-    # 提取 cn_name
-    cn_name = metadata.get("cn_name", "")
-    if not cn_name or force:
-        if skill_md_path.exists():
-            cn_name = extract_cn_name_from_title(md_content)
-        if not cn_name:
-            cn_name = skill_name
-
-    return skill_id, cn_name
-
-
-async def _upsert_skill_to_db(
-    registry,
-    skill_id: str,
-    skill_name: str,
-    cn_name: str,
-    tenant_id: str,
-    source_id: str,
-    entry: dict,
-    metadata: dict,
-) -> str | None:
-    """写入技能到数据库，返回错误信息或 None."""
-    try:
-        await registry.upsert_skill_by_name(
-            skill_id=skill_id,
-            skill_name=skill_name,
-            cn_name=cn_name,
-            tenant_id=tenant_id,
-            tenant_name="",
-            bbk_id="",
-            source=entry.get("source", "customized"),
-            source_id=source_id,
-            enabled=entry.get("enabled", False),
-            description=metadata.get("description", ""),
-            version_text=metadata.get("version_text")
-            or metadata.get("received_version")
-            or "1.0.0",
-        )
-        return None
-    except Exception as e:
-        return str(e)
-
-
-def _process_skill_entry(
-    skill_name: str,
-    skill_id: str,
-    cn_name: str,
-    entry: dict,
-) -> dict:
-    """更新 entry 中的 metadata 字段."""
-    metadata = entry.get("metadata", {})
-    metadata["skill_id"] = skill_id
-    metadata["cn_name"] = cn_name
-    entry["metadata"] = metadata
-    return entry
-
-
 @router.post(
     "/market/admin/skills/init-swe-skills",
 )
@@ -1469,12 +1416,10 @@ async def init_swe_skills(
 ):
     """初始化 swe_skills 表，将现有技能写入数据库.
 
-    Args:
-        payload.source_ids: 租户 source_id 列表
-        payload.force: 是否强制重新初始化
-        payload.dry_run: 试运行模式
+    实际扫描 + upsert 逻辑已下沉到 marketplace.skill_sync.process_tenant_skills。
     """
     from ...marketplace.skill_registry import SkillRegistry
+    from ...marketplace.skill_sync import process_tenant_skills
 
     svc = request.app.state.marketplace
     swe_root = svc.swe_root
@@ -1514,14 +1459,55 @@ async def init_swe_skills(
         results["total_users"] += len(tenant_dirs)
 
         for tenant_dir in tenant_dirs:
-            await _process_tenant_skills(
-                tenant_dir,
+            manifest_before = _dump_workspace_manifests_for_log(tenant_dir)
+            logger.info(
+                "manifest 之前: tenant=%s, source_id=%s, content=%s",
+                tenant_dir.name,
                 source_id,
-                registry,
-                payload.force,
-                payload.dry_run,
-                results,
+                json.dumps(
+                    manifest_before,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
             )
+            try:
+                result = await process_tenant_skills(
+                    tenant_dir,
+                    source_id=source_id,
+                    registry=registry,
+                    force=payload.force,
+                    dry_run=payload.dry_run,
+                )
+                results["total_skills"] += result["total_skills"]
+                results["processed"] += result["total_skills"]
+                results["details"].extend(result["details"])
+                results["errors"].extend(result["errors"])
+                if not payload.dry_run:
+                    results["inserted_db"] += result["synced"]
+            except Exception as exc:
+                logger.exception(
+                    "处理租户目录失败: dir=%s err=%s",
+                    tenant_dir,
+                    exc,
+                )
+                results["errors"].append(
+                    {
+                        "tenant_id": str(tenant_dir),
+                        "error": str(exc),
+                    },
+                )
+            else:
+                manifest_after = _dump_workspace_manifests_for_log(tenant_dir)
+                logger.info(
+                    "manifest 之后: tenant=%s, source_id=%s, content=%s",
+                    tenant_dir.name,
+                    source_id,
+                    json.dumps(
+                        manifest_after,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                    ),
+                )
 
     logger.info(
         "初始化完成: total_users=%d, total_skills=%d, processed=%d, inserted=%d, errors=%d",
@@ -1535,244 +1521,189 @@ async def init_swe_skills(
     return results
 
 
-async def _process_tenant_skills(
-    tenant_dir: Path,
-    source_id: str,
-    registry,
-    force: bool,
-    dry_run: bool,
-    results: _InitSweSkillsResult,
-) -> None:
-    """处理单个租户下的所有技能."""
+def _dump_workspace_manifests(tenant_dir: Path) -> dict[str, object]:
+    """读取 tenant_dir 下所有 workspace 的 skill.json 内容.
+
+    给 init_swe_skills 在调 process_tenant_skills 前后做对比用：
+    返回 {workspace_name: manifest_dict_or_error}，
+    workspace 不存在 / manifest 缺失则不计入。
+    """
+    manifests: dict[str, object] = {}
+    workspaces = tenant_dir / "workspaces"
+    if not workspaces.exists():
+        return manifests
+    for ws_dir in workspaces.iterdir():
+        if not ws_dir.is_dir():
+            continue
+        manifest_path = get_workspace_skill_manifest_path(ws_dir)
+        if not manifest_path.exists():
+            continue
+        try:
+            manifests[ws_dir.name] = json.loads(
+                manifest_path.read_text(encoding="utf-8"),
+            )
+        except json.JSONDecodeError as exc:
+            manifests[ws_dir.name] = {"_error": f"manifest 解析失败: {exc}"}
+    return manifests
+
+
+def _dump_workspace_manifests_for_log(tenant_dir: Path) -> object:
+    """生成适合直接写入日志的 manifest 内容。
+
+    只有一个 workspace 时，直接展开其 skill.json 内容，避免多包一层 workspace 名。
+    """
+    manifests = _dump_workspace_manifests(tenant_dir)
+    if len(manifests) == 1:
+        return next(iter(manifests.values()))
+    return manifests
+
+
+def _resolve_tenant_dir(swe_root: Path, tenant_id: str) -> Path | None:
+    """根据 tenant_id 在 swe_root 下解析出对应的租户目录。
+
+    解析规则（与 init-swe-skills 同款）：
+    - "default" → swe_root / default_<default_source> （通常 swe_root / default）
+    - tenant_id 含 "." → 尝试 decode_scope_id 取回原 user_id 后再拼目录名
+    - 否则 → swe_root / tenant_id
+
+    Returns:
+        租户目录 Path；不存在返回 None。
+    """
+    from ...marketplace.fs import resolve_effective_user_id
     from ...runtime.context import decode_scope_id
 
-    # 从目录名解码出 user_id（数据库 tenant_id）
-    dir_name = tenant_dir.name
-    user_id = dir_name  # 默认使用目录名
+    # 直接匹配
+    direct = swe_root / tenant_id
+    if direct.exists() and direct.is_dir():
+        return direct
 
-    # 如果是 default_xxx 格式，user_id 是 "default"
-    if dir_name.startswith("default_"):
-        user_id = "default"
-    # 如果是 encode_scope_id 格式（xxx.xxx），解码获取 user_id
-    elif "." in dir_name:
+    # decode_scope_id 还原
+    if "." in tenant_id:
         try:
-            decoded_user_id, decoded_source = decode_scope_id(dir_name)
-            user_id = decoded_user_id
+            decoded_user_id, decoded_source = decode_scope_id(tenant_id)
+            effective = resolve_effective_user_id(
+                decoded_user_id,
+                decoded_source,
+            )
+            candidate = swe_root / effective
+            if candidate.exists() and candidate.is_dir():
+                return candidate
         except ValueError:
             pass
 
-    workspace_base = tenant_dir / "workspaces"
-    if not workspace_base.exists():
-        return
+    # default_<source_id> 形态
+    if tenant_id == "default":
+        for child in swe_root.iterdir():
+            if child.is_dir() and child.name.startswith("default_"):
+                return child
 
-    logger.info(
-        "处理租户目录: dir_name=%s, user_id=%s, source_id=%s",
-        dir_name,
-        user_id,
-        source_id,
-    )
-
-    for workspace_dir in workspace_base.iterdir():
-        if not workspace_dir.is_dir():
-            continue
-        await _process_workspace_skills_async(
-            workspace_dir,
-            user_id,  # 使用解码后的 user_id 作为 tenant_id
-            source_id,
-            registry,
-            force,
-            dry_run,
-            results,
-        )
+    return None
 
 
-async def _process_workspace_skills_async(
-    workspace_dir: Path,
-    user_id: str,
-    source_id: str,
-    registry,
-    force: bool,
-    dry_run: bool,
-    results: _InitSweSkillsResult,
-) -> None:
-    """处理单个 workspace 下的所有技能."""
-    skills_dir = workspace_dir / "skills"
-    manifest_path = workspace_dir / "skill.json"
-    agent_id = workspace_dir.name
+def _decode_source_id_from_tenant_id(tenant_id: str) -> str | None:
+    """从 scope 编码的 tenant_id 解出 source_id 段。
 
-    if not skills_dir.exists():
-        return
-
-    logger.info(
-        "读取 workspace manifest: user_id=%s, agent_id=%s, path=%s",
-        user_id,
-        agent_id,
-        manifest_path,
-    )
-
-    manifest, error = _read_workspace_manifest(manifest_path)
-    if error:
-        results["errors"].append(
-            {
-                "tenant_id": user_id,
-                "error": f"skill.json 解析失败: {error}",
-            },
-        )
-        return
-
-    skills_dict = manifest.get("skills", {})
-
-    for skill_dir in skills_dir.iterdir():
-        if not skill_dir.is_dir():
-            continue
-        await _process_single_skill(
-            skill_dir,
-            user_id,
-            source_id,
-            skills_dict,
-            registry,
-            force,
-            dry_run,
-            results,
-        )
-
-    # 保存 manifest
-    if not dry_run and skills_dict:
-        manifest["skills"] = skills_dict
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-
-
-async def _process_single_skill(
-    skill_dir: Path,
-    user_id: str,
-    source_id: str,
-    skills_dict: dict,
-    registry,
-    force: bool,
-    dry_run: bool,
-    results: _InitSweSkillsResult,
-) -> None:
-    """处理单个技能.
+    src/swe 的 bootstrap_tenant_id 形如 "<user>.<source>"（来自
+    resolve_storage_tenant_id 的 scope 编码）；内部同步端点拿到该 ID 时
+    应还原 source_id 写入 swe_skills.source_id 列，避免新建租户的技能
+    因 source_id 为空而无法被 init-swe-skills 等按 source 维度的接口检索到。
 
     Args:
-        skill_dir: 技能目录
-        user_id: 用户ID（数据库 tenant_id）
-        source_id: 租户 source_id
-        skills_dict: skill.json 中的 skills dict
-        registry: SkillRegistry
-        force: 是否强制重新生成
-        dry_run: 试运行模式
-        results: 结果统计
+        tenant_id: bootstrap 阶段的 tenant_id（可能含 "."）
+
+    Returns:
+        解出的 source_id；无 "." 或解码失败时返回 None。
     """
-    skill_name = skill_dir.name
-    results["total_skills"] += 1
+    from ...runtime.context import decode_scope_id
 
-    entry = skills_dict.get(skill_name, {})
-    skill_id, cn_name = _extract_skill_fields(
-        skill_dir,
-        entry,
-        skill_name,
-        user_id,
-        source_id,
-        force,
-    )
-    results["processed"] += 1
+    if "." not in tenant_id:
+        return None
+    try:
+        _, decoded_source = decode_scope_id(tenant_id)
+    except ValueError:
+        return None
+    return decoded_source or None
 
-    # 更新 entry
-    skills_dict[skill_name] = _process_skill_entry(
-        skill_name,
-        skill_id,
-        cn_name,
-        entry,
-    )
 
-    # 写入数据库（tenant_id 使用 user_id）
-    if not dry_run:
-        metadata = entry.get("metadata", {})
-        error = await _upsert_skill_to_db(
-            registry,
-            skill_id,
-            skill_name,
-            cn_name,
-            user_id,  # 使用 user_id 作为数据库 tenant_id
-            source_id,
-            entry,
-            metadata,
+def _check_internal_caller(request: Request) -> bool:
+    """校验是否来自同集群内部调用（X-Internal-Token）。"""
+    from ...config.constant import MARKET_INTERNAL_TOKEN
+
+    if not MARKET_INTERNAL_TOKEN:
+        return True
+    return request.headers.get("X-Internal-Token") == MARKET_INTERNAL_TOKEN
+
+
+@router.post("/market/internal/tenants/{tenant_id}/sync-skills")
+async def internal_sync_skills(
+    request: Request,
+    tenant_id: str,
+):
+    """为指定租户触发一次 swe_skills 同步（由 src/swe 的 tenant_initializer 调用）。
+
+    失败语义：单个技能写库失败被吞到 result.errors，路由仍返回 200。
+    """
+    if not _check_internal_caller(request):
+        raise HTTPException(status_code=403, detail="forbidden")
+
+    from ...marketplace.skill_registry import SkillRegistry
+    from ...marketplace.skill_sync import process_tenant_skills
+
+    svc = request.app.state.marketplace
+    swe_root = svc.swe_root
+    registry = SkillRegistry(svc.db)
+
+    tenant_dir = _resolve_tenant_dir(swe_root, tenant_id)
+    if tenant_dir is None:
+        logger.warning(
+            "internal_sync_skills: tenant_dir 不存在 swe_root=%s tenant_id=%s",
+            swe_root,
+            tenant_id,
         )
-        if error:
-            results["errors"].append(
-                {
-                    "tenant_id": user_id,
-                    "skill_name": skill_name,
-                    "error": f"数据库写入失败: {error}",
-                },
-            )
-        else:
-            results["inserted_db"] += 1
+        return {
+            "tenant_id": tenant_id,
+            "synced": 0,
+            "warning": "tenant_dir_not_found",
+        }
 
-    results["details"].append(
-        {
-            "tenant_id": user_id,
-            "skill_name": skill_name,
-            "skill_id": skill_id,
-            "cn_name": cn_name,
-            "source": entry.get("source", "customized"),
-        },
+    # 从 scope 编码的 tenant_id 还原 source_id，保持与 admin 端点
+    # init-swe-skills 写入 swe_skills.source_id 的语义一致
+    source_id = _decode_source_id_from_tenant_id(tenant_id)
+
+    try:
+        result = await process_tenant_skills(
+            tenant_dir,
+            source_id=source_id,
+            registry=registry,
+            force=False,
+            dry_run=False,
+            # src/swe 自己负责写 skill.json，禁止回写避免污染
+            # per-user skill_id（参见 skill_sync.write_manifest_back 说明）
+            write_manifest_back=False,
+        )
+    except Exception as exc:
+        logger.exception(
+            "internal_sync_skills 失败 tenant=%s err=%s",
+            tenant_id,
+            exc,
+        )
+        return {
+            "tenant_id": tenant_id,
+            "synced": 0,
+            "error": str(exc),
+        }
+
+    logger.info(
+        "internal_sync_skills 完成 tenant=%s synced=%d errors=%d",
+        tenant_id,
+        result["synced"],
+        len(result["errors"]),
     )
-
-    logger.debug(
-        "技能 %s (user_id=%s): skill_id=%s, cn_name=%s",
-        skill_name,
-        user_id,
-        skill_id,
-        cn_name,
-    )
-
-
-def _extract_skill_id_from_md(md_content: str) -> str:
-    """从 SKILL.md frontmatter 提取 skill_id."""
-    if not md_content.startswith("---"):
-        return ""
-    end_idx = md_content.find("---", 3)
-    if end_idx == -1:
-        return ""
-    frontmatter = md_content[3:end_idx].strip()
-    for line in frontmatter.split("\n"):
-        if line.startswith("skill_id:"):
-            skill_id = line.split(":", 1)[1].strip()
-            return skill_id.strip('"').strip("'")
-    return ""
-
-
-def _extract_cn_name_from_md(md_content: str) -> str:
-    """从 SKILL.md 提取中文展示名."""
-    if not md_content:
-        return ""
-
-    # 尝试从 frontmatter metadata.cn_name 提取
-    if md_content.startswith("---"):
-        end_idx = md_content.find("---", 3)
-        if end_idx != -1:
-            frontmatter = md_content[3:end_idx].strip()
-            for line in frontmatter.split("\n"):
-                if line.startswith("cn_name:") or line.startswith(
-                    "chinese_name:",
-                ):
-                    cn_name = line.split(":", 1)[1].strip()
-                    return cn_name.strip('"').strip("'")
-
-    # 尝试一级标题
-    for line in md_content.split("\n"):
-        stripped = line.strip()
-        if stripped.startswith("#") and not stripped.startswith("##"):
-            title = stripped[1:].strip()
-            if title:
-                return title
-
-    return ""
+    return {
+        "tenant_id": tenant_id,
+        "synced": result["synced"],
+        "errors": result["errors"],
+    }
 
 
 @router.get(
@@ -2285,3 +2216,240 @@ async def get_distribution_preview(
         users=[UserSkillStatus(**u) for u in result["users"]],
         distributed_user_ids=result["distributed_user_ids"],
     )
+
+
+# ===== 统计配置管理 =====
+
+
+class UpdateStatisticsConfigRequest(BaseModel):
+    """更新统计配置请求."""
+
+    include_in_statistics: bool = Field(
+        ...,
+        description="是否纳入统计",
+    )
+    updator_id: str = Field(default="", description="更新人ID")
+    updator_name: str = Field(default="", description="更新人名称")
+
+
+class UpdateStatisticsConfigResponse(BaseModel):
+    """更新统计配置响应."""
+
+    success: bool
+    item_id: str
+    skill_name: str
+    include_in_statistics: bool
+
+
+@router.patch(
+    "/market/skills/{item_id}/statistics",
+    response_model=UpdateStatisticsConfigResponse,
+)
+async def update_skill_statistics_config(
+    item_id: str,
+    req: UpdateStatisticsConfigRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+) -> UpdateStatisticsConfigResponse:
+    """更新技能统计配置（管理员）."""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    svc = request.app.state.marketplace
+
+    # 从 index.json 获取技能
+    items = load_index(svc.marketplace_root, source_id)
+    item = next(
+        (i for i in items if i.item_id == item_id and i.item_type == "skill"),
+        None,
+    )
+    if item is None:
+        raise HTTPException(status_code=404, detail="Skill not found")
+
+    # 更新 index.json
+    item.include_in_statistics = req.include_in_statistics
+    item.updated_at = datetime.now(timezone.utc).isoformat()
+    save_index(svc.marketplace_root, source_id, items)
+
+    # 同步更新数据库
+    if svc.db and svc.db.is_connected:
+        from ...marketplace.market_skill_registry import MarketSkillRegistry
+
+        registry = MarketSkillRegistry(svc.db)
+        await registry.update_statistics_config(
+            source_id=source_id,
+            item_id=item_id,
+            include_in_statistics=req.include_in_statistics,
+            updator_id=req.updator_id,
+            updator_name=req.updator_name,
+        )
+
+    return UpdateStatisticsConfigResponse(
+        success=True,
+        item_id=item_id,
+        skill_name=item.name,
+        include_in_statistics=req.include_in_statistics,
+    )
+
+
+class InitStatisticsConfigRequest(BaseModel):
+    """初始化统计配置请求."""
+
+    source_ids: list[str] = Field(
+        default_factory=list,
+        description="来源ID列表，不传或为空时初始化所有来源",
+    )
+    default_include: bool = Field(
+        default=True,
+        description="默认是否纳入统计",
+    )
+    dry_run: bool = Field(
+        default=False,
+        description="试运行模式，仅统计不实际写入",
+    )
+
+
+class InitStatisticsConfigResult(TypedDict):
+    """初始化统计配置结果."""
+
+    dry_run: bool
+    source_ids: list[str]
+    total_skills: int
+    processed: int
+    inserted: int
+    updated: int
+    skipped: int
+    errors: list[dict]
+
+
+async def _init_single_skill_statistics(
+    registry,
+    item: MarketItem,
+    source_id: str,
+    default_include: bool,
+    dry_run: bool,
+) -> tuple[bool, dict | None]:
+    """初始化单个技能的统计配置.
+
+    Returns:
+        (success, error_dict) - 成功时 error_dict 为 None
+    """
+    if dry_run:
+        return True, None
+
+    try:
+        success = await registry.upsert_market_skill(
+            source_id=source_id,
+            item_id=item.item_id,
+            skill_id=item.skill_id,
+            skill_name=item.name,
+            cn_name=item.chinese_name,
+            include_in_statistics=default_include,
+            creator_id=item.creator_id,
+            creator_name=item.creator_name,
+            updator_id=item.creator_id,
+            updator_name=item.creator_name,
+        )
+        if success:
+            return True, None
+        return False, {
+            "item_id": item.item_id,
+            "skill_name": item.name,
+            "reason": "数据库写入返回失败",
+        }
+    except Exception as e:
+        return False, {
+            "item_id": item.item_id,
+            "skill_name": item.name,
+            "reason": str(e),
+        }
+
+
+@router.post(
+    "/market/admin/skills/init-statistics",
+)
+async def init_skill_statistics_config(
+    request: Request,
+    req: InitStatisticsConfigRequest,
+) -> InitStatisticsConfigResult:
+    """初始化技能统计配置."""
+    svc = request.app.state.marketplace
+
+    results: InitStatisticsConfigResult = {
+        "dry_run": req.dry_run,
+        "source_ids": [],
+        "total_skills": 0,
+        "processed": 0,
+        "inserted": 0,
+        "updated": 0,
+        "skipped": 0,
+        "errors": [],
+    }
+
+    # 检查数据库连接
+    if not svc.db or not svc.db.is_connected:
+        results["errors"].append(
+            {
+                "reason": "数据库未连接，无法初始化",
+            },
+        )
+        return results
+
+    # 确定 source_ids 列表
+    if req.source_ids:
+        source_ids = req.source_ids
+    else:
+        # 遍历 marketplace_root 下所有目录
+        source_ids = []
+        for dir_path in svc.marketplace_root.iterdir():
+            if dir_path.is_dir():
+                index_path = dir_path / "index.json"
+                if index_path.exists():
+                    source_ids.append(dir_path.name)
+
+    results["source_ids"] = source_ids
+
+    # 初始化数据库操作类
+    from ...marketplace.market_skill_registry import MarketSkillRegistry
+
+    registry = MarketSkillRegistry(svc.db)
+
+    # dry_run 模式：只统计数量，不写入数据库和文件
+    if req.dry_run:
+        for source_id in source_ids:
+            items = load_index(svc.marketplace_root, source_id)
+            skill_items = [i for i in items if i.item_type == "skill"]
+            results["total_skills"] += len(skill_items)
+            results["processed"] += len(skill_items)
+            results["inserted"] = results["processed"]  # dry_run 假设全部成功
+        return results
+
+    # 实际执行模式
+    for source_id in source_ids:
+        items = load_index(svc.marketplace_root, source_id)
+        skill_items = [i for i in items if i.item_type == "skill"]
+        results["total_skills"] += len(skill_items)
+
+        for item in skill_items:
+            results["processed"] += 1
+
+            success, error = await _init_single_skill_statistics(
+                registry=registry,
+                item=item,
+                source_id=source_id,
+                default_include=req.default_include,
+                dry_run=False,
+            )
+            if success:
+                results["inserted"] += 1
+                # 只更新 skill 类型的 include_in_statistics 字段
+                item.include_in_statistics = req.default_include
+            else:
+                results["skipped"] += 1
+                if error:
+                    results["errors"].append(error)
+
+        # 保存 index.json（只包含 skill 类型的变更）
+        save_index(svc.marketplace_root, source_id, items)
+
+    return results

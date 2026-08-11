@@ -974,8 +974,21 @@ def get_tenant_request_working_dir(tenant_id: str | None = None) -> Path:
     ``default`` 用户在存在 ``source_id`` 时固定走 ``default_{source}``，
     非 ``default`` 用户维持 runtime scope 目录语义。
     """
+    explicit_tenant_id = tenant_id
+    if explicit_tenant_id is not None and explicit_tenant_id.startswith(
+        "default_",
+    ):
+        return migrate_legacy_scope_dir_if_needed(
+            WORKING_DIR,
+            explicit_tenant_id,
+        )
+
     resolved_tenant_id = resolve_request_effective_tenant_id(
-        tenant_id if tenant_id is not None else get_current_tenant_id(),
+        (
+            explicit_tenant_id
+            if explicit_tenant_id is not None
+            else get_current_tenant_id()
+        ),
         get_current_source_id(),
         get_current_scope_id(),
     )

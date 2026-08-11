@@ -7,14 +7,23 @@ Provides endpoints for frontend to query job definitions and execution history.
 import logging
 from datetime import datetime
 from io import BytesIO
+from typing import Annotated
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
+from fastapi.routing import APIRoute
+from pydantic import BeforeValidator
 
 from ..models.cron import (
+    CronScheduleBucketMinutes,
+    CronScheduleDistributionErrorDetail,
+    CronScheduleDistributionErrorResponse,
     CronJobModel,
     CronJobQueryParams,
+    CronScheduleDistributionDetailsResponse,
+    CronScheduleDistributionResponse,
     CronOverviewResponse,
     CronOverviewStatsResponse,
     CronDispatchBatchDetailResponse,
@@ -36,14 +45,61 @@ from ..models.cron import (
     MarkReadResponse,
     SubscriptionDetailItem,
     SubscriptionOverviewItem,
+    TaskType,
     UnreadCountResponse,
+    BroadcastSourceJobQueryParams,
 )
 from ..services.cron import QueryService, get_query_service
 from ..services.cron.export_service import ExportService, get_export_service
+from ..services.cron.query_service import (
+    ScheduleCalculationLimitExceededError,
+    ScheduleDefinitionRevisionConflictError,
+    ScheduleDistributionValidationError,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/monitor/cron", tags=["cron"])
+
+
+def _schedule_distribution_error_detail(
+    *,
+    code: str,
+    message: str,
+    actual_revision: str | None = None,
+) -> dict:
+    """Build the stable detail object shared by the two new endpoints."""
+    return CronScheduleDistributionErrorDetail(
+        code=code,
+        message=message,
+        actual_revision=actual_revision,
+    ).model_dump(exclude_none=True)
+
+
+class _ScheduleDistributionRoute(APIRoute):
+    """Wrap only schedule-distribution request validation errors."""
+
+    def get_route_handler(self):
+        original_handler = super().get_route_handler()
+
+        async def wrapped_handler(request: Request):
+            try:
+                return await original_handler(request)
+            except RequestValidationError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=_schedule_distribution_error_detail(
+                        code="schedule_distribution_validation_error",
+                        message="Invalid schedule distribution request.",
+                    ),
+                ) from exc
+
+        return wrapped_handler
+
+
+schedule_distribution_router = APIRouter(
+    route_class=_ScheduleDistributionRoute,
+)
 
 
 def _get_source_id_from_header(request: Request) -> str:
@@ -125,8 +181,18 @@ async def list_dispatch_batches(
 async def get_dispatch_batch_detail(
     request: Request,
     batch_id: str,
-    intent_limit: int = Query(default=100, ge=1, le=500, description="Intent 数量"),
-    event_limit: int = Query(default=100, ge=1, le=500, description="事件数量"),
+    intent_limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="Intent 数量",
+    ),
+    event_limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+        description="事件数量",
+    ),
     service: QueryService = Depends(get_query_service),
 ) -> CronDispatchBatchDetailResponse:
     """查询单个批调度 batch 的 intent 和事件明细。"""
@@ -156,6 +222,121 @@ async def get_dispatch_workers(
         start_time=start_time,
         end_time=end_time,
     )
+
+
+@schedule_distribution_router.get(
+    "/schedule-distribution",
+    response_model=CronScheduleDistributionResponse,
+    responses={
+        422: {"model": CronScheduleDistributionErrorResponse},
+    },
+)
+async def get_schedule_distribution(
+    request: Request,
+    bucket_minutes: Annotated[
+        CronScheduleBucketMinutes,
+        BeforeValidator(int),
+        Query(description="统计桶间隔（分钟）"),
+    ],
+    start_time: datetime = Query(
+        ...,
+        description="统计开始时间（必须包含 UTC offset）",
+    ),
+    end_time: datetime = Query(
+        ...,
+        description="统计结束时间（必须包含 UTC offset）",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronScheduleDistributionResponse:
+    """统计当前来源下 Scheduled Job 的计划触发次数分布。"""
+    actual_source_id = _get_source_id_from_header(request)
+    try:
+        return await service.get_schedule_distribution(
+            source_id=actual_source_id,
+            start_time=start_time,
+            end_time=end_time,
+            bucket_minutes=bucket_minutes,
+        )
+    except (
+        ScheduleDistributionValidationError,
+        ScheduleCalculationLimitExceededError,
+    ) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=_schedule_distribution_error_detail(
+                code=exc.code,
+                message=exc.message,
+            ),
+        ) from exc
+
+
+@schedule_distribution_router.get(
+    "/schedule-distribution/details",
+    response_model=CronScheduleDistributionDetailsResponse,
+    responses={
+        422: {"model": CronScheduleDistributionErrorResponse},
+        409: {"model": CronScheduleDistributionErrorResponse},
+    },
+)
+async def get_schedule_distribution_details(
+    request: Request,
+    start_time: datetime = Query(
+        ...,
+        description="所选桶开始时间（必须包含 UTC offset）",
+    ),
+    end_time: datetime = Query(
+        ...,
+        description="所选桶结束时间（必须包含 UTC offset）",
+    ),
+    task_type: TaskType | None = Query(
+        default=None,
+        description="任务类型筛选：text/agent",
+    ),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页数量"),
+    expected_revision: str | None = Query(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description="前一页返回的任务定义版本",
+    ),
+    service: QueryService = Depends(get_query_service),
+) -> CronScheduleDistributionDetailsResponse:
+    """查询所选时间桶内计划触发明细，不返回任务正文或原始元数据。"""
+    actual_source_id = _get_source_id_from_header(request)
+    try:
+        return await service.get_schedule_distribution_details(
+            source_id=actual_source_id,
+            start_time=start_time,
+            end_time=end_time,
+            task_type=task_type,
+            page=page,
+            page_size=page_size,
+            expected_revision=expected_revision,
+        )
+    except ScheduleDefinitionRevisionConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=_schedule_distribution_error_detail(
+                code=exc.code,
+                message=exc.message,
+                actual_revision=exc.actual_revision,
+            ),
+        ) from exc
+    except (
+        ScheduleDistributionValidationError,
+        ScheduleCalculationLimitExceededError,
+    ) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=_schedule_distribution_error_detail(
+                code=exc.code,
+                message=exc.message,
+            ),
+        ) from exc
+
+
+router.include_router(schedule_distribution_router)
 
 
 @router.get("/jobs", response_model=PaginatedResponse[CronJobModel])
@@ -203,6 +384,41 @@ async def list_jobs(
         page_size=page_size,
     )
     return await service.list_jobs(params)
+
+
+@router.get(
+    "/jobs/by-broadcast-source",
+    response_model=list[CronJobModel],
+)
+async def query_jobs_by_broadcast_source(
+    request: Request,
+    tenant_id: str | None = Query(default=None, description="租户ID筛选"),
+    bbk_id: str | None = Query(
+        default=None,
+        description="分行号筛选（二级分行号）",
+    ),
+    broadcast_source_job_id: str = Query(..., description="分发源定时任务ID"),
+    service: QueryService = Depends(get_query_service),
+) -> list[CronJobModel]:
+    """根据分发源定时任务ID查询定时任务列表。
+
+    Args:
+        request: FastAPI request object
+        tenant_id: 租户ID筛选
+        bbk_id: 分行号筛选（二级分行号，会转换为一级分行号）
+        broadcast_source_job_id: 分发源定时任务ID
+        service: Query service
+
+    Returns:
+        定时任务列表
+    """
+    actual_source_id = _get_source_id_from_header(request)
+    return await service.query_jobs_by_broadcast_source(
+        tenant_id=tenant_id,
+        bbk_id=bbk_id,
+        source_id=actual_source_id,
+        broadcast_source_job_id=broadcast_source_job_id,
+    )
 
 
 @router.get(

@@ -101,4 +101,3 @@ The Console SHALL refresh its cached effective source system config after a succ
 - **WHEN** a manager successfully saves or deletes current-source config for the active source
 - **THEN** the Console SHALL reload the effective source system config for that active source
 - **AND** subsequent chat requests from the same session SHALL use the refreshed effective config
-

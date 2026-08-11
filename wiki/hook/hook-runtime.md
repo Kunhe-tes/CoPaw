@@ -21,8 +21,9 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 如果你只想快速上手，先记住下面几条：
 
 - `PreToolUse` 是最常用的事件：可以拒绝工具、要求审批、改写工具输入。
-- `BeforeStop` 是“完成门禁”：候选回复已经生成后才触发；返回 `block` 会让 Agent 在同一次请求里继续做事，而不是立刻结束。
-- `PostToolUse` 和 `PostToolUseFailure` 不能撤销已经发生的工具调用，它们更适合补充审计或诊断信息；普通工具执行路径会触发它们，但既有 Tool Guard 的预批准执行分支当前会绕过后置 hook。
+- `PostToolUse` 和 `PostToolUseFailure` 不能撤销已经发生的工具调用，但现在所有经 Tool Guard 执行的工具路径（包括预批准和受保护的内置工具）都会进入对应的后置 hook；它们适合审计、诊断，或用终止决策结束当前回合。
+- `continue: false` 或 `decision: "stop"` 是回合级终止，而不只是“阻断当前工具”：在工具事件中命中后会阻止后续推理，并取消仍在等待的并行工具调用。
+- `Stop` 是统一完成门禁：每个 handler 可先执行审计、埋点或通知；合并后的 `allow` / `block` 决定候选回复是否完成。显式 `block` 可触发有上限的自动续跑，`failPolicy: block` 的执行失败则直接以未完成结束。
 - Skill 自带 hook 只有在该 Skill 在当前会话里被激活后才会生效。
 - 多个 handler 会并发执行，不要依赖“前一个 handler 的输出给后一个 handler 使用”。
 
@@ -34,7 +35,7 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 - 对高风险工具调用弹出人工审批
 - 在工具执行成功或失败后补充审计和诊断信息
 - 在回复结束前要求先完成测试、构建或 lint
-- 在回合结束时记录收尾信息，供下一轮对话继续使用
+- 在回合结束时向外部审计或埋点系统记录最终状态
 
 ## 新人推荐阅读顺序
 
@@ -61,26 +62,17 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 | `SessionStart` | 每次请求进入 Agent 主流程前 | 通常无明显提示；如果被阻断，会直接返回阻断原因 | 注入本轮初始上下文、记录开始事件 |
 | `UserPromptSubmit` | 当前请求含有文本用户输入时，在 Agent 处理前 | 通常无明显提示；如果被阻断，会直接返回阻断原因 | 检查输入、设置会话标题、补充本轮上下文 |
 | `PreToolUse` | 工具真正执行前 | 可能直接放行、拒绝、改写输入，或弹出审批卡片 | 工具审批、参数检查、命令改写 |
-| `PostToolUse` | 工具成功返回后 | 用户不会看到单独弹窗，但后续推理会收到补充上下文 | 审计记录、补充工具结果说明 |
-| `PostToolUseFailure` | 工具调用抛出失败后 | 工具失败仍然会失败；hook 只能补充诊断信息 | 记录错误、提示排查方向 |
-| `BeforeStop` | 候选回复已经流出后、正式结束前 | 用户通常已经看到了候选回复；若返回 `block`，系统会继续同一任务 | 完成门禁、测试门禁、发布前检查 |
-| `Stop` | 系统允许结束后、当前轮真正结束前 | 如果被阻断，用户会再看到一条阻断说明，本轮结束 | 最终审计、写入收尾上下文 |
+| `PostToolUse` | 工具成功返回后 | 成功结果已经保留；普通 `block` 不会撤销它，终止决策会结束当前回合 | 审计记录、补充工具结果说明、在结果出现后停止继续推理 |
+| `PostToolUseFailure` | 工具调用抛出失败后 | 原始失败已被记录；普通 `block` 不会吞掉它，终止决策会结束当前回合 | 记录错误、提示排查方向、在失败后停止继续推理 |
+| `Stop` | 候选回复已经流出后、正式结束前 | 用户通常已经看到了候选回复；若返回 `block`，系统会继续同一任务 | 完成门禁、测试门禁、发布前检查 |
 
 实际请求路径里还有一个顺序细节：如果当前请求带有文本用户输入，`UserPromptSubmit` 会在 preflight 阶段先执行；之后系统装配 Agent 主流程时才执行 `SessionStart`。所以上表按生命周期概念排序，不表示所有请求里严格按表格顺序触发。
 
-工具后置事件也有一个例外：普通工具成功或失败后会分别触发 `PostToolUse` / `PostToolUseFailure`；但如果工具走的是既有 Tool Guard 的预批准执行分支，当前实现会直接执行并返回，不进入这两个后置 hook。
+工具侧的执行路径已经统一：工具成功后都会触发 `PostToolUse`，工具执行抛错后都会触发 `PostToolUseFailure`。这包含普通调用、Tool Guard 预批准调用，以及受保护的 source-built-in tool。后置 hook 仍然不能撤销外部副作用；它能写入上下文，或用终止决策阻止 Agent 基于该结果继续推进。
 
-### 关于 `BeforeStop` 和 `Stop`
+### 关于 `Stop`
 
-这两个事件最容易混淆。
-
-- `BeforeStop` 是“现在能不能结束”。如果返回 `block`，系统会自动继续当前任务，而不是直接结束。
-- `Stop` 是“已经准备结束了，最后再做一次收尾”。如果返回阻断，当前轮会结束，但不会自动续跑。
-
-还有一个很重要的用户可见差异：
-
-- `BeforeStop` 触发时，候选回复通常已经被用户看到了。
-- `Stop` 触发时，候选回复通常也已经被用户看到了；若 hook 阻断，系统会追加一条说明，而不是把前面的回复“撤回”。
+`Stop` 是“现在能不能结束”的唯一事件。它在候选回复生成后运行一次：handler 可以记录该尝试，随后返回 `allow` 批准完成或返回 `block` 要求 Agent 在同一请求中继续。每次续跑后的新候选回复都会再次触发 Stop，因此审计系统应将其记录为独立完成尝试。
 
 ## 配置写在哪里
 
@@ -131,6 +123,16 @@ Skill 级配置和前两者不同：
 - 文件根对象直接就是 hook 配置
 - 不需要再包一层 `hooks`
 - 只有当这个 Skill 在当前会话里被激活后，里面的 hook 才会生效
+
+### 默认 Agent 的 Hook 管理页
+
+控制台的 Hook 管理页管理的是默认 Agent profile 的 hook 配置；它是手工编辑 JSON 之外的受控入口。通过该入口保存配置或上传脚本时，运行时会校验配置并记录审计信息。
+
+- `command` handler 必须使用 `argv`；管理页不接受 `command` 字符串。
+- 由管理页上传的脚本只会放入受控的 `hooks/scripts/` 库，文件名不能包含路径；支持 `.py`、`.sh`、`.bash`、`.zsh`，单文件最多 1 MiB、单次最多 20 个。
+- 引用脚本时必须使用 `hooks/scripts/<filename>`；符号链接、`..` 路径和越出受控库的引用都会被拒绝。保存后的脚本权限会收紧为仅属主可访问。
+- 上传会经过安全扫描：扫描器明确拒绝的文件不会写入；无法判定安全的文件会带警告保留，需由管理员复核。
+- “手工测试”会实际执行一个尚未保存的 handler，可能产生网络或本地命令副作用；测试结果会返回脱敏摘要并写入审计日志，不应直接使用生产敏感 payload。
 
 ## 最小配置
 
@@ -434,18 +436,16 @@ Skill 级 `hooks/hooks.json` 示例：
 
 #### 适用事件
 
-`prompt` handler 只能配置在以下事件上：
+`prompt` handler 可以配置在全部 6 个事件上：
 
 - `SessionStart`
 - `UserPromptSubmit`
 - `PreToolUse`
-- `BeforeStop`
-- `Stop`
-
-不能配置在：
-
 - `PostToolUse`
 - `PostToolUseFailure`
+- `Stop`
+
+在后置工具事件上，它同样只能观察或补充已发生的结果；若要阻止 Agent 继续基于结果推进，返回回合级终止决策。
 
 #### 输出格式
 
@@ -463,8 +463,9 @@ Skill 级 `hooks/hooks.json` 示例：
 - `allow`
 - `deny`
 - `block`
+- `stop`
 
-`BeforeStop` 上更严格，只允许：
+`Stop` 是完成门禁，并且更严格，只允许：
 
 - `allow`
 - `block`
@@ -494,7 +495,7 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `cwd` | 当前 workspace 路径 |
 | `workspace_dir` | 当前 workspace 路径 |
 | `prompt` | 用户本轮文本输入 |
-| `assistant_response` | 当前候选回复；主要见于 `BeforeStop` 和 `Stop` |
+| `assistant_response` | 当前候选回复；主要见于 `Stop` |
 | `tool_name` | 工具名 |
 | `tool_input` | 工具输入对象 |
 | `tool_use_id` | 工具调用 ID |
@@ -527,19 +528,19 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 | `turn_id` | 部分 | 请求上下文里有 turn 时会传 |
 | `source` | 部分 | `SessionStart` 这类 runner 事件会传；当前主流程常见值是 `startup` / `resume` |
 | `model` | 部分 | 当前主流程只在 `SessionStart` 传当前激活模型标签 |
-| `prompt` | 部分 | `UserPromptSubmit`、`BeforeStop`、`Stop` 常见；tool 事件当前不传 |
+| `prompt` | 部分 | `UserPromptSubmit`、`Stop` 常见；tool 事件当前不传 |
 | `tool_name` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
 | `tool_input` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
 | `tool_use_id` | 部分 | `PreToolUse` / `PostToolUse` / `PostToolUseFailure` 传 |
 | `tool_response` | 部分 | 主要见于 `PostToolUse`，值为当前工具调用最终 `tool_result.output`；无法提取时省略 |
-| `assistant_response` | 部分 | 主要见于 `BeforeStop` 和 `Stop` |
+| `assistant_response` | 部分 | 主要见于 `Stop` |
 | `error` | 部分 | 主要见于 `PostToolUseFailure` |
 | `conversation_snapshot` | 部分 | 仅对声明了 `includeConversationSnapshot: true` 的 handler 注入；值是当前 Agent 内存或 session state memory 里的最近若干条规范化消息 |
 | `conversation_snapshot_meta` | 部分 | 与 `conversation_snapshot` 配套；包含 `included_messages`、`omitted_messages`、`limit` 以及可选的 `reasoning_omitted` / `media_content_omitted` / `unavailable` 信息 |
 
 这张表的关键结论是：
 
-- 如果你写的是 runner 侧 hook，例如 `SessionStart`、`UserPromptSubmit`、`BeforeStop`、`Stop`，重点看 `prompt`、`assistant_response`、`source`、`model`。
+- 如果你写的是 runner 侧 hook，例如 `SessionStart`、`UserPromptSubmit`、`Stop`，重点看 `prompt`、`assistant_response`、`source`、`model`。
 - 如果你写的是 tool 侧 hook，例如 `PreToolUse`、`PostToolUse`、`PostToolUseFailure`，重点看 `tool_name`、`tool_input`、`tool_use_id`、`tool_response`、`error`。其中 `tool_response` 是当前工具调用的业务输出，不是完整 `tool_result` 块，也不需要通过 `includeConversationSnapshot` 获取。
 - 如果你要把“当前事件字段”与“最近对话上下文”一起送给外部策略，就同时使用事件字段和 `conversation_snapshot`，不要试图只从快照里反推当前事件。
 - `permission_mode`、`effort`、`agent_type` 虽然在模型里有字段，但当前实现还没有把它们接进真实 hook payload，不要把它们当成当前可依赖入参。
@@ -698,11 +699,12 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 
 - 只有在 `PreToolUse` 上，当前系统才会把 `ask` 接到现有审批流程里
 - 用户同意后，原工具调用会再次经过一次 `PreToolUse`
-- 如果条件没变、又再次返回 `ask`，就会再次弹审批
+- 批准只可复用一次，而且必须仍是同一工具调用 ID、工具名和工具输入
+- 重放时，只有本次仍返回 `ask`、且其 handler ID 都包含在已批准集合内的请求才会通过；新增的 `ask` handler 或改动后的输入都会再次弹审批
 
 建议：
 
-- 需要审批的策略尽量配合 `once: true`
+- 需要跨轮次记住已批准状态时，再配合 `once: true`
 - 或者在外部策略服务里记录“该操作已经审批过”
 
 还要注意一点：
@@ -759,15 +761,15 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 - `PreToolUse`
   会阻断当前工具执行。
 - `PostToolUse`
-  不会撤销已经执行完的工具；它更像是“补一条阻断说明给后续推理看”。
+  不会撤销已经执行完的工具，也不会仅凭 `block` 自动结束当前回合；可用 `additionalContext` 补充后续推理信息。
 - `PostToolUseFailure`
   不会吞掉原始工具失败；原错误仍然会继续向上抛出。
-- `BeforeStop`
+- `Stop`
   表示“现在还不能结束，请继续当前任务”。
 - `Stop`
-  会在当前轮末尾追加一条阻断说明，然后结束本轮，不会自动续跑。
+  handler 仍会执行，但 `block`、`deny`、`stop` 和其他全部输出都不会改变当前轮。
 
-### 4. 停止当前流程：`continue: false`
+### 4. 终止当前回合：`continue: false` 或 `decision: "stop"`
 
 配置示例：
 
@@ -778,17 +780,27 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 }
 ```
 
-这个返回值适合明确要求“当前流程就到这里”。它与 `block` 的区别在于：
+或使用等价的规范写法：
+
+```json
+{
+  "decision": "stop",
+  "reason": "stop requested by hook"
+}
+```
+
+这两个写法都适合明确要求“当前回合就到这里”。它与 `block` 的区别在于：
 
 - `block` 更偏向“此处不允许继续，需要转到别的处理”
-- `continue: false` 更偏向“直接停止当前流程”
+- `continue: false` / `decision: "stop"` 会设置回合级终止状态
 
 注意：
 
-- `SessionStart` / `UserPromptSubmit` / `PreToolUse` / `Stop` 上更有实际意义
-- `PostToolUse` / `PostToolUseFailure` 上同样不能回滚已发生的工具结果，更多仍是写入说明
-- `BeforeStop` 不支持这个字段
-- 在 `BeforeStop` 上只能用 `allow` 或 `block`
+- 在 `PreToolUse` 命中时，当前工具不会执行；运行时会写入 `hook_stopped` 工具结果，并取消同一回合中仍未完成的并行工具调用。
+- 在 `PostToolUse` 命中时，已完成的成功工具结果会保留，然后结束当前回合并取消等待中的并行工具调用。
+- 在 `PostToolUseFailure` 命中时，hook 仍会先拿到原始失败信息；终止决策会以回合终止取代正常的失败继续路径。
+- `SessionStart` / `UserPromptSubmit` 同样可以使用它结束当前流程。
+- `Stop` 不支持这个字段；只能用 `allow` 或 `block`
 
 ### 5. 补充上下文：`additionalContext`
 
@@ -806,10 +818,9 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 
 - `SessionStart` / `UserPromptSubmit`
   会被追加到本轮 Agent 的初始上下文中
-- `PostToolUse` / `PostToolUseFailure` / `Stop`
+- `PostToolUse` / `PostToolUseFailure`
   会作为系统说明写入内存，供后续推理或下一轮继续使用
-- `BeforeStop`
-  不支持 `additionalContext`
+- `Stop` 不支持 `additionalContext`，也不会写入 memory
 
 实务上最常见的用法：
 
@@ -839,6 +850,7 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 - `updatedInput` 会替换整个工具输入对象，不是局部 merge
 - 同一个事件中只允许一个 handler 返回 `updatedInput`
 - 如果多个 handler 同时返回 `updatedInput`，系统会直接阻断，避免结果不确定
+- 只要任一 handler 返回回合终止决策，运行时会丢弃全部 `updatedInput`，不会在停止前再执行改写后的工具调用
 
 ### 7. 设置会话标题：`sessionTitle`
 
@@ -898,14 +910,17 @@ handler 收到的是一个 JSON 对象。为了避免把“模型层支持”和
 多个结果合并时，优先级大致如下：
 
 ```text
-continue:false > block/deny > ask > allow > none
+continue:false / decision:stop > block/deny > ask > allow > none
 ```
+
+这套合并规则不适用于 `Stop`：它会先让所有命中的 handler 执行完，再把整个合并结果替换为空结果。
 
 另外还有几条固定规则：
 
 - `additionalContext` 按配置顺序收集
 - `sessionTitle` 取第一个非空值
 - `updatedInput` 只允许一个来源
+- 任一终止决策都会胜过其他结果，并丢弃 `updatedInput`
 - handler 自己执行失败时，按各自的 `failPolicy` 决定是否阻断
 
 ## Skill hook 的特殊规则
@@ -963,7 +978,7 @@ Skill 自带 `http` handler：
 - 对 Skill `headerSecretRefs` 增加可引用密钥白名单，避免任意 Skill 读取租户级敏感 Header。
 - 对外发 HTTP hook 增加审计日志，记录 handler ID、目标 URL、事件名和脱敏后的字段摘要。
 
-## `BeforeStop` 完成门禁
+## `Stop` 完成门禁
 
 如果你只准备做一个高级 hook，通常就是它。
 
@@ -977,11 +992,11 @@ Skill 自带 `http` handler：
 
 ### 它和普通阻断最大的区别
 
-`BeforeStop` 返回 `block` 时，不是简单地“报错结束”，而是：
+`Stop` 返回 `block` 时，不是简单地“报错结束”，而是：
 
 1. 给当前任务生成一条内部续跑指令
 2. 让 Agent 在同一次请求里继续做事
-3. 再次生成候选回复后，再次进入 `BeforeStop`
+3. 再次生成候选回复后，再次进入 `Stop`
 
 如果持续返回 `block`，系统会用预算保护当前请求，避免无限循环。
 
@@ -995,7 +1010,7 @@ Skill 自带 `http` handler：
 {
   "running": {
     "hook_runtime": {
-      "max_before_stop_turns": 2,
+      "max_stop_turns": 2,
       "max_automatic_follow_up_turns": 4
     }
   }
@@ -1004,14 +1019,14 @@ Skill 自带 `http` handler：
 
 含义：
 
-- `max_before_stop_turns`
-  `BeforeStop` 触发自动续跑的最大次数
+- `max_stop_turns`
+  `Stop` 触发自动续跑的最大次数
 - `max_automatic_follow_up_turns`
   自动续跑总预算；如果系统里还有别的自动续跑机制，会共享这个总预算
 
 兼容字段仍然可读：
 
-- `running.max_before_stop_turns`
+- `running.max_stop_turns`
 - `running.max_automatic_follow_up_turns`
 
 但如果同时配置了 `running.hook_runtime`，后者优先。
@@ -1200,7 +1215,7 @@ Skill 自带 `http` handler：
   "hooks": {
     "enabled": true,
     "events": {
-      "BeforeStop": [
+      "Stop": [
         {
           "id": "completion-gate",
           "hooks": [
@@ -1219,7 +1234,7 @@ Skill 自带 `http` handler：
 }
 ```
 
-### 示例 7：真正结束前追加收尾信息
+### 示例 7：在完成门禁中发送审计/埋点
 
 ```json
 {
@@ -1247,9 +1262,15 @@ Skill 自带 `http` handler：
 
 适合做：
 
-- 当前轮真正结束前写入收尾上下文
-- 记录最终审计说明
-- 在需要时用 `continue: false` 明确停止当前轮
+- 向日志、指标或审计系统记录当前候选回复
+- 触发不影响会话的外部收尾动作
+
+不适合做：
+
+- 返回 `additionalContext` 写入记忆
+- 返回 `deny`、`stop` 或 `continue: false`
+
+需要候选回复继续时，返回 `block`；记录完成并允许结束时，返回 `allow`。
 
 ## 验证方式
 
@@ -1257,11 +1278,13 @@ Skill 自带 `http` handler：
 
 ### 验证 1：确认 hook 已命中
 
-先用一个最简单的 handler，返回固定 `additionalContext` 或固定 `block`，确认：
+先在会产生效果的事件上用一个最简单的 handler，返回固定 `additionalContext` 或固定 `block`，确认：
 
 - 事件名写对了
 - 文件路径写对了
 - `enabled` 已打开
+
+验证 `Stop` 时不要只观察 stdout；还应检查 handler 写入的外部审计、日志或指标，以及 `allow` / `block` 对完成状态的影响。
 
 ### 验证 2：确认工具名和字段名
 
@@ -1284,8 +1307,9 @@ Skill 自带 `http` handler：
 
 - 用户批准后是否会再次弹审批
 - 改写输入后是否会重新触发审批
+- 新增或替换 `ask` handler 后是否会重新触发审批
 
-这一步通常可以尽早发现是否需要补 `once: true`。
+这一步可以确认批准不会意外覆盖新的策略；只有需要跨轮次记住批准状态时，才考虑 `once: true`。
 
 ## 常见问题
 
@@ -1309,15 +1333,16 @@ Skill 自带 `http` handler：
 
 ### 批准后又重复审批
 
-这是 `PreToolUse` 的常见现象。原因通常有两个：
+这是 `PreToolUse` 的预期保护行为。原因通常有三个：
 
-1. handler 每次都会再次返回 `ask`
+1. 本次 `ask` 来自未被原批准覆盖的新 handler
 2. 批准后工具输入发生了变化，系统把它视为新的待审操作
+3. 本次不是同一个工具调用的单次批准重放
 
 处理建议：
 
-- 优先加 `once: true`
-- 或在外部策略里记录已审批状态
+- 检查返回 `ask` 的 handler ID 与工具输入是否保持不变
+- 仅在确实希望跨轮次跳过审批时，再加 `once: true` 或在外部策略里记录已审批状态
 
 ### `PostToolUse` 返回了 `block`，为什么工具还是执行了
 
@@ -1329,7 +1354,7 @@ Skill 自带 `http` handler：
 - 追加结果摘要
 - 告诉后续推理“这一步虽然执行了，但有风险”
 
-注意：普通工具成功路径会触发 `PostToolUse`；既有 Tool Guard 的预批准执行分支当前会绕过这个后置 hook，所以不要把它当作所有工具成功路径的强制审计点。
+当前所有经 Tool Guard 执行的成功路径都会触发 `PostToolUse`，包括预批准调用和受保护的 source-built-in tool；因此可以把它作为统一的成功后审计点。它仍不能回滚工具的外部副作用。
 
 ### `PostToolUseFailure` 返回了 `block`，为什么原错误还在
 
@@ -1341,7 +1366,7 @@ Skill 自带 `http` handler：
 2. hook 可以写入诊断信息
 3. 原始工具失败仍然会继续向上抛出
 
-注意：这描述的是普通工具失败路径；既有 Tool Guard 的预批准执行分支当前不在后置 hook 的 `try` / `except` 包裹内，失败时也不会触发 `PostToolUseFailure`。
+预批准调用和受保护的 source-built-in tool 同样在该失败路径内，会触发 `PostToolUseFailure`。如果需要在失败后直接结束回合，应返回 `continue: false` 或 `decision: "stop"`；普通 `block` 则仍保留原始工具失败。
 
 ### command hook 报路径越界
 
@@ -1385,5 +1410,5 @@ Skill hook 则应改为放在 Skill 自己的 `scripts/` 目录里。
 - 需要人工审批的 `PreToolUse` 尽量配合 `once: true`
 - 能用 `matcher.tools` 缩小范围时，不要让所有工具都命中
 - 不要依赖多个 handler 之间的顺序副作用，因为它们会并发执行
-- `BeforeStop` 规则要尽量具体，否则容易把正常任务拖进反复续跑
+- `Stop` 规则要尽量具体，否则容易把正常任务拖进反复续跑
 - 不要把密钥明文写进配置；HTTP 认证优先用 `headerSecretRefs`

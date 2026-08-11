@@ -3,8 +3,8 @@ import {
   Alert,
   Button,
   Card,
-  Input,
   InputNumber,
+  Modal,
   Result,
   Select,
   Space,
@@ -13,6 +13,7 @@ import {
   Tag,
 } from "antd";
 import { useTranslation } from "react-i18next";
+import isEqual from "lodash/isEqual";
 
 import { PageHeader } from "@/components/PageHeader";
 import { useAppMessage } from "@/hooks/useAppMessage";
@@ -33,11 +34,7 @@ import {
   QUERY_RETRY_NUMBER_FIELDS,
   TOOL_RESULT_COMPACT_NUMBER_FIELDS,
   clearModelCallPolicyConfig,
-  clearImmediateTruncationConfig,
   enableModelCallPolicyConfig,
-  enableImmediateTruncationConfig,
-  formatSystemPromptInjectionText,
-  parseSystemPromptInjectionText,
   readArchiveMaintenanceConfig,
   readCronNotificationConfig,
   readCronTaskSessionCleanupConfig,
@@ -45,7 +42,6 @@ import {
   readLlmRateLimiterConfigState,
   readQueryRetryConfigState,
   readRegisteredSwitchValue,
-  readImmediateTruncationConfig,
   readSystemPromptInjections,
   readToolResultCompactConfig,
   validateSourceSystemConfig,
@@ -57,14 +53,27 @@ import {
   writeQueryRetryValue,
   writeRegisteredSwitchValue,
   writeSystemPromptInjections,
-  writeImmediateTruncationValue,
   writeToolResultCompactValue,
 } from "./registry";
 import type {
-  ImmediateTruncationConfigKey,
   LlmRateLimiterConfig,
   ModelCallPolicyConfigKey,
 } from "./registry";
+import {
+  CapabilityGrid,
+  ConfigDetailDrawer,
+  SystemPromptSegments,
+} from "./components";
+import { SourceToolLibrary } from "./SourceToolLibrary";
+import {
+  addPromptSegment,
+  buildCapabilitySummaries,
+  filterCapabilitySummaries,
+  movePromptSegment,
+  removePromptSegment,
+  type CapabilityFilter,
+  type CapabilityId,
+} from "./workbench";
 import styles from "./index.module.less";
 
 function formatUpdatedAt(value?: string | null): string {
@@ -98,12 +107,34 @@ export default function SystemConfigPage() {
   const [record, setRecord] =
     useState<CurrentSourceSystemConfigResponse | null>(null);
   const [draftConfig, setDraftConfig] = useState<SourceSystemConfig>({});
+  const [capabilityFilter, setCapabilityFilter] =
+    useState<CapabilityFilter>("all");
+  const [selectedCapabilityId, setSelectedCapabilityId] =
+    useState<CapabilityId | null>(null);
+  const [promptSegments, setPromptSegments] = useState<string[]>([]);
+  const [databaseGuardDisablePending, setDatabaseGuardDisablePending] =
+    useState(false);
+  const [restoreDefaultsPending, setRestoreDefaultsPending] = useState(false);
+  const [restoreDefaultsSourceId, setRestoreDefaultsSourceId] = useState<
+    string | null
+  >(null);
+  const [pendingSourceId, setPendingSourceId] = useState<string | null>(null);
   const requestSeqRef = useRef(0);
   const activeSourceRef = useRef(activeSourceId);
 
   useEffect(() => {
     activeSourceRef.current = activeSourceId;
   }, [activeSourceId]);
+
+  useEffect(() => {
+    if (
+      restoreDefaultsSourceId !== null &&
+      restoreDefaultsSourceId !== activeSourceId
+    ) {
+      setRestoreDefaultsPending(false);
+      setRestoreDefaultsSourceId(null);
+    }
+  }, [activeSourceId, restoreDefaultsSourceId]);
 
   const beginRequest = (sourceId: string) => {
     requestSeqRef.current += 1;
@@ -133,6 +164,7 @@ export default function SystemConfigPage() {
     ? effectiveSourceConfig.config
     : null;
   const modelCallPolicyDisabled = formDisabled || !isEffectiveConfigCurrent;
+  const isDirty = !isEqual(draftConfig, record?.config ?? {});
 
   useEffect(() => {
     if (!canManage) {
@@ -143,6 +175,24 @@ export default function SystemConfigPage() {
       setValidationError(null);
       setRecord(null);
       setDraftConfig({});
+      setPromptSegments([]);
+      setRestoreDefaultsPending(false);
+      setRestoreDefaultsSourceId(null);
+      setPendingSourceId(null);
+      return;
+    }
+
+    if (pendingSourceId) {
+      return;
+    }
+
+    if (isDirty && record?.source_id && activeSourceId !== record.source_id) {
+      setPendingSourceId(activeSourceId);
+      useIframeStore.getState().setContext({ source: record.source_id });
+      return;
+    }
+
+    if (record?.source_id === activeSourceId) {
       return;
     }
 
@@ -153,6 +203,7 @@ export default function SystemConfigPage() {
     setValidationError(null);
     setRecord(null);
     setDraftConfig({});
+    setPromptSegments([]);
     void loadEffectiveConfig(activeSourceId);
 
     sourceSystemConfigApi
@@ -166,6 +217,7 @@ export default function SystemConfigPage() {
         }
         setRecord(response);
         setDraftConfig(response.config);
+        setPromptSegments(readSystemPromptInjections(response.config));
       })
       .catch((requestError) => {
         if (!isCurrentRequest(request)) {
@@ -182,7 +234,26 @@ export default function SystemConfigPage() {
           setLoading(false);
         }
       });
-  }, [activeSourceId, canManage, loadEffectiveConfig]);
+  }, [
+    activeSourceId,
+    canManage,
+    isDirty,
+    loadEffectiveConfig,
+    pendingSourceId,
+    record?.source_id,
+  ]);
+
+  useEffect(() => {
+    const preventUnload = (event: BeforeUnloadEvent) => {
+      if (!isDirty) {
+        return;
+      }
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", preventUnload);
+    return () => window.removeEventListener("beforeunload", preventUnload);
+  }, [isDirty]);
 
   if (!canManage) {
     return (
@@ -216,10 +287,28 @@ export default function SystemConfigPage() {
     if (!definition) {
       return;
     }
+    if (key === "feature_switches.database_access_guard_enabled" && !checked) {
+      setDatabaseGuardDisablePending(true);
+      return;
+    }
     setValidationError(null);
     setDraftConfig((previous) =>
       writeRegisteredSwitchValue(previous, definition, checked),
     );
+  };
+
+  const confirmDatabaseGuardDisable = () => {
+    const definition = CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.find(
+      (item) => item.key === "feature_switches.database_access_guard_enabled",
+    );
+    if (!definition || formDisabled) {
+      return;
+    }
+    setValidationError(null);
+    setDraftConfig((previous) =>
+      writeRegisteredSwitchValue(previous, definition, false),
+    );
+    setDatabaseGuardDisablePending(false);
   };
 
   const handleToolResultEnabledChange = (checked: boolean) => {
@@ -318,17 +407,13 @@ export default function SystemConfigPage() {
     );
   };
 
-  const handleSystemPromptInjectionsChange = (value: string) => {
+  const handleSystemPromptInjectionsChange = (value: string[]) => {
     if (formDisabled) {
       return;
     }
     setValidationError(null);
-    setDraftConfig((previous) =>
-      writeSystemPromptInjections(
-        previous,
-        parseSystemPromptInjectionText(value),
-      ),
-    );
+    setPromptSegments(value);
+    setDraftConfig((previous) => writeSystemPromptInjections(previous, value));
   };
 
   const handleEnableModelCallPolicy = (configKey: ModelCallPolicyConfigKey) => {
@@ -402,56 +487,6 @@ export default function SystemConfigPage() {
     );
   };
 
-  const handleEnableImmediateTruncation = (
-    configKey: ImmediateTruncationConfigKey,
-  ) => {
-    if (formDisabled) {
-      return;
-    }
-    setValidationError(null);
-    setDraftConfig((previous) =>
-      enableImmediateTruncationConfig(previous, configKey),
-    );
-  };
-
-  const handleImmediateTruncationEnabledChange = (
-    configKey: ImmediateTruncationConfigKey,
-    checked: boolean,
-  ) => {
-    if (formDisabled) {
-      return;
-    }
-    setValidationError(null);
-    setDraftConfig((previous) =>
-      writeImmediateTruncationValue(previous, configKey, "enabled", checked),
-    );
-  };
-
-  const handleImmediateTruncationMaxBytesChange = (
-    configKey: ImmediateTruncationConfigKey,
-    value: number | null,
-  ) => {
-    if (formDisabled || typeof value !== "number") {
-      return;
-    }
-    setValidationError(null);
-    setDraftConfig((previous) =>
-      writeImmediateTruncationValue(previous, configKey, "max_bytes", value),
-    );
-  };
-
-  const handleRestoreImmediateTruncationInheritance = (
-    configKey: ImmediateTruncationConfigKey,
-  ) => {
-    if (formDisabled) {
-      return;
-    }
-    setValidationError(null);
-    setDraftConfig((previous) =>
-      clearImmediateTruncationConfig(previous, configKey),
-    );
-  };
-
   const handleSave = async () => {
     if (formDisabled) {
       return;
@@ -470,8 +505,10 @@ export default function SystemConfigPage() {
     setRequestError(null);
     setValidationError(null);
     try {
+      const configToSave = { ...draftConfig };
+      delete configToSave.file_read_truncation;
       const nextRecord = await sourceSystemConfigApi.updateCurrent({
-        config: draftConfig,
+        config: configToSave,
       });
       if (
         !isCurrentRequest(request) ||
@@ -481,6 +518,7 @@ export default function SystemConfigPage() {
       }
       setRecord(nextRecord);
       setDraftConfig(nextRecord.config);
+      setPromptSegments(readSystemPromptInjections(nextRecord.config));
       await loadEffectiveConfig(request.sourceId);
       if (!isCurrentRequest(request)) {
         return;
@@ -490,6 +528,11 @@ export default function SystemConfigPage() {
           defaultValue: "当前系统配置已保存",
         }),
       );
+      if (pendingSourceId) {
+        const sourceId = pendingSourceId;
+        setPendingSourceId(null);
+        useIframeStore.getState().setContext({ source: sourceId });
+      }
     } catch (requestError) {
       const nextError =
         requestError instanceof Error
@@ -507,14 +550,24 @@ export default function SystemConfigPage() {
     }
   };
 
+  const handleDiscardAndSwitchSource = () => {
+    if (!pendingSourceId) {
+      return;
+    }
+    const sourceId = pendingSourceId;
+    setPendingSourceId(null);
+    setRecord(null);
+    setDraftConfig({});
+    setPromptSegments([]);
+    useIframeStore.getState().setContext({ source: sourceId });
+  };
+
   const cronUnreadAutoPauseConfig = readCronUnreadAutoPauseConfig(draftConfig);
   const cronNotificationConfig = readCronNotificationConfig(draftConfig);
   const cronTaskSessionCleanupConfig =
     readCronTaskSessionCleanupConfig(draftConfig);
   const archiveMaintenanceConfig = readArchiveMaintenanceConfig(draftConfig);
-  const systemPromptInjectionText = formatSystemPromptInjectionText(
-    readSystemPromptInjections(draftConfig),
-  );
+  const systemPromptInjections = promptSegments;
   const queryRetryState = readQueryRetryConfigState(
     draftConfig,
     effectiveConfigPayload,
@@ -524,16 +577,381 @@ export default function SystemConfigPage() {
     effectiveConfigPayload,
   );
   const toolResultCompactConfig = readToolResultCompactConfig(draftConfig);
-  const fileReadTruncationState = readImmediateTruncationConfig(
+  const capabilitySummaries = buildCapabilitySummaries({
+    savedConfig: record?.config ?? {},
     draftConfig,
-    "file_read_truncation",
+    effectiveConfig: effectiveConfigPayload ?? {},
+  });
+  const visibleCapabilitySummaries = filterCapabilitySummaries(
+    capabilitySummaries,
+    capabilityFilter,
   );
-
+  const selectedCapability =
+    capabilitySummaries.find(
+      (summary) => summary.id === selectedCapabilityId,
+    ) ?? null;
+  const drawerEditor =
+    selectedCapabilityId === "conversation" ? (
+      <SystemPromptSegments
+        disabled={formDisabled}
+        prompts={systemPromptInjections}
+        onAdd={() =>
+          handleSystemPromptInjectionsChange(
+            addPromptSegment(systemPromptInjections),
+          )
+        }
+        onChange={(index, value) =>
+          handleSystemPromptInjectionsChange(
+            systemPromptInjections.map((prompt, promptIndex) =>
+              promptIndex === index ? value : prompt,
+            ),
+          )
+        }
+        onMove={(index, direction) =>
+          handleSystemPromptInjectionsChange(
+            movePromptSegment(systemPromptInjections, index, direction),
+          )
+        }
+        onRemove={(index) =>
+          handleSystemPromptInjectionsChange(
+            removePromptSegment(systemPromptInjections, index),
+          )
+        }
+      />
+    ) : selectedCapabilityId === "safety" ? (
+      <div className={styles.drawerEditor}>
+        <section className={styles.drawerSettingSection}>
+          <div className={styles.drawerSettingSectionHeader}>
+            <span>访问防护</span>
+            <span>1 项设置</span>
+          </div>
+          {CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.filter(
+            (definition) =>
+              definition.key ===
+              "feature_switches.database_access_guard_enabled",
+          ).map((definition) => (
+            <div key={definition.key} className={styles.switchRow}>
+              <div className={styles.switchCopy}>
+                <span className={styles.switchTitle}>{definition.title}</span>
+                <span className={styles.switchDescription}>
+                  {definition.description}
+                </span>
+              </div>
+              <Switch
+                checked={readRegisteredSwitchValue(draftConfig, definition)}
+                disabled={formDisabled}
+                onChange={(checked) =>
+                  handleSwitchChange(definition.key, checked)
+                }
+              />
+            </div>
+          ))}
+        </section>
+        <section className={styles.drawerSettingSection}>
+          <div className={styles.drawerSettingSectionHeader}>
+            <span>审批通知</span>
+            <span>1 项设置</span>
+          </div>
+          {CURRENT_SOURCE_SYSTEM_CONFIG_SWITCHES.filter(
+            (definition) =>
+              definition.key ===
+              "approval_notifications.zhaohu_tool_guard_enabled",
+          ).map((definition) => (
+            <div key={definition.key} className={styles.switchRow}>
+              <div className={styles.switchCopy}>
+                <span className={styles.switchTitle}>{definition.title}</span>
+                <span className={styles.switchDescription}>
+                  {definition.description}
+                </span>
+              </div>
+              <Switch
+                checked={readRegisteredSwitchValue(draftConfig, definition)}
+                disabled={formDisabled}
+                onChange={(checked) =>
+                  handleSwitchChange(definition.key, checked)
+                }
+              />
+            </div>
+          ))}
+        </section>
+      </div>
+    ) : selectedCapabilityId === "model" ? (
+      <div className={styles.drawerEditor}>
+        <section className={styles.toolOutputSection}>
+          <div className={styles.toolOutputSectionHeader}>
+            <span className={styles.switchTitle}>查询重试</span>
+            <Tag color={queryRetryState.explicit ? "green" : "blue"}>
+              {queryRetryState.explicit
+                ? "当前系统显式覆盖"
+                : "继承 Agent 配置"}
+            </Tag>
+          </div>
+          {queryRetryState.explicit ? (
+            <>
+              <div className={styles.switchRow}>
+                <span className={styles.switchTitle}>启用查询重试</span>
+                <Switch
+                  checked={queryRetryState.config.enabled}
+                  disabled={modelCallPolicyDisabled}
+                  onChange={handleQueryRetryEnabledChange}
+                />
+              </div>
+              <details className={styles.advancedParameters} open>
+                <summary>高级参数</summary>
+                <div className={styles.numberGrid}>
+                  {QUERY_RETRY_NUMBER_FIELDS.map((definition) => (
+                    <label key={definition.key} className={styles.numberField}>
+                      <span className={styles.numberLabel}>
+                        {definition.title}
+                      </span>
+                      <InputNumber
+                        min={definition.min}
+                        step={definition.step}
+                        value={queryRetryState.config[definition.key]}
+                        disabled={
+                          modelCallPolicyDisabled ||
+                          !queryRetryState.config.enabled
+                        }
+                        onChange={(value) =>
+                          handleQueryRetryNumberChange(definition.key, value)
+                        }
+                      />
+                    </label>
+                  ))}
+                </div>
+              </details>
+              <Button
+                disabled={modelCallPolicyDisabled}
+                onClick={() =>
+                  handleRestoreModelCallPolicyInheritance("query_retry")
+                }
+              >
+                恢复继承
+              </Button>
+            </>
+          ) : (
+            <Button
+              disabled={modelCallPolicyDisabled}
+              onClick={() => handleEnableModelCallPolicy("query_retry")}
+            >
+              启用覆盖
+            </Button>
+          )}
+        </section>
+        <section className={styles.toolOutputSection}>
+          <div className={styles.toolOutputSectionHeader}>
+            <span className={styles.switchTitle}>LLM 并发限流</span>
+            <Tag color={llmRateLimiterState.explicit ? "green" : "blue"}>
+              {llmRateLimiterState.explicit
+                ? "当前系统显式覆盖"
+                : "继承 Agent 配置"}
+            </Tag>
+          </div>
+          {llmRateLimiterState.explicit ? (
+            <>
+              <details className={styles.advancedParameters} open>
+                <summary>高级参数</summary>
+                <div className={styles.numberGrid}>
+                  {LLM_RATE_LIMITER_NUMBER_FIELDS.map((definition) => (
+                    <label key={definition.key} className={styles.numberField}>
+                      <span className={styles.numberLabel}>
+                        {definition.title}
+                      </span>
+                      <InputNumber
+                        min={definition.min}
+                        step={definition.step}
+                        value={
+                          llmRateLimiterState.config[definition.key] ??
+                          undefined
+                        }
+                        disabled={modelCallPolicyDisabled}
+                        onChange={(value) => {
+                          if (value === null && !definition.nullable) {
+                            return;
+                          }
+                          handleLlmRateLimiterNumberChange(
+                            definition.key,
+                            (value ??
+                              null) as LlmRateLimiterConfig[typeof definition.key],
+                          );
+                        }}
+                      />
+                    </label>
+                  ))}
+                </div>
+              </details>
+              <Button
+                disabled={modelCallPolicyDisabled}
+                onClick={() =>
+                  handleRestoreModelCallPolicyInheritance("llm_rate_limiter")
+                }
+              >
+                恢复继承
+              </Button>
+            </>
+          ) : (
+            <Button
+              disabled={modelCallPolicyDisabled}
+              onClick={() => handleEnableModelCallPolicy("llm_rate_limiter")}
+            >
+              启用覆盖
+            </Button>
+          )}
+        </section>
+      </div>
+    ) : selectedCapabilityId === "cron" ? (
+      <div className={styles.drawerEditor}>
+        <section className={styles.toolOutputSection}>
+          <div className={styles.switchRow}>
+            <span className={styles.switchTitle}>定时任务未读自动暂停</span>
+            <Switch
+              checked={cronUnreadAutoPauseConfig.enabled}
+              disabled={formDisabled}
+              onChange={handleCronUnreadAutoPauseEnabledChange}
+            />
+          </div>
+          <details className={styles.advancedParameters}>
+            <summary>高级参数</summary>
+            <label className={styles.numberField}>
+              <span className={styles.numberLabel}>未读暂停条数</span>
+              <InputNumber
+                min={1}
+                step={1}
+                value={cronUnreadAutoPauseConfig.threshold}
+                disabled={formDisabled || !cronUnreadAutoPauseConfig.enabled}
+                onChange={handleCronUnreadAutoPauseThresholdChange}
+              />
+            </label>
+          </details>
+        </section>
+        <section className={styles.toolOutputSection}>
+          <div className={styles.switchRow}>
+            <span className={styles.switchTitle}>周末不发招呼完成通知</span>
+            <Switch
+              checked={cronNotificationConfig.skip_weekend_zhaohu_enabled}
+              disabled={formDisabled}
+              onChange={handleCronSkipWeekendZhaohuEnabledChange}
+            />
+          </div>
+        </section>
+        <section className={styles.toolOutputSection}>
+          <div className={styles.switchRow}>
+            <span className={styles.switchTitle}>定时任务会话历史清理</span>
+            <Switch
+              checked={cronTaskSessionCleanupConfig.enabled}
+              disabled={formDisabled}
+              onChange={handleCronTaskSessionCleanupEnabledChange}
+            />
+          </div>
+          <details className={styles.advancedParameters}>
+            <summary>高级参数</summary>
+            <div className={styles.numberGrid}>
+              <label className={styles.numberField}>
+                <span className={styles.numberLabel}>历史保留天数</span>
+                <InputNumber
+                  min={1}
+                  step={1}
+                  value={cronTaskSessionCleanupConfig.retention_days}
+                  disabled={
+                    formDisabled || !cronTaskSessionCleanupConfig.enabled
+                  }
+                  onChange={handleCronTaskSessionCleanupRetentionChange}
+                />
+              </label>
+              <label className={styles.numberField}>
+                <span className={styles.numberLabel}>每日运行时间</span>
+                <Select
+                  value={cronTaskSessionCleanupConfig.run_time}
+                  disabled={
+                    formDisabled || !cronTaskSessionCleanupConfig.enabled
+                  }
+                  options={CRON_TASK_SESSION_CLEANUP_RUN_TIME_OPTIONS.map(
+                    (runTime) => ({ label: runTime, value: runTime }),
+                  )}
+                  onChange={handleCronTaskSessionCleanupRunTimeChange}
+                />
+              </label>
+            </div>
+          </details>
+        </section>
+        <section className={styles.toolOutputSection}>
+          <div className={styles.switchRow}>
+            <span className={styles.switchTitle}>文件归档维护</span>
+            <Switch
+              checked={archiveMaintenanceConfig.enabled}
+              disabled={formDisabled}
+              onChange={handleArchiveMaintenanceEnabledChange}
+            />
+          </div>
+          <details className={styles.advancedParameters}>
+            <summary>高级参数</summary>
+            <label className={styles.numberField}>
+              <span className={styles.numberLabel}>归档维护每日运行时间</span>
+              <Select
+                value={archiveMaintenanceConfig.run_time}
+                disabled={formDisabled || !archiveMaintenanceConfig.enabled}
+                options={ARCHIVE_MAINTENANCE_RUN_TIME_OPTIONS.map(
+                  (runTime) => ({
+                    label: runTime,
+                    value: runTime,
+                  }),
+                )}
+                onChange={handleArchiveMaintenanceRunTimeChange}
+              />
+            </label>
+          </details>
+        </section>
+      </div>
+    ) : selectedCapabilityId === "output" ? (
+      <div className={styles.drawerEditor}>
+        <section className={styles.toolOutputSection}>
+          <div className={styles.switchRow}>
+            <span className={styles.switchTitle}>启用工具结果压缩</span>
+            <Switch
+              checked={toolResultCompactConfig.enabled}
+              disabled={formDisabled}
+              onChange={handleToolResultEnabledChange}
+            />
+          </div>
+          <details className={styles.advancedParameters}>
+            <summary>高级参数</summary>
+            <div className={styles.numberGrid}>
+              {TOOL_RESULT_COMPACT_NUMBER_FIELDS.map((definition) => (
+                <label key={definition.key} className={styles.numberField}>
+                  <span className={styles.numberLabel}>{definition.title}</span>
+                  <InputNumber
+                    min={definition.min}
+                    max={definition.max}
+                    step={definition.step}
+                    value={toolResultCompactConfig[definition.key]}
+                    disabled={formDisabled}
+                    onChange={(value) =>
+                      handleToolResultNumberChange(definition.key, value)
+                    }
+                  />
+                </label>
+              ))}
+            </div>
+          </details>
+        </section>
+      </div>
+    ) : null;
   const handleDelete = async () => {
-    if (formDisabled) {
+    const currentSourceId =
+      useIframeStore.getState().source || DEFAULT_SOURCE_ID;
+    if (
+      formDisabled ||
+      restoreDefaultsSourceId === null ||
+      restoreDefaultsSourceId !== activeSourceId ||
+      restoreDefaultsSourceId !== currentSourceId
+    ) {
+      setRestoreDefaultsPending(false);
+      setRestoreDefaultsSourceId(null);
       return;
     }
-    const request = beginRequest(activeSourceId);
+    setRestoreDefaultsPending(false);
+    const request = beginRequest(restoreDefaultsSourceId);
+    setRestoreDefaultsSourceId(null);
     setSaving(true);
     setRequestError(null);
     setValidationError(null);
@@ -551,6 +969,7 @@ export default function SystemConfigPage() {
       }
       setRecord(nextRecord);
       setDraftConfig(nextRecord.config);
+      setPromptSegments(readSystemPromptInjections(nextRecord.config));
       await loadEffectiveConfig(request.sourceId);
       if (!isCurrentRequest(request)) {
         return;
@@ -672,8 +1091,30 @@ export default function SystemConfigPage() {
                 </div>
               </div>
             </Card>
+            <SourceToolLibrary sourceId={activeSourceId} />
+
+            <CapabilityGrid
+              summaries={visibleCapabilitySummaries}
+              filter={capabilityFilter}
+              onFilterChange={setCapabilityFilter}
+              onSelect={setSelectedCapabilityId}
+            />
+
+            <ConfigDetailDrawer
+              capability={selectedCapability}
+              hasUnsavedChanges={isDirty}
+              open={selectedCapabilityId !== null}
+              onClose={() => setSelectedCapabilityId(null)}
+            >
+              <div className={styles.drawerSummary}>
+                <span>{selectedCapability?.summary}</span>
+                <span>所有修改仍会通过页面底部统一保存。</span>
+              </div>
+              {drawerEditor}
+            </ConfigDetailDrawer>
 
             <Card
+              id="system-config-switches"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.switchesTitle", {
                 defaultValue: "受控功能开关",
@@ -706,6 +1147,7 @@ export default function SystemConfigPage() {
             </Card>
 
             <Card
+              id="system-config-prompts"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.systemPromptInjectionsTitle", {
                 defaultValue: "系统提示词注入",
@@ -717,32 +1159,36 @@ export default function SystemConfigPage() {
                     "配置当前系统运行时固定追加到对话的系统提示词。多段提示词使用空行分隔，保存时会自动去除空段和重复段。",
                 })}
               </div>
-              <label className={styles.promptField}>
-                <Input.TextArea
-                  aria-label={t(
-                    "sourceSystemConfigPage.systemPromptInjectionsLabel",
-                    {
-                      defaultValue: "系统提示词注入",
-                    },
-                  )}
-                  autoSize={{ minRows: 5, maxRows: 12 }}
-                  className={styles.systemPromptTextArea}
-                  disabled={formDisabled}
-                  placeholder={t(
-                    "sourceSystemConfigPage.systemPromptInjectionsPlaceholder",
-                    {
-                      defaultValue: "每段提示词之间留一个空行",
-                    },
-                  )}
-                  value={systemPromptInjectionText}
-                  onChange={(event) =>
-                    handleSystemPromptInjectionsChange(event.target.value)
-                  }
-                />
-              </label>
+              <SystemPromptSegments
+                disabled={formDisabled}
+                prompts={systemPromptInjections}
+                onAdd={() =>
+                  handleSystemPromptInjectionsChange(
+                    addPromptSegment(systemPromptInjections),
+                  )
+                }
+                onChange={(index, value) =>
+                  handleSystemPromptInjectionsChange(
+                    systemPromptInjections.map((prompt, promptIndex) =>
+                      promptIndex === index ? value : prompt,
+                    ),
+                  )
+                }
+                onMove={(index, direction) =>
+                  handleSystemPromptInjectionsChange(
+                    movePromptSegment(systemPromptInjections, index, direction),
+                  )
+                }
+                onRemove={(index) =>
+                  handleSystemPromptInjectionsChange(
+                    removePromptSegment(systemPromptInjections, index),
+                  )
+                }
+              />
             </Card>
 
             <Card
+              id="system-config-model"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.modelCallPolicyTitle", {
                 defaultValue: "模型调用策略",
@@ -942,6 +1388,7 @@ export default function SystemConfigPage() {
             </Card>
 
             <Card
+              id="system-config-cron"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.cronTaskSettingsTitle", {
                 defaultValue: "定时任务设置",
@@ -1156,6 +1603,7 @@ export default function SystemConfigPage() {
             </Card>
 
             <Card
+              id="system-config-output"
               className={styles.switchCard}
               title={t("sourceSystemConfigPage.toolResultCompactTitle", {
                 defaultValue: "工具输出控制",
@@ -1164,7 +1612,7 @@ export default function SystemConfigPage() {
               <div className={styles.toolResultIntro}>
                 {t("sourceSystemConfigPage.toolResultCompactIntro", {
                   defaultValue:
-                    "当前系统下工具历史压缩和文件读取即时截断的解析配置。",
+                    "recent_max_bytes 同时控制新产生和近期的工具输出；old_max_bytes 仅控制历史工具输出。",
                 })}
               </div>
               <section className={styles.toolOutputSection}>
@@ -1229,144 +1677,98 @@ export default function SystemConfigPage() {
                   ))}
                 </div>
               </section>
-
-              <section className={styles.toolOutputSection}>
-                <div className={styles.toolOutputSectionHeader}>
-                  <div className={styles.switchCopy}>
-                    <span className={styles.switchTitle}>
-                      {t("sourceSystemConfigPage.fileReadTruncationTitle", {
-                        defaultValue: "文件读取截断",
-                      })}
-                    </span>
-                    <span className={styles.switchDescription}>
-                      {t(
-                        "sourceSystemConfigPage.fileReadTruncationDescription",
-                        {
-                          defaultValue:
-                            "缺少独立配置时继续使用历史工具结果的近期阈值；显式配置后由本段接管。",
-                        },
-                      )}
-                    </span>
-                  </div>
-                  <Tag
-                    color={fileReadTruncationState.explicit ? "green" : "blue"}
-                  >
-                    {fileReadTruncationState.explicit
-                      ? fileReadTruncationState.config.enabled
-                        ? t(
-                            "sourceSystemConfigPage.fileReadIndependentEnabledState",
-                            {
-                              defaultValue: "独立配置已启用",
-                            },
-                          )
-                        : t(
-                            "sourceSystemConfigPage.fileReadIndependentDisabledState",
-                            {
-                              defaultValue: "独立配置已关闭",
-                            },
-                          )
-                      : t("sourceSystemConfigPage.fileReadInheritedState", {
-                          defaultValue: "继承旧工具结果近期阈值",
-                        })}
-                  </Tag>
-                </div>
-                {fileReadTruncationState.explicit ? (
-                  <>
-                    <div className={styles.switchRow}>
-                      <div className={styles.switchCopy}>
-                        <span className={styles.switchTitle}>
-                          {t("sourceSystemConfigPage.fileReadEnabledTitle", {
-                            defaultValue: "启用文件读取截断",
-                          })}
-                        </span>
-                        <span className={styles.switchDescription}>
-                          {t(
-                            "sourceSystemConfigPage.fileReadEnabledDescription",
-                            {
-                              defaultValue:
-                                "关闭后当前系统的文件读取即时输出不再由 SWE 截断。",
-                            },
-                          )}
-                        </span>
-                      </div>
-                      <Switch
-                        checked={fileReadTruncationState.config.enabled}
-                        disabled={formDisabled}
-                        onChange={(checked) =>
-                          handleImmediateTruncationEnabledChange(
-                            "file_read_truncation",
-                            checked,
-                          )
-                        }
-                      />
-                    </div>
-                    <div className={styles.numberGrid}>
-                      <label className={styles.numberField}>
-                        <span className={styles.numberLabel}>
-                          {t("sourceSystemConfigPage.fileReadMaxBytesLabel", {
-                            defaultValue: "输出片段字节数",
-                          })}
-                        </span>
-                        <InputNumber
-                          min={1000}
-                          step={1000}
-                          value={fileReadTruncationState.config.max_bytes}
-                          disabled={
-                            formDisabled ||
-                            !fileReadTruncationState.config.enabled
-                          }
-                          onChange={(value) =>
-                            handleImmediateTruncationMaxBytesChange(
-                              "file_read_truncation",
-                              value,
-                            )
-                          }
-                        />
-                      </label>
-                    </div>
-                    <Button
-                      disabled={formDisabled}
-                      onClick={() =>
-                        handleRestoreImmediateTruncationInheritance(
-                          "file_read_truncation",
-                        )
-                      }
-                    >
-                      {t("sourceSystemConfigPage.restoreInheritance", {
-                        defaultValue: "恢复继承",
-                      })}
-                    </Button>
-                  </>
-                ) : (
-                  <Button
-                    disabled={formDisabled}
-                    onClick={() =>
-                      handleEnableImmediateTruncation("file_read_truncation")
-                    }
-                  >
-                    {t("sourceSystemConfigPage.enableFileReadTruncation", {
-                      defaultValue: "启用独立配置",
-                    })}
-                  </Button>
-                )}
-              </section>
             </Card>
 
+            <Modal
+              cancelText="继续编辑"
+              footer={(_, { CancelBtn }) => (
+                <Space>
+                  <CancelBtn />
+                  <Button danger onClick={handleDiscardAndSwitchSource}>
+                    放弃草稿并切换
+                  </Button>
+                  <Button
+                    type="primary"
+                    loading={saving}
+                    onClick={() => void handleSave()}
+                  >
+                    保存并切换
+                  </Button>
+                </Space>
+              )}
+              open={pendingSourceId !== null}
+              title="切换系统前保存修改？"
+              onCancel={() => setPendingSourceId(null)}
+            >
+              当前系统的未保存修改会保留在编辑区。你可以先保存，再切换到目标系统。
+            </Modal>
+
+            <Modal
+              cancelText="取消"
+              confirmLoading={saving}
+              okButtonProps={{ danger: true }}
+              okText="恢复默认设置"
+              open={restoreDefaultsPending}
+              title="恢复当前系统的默认设置？"
+              onCancel={() => {
+                setRestoreDefaultsPending(false);
+                setRestoreDefaultsSourceId(null);
+              }}
+              onOk={() => void handleDelete()}
+            >
+              这会移除当前系统已保存的全部自定义配置，并丢弃未保存的草稿修改，恢复继承默认值。此操作无法从此页撤销。
+            </Modal>
+
+            <Modal
+              cancelText="保留防护"
+              okButtonProps={{ danger: true }}
+              okText="确认关闭"
+              open={databaseGuardDisablePending}
+              title="确认关闭数据库访问拦截"
+              onCancel={() => setDatabaseGuardDisablePending(false)}
+              onOk={confirmDatabaseGuardDisable}
+            >
+              关闭后，模型可通过 Python
+              或命令行直连数据库。此修改会在统一保存后生效。
+            </Modal>
+
             <div className={styles.actionRow}>
+              {isDirty ? (
+                <span className={styles.dirtySummary}>存在未保存修改</span>
+              ) : null}
+              {isDirty ? (
+                <Button
+                  onClick={() => {
+                    setDraftConfig(record?.config ?? {});
+                    setPromptSegments(
+                      readSystemPromptInjections(record?.config ?? {}),
+                    );
+                  }}
+                >
+                  放弃修改
+                </Button>
+              ) : null}
+              <span className={styles.restoreDefaultsHint}>
+                清除自定义项并恢复继承默认值
+              </span>
               <Button
                 danger
-                onClick={handleDelete}
                 disabled={formDisabled || record?.is_default}
+                onClick={() => {
+                  setRestoreDefaultsSourceId(activeSourceId);
+                  setRestoreDefaultsPending(true);
+                }}
               >
-                {t("common.delete")}
+                恢复默认设置
               </Button>
               <Button
+                aria-label={t("common.save")}
                 type="primary"
                 loading={saving}
                 disabled={formDisabled}
                 onClick={handleSave}
               >
-                {t("common.save")}
+                保存全部修改
               </Button>
             </div>
           </>

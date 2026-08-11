@@ -18,9 +18,21 @@ import logging
 import os
 import re
 import tempfile
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Iterator, Optional
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - Windows fallback
+    fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - POSIX fallback
+    msvcrt = None
 
 from .models import MarketItem
 from ..runtime.context import (
@@ -31,6 +43,18 @@ from ..runtime.context import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_AGENT_ID = "default"
+
+
+class WorkspaceSkillManifestError(ValueError):
+    """A shared Workspace skill manifest cannot safely be mutated."""
+
+
+@dataclass(frozen=True)
+class ResolvedRegisteredSkill:
+    """A registered package location and whether a collision enables it."""
+
+    path: Path | None
+    promoted: bool = False
 
 
 # === MCP 配置归一化函数 ===
@@ -296,11 +320,15 @@ def save_index(
     """原子写入市场索引."""
     path = get_index_path(marketplace_root, source_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    # MCP 条目不写入 skill_id 字段（保持历史数据兼容）
+    # MCP 条目不写入 skill_id 和 include_in_statistics 字段（仅对 skill 类型生效）
     data = {
         "items": [
             item.model_dump(
-                exclude={"skill_id"} if item.item_type != "skill" else set(),
+                exclude=(
+                    {"skill_id", "include_in_statistics"}
+                    if item.item_type != "skill"
+                    else set()
+                ),
             )
             for item in items
         ],
@@ -365,51 +393,63 @@ def copy_skill_to_user(
 
     _validate_skill_name_segment(skill_name)
     src_dir = get_skill_dir(marketplace_root, source_id, item_id)
-    dst_dir = (
-        get_user_skills_dir(swe_root, user_id, agent_id, source_id)
-        / skill_name
-    )
 
-    # 检查目标目录是否已有同名技能（通过 workspace manifest 判断）
+    # Validate the shared manifest before choosing or replacing a package.
     manifest_path = get_user_skill_manifest_path(
         swe_root,
         user_id,
         agent_id,
         source_id,
     )
+    manifest_data = _read_user_skill_manifest_for_mutation(manifest_path)
+    existing_entry = manifest_data["skills"].get(skill_name)
+    promoted = False
+    active_dir = (
+        get_user_skills_dir(
+            swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        / skill_name
+    )
+    hidden_dir = (
+        get_user_disabled_skills_dir(
+            swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        / skill_name
+    )
+    if existing_entry is not None:
+        resolved = resolve_registered_skill_path(
+            manifest_path.parent,
+            skill_name,
+            existing_entry,
+        )
+        promoted = resolved.promoted
+        final_enabled = existing_entry["enabled"] or promoted
+    else:
+        final_enabled = True
+    dst_dir = active_dir if final_enabled else hidden_dir
+    stale_dir = hidden_dir if final_enabled else active_dir
+
+    # 检查目标目录是否已有同名技能（通过 workspace manifest 判断）
     existing_created_at = None
-    if manifest_path.exists():
-        try:
-            manifest_data = json.loads(
-                manifest_path.read_text(encoding="utf-8"),
-            )
-            existing_entry = manifest_data.get("skills", {}).get(skill_name)
+    if existing_entry is not None:
+        existing_source = existing_entry.get("source", "customized")
+        existing_created_at = existing_entry.get("created_at")
 
-            # 技能不存在于 manifest 中，可以正常分发
-            if existing_entry is None:
-                pass  # 不存在，正常分发
-            else:
-                existing_source = existing_entry.get("source", "customized")
-                existing_created_at = existing_entry.get("created_at")
-
-                # 仅当自建技能明确绑定 creator_id 时才保护，兼容历史脏数据覆盖
-                if (
-                    existing_source == "customized"
-                    and _has_existing_creator_id(
-                        existing_entry,
-                    )
-                ):
-                    return {"status": "conflict", "reason": "customized"}
-
-                # 接收的技能：继续覆盖更新
-        except (json.JSONDecodeError, OSError) as e:
-            logger.warning(
-                "Failed to read manifest %s: %s",
-                manifest_path,
-                e,
-            )
+        # 仅当自建技能明确绑定 creator_id 时才保护，兼容历史脏数据覆盖
+        if existing_source == "customized" and _has_existing_creator_id(
+            existing_entry,
+        ):
+            return {"status": "conflict", "reason": "customized"}
 
     # 先删除旧目录，再整体复制（确保与市场源一致）
+    if stale_dir.exists():
+        shutil.rmtree(stale_dir)
     if dst_dir.exists():
         shutil.rmtree(dst_dir)
     shutil.copytree(src_dir, dst_dir)
@@ -440,7 +480,51 @@ def copy_skill_to_user(
     if existing_created_at:
         metadata["created_at"] = existing_created_at
 
-    return {"status": "distributed", "metadata": metadata}
+    return {
+        "status": "distributed",
+        "metadata": metadata,
+        "package_path": dst_dir,
+        "final_enabled": final_enabled,
+        "promoted": promoted,
+    }
+
+
+def get_workspace_skill_manifest_path(workspace_dir: Path) -> Path:
+    """Return the Workspace v2 skill management manifest path."""
+    return Path(workspace_dir) / "skill.json"
+
+
+def default_workspace_skill_manifest() -> dict:
+    """Return a fresh Workspace v2 skill manifest payload."""
+    return {
+        "schema_version": "workspace-skill-manifest.v1",
+        "layout_version": 2,
+        "version": 0,
+        "skills": {},
+    }
+
+
+def validate_workspace_skill_manifest_v2(payload: object) -> dict:
+    """Validate the shared manifest required for Marketplace mutations."""
+    if not isinstance(payload, dict) or payload.get("layout_version") != 2:
+        raise WorkspaceSkillManifestError(
+            "Run skills migrate-layout --apply before mutating skills",
+        )
+    skills = payload.get("skills")
+    if not isinstance(skills, dict):
+        raise WorkspaceSkillManifestError(
+            "Workspace manifest skills must be an object",
+        )
+    for skill_name, entry in skills.items():
+        if not isinstance(skill_name, str) or not isinstance(entry, dict):
+            raise WorkspaceSkillManifestError(
+                "Workspace manifest has an invalid skill entry",
+            )
+        if "enabled" not in entry or not isinstance(entry["enabled"], bool):
+            raise WorkspaceSkillManifestError(
+                "Workspace manifest skill enabled must be a boolean",
+            )
+    return payload
 
 
 def get_user_skill_manifest_path(
@@ -452,14 +536,53 @@ def get_user_skill_manifest_path(
     """获取用户 workspace 的运行时 manifest 路径（skill.json）.
 
     该文件存储技能的运行时状态（enabled、channels、config 等），
-    与技能目录内的 skill.json（存储展示元数据）职责不同。
+    与技能目录内的 skills/<技能名>/skill.json 职责不同。
     路径与 src/swe 的 get_workspace_skill_manifest_path 保持一致。
     """
     effective_user_id = resolve_effective_user_id(user_id, source_id)
     _validate_path_segment(effective_user_id, "user_id")
     _validate_path_segment(agent_id, "agent_id")
     user_root = migrate_legacy_scope_dir_if_needed(swe_root, effective_user_id)
-    return user_root / "workspaces" / agent_id / "skill.json"
+    workspace_dir = user_root / "workspaces" / agent_id
+    return get_workspace_skill_manifest_path(workspace_dir)
+
+
+def get_user_disabled_skills_dir(
+    swe_root: Path,
+    user_id: str,
+    agent_id: str = DEFAULT_AGENT_ID,
+    source_id: str | None = None,
+) -> Path:
+    """Return the registered disabled-skill root beside active skills."""
+    return (
+        get_user_skill_manifest_path(
+            swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        ).parent
+        / ".disabled_skills"
+    )
+
+
+def resolve_registered_skill_path(
+    workspace_dir: Path,
+    skill_name: str,
+    entry: dict,
+) -> ResolvedRegisteredSkill:
+    """Resolve a registered package without changing files or manifest."""
+    _validate_skill_name_segment(skill_name)
+    enabled = entry["enabled"]
+    active = workspace_dir / "skills" / skill_name
+    disabled = workspace_dir / ".disabled_skills" / skill_name
+    if active.exists() and disabled.exists():
+        return ResolvedRegisteredSkill(active, promoted=not enabled)
+    target, fallback = (active, disabled) if enabled else (disabled, active)
+    if target.exists():
+        return ResolvedRegisteredSkill(target)
+    if fallback.exists():
+        return ResolvedRegisteredSkill(fallback)
+    return ResolvedRegisteredSkill(None)
 
 
 def read_user_skill_manifest(
@@ -476,20 +599,36 @@ def read_user_skill_manifest(
         source_id,
     )
     if not manifest_path.exists():
-        return {
-            "schema_version": "workspace-skill-manifest.v1",
-            "version": 0,
-            "skills": {},
-        }
+        return default_workspace_skill_manifest()
     try:
         return json.loads(manifest_path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError) as e:
         logger.warning("Failed to read manifest %s: %s", manifest_path, e)
-        return {
-            "schema_version": "workspace-skill-manifest.v1",
-            "version": 0,
-            "skills": {},
-        }
+        return default_workspace_skill_manifest()
+
+
+def _read_user_skill_manifest_for_mutation(manifest_path: Path) -> dict:
+    """Strictly read a shared manifest before mutating it.
+
+    Only a missing manifest starts from the Workspace v2 default. Existing
+    manifests must be readable UTF-8 containing valid JSON; failures propagate
+    so callers cannot overwrite data they failed to read.
+    """
+    try:
+        manifest_text = manifest_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return default_workspace_skill_manifest()
+    except UnicodeDecodeError as exc:
+        raise WorkspaceSkillManifestError(
+            "Run skills migrate-layout --apply before mutating skills",
+        ) from exc
+    try:
+        payload = json.loads(manifest_text)
+    except json.JSONDecodeError as exc:
+        raise WorkspaceSkillManifestError(
+            "Run skills migrate-layout --apply before mutating skills",
+        ) from exc
+    return validate_workspace_skill_manifest_v2(payload)
 
 
 def check_skill_status_in_manifest(
@@ -543,6 +682,7 @@ def mutate_user_skill_manifest(
     agent_id: str,
     mutation_fn,
     source_id: str | None = None,
+    rollback_fn: Callable[[], None] | None = None,
 ) -> bool:
     """原子修改用户技能 manifest.
 
@@ -555,14 +695,44 @@ def mutate_user_skill_manifest(
         agent_id,
         source_id,
     )
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    with _workspace_manifest_write_lock(manifest_path):
+        try:
+            current = _read_user_skill_manifest_for_mutation(manifest_path)
+            if not mutation_fn(current):
+                return False
 
-    current = read_user_skill_manifest(swe_root, user_id, agent_id, source_id)
-    if not mutation_fn(current):
-        return False
+            _atomic_write_json(manifest_path, current)
+            return True
+        except Exception:
+            if rollback_fn is not None:
+                try:
+                    rollback_fn()
+                except OSError:
+                    logger.exception(
+                        "Failed to roll back workspace skill manifest mutation",
+                    )
+            raise
 
-    _atomic_write_json(manifest_path, current)
-    return True
+
+@contextmanager
+def _workspace_manifest_write_lock(manifest_path: Path) -> Iterator[None]:
+    """Serialize Marketplace mutations with src workspace reconciliation."""
+    lock_path = manifest_path.with_name(f".{manifest_path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a+", encoding="utf-8") as lock_file:
+        if fcntl is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        elif msvcrt is not None:  # pragma: no cover
+            lock_file.seek(0)
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_LOCK, 1)
+        try:
+            yield
+        finally:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            elif msvcrt is not None:  # pragma: no cover
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def _mask_env_value(value: Optional[str]) -> Optional[str]:

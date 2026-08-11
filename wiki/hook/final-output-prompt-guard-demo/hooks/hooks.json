@@ -1,7 +1,7 @@
 {
   "enabled": true,
   "events": {
-    "BeforeStop": [
+    "Stop": [
       {
         "id": "final-output-standard-gate",
         "hooks": [
