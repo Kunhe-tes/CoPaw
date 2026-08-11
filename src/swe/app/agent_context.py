@@ -27,6 +27,7 @@ from ..config.context import (
     resolve_runtime_tenant_id,
     resolve_storage_tenant_id,
 )
+from ..constant import WORKING_DIR
 from .middleware.tenant_workspace import TenantWorkspaceContext
 
 if TYPE_CHECKING:
@@ -38,7 +39,6 @@ _current_agent_id: ContextVar[Optional[str]] = ContextVar(
     "current_agent_id",
     default=None,
 )
-FILE_MANAGER_SOURCE_SCOPE_BASE_DIR = Path("/opt/deployments/app/working")
 
 
 @dataclass(frozen=True)
@@ -251,7 +251,7 @@ def resolve_file_manager_source_scope_location(
             detail="Tenant workspace is unavailable",
         )
     return FileManagerSourceScopeLocation(
-        base_dir=FILE_MANAGER_SOURCE_SCOPE_BASE_DIR,
+        base_dir=WORKING_DIR,
         component=component,
     )
 

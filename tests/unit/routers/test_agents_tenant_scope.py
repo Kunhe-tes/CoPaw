@@ -786,7 +786,7 @@ def test_file_manager_source_scope_location_uses_tenant_workspace_name(
     )
     monkeypatch.setattr(
         agent_context,
-        "FILE_MANAGER_SOURCE_SCOPE_BASE_DIR",
+        "WORKING_DIR",
         source_scope_base,
         raising=False,
     )
