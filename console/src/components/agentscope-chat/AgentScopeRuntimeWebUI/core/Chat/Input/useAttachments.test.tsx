@@ -1,7 +1,15 @@
 import type React from "react";
-import { act, render, renderHook, waitFor } from "@testing-library/react";
+import {
+  act,
+  fireEvent,
+  render,
+  renderHook,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import type { UploadFile } from "antd";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import ComposerQuickMenu from "@/components/agentscope-chat/ComposerQuickMenu";
 import useAttachments from "./useAttachments";
 import quickMenuStyles from "@/components/agentscope-chat/ComposerQuickMenu/index.module.less";
 
@@ -26,12 +34,21 @@ vi.mock("@/components/agentscope-chat", () => ({
   },
 }));
 
-vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => ({
-  ComposerQuickMenuItem: (props: unknown) => {
-    quickMenuItemSpy(props);
-    return null;
+vi.mock(
+  "@/components/agentscope-chat/ComposerQuickMenu",
+  async (importOriginal) => {
+    const actual = await importOriginal<
+      typeof import("@/components/agentscope-chat/ComposerQuickMenu")
+    >();
+    return {
+      ...actual,
+      ComposerQuickMenuItem: (props: unknown) => {
+        quickMenuItemSpy(props);
+        return <div>{(props as { label: React.ReactNode }).label}</div>;
+      },
+    };
   },
-}));
+);
 
 vi.mock("react-i18next", () => ({
   useTranslation: () => ({
@@ -124,6 +141,40 @@ describe("useAttachments", () => {
 
     expect(quickMenuStyles.uploadTrigger).toEqual(expect.any(String));
     expect(uploadItem.props.className).toBe(quickMenuStyles.uploadTrigger);
+  });
+
+  it("keeps the uploader mounted while choosing a file from the quick menu", async () => {
+    const customRequest = vi.fn();
+    const { result } = renderHook(() => useAttachments({ customRequest }));
+
+    render(
+      <ComposerQuickMenu triggerLabel="快捷操作">
+        {result.current.uploadQuickMenuItem}
+      </ComposerQuickMenu>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷操作" }));
+    const fileInputs = Array.from(
+      document.querySelectorAll<HTMLInputElement>(
+        ".ant-upload input[type=file]",
+      ),
+    );
+    const fileInput = fileInputs[fileInputs.length - 1];
+
+    expect(fileInput).not.toBeNull();
+    const uploadLabels = screen.getAllByText("上传文件");
+    fireEvent.click(uploadLabels[uploadLabels.length - 1]);
+    expect(fileInput).toBeInTheDocument();
+
+    fireEvent.change(fileInput!, {
+      target: {
+        files: [new File(["hello"], "demo.txt", { type: "text/plain" })],
+      },
+    });
+
+    await waitFor(() => {
+      expect(customRequest).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("routes pasted files to customRequest even when they do not match the picker accept hint", () => {
