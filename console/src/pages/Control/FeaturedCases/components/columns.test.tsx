@@ -63,12 +63,16 @@ function renderColumns({
 describe("featured case sort column", () => {
   afterEach(cleanup);
 
-  it("enters editing through a visible action", () => {
-    const { onStartSort } = renderColumns({ editing: false });
+  it("enters editing through a visible form-edit action", async () => {
+    const { container, onStartSort } = renderColumns({ editing: false });
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "编辑“跨境汇款”的排序" }),
-    );
+    const editButton = screen.getByRole("button", {
+      name: "编辑“跨境汇款”的排序",
+    });
+    expect(container.querySelector(".anticon-form")).toBeInTheDocument();
+    fireEvent.mouseOver(editButton);
+    expect(await screen.findByText("调整排序")).toBeInTheDocument();
+    fireEvent.click(editButton);
 
     expect(onStartSort).toHaveBeenCalledWith(caseItem);
   });

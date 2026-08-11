@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Alert, Button, Card, Modal, Table, Tabs } from "antd";
+import { Alert, Button, Modal, Table, Tabs } from "antd";
+import { PlusOutlined, RightOutlined, StarOutlined } from "@ant-design/icons";
 import { Form } from "@agentscope-ai/design";
 import { useTranslation } from "react-i18next";
-import { PageHeader } from "@/components/PageHeader";
 import { useAppMessage } from "@/hooks/useAppMessage";
 import { useIframeStore } from "@/stores/iframeStore";
 import { useFeaturedCases } from "./components/hooks";
@@ -255,68 +255,83 @@ function FeaturedCasesPage() {
       ];
 
   return (
-    <div className={styles.featuredCasesPage}>
-      <PageHeader
-        items={[
-          { title: t("nav.systemSettings") },
-          {
-            title: t("nav.featuredCasesManagement", "精选案例管理"),
-          },
-        ]}
-        extra={
-          !readOnly ? (
-            <Button type="primary" onClick={handleCreate}>
-              + 新建案例
-            </Button>
-          ) : undefined
-        }
-      />
+    <div className={`${styles.featuredCasesPage} console-management-theme`}>
+      <header className={styles.pageHeading}>
+        <div className={styles.pageHeadingIcon} aria-hidden="true">
+          <StarOutlined />
+        </div>
+        <nav className={styles.breadcrumbTrail} aria-label="面包屑">
+          <span className={styles.pageEyebrow}>{t("nav.systemSettings")}</span>
+          <RightOutlined className={styles.breadcrumbChevron} />
+          <span className={styles.breadcrumbCurrent} aria-current="page">
+            {t("nav.featuredCasesManagement", "精选案例管理")}
+          </span>
+        </nav>
+        <h1 className={styles.visuallyHiddenHeading}>
+          {t("nav.featuredCasesManagement", "精选案例管理")}
+        </h1>
+        {!readOnly && (
+          <Button
+            aria-label="新建案例"
+            className={styles.createButton}
+            icon={<PlusOutlined />}
+            type="primary"
+            onClick={handleCreate}
+          >
+            新建案例
+          </Button>
+        )}
+      </header>
 
-      {scopeTabs.length > 0 && (
-        <Tabs
-          activeKey={activeScopeBbkId}
-          className={styles.scopeTabs}
-          items={scopeTabs}
-          onChange={(scopeBbkId) => {
-            setEditingSortId(null);
-            setActiveScopeBbkId(scopeBbkId);
-          }}
-        />
-      )}
+      <main className={styles.content}>
+        {scopeTabs.length > 0 && (
+          <Tabs
+            activeKey={activeScopeBbkId}
+            className={styles.scopeTabs}
+            items={scopeTabs}
+            onChange={(scopeBbkId) => {
+              setEditingSortId(null);
+              setActiveScopeBbkId(scopeBbkId);
+            }}
+          />
+        )}
 
-      {readOnly && (
-        <Alert
-          className={styles.readOnlyAlert}
-          message="总行案例仅供查看，如需调整请切换至总行管理上下文。"
-          showIcon
-          type="info"
-        />
-      )}
+        {readOnly && (
+          <Alert
+            className={styles.readOnlyAlert}
+            message="总行案例仅供查看，如需调整请切换至总行管理上下文。"
+            showIcon
+            type="info"
+          />
+        )}
 
-      <Card className={styles.tableCard}>
-        <Table
-          columns={columns}
-          dataSource={cases}
-          loading={loading}
-          rowClassName={(caseItem) =>
-            caseItem.id === highlightedCaseId ? styles.highlightedRow : ""
-          }
-          rowKey="id"
-          pagination={{
-            current: pagination.current,
-            pageSize: pagination.pageSize,
-            total,
-            showSizeChanger: true,
-            showTotal: (count) => `共 ${count} 条`,
-          }}
-          onChange={(nextPagination) => {
-            updatePagination(activeScopeBbkId, {
-              current: nextPagination.current || 1,
-              pageSize: nextPagination.pageSize || DEFAULT_PAGE_SIZE,
-            });
-          }}
-        />
-      </Card>
+        <section className={styles.tablePanel} aria-label="精选案例列表">
+          <Table
+            columns={columns}
+            dataSource={cases}
+            loading={loading}
+            rowClassName={(caseItem) =>
+              caseItem.id === highlightedCaseId ? styles.highlightedRow : ""
+            }
+            rowKey="id"
+            pagination={{
+              current: pagination.current,
+              pageSize: pagination.pageSize,
+              total,
+              showSizeChanger: true,
+              showTotal: (count) => `共 ${count} 条`,
+            }}
+            scroll={{ x: 720 }}
+            size="middle"
+            onChange={(nextPagination) => {
+              updatePagination(activeScopeBbkId, {
+                current: nextPagination.current || 1,
+                pageSize: nextPagination.pageSize || DEFAULT_PAGE_SIZE,
+              });
+            }}
+          />
+        </section>
+      </main>
 
       <CaseDrawer
         bbkId={activeScopeBbkId}

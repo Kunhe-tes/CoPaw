@@ -1,4 +1,3 @@
-import React from "react";
 import {
   cleanup,
   fireEvent,
@@ -33,12 +32,6 @@ vi.mock("@/stores/iframeStore", () => ({
 
 vi.mock("@/hooks/useAppMessage", () => ({
   useAppMessage: () => ({ message: mocks.message }),
-}));
-
-vi.mock("@/components/PageHeader", () => ({
-  PageHeader: ({ extra }: { extra?: React.ReactNode }) => (
-    <header>{extra}</header>
-  ),
 }));
 
 vi.mock("./components/CaseDrawer", () => ({
@@ -88,7 +81,7 @@ describe("FeaturedCasesPage", () => {
   afterEach(cleanup);
 
   it("queries branch and head-office management queues separately", async () => {
-    render(<FeaturedCasesPage />);
+    const { container } = render(<FeaturedCasesPage />);
 
     await waitFor(() =>
       expect(mocks.loadCases).toHaveBeenCalledWith({
@@ -98,7 +91,15 @@ describe("FeaturedCasesPage", () => {
       }),
     );
     expect(
-      screen.getByRole("button", { name: "+ 新建案例" }),
+      screen.getByRole("navigation", { name: "面包屑" }),
+    ).toHaveTextContent("精选案例管理");
+    expect(
+      screen.getByRole("heading", { name: "精选案例管理", level: 1 }),
+    ).toBeInTheDocument();
+    expect(container.querySelector(".anticon-star")).toBeInTheDocument();
+    expect(container.querySelector(".anticon-plus")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "新建案例" }),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByTitle("2"));
@@ -123,7 +124,7 @@ describe("FeaturedCasesPage", () => {
       screen.getByText("总行案例仅供查看，如需调整请切换至总行管理上下文。"),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "+ 新建案例" }),
+      screen.queryByRole("button", { name: "新建案例" }),
     ).not.toBeInTheDocument();
     expect(screen.getByText("仅查看")).toBeInTheDocument();
 
@@ -155,7 +156,7 @@ describe("FeaturedCasesPage", () => {
       screen.queryByRole("tab", { name: "总行案例" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "+ 新建案例" }),
+      screen.getByRole("button", { name: "新建案例" }),
     ).toBeInTheDocument();
   });
 
