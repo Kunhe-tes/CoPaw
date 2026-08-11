@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from agentscope.message import Msg
+from agentscope.model import ChatResponse
 
 from swe.app.subagents import (
     AgentRegistry,
@@ -67,7 +68,14 @@ class _FakeSWEAgent:
             raise RuntimeError(str(text))
         if text is None:
             return None
-        return Msg("Friday", text, "assistant")
+        return ChatResponse(
+            content=[
+                {
+                    "type": "text",
+                    "text": text,
+                },
+            ],
+        )
 
 
 def _agent_config(tmp_path: Path) -> AgentProfileConfig:
@@ -149,6 +157,58 @@ async def test_runtime_creates_fresh_agent_with_subagent_safe_options(
     context = json.loads(created.finalization_prompt[1].get_text_content())
     assert context["delegation_spec"]["task_id"] == "task-1"
     assert "research_record" in context
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_final_text_from_streaming_chat_response(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """The final streamed ChatResponse produces the terminal summary."""
+    from swe.app.subagents import runtime as runtime_module
+
+    class StreamingFinalizationAgent(_FakeSWEAgent):
+        async def _model(self, prompt, **kwargs):
+            self.finalization_prompt = prompt
+            self.finalization_kwargs = kwargs
+
+            async def responses():
+                yield ChatResponse(
+                    content=[{"type": "text", "text": "first frame"}],
+                )
+                yield ChatResponse(
+                    content=[{"type": "text", "text": "final frame"}],
+                )
+
+            return responses()
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [Msg("Friday", "research synthesis", "assistant")]
+    monkeypatch.setattr(
+        runtime_module,
+        "SWEAgent",
+        StreamingFinalizationAgent,
+    )
+    registry = AgentRegistry([builtin_definition_provider()])
+    definition = registry.resolve("plan-researcher")
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    result = await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    assert result.status == "completed"
+    assert result.summary == "final frame"
 
 
 @pytest.mark.asyncio

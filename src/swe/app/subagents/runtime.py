@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import AsyncIterable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -357,17 +358,27 @@ class SubAgentRuntime:
             ],
         )
         response = await agent.model(prompt)
-        if hasattr(response, "__aiter__"):
+        if isinstance(response, AsyncIterable):
             last_response = None
             async for chunk in response:
                 last_response = chunk
             response = last_response
-        summary = (
-            response.get_text_content() if response is not None else ""
-        ).strip()
+        summary = self._chat_response_text(response)
         if not summary:
             raise ValueError("Text finalization returned no summary.")
         return summary
+
+    def _chat_response_text(self, response: Any) -> str:
+        content = getattr(response, "content", None)
+        if isinstance(content, str):
+            return content.strip()
+        if not isinstance(content, Sequence):
+            return ""
+        return "".join(
+            str(block.get("text") or "")
+            for block in content
+            if isinstance(block, dict) and block.get("type") == "text"
+        ).strip()
 
     def _finalization_context(
         self,
