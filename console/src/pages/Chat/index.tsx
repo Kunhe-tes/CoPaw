@@ -2112,10 +2112,6 @@ export default function ChatPage() {
         beforeSubmit: handleBeforeSubmit,
         beforeUI: (
           <>
-            <SubAgentRunMonitor
-              chatId={feedbackChatId}
-              resetKey={subAgentMonitorResetKey}
-            />
             {taskProgressEnabled ? (
               <TaskProgressFloatingCard progress={taskProgress} />
             ) : null}
@@ -2330,6 +2326,10 @@ export default function ChatPage() {
                     <AgentScopeRuntimeWebUILayout ref={chatRef} />
                   </GlobalVoiceRecorder>
                 </ChatContentOnlyProvider>
+                <SubAgentRunMonitor
+                  chatId={feedbackChatId}
+                  resetKey={subAgentMonitorResetKey}
+                />
                 {!isContentOnly && (
                   <DragUploadOverlay
                     visible={isDragging}

@@ -35,6 +35,7 @@ const mocks = vi.hoisted(() => {
   return {
     capturedOptions: null as Record<string, any> | null,
     planModeEnabledHistory: [] as boolean[],
+    showContentOnly: false,
     createChat: vi.fn(async () => ({
       id: "chat-real-created",
       meta: { plan_mode_enabled: true },
@@ -117,14 +118,18 @@ vi.mock("@/components/agentscope-chat", () => {
             onSubmit: vi.fn(),
           })}
         </div>
-        <div data-testid="chat-sender-before-ui">
-          {mocks.capturedOptions?.sender?.beforeUI}
-        </div>
-        <div data-testid="chat-rendered-composer">
-          {mocks.capturedOptions?.sender?.renderComposer?.(
-            <div data-testid="default-composer">composer</div>,
-          )}
-        </div>
+        {!mocks.showContentOnly && (
+          <>
+            <div data-testid="chat-sender-before-ui">
+              {mocks.capturedOptions?.sender?.beforeUI}
+            </div>
+            <div data-testid="chat-rendered-composer">
+              {mocks.capturedOptions?.sender?.renderComposer?.(
+                <div data-testid="default-composer">composer</div>,
+              )}
+            </div>
+          </>
+        )}
         <div data-testid="chat-sender-prefix">
           {mocks.capturedOptions?.sender?.prefix}
         </div>
@@ -264,6 +269,12 @@ vi.mock("../../stores/agentStore", () => ({
   useAgentStore: () => ({
     selectedAgent: null,
   }),
+}));
+
+vi.mock("../../stores/chatPresentationStore", () => ({
+  useChatPresentationStore: (
+    selector: (value: { showContentOnly: boolean }) => unknown,
+  ) => selector({ showContentOnly: mocks.showContentOnly }),
 }));
 
 vi.mock("../../stores/sourceSystemConfigStore", () => ({
@@ -541,6 +552,11 @@ vi.mock("./components/TaskRunGroupCard", () => ({
   default: () => null,
 }));
 
+vi.mock("./components/SubAgentRunMonitor", () => ({
+  __esModule: true,
+  default: () => <div data-testid="subagent-run-monitor" />,
+}));
+
 vi.mock(
   "@/components/agentscope-chat/AgentScopeRuntimeWebUI/customToolRenders/CopyFileToStatic",
   () => ({
@@ -573,6 +589,7 @@ describe("ChatPage plan mode wiring", () => {
   beforeEach(() => {
     mocks.capturedOptions = null;
     mocks.planModeEnabledHistory = [];
+    mocks.showContentOnly = false;
     mocks.inputDisabled = true;
     mocks.pathname = "/chat/chat-1";
     mocks.currentSessionId = "chat-1";
@@ -621,6 +638,24 @@ describe("ChatPage plan mode wiring", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("renders the subagent monitor outside the composer beforeUI", () => {
+    render(<ChatPage />);
+
+    const monitor = screen.getByTestId("subagent-run-monitor");
+    expect(screen.getByTestId("chat-sender-before-ui")).not.toContainElement(
+      monitor,
+    );
+  });
+
+  it("keeps the subagent monitor mounted in content-only mode", () => {
+    mocks.showContentOnly = true;
+
+    render(<ChatPage />);
+
+    expect(screen.getByTestId("subagent-run-monitor")).toBeInTheDocument();
+    expect(screen.queryByTestId("chat-sender-before-ui")).toBeNull();
   });
 
   it("disables active Plan Mode buttons when the composer is disabled", async () => {
