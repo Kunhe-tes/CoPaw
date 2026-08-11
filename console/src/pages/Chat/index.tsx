@@ -124,7 +124,10 @@ import {
 import RuntimeResponseCard from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
-import { ActivePlanInteractionComposer } from "./components/PlanInteractionCards";
+import {
+  ActivePlanInteractionComposer,
+  PlanReviewMessageCard,
+} from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
 import {
@@ -162,6 +165,10 @@ import {
   useChatFeedbackRenderContext,
   type ChatFeedbackRenderContextValue,
 } from "./feedbackRenderContext";
+import {
+  ChatPlanReviewRenderProvider,
+  type ChatPlanReviewRenderContextValue,
+} from "./planReviewRenderContext";
 import {
   CHAT_TASK_PROGRESS_UPDATE_EVENT,
   isTaskProgressUpdateForActiveSession,
@@ -218,7 +225,17 @@ const chatCardRenderers = {
       />
     );
   },
-  PlanInteraction: () => null,
+  PlanInteraction: (props: { data: unknown }) => {
+    const data = props.data;
+    if (
+      !data ||
+      typeof data !== "object" ||
+      (data as { card_type?: unknown }).card_type !== "plan_review"
+    ) {
+      return null;
+    }
+    return <PlanReviewMessageCard data={data as ChatPlanReviewCardData} />;
+  },
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
@@ -1928,6 +1945,14 @@ export default function ChatPage() {
       handleFeedbackSaved,
     ],
   );
+  const planReviewRenderContextValue =
+    useMemo<ChatPlanReviewRenderContextValue>(
+      () => ({
+        onContinueModifying: handleContinueModifyingPlan,
+        onPlanModeDecision: handlePlanModeDecision,
+      }),
+      [handleContinueModifyingPlan, handlePlanModeDecision],
+    );
   const htmlPreviewTrackingContextValue = useMemo(
     () => ({
       cronTaskId: feedbackTask?.cronTaskId || null,
@@ -2322,9 +2347,13 @@ export default function ChatPage() {
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
                 <ChatContentOnlyProvider enabled={isContentOnly}>
-                  <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
-                    <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                  </GlobalVoiceRecorder>
+                  <ChatPlanReviewRenderProvider
+                    value={planReviewRenderContextValue}
+                  >
+                    <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                      <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                    </GlobalVoiceRecorder>
+                  </ChatPlanReviewRenderProvider>
                 </ChatContentOnlyProvider>
                 <SubAgentRunMonitor
                   chatId={feedbackChatId}

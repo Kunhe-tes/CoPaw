@@ -20,6 +20,7 @@ import {
   resolveFeedbackResponseId,
   resolveFeedbackTraceId,
 } from "../messageMeta";
+import { useChatPlanReviewRenderContext } from "../planReviewRenderContext";
 import styles from "./PlanInteractionCards.module.less";
 import { useContextSelector } from "use-context-selector";
 
@@ -186,52 +187,12 @@ function findLatestPlanClarificationCard(
   return null;
 }
 
-function findLatestPlanReviewCard(messages: IAgentScopeRuntimeWebUIMessage[]): {
-  data: ChatPlanReviewCardData;
+type ActivePlanInteraction = {
+  type: "clarification";
+  data: ChatPlanClarificationCardData;
   instanceKey: string;
-} | null {
-  let hasLaterUserMessage = false;
-  for (
-    let messageIndex = messages.length - 1;
-    messageIndex >= 0;
-    messageIndex -= 1
-  ) {
-    const message = messages[messageIndex];
-    if (message?.role === "user") {
-      hasLaterUserMessage = true;
-      continue;
-    }
-    const cards = message?.cards || [];
-    for (let cardIndex = cards.length - 1; cardIndex >= 0; cardIndex -= 1) {
-      const card = cards[cardIndex];
-      if (
-        !hasLaterUserMessage &&
-        card.code === PLAN_INTERACTION_CARD_CODE &&
-        isPlanReviewCardData(card.data) &&
-        card.data.status !== "submitted"
-      ) {
-        return {
-          data: card.data,
-          instanceKey: `${message.id}:${card.id || card.code}:${cardIndex}`,
-        };
-      }
-    }
-  }
-  return null;
-}
-
-type ActivePlanInteraction =
-  | {
-      type: "clarification";
-      data: ChatPlanClarificationCardData;
-      instanceKey: string;
-      sourceKey: string | null;
-    }
-  | {
-      type: "review";
-      data: ChatPlanReviewCardData;
-      instanceKey: string;
-    };
+  sourceKey: string | null;
+};
 
 function findLatestActivePlanInteractionCard(
   messages: IAgentScopeRuntimeWebUIMessage[],
@@ -257,14 +218,7 @@ function findLatestActivePlanInteractionCard(
 
       const instanceKey = `${message.id}:${card.id || card.code}:${cardIndex}`;
       if (isPlanReviewCardData(card.data)) {
-        if (card.data.status === "submitted") {
-          return null;
-        }
-        return {
-          type: "review",
-          data: card.data,
-          instanceKey,
-        };
+        return null;
       }
 
       if (isPlanClarificationCardData(card.data)) {
@@ -1069,25 +1023,19 @@ export function PlanReviewCard({
   );
 }
 
-export function ActivePlanReviewCard({
-  onContinueModifying,
-  onPlanModeDecision,
+export function PlanReviewMessageCard({
+  data,
 }: {
-  onContinueModifying?: (data: ChatPlanReviewCardData) => void;
-  onPlanModeDecision?: (enabled: boolean) => void;
+  data: ChatPlanReviewCardData;
 }) {
-  const review = useContextSelector(ChatAnywhereMessagesContext, (value) =>
-    findLatestPlanReviewCard(value.messages || []),
-  );
+  const { onContinueModifying, onPlanModeDecision } =
+    useChatPlanReviewRenderContext();
 
-  if (!review) {
-    return null;
-  }
   return (
     <PlanReviewCard
-      active
-      data={review.data}
-      cardInstanceKey={review.instanceKey}
+      active={data.status !== "submitted"}
+      data={data}
+      cardInstanceKey={data.plan_id}
       onContinueModifying={onContinueModifying}
       onPlanModeDecision={onPlanModeDecision}
     />
@@ -1096,8 +1044,6 @@ export function ActivePlanReviewCard({
 
 export function ActivePlanInteractionComposer({
   defaultComposer,
-  onContinueModifying,
-  onPlanModeDecision,
 }: {
   defaultComposer: ReactElement;
   onContinueModifying?: (data: ChatPlanReviewCardData) => void;
@@ -1116,19 +1062,6 @@ export function ActivePlanInteractionComposer({
 
   if (completedInstanceKey === interaction.instanceKey) {
     return defaultComposer;
-  }
-
-  if (interaction.type === "review") {
-    return (
-      <PlanReviewCard
-        active
-        data={interaction.data}
-        cardInstanceKey={interaction.instanceKey}
-        onContinueModifying={onContinueModifying}
-        onPlanModeDecision={onPlanModeDecision}
-        onComplete={() => setCompletedInstanceKey(interaction.instanceKey)}
-      />
-    );
   }
 
   return (

@@ -544,7 +544,12 @@ vi.mock("./components/PlanInteractionCards", () => ({
     );
   },
   PlanClarificationCard: () => null,
-  PlanReviewCard: () => null,
+  PlanReviewMessageCard: ({ data }: { data: { status?: string } }) => (
+    <div
+      data-testid="plan-review-message-card"
+      data-active={String(data.status !== "submitted")}
+    />
+  ),
 }));
 
 vi.mock("./components/TaskRunGroupCard", () => ({
@@ -1172,24 +1177,31 @@ describe("ChatPage plan mode wiring", () => {
     ).toBeInTheDocument();
   });
 
-  it("does not render plan review cards in the scrollable message renderer", () => {
+  it("renders active plan review cards in the scrollable message renderer", () => {
     render(<ChatPage />);
 
     const renderer = mocks.capturedOptions?.cards?.PlanInteraction;
 
-    expect(
-      renderer?.({
-        data: {
-          card_type: "plan_review",
-          plan_id: "plan-123",
-          title: "Implementation plan",
-          summary: "Plan summary",
-          steps: [],
-          risks: [],
-          verification: [],
-        },
-      }),
-    ).toBeNull();
+    render(
+      <>
+        {renderer?.({
+          data: {
+            card_type: "plan_review",
+            plan_id: "plan-123",
+            title: "Implementation plan",
+            summary: "Plan summary",
+            steps: [],
+            risks: [],
+            verification: [],
+          },
+        })}
+      </>,
+    );
+
+    expect(screen.getByTestId("plan-review-message-card")).toHaveAttribute(
+      "data-active",
+      "true",
+    );
   });
 
   it("defers Continue modifying and sends the next submission as plan revision feedback", async () => {

@@ -16,11 +16,12 @@ import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat";
 import {
   ActivePlanClarificationCard,
   ActivePlanInteractionComposer,
-  ActivePlanReviewCard,
   PlanClarificationCard,
   PlanReviewCard,
+  PlanReviewMessageCard,
   PlanReviewSnapshot,
 } from "./PlanInteractionCards";
+import { ChatPlanReviewRenderProvider } from "../planReviewRenderContext";
 import styles from "./PlanInteractionCards.module.less";
 
 const stylesheet = readFileSync(
@@ -98,21 +99,19 @@ function renderActiveClarification(
   );
 }
 
-function renderActivePlanReview(
-  messages: IAgentScopeRuntimeWebUIMessage<unknown>[],
+function renderPlanReviewMessage(
+  data: React.ComponentProps<typeof PlanReviewCard>["data"],
+  callbacks: {
+    onContinueModifying?: (
+      value: React.ComponentProps<typeof PlanReviewCard>["data"],
+    ) => void;
+    onPlanModeDecision?: (enabled: boolean) => void;
+  } = {},
 ) {
   return render(
-    <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
-      <ChatAnywhereMessagesContext.Provider
-        value={{
-          messages,
-          setMessages: vi.fn(),
-          getMessages: () => messages,
-        }}
-      >
-        <ActivePlanReviewCard />
-      </ChatAnywhereMessagesContext.Provider>
-    </ChatAnywhereSessionsContext.Provider>,
+    <ChatPlanReviewRenderProvider value={callbacks}>
+      <PlanReviewMessageCard data={data} />
+    </ChatPlanReviewRenderProvider>,
   );
 }
 
@@ -261,7 +260,7 @@ describe("Plan interaction cards", () => {
     expect(screen.getByText("Pick scope")).toBeInTheDocument();
   });
 
-  it("replaces the composer with the latest active plan interaction card", () => {
+  it("keeps the composer when a plan review follows a clarification", () => {
     renderActiveComposer([
       createClarificationMessage({
         messageId: "assistant-clarification",
@@ -276,10 +275,7 @@ describe("Plan interaction cards", () => {
       }),
     ]);
 
-    expect(screen.queryByTestId("default-composer")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Review latest plan" }),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("default-composer")).toBeInTheDocument();
     expect(
       screen.queryByRole("region", { name: "Pick scope" }),
     ).not.toBeInTheDocument();
@@ -325,26 +321,15 @@ describe("Plan interaction cards", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("restores the default composer after choosing to continue modifying a plan", () => {
-    const onContinueModifying = vi.fn();
-    renderActiveComposer(
-      [
-        createReviewMessage({
-          messageId: "assistant-review",
-          cardId: "plan-2",
-          title: "Review latest plan",
-        }),
-      ],
-      { onContinueModifying },
-    );
+  it("keeps the default composer when a plan review is pending", () => {
+    renderActiveComposer([
+      createReviewMessage({
+        messageId: "assistant-review",
+        cardId: "plan-2",
+        title: "Review latest plan",
+      }),
+    ]);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Continue modifying" }),
-    );
-
-    expect(onContinueModifying).toHaveBeenCalledWith(
-      expect.objectContaining({ plan_id: "plan-2" }),
-    );
     expect(screen.getByTestId("default-composer")).toBeInTheDocument();
     expect(
       screen.queryByRole("region", { name: "Review latest plan" }),
@@ -1404,49 +1389,19 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("renders only the latest unhandled plan review as the active card", () => {
-    renderActivePlanReview([
-      createReviewMessage({
-        messageId: "message-1",
-        cardId: "review-1",
-        title: "Older review",
-      }),
-      createReviewMessage({
-        messageId: "message-2",
-        cardId: "review-2",
-        title: "Submitted review",
-        status: "submitted",
-        submittedDecision: "execute",
-      }),
-      createReviewMessage({
-        messageId: "message-3",
-        cardId: "review-3",
-        title: "Latest review",
-      }),
-    ]);
+  it("renders an interactive plan review in the message flow", () => {
+    const onContinueModifying = vi.fn();
+    renderPlanReviewMessage(createReviewData(), { onContinueModifying });
 
-    expect(
-      screen.getByRole("region", { name: "Latest review" }),
-    ).toHaveAttribute("data-active-plan-review-card", "true");
-    expect(screen.queryByText("Older review")).not.toBeInTheDocument();
-    expect(screen.queryByText("Submitted review")).not.toBeInTheDocument();
-  });
+    expect(screen.getByRole("region", { name: "Fix bug" })).toHaveAttribute(
+      "data-active-plan-review-card",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
 
-  it("renders no active plan review if a later user message supersedes it", () => {
-    renderActivePlanReview([
-      createReviewMessage({
-        messageId: "message-1",
-        cardId: "review-1",
-        title: "Plan to confirm",
-      }),
-      {
-        id: "user-1",
-        role: "user" as const,
-        cards: [],
-      },
-    ]);
-
-    expect(screen.queryByText("Plan to confirm")).not.toBeInTheDocument();
+    expect(onContinueModifying).toHaveBeenCalledWith(
+      expect.objectContaining({ plan_id: "plan-123" }),
+    );
   });
 
   it("renders a read-only plan review snapshot with submitted execute status", () => {
