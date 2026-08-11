@@ -33,65 +33,6 @@ import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
 const HIGH_FREQUENCY_QUESTION_TASK_TYPE = "monitor.high.freq.question";
-const USE_HFQ_SINGLE_BBK_MOCK_RESULT = true;
-const HFQ_SINGLE_BBK_MOCK_ID = "110";
-
-function buildSingleBbkMockHighFrequencyQuestionResult(
-  range: [Dayjs, Dayjs],
-  bbkId: string,
-): HighFrequencyQuestionResult {
-  return {
-    state: "AVAILABLE",
-    task_id: "mock-single-bbk-task",
-    batch_id: "mock-single-bbk-batch",
-    status: "succeeded",
-    source_id: "RMASSIST",
-    stat_start_time: range[0].startOf("day").format("YYYY-MM-DD HH:mm:ss"),
-    stat_end_time: range[1].endOf("day").format("YYYY-MM-DD HH:mm:ss"),
-    scope_type: "ORG",
-    bbk_id: bbkId,
-    result_updated_at: dayjs().format("YYYY-MM-DD HH:mm:ss"),
-    topics: [
-      {
-        rank_no: 1,
-        topic_name: "客户询问保险持仓和收益情况",
-        message_count: 335,
-        valid_message_count: 3526,
-        bbk_dis: { [bbkId]: 335 },
-        sample_questions: [
-          "帮我查一下客户当前保险持仓和收益情况",
-          "这个客户买过哪些保险产品？",
-          "客户保险到期和收益怎么看？",
-        ],
-      },
-      {
-        rank_no: 2,
-        topic_name: "客户资产配置和产品推荐",
-        message_count: 268,
-        valid_message_count: 3526,
-        bbk_dis: { [bbkId]: 268 },
-        sample_questions: [
-          "根据客户资产情况推荐合适产品",
-          "这个客户适合做什么资产配置？",
-          "帮我生成一份客户产品推荐话术",
-        ],
-      },
-      {
-        rank_no: 3,
-        topic_name: "客户画像与营销触达建议",
-        message_count: 197,
-        valid_message_count: 3526,
-        bbk_dis: { [bbkId]: 197 },
-        sample_questions: [
-          "总结一下这个客户的画像",
-          "客户最近适合用什么方式触达？",
-          "帮我写一段客户维护建议",
-        ],
-      },
-    ],
-    message: "single bbk mock data",
-  };
-}
 
 function getDefaultAnalysisRange(): [Dayjs, Dayjs] {
   return [dayjs().subtract(6, "day").startOf("day"), dayjs().endOf("day")];
@@ -128,20 +69,23 @@ function getTopicMetricText(
 function getTopicBbkDistribution(
   topic: HighFrequencyQuestionResult["topics"][number],
 ) {
-  const rawEntries: Array<[string, number]> = Object.entries(
-    topic.bbk_dis || {},
-  ).map(([bbkId, value]) => [bbkId, Number(value)]);
-  const entries = rawEntries
+  const entries = Object.entries(topic.bbk_dis || {})
     .map(([bbkId, value]) => ({
       bbkId,
-      value,
+      value: Number(value),
     }))
     .filter((item) => Number.isFinite(item.value) && item.value > 0)
     .sort((a, b) => b.value - a.value);
+
+  if (entries.length === 0) {
+    return [];
+  }
+
   const total = entries.reduce((sum, item) => sum + item.value, 0);
 
   return entries.slice(0, 5).map((item) => {
     const name = getBbkDisplayName(item.bbkId);
+    const width = entries.length === 1 ? 100 : (total > 0 ? Math.max((item.value / total) * 100, 10) : 0);
     return {
       bbkId: item.bbkId,
       name,
@@ -149,7 +93,7 @@ function getTopicBbkDistribution(
         topic.message_count > 0
           ? `${((item.value / topic.message_count) * 100).toFixed(1)}%`
           : "0.0%",
-      width: total > 0 ? Math.max((item.value / total) * 100, 10) : 0,
+      width,
     };
   });
 }
@@ -242,9 +186,7 @@ export default function MessagesPage() {
     getDefaultAnalysisRange,
   );
   const [analysisQuickRange, setAnalysisQuickRange] = useState("7");
-  const [analysisBbkId, setAnalysisBbkId] = useState<string | undefined>(
-    USE_HFQ_SINGLE_BBK_MOCK_RESULT ? HFQ_SINGLE_BBK_MOCK_ID : undefined,
-  );
+  const [analysisBbkId, setAnalysisBbkId] = useState<string | undefined>();
   const [analysisResult, setAnalysisResult] =
     useState<HighFrequencyQuestionResult | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
@@ -366,14 +308,6 @@ export default function MessagesPage() {
       setAnalysisTaskStatus("idle");
       try {
         const criteria = toHighFrequencyCriteria(range, bbkId);
-        if (USE_HFQ_SINGLE_BBK_MOCK_RESULT) {
-          const mockBbkId = bbkId || HFQ_SINGLE_BBK_MOCK_ID;
-          setAnalysisResult(
-            buildSingleBbkMockHighFrequencyQuestionResult(range, mockBbkId),
-          );
-          setAnalysisQueried(true);
-          return;
-        }
         const data = await monitorApi.getHighFrequencyQuestionResults(
           criteria,
         );
@@ -579,7 +513,7 @@ export default function MessagesPage() {
                           topic.rank_no,
                         ),
                       } as CSSProperties &
-                        Record<"--analysis-topic-accent", string>
+                      Record<"--analysis-topic-accent", string>
                     }
                   >
                     <div className={getRankClassName(topic.rank_no)}>
@@ -630,7 +564,7 @@ export default function MessagesPage() {
                         </div>
                       ) : (
                         <span className={styles.analysisBbkDistributionEmpty}>
-                          暂无分行分布
+
                         </span>
                       )}
                     </div>
@@ -918,8 +852,8 @@ export default function MessagesPage() {
               ? "生成中..."
               : analysisResult?.state === "AVAILABLE" ||
                 analysisResult?.state === "AVAILABLE_STALE"
-              ? "重新生成分析"
-              : "生成分析"}
+                ? "重新生成分析"
+                : "生成分析"}
           </Button>,
         ]}
       >

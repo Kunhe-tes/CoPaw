@@ -185,7 +185,7 @@
   gap: 12px;
   min-width: 0;
 
-  > div {
+  >div {
     min-width: 0;
 
     strong,
@@ -254,7 +254,7 @@
 
 .analysisTopic {
   display: grid;
-  grid-template-columns: 40px minmax(180px, 0.85fr) minmax(320px, 1.15fr) auto;
+  grid-template-columns: 40px minmax(100px, 1fr) minmax(320px, 1fr) auto;
   align-items: center;
   gap: 14px;
   padding: 16px 20px;
@@ -332,16 +332,15 @@
 }
 
 .analysisBbkDistributionList {
-  min-height: 92px;
-  display: flex;
+  display: grid;
   flex-direction: column;
-  gap: 10px;
-  justify-content: flex-start;
+  gap: 8px;
+
 }
 
 .analysisBbkDistributionRow {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) 52px;
+  grid-template-columns: 72px minmax(0, 0.4fr) 52px;
   align-items: center;
   gap: 8px;
 }
@@ -349,15 +348,13 @@
 .analysisBbkDistributionName,
 .analysisBbkDistributionValue {
   color: #344256;
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1;
 }
 
 .analysisBbkDistributionName {
-  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
-  text-align: left;
   white-space: nowrap;
 }
 
