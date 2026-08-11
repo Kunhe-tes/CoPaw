@@ -13,6 +13,7 @@ from swe.agents.tools.subagent_background import (
     create_background_subagent_tools,
 )
 from swe.app.subagents import BackgroundSubAgentStartBlocked
+from swe.app.subagents.models import AgentError
 from swe.app.subagents import (
     AgentResult,
     AgentRegistry,
@@ -150,6 +151,12 @@ async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
                         agent_name="plan-researcher",
                         status="partial",
                         summary="partial research",
+                        errors=[
+                            AgentError(
+                                code="structured_finalization_failed",
+                                message="finalization timed out",
+                            ),
+                        ],
                     ),
                     errors=[],
                     worker=SimpleNamespace(
@@ -189,6 +196,7 @@ async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
         "result": {
             "status": "partial",
             "summary": "partial research",
+            "error_code": "structured_finalization_failed",
             "findings": [],
             "relevant_files": [],
             "risks": [],

@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 from agentscope_runtime.engine.schemas.agent_schemas import (
     DataContent,
@@ -17,6 +15,7 @@ from swe.app.runner.stream_boundary import (
     _normalize_reasoning_boundary_events,
     normalize_reasoning_boundary_stream,
 )
+from swe.agents.utils import tool_summary
 
 
 def _message(
@@ -105,7 +104,9 @@ def test_reasoning_boundary_keeps_following_assistant_message_start() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stream_tool_call_uses_async_summary(monkeypatch) -> None:
+async def test_stream_tool_call_uses_rule_summary_without_model(
+    monkeypatch,
+) -> None:
     event = Message(
         id="tool-1",
         type=MessageType.FUNCTION_CALL,
@@ -126,25 +127,31 @@ async def test_stream_tool_call_uses_async_summary(monkeypatch) -> None:
     async def source():
         yield event
 
-    async def fake_summary(**_kwargs):
-        return "搜索 tenant 相关代码"
+    called = False
+
+    async def unexpected_model_summary(_prompt):
+        nonlocal called
+        called = True
+        return "模型生成的摘要"
 
     monkeypatch.setattr(
-        "swe.app.runner.stream_boundary.async_generate_tool_call_summary",
-        fake_summary,
+        tool_summary,
+        "_run_summary_model",
+        unexpected_model_summary,
     )
 
     events = [
         item async for item in normalize_reasoning_boundary_stream(source())
     ]
 
-    assert events[0].content[0].data["summary"] == "搜索 tenant 相关代码"
+    assert called is False
+    assert events[0].content[0].data["summary"] == "正在搜索 tenant"
     assert events[0].content[0].data["tool_status"] == "running"
     assert "tool_error" not in events[0].content[0].data
 
 
 @pytest.mark.asyncio
-async def test_stream_tool_output_falls_back_to_rule_summary(
+async def test_stream_tool_output_uses_rule_summary_without_model(
     monkeypatch,
 ) -> None:
     event = Message(
@@ -167,79 +174,31 @@ async def test_stream_tool_output_falls_back_to_rule_summary(
     async def source():
         yield event
 
-    async def boom(**_kwargs):
-        raise RuntimeError("timeout")
+    called = False
+
+    async def unexpected_model_summary(_prompt):
+        nonlocal called
+        called = True
+        return "模型生成的摘要"
 
     monkeypatch.setattr(
-        "swe.app.runner.stream_boundary.async_generate_tool_output_summary",
-        boom,
+        tool_summary,
+        "_run_summary_model",
+        unexpected_model_summary,
     )
 
     events = [
         item async for item in normalize_reasoning_boundary_stream(source())
     ]
 
+    assert called is False
     assert events[0].content[0].data["output_summary"] == "共找到 2 项内容"
     assert events[0].content[0].data["tool_status"] == "success"
     assert events[0].content[0].data["tool_error"] is None
 
 
 @pytest.mark.asyncio
-async def test_stream_tool_output_summary_timeout_does_not_block_stream(
-    monkeypatch,
-) -> None:
-    event = Message(
-        id="tool-3",
-        type=MessageType.FUNCTION_CALL_OUTPUT,
-        role=Role.ASSISTANT,
-        status=RunStatus.InProgress,
-        content=[
-            DataContent(
-                data={
-                    "name": "grep_search",
-                    "output": '["a.py:1", "b.py:2"]',
-                },
-                delta=False,
-                index=0,
-            ),
-        ],
-    )
-
-    async def source():
-        yield event
-
-    started = asyncio.Event()
-    release = asyncio.Event()
-
-    async def hang_forever(**_kwargs):
-        started.set()
-        try:
-            await release.wait()
-        except asyncio.CancelledError:
-            await release.wait()
-
-    monkeypatch.setattr(
-        "swe.app.runner.stream_boundary.async_generate_tool_output_summary",
-        hang_forever,
-    )
-
-    events = await asyncio.wait_for(
-        asyncio.create_task(
-            _collect_events(normalize_reasoning_boundary_stream(source())),
-        ),
-        timeout=0.2,
-    )
-
-    assert started.is_set()
-    assert events[0].content[0].data["output_summary"] == "共找到 2 项内容"
-    assert events[0].content[0].data["tool_status"] == "success"
-    assert events[0].content[0].data["tool_error"] is None
-
-    release.set()
-
-
-@pytest.mark.asyncio
-async def test_stream_tool_output_marks_failed_status(monkeypatch) -> None:
+async def test_stream_tool_output_marks_failed_status() -> None:
     event = Message(
         id="tool-4",
         type=MessageType.FUNCTION_CALL_OUTPUT,
@@ -260,27 +219,17 @@ async def test_stream_tool_output_marks_failed_status(monkeypatch) -> None:
     async def source():
         yield event
 
-    async def fake_summary(**_kwargs):
-        return "failed summary"
-
-    monkeypatch.setattr(
-        "swe.app.runner.stream_boundary.async_generate_tool_output_summary",
-        fake_summary,
-    )
-
     events = [
         item async for item in normalize_reasoning_boundary_stream(source())
     ]
 
     assert events[0].content[0].data["tool_status"] == "failed"
     assert events[0].content[0].data["tool_error"] == "permission denied"
-    assert events[0].content[0].data["output_summary"] == "failed summary"
+    assert events[0].content[0].data["output_summary"] == "内容搜索未成功完成"
 
 
 @pytest.mark.asyncio
-async def test_stream_tool_output_marks_structured_json_failure(
-    monkeypatch,
-) -> None:
+async def test_stream_tool_output_marks_structured_json_failure() -> None:
     event = Message(
         id="tool-4b",
         type=MessageType.FUNCTION_CALL_OUTPUT,
@@ -305,27 +254,19 @@ async def test_stream_tool_output_marks_structured_json_failure(
     async def source():
         yield event
 
-    async def fake_summary(**_kwargs):
-        return "failed summary"
-
-    monkeypatch.setattr(
-        "swe.app.runner.stream_boundary.async_generate_tool_output_summary",
-        fake_summary,
-    )
-
     events = [
         item async for item in normalize_reasoning_boundary_stream(source())
     ]
 
     assert events[0].content[0].data["tool_status"] == "failed"
     assert events[0].content[0].data["tool_error"] == "permission denied"
-    assert events[0].content[0].data["output_summary"] == "failed summary"
+    assert events[0].content[0].data["output_summary"] == "内容搜索已完成"
 
 
 @pytest.mark.asyncio
-async def test_stream_silent_tool_event_is_filtered_before_status_enrichment(
-    monkeypatch,
-) -> None:
+async def test_stream_silent_tool_event_is_filtered_before_status_enrichment() -> (
+    None
+):
     event = Message(
         id="tool-5",
         type=MessageType.FUNCTION_CALL,
@@ -345,14 +286,6 @@ async def test_stream_silent_tool_event_is_filtered_before_status_enrichment(
 
     async def source():
         yield event
-
-    async def unexpected_summary(**_kwargs):
-        raise AssertionError("silent tool should not be enriched")
-
-    monkeypatch.setattr(
-        "swe.app.runner.stream_boundary.async_generate_tool_call_summary",
-        unexpected_summary,
-    )
 
     events = [
         item async for item in normalize_reasoning_boundary_stream(source())

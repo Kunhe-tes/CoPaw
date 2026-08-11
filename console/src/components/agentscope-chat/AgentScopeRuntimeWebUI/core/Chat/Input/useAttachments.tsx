@@ -107,28 +107,32 @@ export default function useAttachments(
 
   if (customRequest) {
     const uploadQuickMenuItem = (
-      <Upload
+      <div
         className={quickMenuStyles.uploadTrigger}
-        fileList={fileList}
-        showUploadList={false}
-        onChange={(info) => {
-          setFileList(info.fileList);
-        }}
-        {...rest}
-        customRequest={customRequest}
-        maxCount={maxCount}
-        disabled={options?.disabled}
+        onClick={(event) => event.stopPropagation()}
       >
-        {trigger ? (
-          React.createElement(trigger, { disabled: options?.disabled })
-        ) : (
-          <ComposerQuickMenuItem
-            icon={<SparkAttachmentLine />}
-            interactive
-            label={t("chat.quickMenu.upload", "上传文件")}
-          />
-        )}
-      </Upload>
+        <Upload
+          fileList={fileList}
+          showUploadList={false}
+          onChange={(info) => {
+            setFileList(info.fileList);
+          }}
+          {...rest}
+          customRequest={customRequest}
+          maxCount={maxCount}
+          disabled={options?.disabled}
+        >
+          {trigger ? (
+            React.createElement(trigger, { disabled: options?.disabled })
+          ) : (
+            <ComposerQuickMenuItem
+              icon={<SparkAttachmentLine />}
+              interactive
+              label={t("chat.quickMenu.upload", "上传文件")}
+            />
+          )}
+        </Upload>
+      </div>
     );
 
     const uploadFileListHeader = (

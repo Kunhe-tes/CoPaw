@@ -306,21 +306,25 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     const externalItems =
       React.Children.toArray(quickMenuItems).filter(Boolean);
     const uploadItem = (
-      <Upload
+      <div
         key="welcome-upload"
         className={quickMenuStyles.uploadTrigger}
-        ref={uploadRef}
-        showUploadList={false}
-        accept="*/*"
-        beforeUpload={handleBeforeUpload}
-        disabled={inputDisabled || isSubmitting}
+        onClick={(event) => event.stopPropagation()}
       >
-        <ComposerQuickMenuItem
-          icon={<SparkAttachmentLine />}
-          interactive
-          label={t("chat.quickMenu.upload", "上传文件")}
-        />
-      </Upload>
+        <Upload
+          ref={uploadRef}
+          showUploadList={false}
+          accept="*/*"
+          beforeUpload={handleBeforeUpload}
+          disabled={inputDisabled || isSubmitting}
+        >
+          <ComposerQuickMenuItem
+            icon={<SparkAttachmentLine />}
+            interactive
+            label={t("chat.quickMenu.upload", "上传文件")}
+          />
+        </Upload>
+      </div>
     );
 
     return [

@@ -90,4 +90,29 @@ describe("chat attachment upload policy", () => {
     expect(onProgress).toHaveBeenCalledWith({ percent: 100 });
     expect(onSuccess).toHaveBeenCalledWith({ url: "/preview/archive.zip" });
   });
+
+  it("shows an upload error when the API request fails", async () => {
+    const file = new File(["content"], "report.pdf", {
+      type: "application/pdf",
+    });
+    const onError = vi.fn();
+    uploadFile.mockRejectedValueOnce(new Error("network unavailable"));
+
+    await uploadChatAttachment({
+      file,
+      onSuccess: vi.fn(),
+      onError,
+      message,
+      t,
+      multimodalCaps,
+      maxUploadMb: 10,
+      uploadFile,
+      filePreviewUrl,
+    });
+
+    expect(message.error).toHaveBeenCalledWith("chat.attachments.uploadFailed");
+    expect(onError).toHaveBeenCalledWith(
+      expect.objectContaining({ message: "network unavailable" }),
+    );
+  });
 });
