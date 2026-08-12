@@ -10,6 +10,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 import pytest
 
+from swe.app.middleware.tenant_workspace import TenantWorkspaceContext
+from swe.app.runner.api import get_workspace
 from swe.app.runner.models import ChatSpec
 from swe.app.routers.subagents import router
 from swe.app.subagents import (
@@ -73,12 +75,14 @@ class _Supervisor:
 
 def _client(
     tmp_path,
+    *,
+    request_workspace: object | None = None,
 ) -> tuple[TestClient, PerRunSubAgentRunStore, _Supervisor]:
     app = FastAPI()
     app.include_router(router)
     store = PerRunSubAgentRunStore(tmp_path / "subagent_runs")
     supervisor = _Supervisor(store)
-    app.state.workspace = SimpleNamespace(
+    workspace = SimpleNamespace(
         agent_id="agent-1",
         tenant_id="tenant-1",
         workspace_dir=tmp_path,
@@ -91,6 +95,15 @@ def _client(
         subagent_supervisor=supervisor,
         subagent_run_store_dir=tmp_path / "subagent_runs",
     )
+    app.state.workspace = workspace
+    app.dependency_overrides[get_workspace] = lambda: workspace
+    if request_workspace is not None:
+
+        @app.middleware("http")
+        async def inject_workspace_context(request, call_next):
+            request.state.workspace = request_workspace
+            return await call_next(request)
+
     return TestClient(app), store, supervisor
 
 
@@ -166,6 +179,33 @@ async def _create_run(
             ),
         )
     return record
+
+
+def test_monitor_snapshot_ignores_lightweight_request_workspace(
+    tmp_path,
+) -> None:
+    client, store, _supervisor = _client(
+        tmp_path,
+        request_workspace=TenantWorkspaceContext("tenant-1", tmp_path),
+    )
+
+    import asyncio
+
+    asyncio.run(
+        _create_run(
+            store,
+            run_id="subagent-running",
+            session_id="session-1",
+            status="running",
+        ),
+    )
+
+    response = client.get("/subagents/runs", params={"chat_id": "chat-1"})
+
+    assert response.status_code == 200
+    assert [item["run_id"] for item in response.json()["runs"]] == [
+        "subagent-running",
+    ]
 
 
 def test_snapshot_returns_slim_current_chat_runs(tmp_path) -> None:
