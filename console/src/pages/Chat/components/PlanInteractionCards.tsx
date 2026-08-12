@@ -255,23 +255,16 @@ function ChoiceRows({
   options,
   selectedIds,
   focusedIndex,
-  allowCustomResponse = false,
-  customActive = false,
   onFocusIndexChange,
   onSelect,
-  onCustomSelect,
 }: {
   options: PlanClarificationOption[];
   selectedIds: string[];
   focusedIndex: number;
-  allowCustomResponse?: boolean;
-  customActive?: boolean;
   onFocusIndexChange: (index: number) => void;
   onSelect: (optionId: string) => void;
-  onCustomSelect?: () => void;
 }) {
   const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const allRowsCount = options.length + (allowCustomResponse ? 1 : 0);
 
   useEffect(() => {
     const focusedRow = rowRefs.current[focusedIndex];
@@ -317,36 +310,6 @@ function ChoiceRows({
           </button>
         );
       })}
-      {allowCustomResponse ? (
-        <button
-          ref={(node) => {
-            rowRefs.current[allRowsCount - 1] = node;
-          }}
-          type="button"
-          className={[
-            styles.optionRow,
-            focusedIndex === allRowsCount - 1 ? styles.optionRowFocused : "",
-            customActive ? styles.optionRowSelected : "",
-          ]
-            .filter(Boolean)
-            .join(" ")}
-          aria-current={focusedIndex === allRowsCount - 1 ? "true" : undefined}
-          aria-pressed={customActive}
-          aria-label="自定义填写"
-          onFocus={() => onFocusIndexChange(allRowsCount - 1)}
-          onClick={onCustomSelect}
-        >
-          <span className={styles.optionNumber}>{allRowsCount}.</span>
-          <span className={styles.optionLabel} title="自定义填写">
-            自定义填写
-          </span>
-          {customActive ? (
-            <span className={styles.optionCheck} aria-hidden="true">
-              <Check size={15} strokeWidth={3} />
-            </span>
-          ) : null}
-        </button>
-      ) : null}
     </div>
   );
 }
@@ -371,9 +334,6 @@ export function PlanClarificationCard({
   >({});
   const [customFieldValues, setCustomFieldValues] = useState<
     Record<string, string>
-  >({});
-  const [customFieldActive, setCustomFieldActive] = useState<
-    Record<string, boolean>
   >({});
   const cardRef = useRef<HTMLElement | null>(null);
   const interactionResetKey =
@@ -468,7 +428,6 @@ export function PlanClarificationCard({
     setCustomActive(false);
     setFormValues({});
     setCustomFieldValues({});
-    setCustomFieldActive({});
     setFocusedIndex(0);
     setActiveStep(0);
   }, [interactionResetKey]);
@@ -482,6 +441,9 @@ export function PlanClarificationCard({
 
   const handleCustomFieldTextChange = (fieldId: string, value: string) => {
     setCustomFieldValues((current) => ({ ...current, [fieldId]: value }));
+    if (activeField?.id === fieldId && activeField.type === "single_choice") {
+      setFormValues((current) => ({ ...current, [fieldId]: "" }));
+    }
   };
 
   useEffect(() => {
@@ -579,10 +541,6 @@ export function PlanClarificationCard({
     }
     if (activeField) {
       if (activeField.type === "single_choice") {
-        setCustomFieldActive((current) => ({
-          ...current,
-          [activeField.id]: false,
-        }));
         setCustomFieldValues((current) => ({
           ...current,
           [activeField.id]: "",
@@ -614,22 +572,6 @@ export function PlanClarificationCard({
     setSingleChoice(optionId);
   };
 
-  const activateCustomResponse = () => {
-    if (activeField) {
-      setCustomFieldActive((current) => ({
-        ...current,
-        [activeField.id]: true,
-      }));
-      if (activeField.type === "single_choice") {
-        setFormValues((current) => ({ ...current, [activeField.id]: "" }));
-      }
-      return;
-    }
-    setSingleChoice("");
-    setMultiChoice([]);
-    setCustomActive(true);
-  };
-
   const handleCardKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -646,11 +588,7 @@ export function PlanClarificationCard({
       }
       return;
     }
-    const hasCustomRow =
-      (activeField?.type === "single_choice" ||
-        activeField?.type === "multi_choice") &&
-      data.allow_custom_response !== false;
-    const rowCount = activeOptions.length + (hasCustomRow ? 1 : 0);
+    const rowCount = activeOptions.length;
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       setFocusedIndex((current) =>
@@ -675,19 +613,13 @@ export function PlanClarificationCard({
       if (index < rowCount) {
         event.preventDefault();
         setFocusedIndex(index);
-        if (index === activeOptions.length && hasCustomRow) {
-          activateCustomResponse();
-        } else {
-          selectActiveOption(activeOptions[index].id);
-        }
+        selectActiveOption(activeOptions[index].id);
       }
       return;
     }
     if (event.key === " ") {
       event.preventDefault();
-      if (hasCustomRow && focusedIndex === activeOptions.length) {
-        activateCustomResponse();
-      } else if (activeOptions[focusedIndex]) {
+      if (activeOptions[focusedIndex]) {
         selectActiveOption(activeOptions[focusedIndex].id);
       }
       return;
@@ -761,19 +693,8 @@ export function PlanClarificationCard({
             options={activeOptions}
             selectedIds={activeSelectedIds}
             focusedIndex={focusedIndex}
-            allowCustomResponse={
-              (activeField?.type === "single_choice" ||
-                activeField?.type === "multi_choice") &&
-              data.allow_custom_response !== false
-            }
-            customActive={
-              activeField
-                ? Boolean(customFieldActive[activeField.id])
-                : customActive
-            }
             onFocusIndexChange={setFocusedIndex}
             onSelect={selectActiveOption}
-            onCustomSelect={activateCustomResponse}
           />
         ) : null}
         {activeField?.type === "text" ? (
@@ -811,7 +732,10 @@ export function PlanClarificationCard({
             onChange={(event) => handleCustomTextChange(event.target.value)}
           />
         ) : null}
-        {activeField && customFieldActive[activeField.id] ? (
+        {activeField &&
+        (activeField.type === "single_choice" ||
+          activeField.type === "multi_choice") &&
+        data.allow_custom_response !== false ? (
           <textarea
             autoFocus
             className={styles.textArea}

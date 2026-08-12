@@ -956,7 +956,7 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("requires custom text for a required single-choice form field", () => {
+  it("shows a persistent custom input for a required single-choice form field", () => {
     render(
       <PlanClarificationCard
         data={{
@@ -977,13 +977,57 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "自定义填写" }));
+    expect(screen.getByRole("textbox", { name: "Scope" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "自定义填写" }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "提交" })).toBeDisabled();
 
     fireEvent.change(screen.getByRole("textbox", { name: "Scope" }), {
       target: { value: "CLI only" },
     });
     expect(screen.getByRole("button", { name: "提交" })).toBeEnabled();
+  });
+
+  it("replaces a single-choice selection when persistent custom text is entered", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "single_choice",
+              required: true,
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Backend" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Scope" }), {
+      target: { value: "CLI only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Scope: CLI only",
+      biz_params: {
+        plan_interaction_response: {
+          field_values: {},
+          custom_field_values: { scope: "CLI only" },
+        },
+      },
+    });
+    submit.cleanup();
   });
 
   it("submits multi-choice ids and field-level custom text independently", async () => {
@@ -1008,7 +1052,6 @@ describe("Plan interaction cards", () => {
     );
 
     fireEvent.click(screen.getByRole("button", { name: "Lint" }));
-    fireEvent.click(screen.getByRole("button", { name: "自定义填写" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Checks" }), {
       target: { value: "Security scan" },
     });
@@ -1054,7 +1097,7 @@ describe("Plan interaction cards", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("hides field-level custom input when explicitly disabled", () => {
+  it("hides the persistent custom input when explicitly disabled", () => {
     render(
       <PlanClarificationCard
         data={{
@@ -1076,7 +1119,7 @@ describe("Plan interaction cards", () => {
     );
 
     expect(
-      screen.queryByRole("button", { name: "自定义填写" }),
+      screen.queryByRole("textbox", { name: "Scope" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1102,12 +1145,10 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "自定义填写" }));
     fireEvent.change(screen.getByPlaceholderText("请输入自定义填写"), {
       target: { value: "Keep this context" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Small" }));
-    fireEvent.click(screen.getByRole("button", { name: "自定义填写" }));
 
     expect(screen.getByPlaceholderText("请输入自定义填写")).toHaveValue(
       "Keep this context",
