@@ -33,6 +33,10 @@
     0 1px 2px rgba(29, 36, 51, 0.05);
 }
 
+.planClarificationCard {
+  padding: 16px;
+}
+
 .planReviewActiveCard {
   display: flex;
   height: auto;
@@ -49,6 +53,11 @@
   justify-content: space-between;
   gap: 16px;
   padding-bottom: 16px;
+}
+
+.cardHeader {
+  gap: 12px;
+  padding-bottom: 12px;
 }
 
 .cardHeading,
@@ -70,6 +79,11 @@
   line-height: 24px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.cardHeading strong {
+  font-size: 16px;
+  line-height: 22px;
 }
 
 .cardHeading span {
@@ -142,7 +156,7 @@
   display: flex;
   max-height: 244px;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   overflow-y: auto;
   padding-right: 2px;
   scrollbar-color: rgba(138, 148, 166, 0.36) transparent;
@@ -163,17 +177,16 @@
 }
 
 .choiceOptionsViewport + .textArea {
-  margin-top: 14px;
+  margin-top: 10px;
 }
 
 .optionRow {
   display: flex;
   width: 100%;
-  min-height: 52px;
-  flex: 0 0 52px;
+  min-height: 44px;
   align-items: center;
-  gap: 12px;
-  padding: 8px 12px;
+  gap: 10px;
+  padding: 6px 10px;
   border: 1px solid var(--clarification-border);
   border-radius: 8px;
   outline: none;
@@ -214,14 +227,14 @@
 
 .optionNumber {
   display: grid;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
-  border-radius: 7px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 6px;
   place-items: center;
   background: var(--clarification-soft-bg);
   color: var(--clarification-muted);
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
 }
 
@@ -233,19 +246,21 @@
 .optionLabel {
   min-width: 0;
   flex: 1;
-  overflow: hidden;
+  overflow: visible;
   font-size: 14px;
   font-weight: 500;
   line-height: 20px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .optionCheck {
   display: inline-grid;
-  width: 28px;
-  height: 28px;
-  flex: 0 0 28px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
   border-radius: 50%;
   place-items: center;
   background: var(--clarification-accent);
@@ -269,14 +284,14 @@
 }
 
 .textField {
-  height: 40px;
-  padding: 0 12px;
+  height: 36px;
+  padding: 0 10px;
 }
 
 .textArea {
-  min-height: 88px;
-  max-height: 160px;
-  padding: 12px;
+  min-height: 64px;
+  max-height: 120px;
+  padding: 9px 10px;
   resize: vertical;
 }
 
@@ -291,7 +306,17 @@
   box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.16);
 }
 
-.cardFooter,
+.cardFooter {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--clarification-border);
+}
+
 .reviewActions {
   display: flex;
   min-height: 36px;

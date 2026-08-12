@@ -100,6 +100,21 @@ describe("messageMeta", () => {
     });
   });
 
+  it("enables custom response for clarification cards that omit the legacy flag", () => {
+    expect(
+      extractPlanInteractionCard({
+        metadata: {
+          plan_interaction_card: {
+            card_type: "plan_clarification",
+            kind: "single_choice",
+            prompt: "Pick scope",
+            options: [{ id: "backend", label: "Backend" }],
+          },
+        },
+      }),
+    ).toMatchObject({ allow_custom_response: true });
+  });
+
   it("extracts structured clarification forms", () => {
     const card = extractPlanInteractionCard({
       metadata: {

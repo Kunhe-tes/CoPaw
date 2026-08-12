@@ -1,10 +1,5 @@
 import { type ReactElement, useEffect, useRef, useState } from "react";
-import {
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  CornerDownLeft,
-} from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, CornerDownLeft } from "lucide-react";
 import { type IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
 import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
 import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
@@ -74,6 +69,16 @@ function collectFormValues(
   );
 }
 
+function collectCustomFormValues(
+  values: Record<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(values)
+      .map(([fieldId, value]) => [fieldId, value.trim()] as const)
+      .filter(([, value]) => Boolean(value)),
+  );
+}
+
 function isPlanClarificationCardData(
   data: unknown,
 ): data is ChatPlanClarificationCardData {
@@ -111,7 +116,7 @@ function createPlanClarificationFingerprint(
     form_id: data.form_id,
     options: data.options || [],
     fields: data.fields || [],
-    allow_custom_response: data.allow_custom_response === true,
+    allow_custom_response: data.allow_custom_response !== false,
   });
 }
 
@@ -296,11 +301,14 @@ function ChoiceRows({
               .join(" ")}
             aria-current={focused ? "true" : undefined}
             aria-pressed={selected}
+            aria-label={option.label}
             onFocus={() => onFocusIndexChange(index)}
             onClick={() => onSelect(option.id)}
           >
             <span className={styles.optionNumber}>{index + 1}.</span>
-            <span className={styles.optionLabel}>{option.label}</span>
+            <span className={styles.optionLabel} title={option.label}>
+              {option.label}
+            </span>
             {selected ? (
               <span className={styles.optionCheck} aria-hidden="true">
                 <Check size={15} strokeWidth={3} />
@@ -319,16 +327,19 @@ function ChoiceRows({
             styles.optionRow,
             focusedIndex === allRowsCount - 1 ? styles.optionRowFocused : "",
             customActive ? styles.optionRowSelected : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}
+          ]
+            .filter(Boolean)
+            .join(" ")}
           aria-current={focusedIndex === allRowsCount - 1 ? "true" : undefined}
           aria-pressed={customActive}
+          aria-label="自定义填写"
           onFocus={() => onFocusIndexChange(allRowsCount - 1)}
           onClick={onCustomSelect}
         >
           <span className={styles.optionNumber}>{allRowsCount}.</span>
-          <span className={styles.optionLabel}>自定义回复</span>
+          <span className={styles.optionLabel} title="自定义填写">
+            自定义填写
+          </span>
           {customActive ? (
             <span className={styles.optionCheck} aria-hidden="true">
               <Check size={15} strokeWidth={3} />
@@ -358,6 +369,12 @@ export function PlanClarificationCard({
   const [formValues, setFormValues] = useState<
     Record<string, string | string[]>
   >({});
+  const [customFieldValues, setCustomFieldValues] = useState<
+    Record<string, string>
+  >({});
+  const [customFieldActive, setCustomFieldActive] = useState<
+    Record<string, boolean>
+  >({});
   const cardRef = useRef<HTMLElement | null>(null);
   const interactionResetKey =
     cardInstanceKey || createPlanClarificationFingerprint(data);
@@ -367,21 +384,12 @@ export function PlanClarificationCard({
   const fields = data.fields || [];
   const isTopLevelChoice =
     data.kind === "single_choice" || data.kind === "multi_choice";
-  const allowsCustomText =
-    data.kind === "text" ||
-    isTopLevelChoice ||
-    data.allow_custom_response === true;
-  const totalSteps =
-    data.kind === "form"
-      ? fields.length + (data.allow_custom_response ? 1 : 0)
-      : 1;
+  const totalSteps = data.kind === "form" ? fields.length : 1;
   const boundedStep = boundedIndex(activeStep, totalSteps);
   const activeField =
     data.kind === "form" && boundedStep < fields.length
       ? fields[boundedStep]
       : undefined;
-  const isSupplementStep =
-    data.kind === "form" && !activeField && data.allow_custom_response === true;
   const activeOptions =
     activeField?.type === "single_choice" ||
     activeField?.type === "multi_choice"
@@ -414,40 +422,42 @@ export function PlanClarificationCard({
     : customActive
     ? trimmedText
     : "";
+  const fieldHasCustomValue = (field: PlanClarificationField): boolean =>
+    Boolean(customFieldValues[field.id]?.trim());
+  const fieldHasResponse = (field: PlanClarificationField): boolean =>
+    hasFormValue(formValues[field.id]) || fieldHasCustomValue(field);
   const requiredFormFieldsSatisfied = fields.every(
-    (field) => !field.required || hasFormValue(formValues[field.id]),
+    (field) => !field.required || fieldHasResponse(field),
   );
   const formQueryLines = fields
     .map((field) => {
-      const formattedValue = formatFormFieldValue(field, formValues[field.id]);
-      if (!formattedValue) return "";
-      return `${field.label}: ${formattedValue}`;
+      const values = [
+        formatFormFieldValue(field, formValues[field.id]),
+        customFieldValues[field.id]?.trim(),
+      ].filter(Boolean);
+      return values.length > 0 ? `${field.label}: ${values.join(", ")}` : "";
     })
     .filter(Boolean);
   const disabled =
     data.kind === "text"
       ? !trimmedText
       : data.kind === "form"
-      ? !requiredFormFieldsSatisfied ||
-        [...formQueryLines, trimmedText].filter(Boolean).length === 0
+      ? !requiredFormFieldsSatisfied || formQueryLines.length === 0
       : selectedIds.length === 0 && !effectiveChoiceText;
   const currentFieldComplete = activeField
-    ? !activeField.required || hasFormValue(formValues[activeField.id])
+    ? !activeField.required || fieldHasResponse(activeField)
     : true;
   const isFinalStep = boundedStep >= totalSteps - 1;
   const canGoNext = !isFinalStep && currentFieldComplete;
   const pageTitle =
-    data.kind === "form" ? activeField?.label || "补充说明" : data.prompt;
+    data.kind === "form" ? activeField?.label || data.prompt : data.prompt;
   const showChoiceRows =
-    (isTopLevelChoice ||
-      activeField?.type === "single_choice" ||
-      activeField?.type === "multi_choice");
+    isTopLevelChoice ||
+    activeField?.type === "single_choice" ||
+    activeField?.type === "multi_choice";
   const showTopLevelChoiceCustomInput = isTopLevelChoice;
   const showCustomInput =
-    data.kind === "text" ||
-    showTopLevelChoiceCustomInput ||
-    customActive ||
-    isSupplementStep;
+    data.kind === "text" || showTopLevelChoiceCustomInput || customActive;
 
   useEffect(() => {
     setSubmitted(false);
@@ -457,6 +467,8 @@ export function PlanClarificationCard({
     setTextInput("");
     setCustomActive(false);
     setFormValues({});
+    setCustomFieldValues({});
+    setCustomFieldActive({});
     setFocusedIndex(0);
     setActiveStep(0);
   }, [interactionResetKey]);
@@ -466,6 +478,10 @@ export function PlanClarificationCard({
     if (data.kind === "single_choice" && value.trim()) {
       setSingleChoice("");
     }
+  };
+
+  const handleCustomFieldTextChange = (fieldId: string, value: string) => {
+    setCustomFieldValues((current) => ({ ...current, [fieldId]: value }));
   };
 
   useEffect(() => {
@@ -486,14 +502,12 @@ export function PlanClarificationCard({
     const effectiveSelectedIds = selectedOverride || selectedIds;
     const effectiveSelectedLabels = optionLabels(options, effectiveSelectedIds);
     const effectiveText =
-      data.kind === "form" || data.kind === "text"
-        ? trimmedText
-        : effectiveChoiceText;
+      data.kind === "text" ? trimmedText : effectiveChoiceText;
     const effectiveQuery =
       data.kind === "text"
         ? effectiveText
         : data.kind === "form"
-        ? [...formQueryLines, effectiveText].filter(Boolean).join("\n")
+        ? formQueryLines.join("\n")
         : [effectiveSelectedLabels, effectiveText].filter(Boolean).join("\n");
     const effectiveDisabled =
       data.kind === "text"
@@ -504,13 +518,18 @@ export function PlanClarificationCard({
     if (effectiveDisabled || submitted) return;
     const payload =
       data.kind === "form"
-        ? {
-            card_type: "plan_clarification" as const,
-            kind: "form" as const,
-            form_id: data.form_id,
-            field_values: collectFormValues(fields, formValues),
-            text: effectiveText || undefined,
-          }
+        ? (() => {
+            const customValues = collectCustomFormValues(customFieldValues);
+            return {
+              card_type: "plan_clarification" as const,
+              kind: "form" as const,
+              form_id: data.form_id,
+              field_values: collectFormValues(fields, formValues),
+              ...(Object.keys(customValues).length > 0
+                ? { custom_field_values: customValues }
+                : {}),
+            };
+          })()
         : {
             card_type: "plan_clarification" as const,
             kind: data.kind,
@@ -554,11 +573,21 @@ export function PlanClarificationCard({
   };
 
   const selectActiveOption = (optionId: string) => {
-    setCustomActive(false);
     if (!activeField && data.kind === "single_choice") {
+      setCustomActive(false);
       setTextInput("");
     }
     if (activeField) {
+      if (activeField.type === "single_choice") {
+        setCustomFieldActive((current) => ({
+          ...current,
+          [activeField.id]: false,
+        }));
+        setCustomFieldValues((current) => ({
+          ...current,
+          [activeField.id]: "",
+        }));
+      }
       setFormValues((current) => {
         const currentValue = current[activeField.id];
         if (activeField.type === "multi_choice") {
@@ -586,6 +615,16 @@ export function PlanClarificationCard({
   };
 
   const activateCustomResponse = () => {
+    if (activeField) {
+      setCustomFieldActive((current) => ({
+        ...current,
+        [activeField.id]: true,
+      }));
+      if (activeField.type === "single_choice") {
+        setFormValues((current) => ({ ...current, [activeField.id]: "" }));
+      }
+      return;
+    }
     setSingleChoice("");
     setMultiChoice([]);
     setCustomActive(true);
@@ -607,9 +646,11 @@ export function PlanClarificationCard({
       }
       return;
     }
-    const rowCount =
-      activeOptions.length +
-      (!isTopLevelChoice && data.kind !== "form" && allowsCustomText ? 1 : 0);
+    const hasCustomRow =
+      (activeField?.type === "single_choice" ||
+        activeField?.type === "multi_choice") &&
+      data.allow_custom_response !== false;
+    const rowCount = activeOptions.length + (hasCustomRow ? 1 : 0);
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       setFocusedIndex((current) =>
@@ -634,7 +675,7 @@ export function PlanClarificationCard({
       if (index < rowCount) {
         event.preventDefault();
         setFocusedIndex(index);
-        if (index === activeOptions.length && !isTopLevelChoice) {
+        if (index === activeOptions.length && hasCustomRow) {
           activateCustomResponse();
         } else {
           selectActiveOption(activeOptions[index].id);
@@ -644,8 +685,6 @@ export function PlanClarificationCard({
     }
     if (event.key === " ") {
       event.preventDefault();
-      const hasCustomRow =
-        !isTopLevelChoice && data.kind !== "form" && allowsCustomText;
       if (hasCustomRow && focusedIndex === activeOptions.length) {
         activateCustomResponse();
       } else if (activeOptions[focusedIndex]) {
@@ -723,9 +762,15 @@ export function PlanClarificationCard({
             selectedIds={activeSelectedIds}
             focusedIndex={focusedIndex}
             allowCustomResponse={
-              !isTopLevelChoice && data.kind !== "form" && allowsCustomText
+              (activeField?.type === "single_choice" ||
+                activeField?.type === "multi_choice") &&
+              data.allow_custom_response !== false
             }
-            customActive={customActive}
+            customActive={
+              activeField
+                ? Boolean(customFieldActive[activeField.id])
+                : customActive
+            }
             onFocusIndexChange={setFocusedIndex}
             onSelect={selectActiveOption}
             onCustomSelect={activateCustomResponse}
@@ -764,6 +809,18 @@ export function PlanClarificationCard({
             }
             value={textInput}
             onChange={(event) => handleCustomTextChange(event.target.value)}
+          />
+        ) : null}
+        {activeField && customFieldActive[activeField.id] ? (
+          <textarea
+            autoFocus
+            className={styles.textArea}
+            aria-label={activeField.label}
+            placeholder="请输入自定义填写"
+            value={customFieldValues[activeField.id] || ""}
+            onChange={(event) =>
+              handleCustomFieldTextChange(activeField.id, event.target.value)
+            }
           />
         ) : null}
       </div>

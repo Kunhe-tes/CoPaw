@@ -117,6 +117,16 @@ def test_plan_clarification_card_supports_allowed_kinds() -> None:
     assert card.kind == "single_choice"
 
 
+def test_plan_clarification_card_enables_custom_response_by_default() -> None:
+    card = PlanClarificationCard(
+        prompt="Choose scope",
+        kind="single_choice",
+        options=[{"id": "backend", "label": "Backend"}],
+    )
+
+    assert card.allow_custom_response is True
+
+
 def test_plan_clarification_card_supports_form_fields() -> None:
     card = PlanClarificationCard(
         prompt="Collect planning context",

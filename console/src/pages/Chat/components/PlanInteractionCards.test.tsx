@@ -856,7 +856,7 @@ describe("Plan interaction cards", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("submits paged form values and optional supplemental context", async () => {
+  it("submits paged form values without a global supplemental step", async () => {
     const submit = captureSubmitEvents();
     render(
       <PlanClarificationCard
@@ -865,7 +865,6 @@ describe("Plan interaction cards", () => {
           kind: "form",
           form_id: "customer_plan_clarification",
           prompt: "Collect planning context",
-          allow_custom_response: true,
           fields: [
             {
               id: "industry",
@@ -885,23 +884,17 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    expect(screen.getByText("1 of 3")).toBeInTheDocument();
+    expect(screen.getByText("1 of 2")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /零售\/电商/ }));
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     fireEvent.change(screen.getByPlaceholderText("请补充"), {
       target: { value: "复购率低" },
     });
     fireEvent.keyDown(screen.getByPlaceholderText("请补充"), { key: "Enter" });
-    fireEvent.change(screen.getByPlaceholderText("请输入自定义回复"), {
-      target: { value: "希望年度内看到改善" },
-    });
-    fireEvent.keyDown(screen.getByPlaceholderText("请输入自定义回复"), {
-      key: "Enter",
-    });
 
     await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
     expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
-      query: "所在行业: 零售/电商\n当前主要挑战: 复购率低\n希望年度内看到改善",
+      query: "所在行业: 零售/电商\n当前主要挑战: 复购率低",
       biz_params: {
         plan_interaction_response: {
           kind: "form",
@@ -910,7 +903,6 @@ describe("Plan interaction cards", () => {
             industry: "retail",
             challenges: "复购率低",
           },
-          text: "希望年度内看到改善",
         },
       },
     });
@@ -957,10 +949,85 @@ describe("Plan interaction cards", () => {
         },
       },
     });
+    expect(
+      submit.handler.mock.calls[0][0].detail.biz_params
+        .plan_interaction_response,
+    ).not.toHaveProperty("custom_field_values");
     submit.cleanup();
   });
 
-  it("preserves supplemental context when revisiting form fields", () => {
+  it("requires custom text for a required single-choice form field", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "single_choice",
+              required: true,
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "自定义填写" }));
+    expect(screen.getByRole("button", { name: "提交" })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Scope" }), {
+      target: { value: "CLI only" },
+    });
+    expect(screen.getByRole("button", { name: "提交" })).toBeEnabled();
+  });
+
+  it("submits multi-choice ids and field-level custom text independently", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "checks-context",
+          prompt: "Collect checks",
+          fields: [
+            {
+              id: "checks",
+              label: "Checks",
+              type: "multi_choice",
+              options: [{ id: "lint", label: "Lint" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Lint" }));
+    fireEvent.click(screen.getByRole("button", { name: "自定义填写" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Checks" }), {
+      target: { value: "Security scan" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Checks: Lint, Security scan",
+      biz_params: {
+        plan_interaction_response: {
+          field_values: { checks: ["lint"] },
+          custom_field_values: { checks: "Security scan" },
+        },
+      },
+    });
+    submit.cleanup();
+  });
+
+  it("does not append a global custom-response step to forms", () => {
     render(
       <PlanClarificationCard
         data={{
@@ -974,6 +1041,59 @@ describe("Plan interaction cards", () => {
               id: "scope",
               label: "Scope",
               type: "single_choice",
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("1 of 1")).toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText("请输入自定义回复"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides field-level custom input when explicitly disabled", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          allow_custom_response: false,
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "single_choice",
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "自定义填写" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves custom field context when revisiting a form field", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          allow_custom_response: true,
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "multi_choice",
               required: true,
               options: [{ id: "small", label: "Small" }],
             },
@@ -982,16 +1102,14 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
-    fireEvent.click(screen.getByRole("button", { name: "继续" }));
-    fireEvent.change(screen.getByPlaceholderText("请输入自定义回复"), {
+    fireEvent.click(screen.getByRole("button", { name: "自定义填写" }));
+    fireEvent.change(screen.getByPlaceholderText("请输入自定义填写"), {
       target: { value: "Keep this context" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "上一项" }));
-    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
-    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    fireEvent.click(screen.getByRole("button", { name: "Small" }));
+    fireEvent.click(screen.getByRole("button", { name: "自定义填写" }));
 
-    expect(screen.getByPlaceholderText("请输入自定义回复")).toHaveValue(
+    expect(screen.getByPlaceholderText("请输入自定义填写")).toHaveValue(
       "Keep this context",
     );
   });
@@ -1015,6 +1133,31 @@ describe("Plan interaction cards", () => {
       container.querySelector(`.${styles.choiceOptionsViewport}`),
     ).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /Option/ })).toHaveLength(6);
+  });
+
+  it("wraps long option labels and retains their complete label", () => {
+    const longLabel =
+      "This is a deliberately long option label that must wrap inside the clarification card without being truncated";
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt: "Pick scope",
+          options: [{ id: "long", label: longLabel }],
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: longLabel })).toHaveAttribute(
+      "aria-label",
+      longLabel,
+    );
+    expect(screen.getByTitle(longLabel)).toBeInTheDocument();
+    expect(stylesheet).toContain("max-height: 244px;");
+    expect(stylesheet).toContain("overflow-y: auto;");
+    expect(stylesheet).toContain("white-space: normal;");
+    expect(stylesheet).toContain("overflow-wrap: anywhere;");
   });
 
   it("hides a submitted clarification in the current render", async () => {
@@ -1441,7 +1584,9 @@ describe("Plan interaction cards", () => {
     expect(
       screen.getByRole("button", { name: "继续修改" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始执行" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "开始执行" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "退出计划模式" }),
     ).toBeInTheDocument();
@@ -1469,7 +1614,9 @@ describe("Plan interaction cards", () => {
   it("uses Chinese review actions with one primary execute action", () => {
     render(<PlanReviewCard active data={createReviewData()} />);
 
-    expect(screen.getByRole("button", { name: "继续修改" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "继续修改" }),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "退出计划模式" }),
     ).toBeInTheDocument();
@@ -1590,7 +1737,7 @@ describe("Plan interaction cards", () => {
     expect(stylesheet).toContain(
       "border-left: 3px solid var(--clarification-accent)",
     );
-    expect(stylesheet).toContain("min-height: 52px");
+    expect(stylesheet).toContain("min-height: 44px");
     expect(stylesheet).toContain("height: 36px");
     expect(stylesheet).toContain(".optionRowFocused");
     expect(stylesheet).toContain(".optionRowSelected");
@@ -1601,5 +1748,15 @@ describe("Plan interaction cards", () => {
     expect(stylesheet).toContain("animation: none");
     expect(stylesheet).toContain("transition: none");
     expect(stylesheet).not.toContain("#4f6f63");
+  });
+
+  it("uses compact vertical spacing for clarification cards", () => {
+    expect(stylesheet).toContain("padding: 16px;");
+    expect(stylesheet).toContain("min-height: 44px;");
+    expect(stylesheet).not.toContain("flex: 0 0 44px;");
+    expect(stylesheet).toContain("gap: 6px;");
+    expect(stylesheet).toContain("min-height: 64px;");
+    expect(stylesheet).toContain("margin-top: 12px;");
+    expect(stylesheet).toContain("padding-top: 12px;");
   });
 });

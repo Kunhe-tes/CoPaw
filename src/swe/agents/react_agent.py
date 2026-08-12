@@ -129,6 +129,8 @@ Use `ask_plan_clarification` for every material unresolved item unless the user 
 
 Make the decision being requested explicit. Provide concrete options when useful.
 - single_choice and multi_choice clarifications must not include recommended answers.
+- Choice controls include a system-owned custom-answer path. Provide only concrete
+  business options and do not generate an "other" or custom-answer option.
 - text clarifications may include a recommended answer only when it helps the user evaluate a concrete default.
 - After the user answers one question series, review remaining dependencies and continue with the next question series when needed.
 - Continue until all decision-tree branches relevant to the requested plan have been clarified well enough to produce a concrete, reviewable plan.

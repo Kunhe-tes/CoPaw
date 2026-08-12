@@ -276,7 +276,7 @@ function normalizePlanInteractionCard(
       options,
       form_id: typeof card.form_id === "string" ? card.form_id : undefined,
       fields: kind === "form" ? fields || undefined : undefined,
-      allow_custom_response: card.allow_custom_response === true,
+      allow_custom_response: card.allow_custom_response !== false,
     };
   }
 
