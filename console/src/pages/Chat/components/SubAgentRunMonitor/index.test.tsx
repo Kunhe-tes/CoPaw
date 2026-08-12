@@ -279,7 +279,7 @@ describe("SubAgentRunMonitor", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders assistant budgets and keeps a completed result collapsed", async () => {
+  it("renders assistant budgets without displaying completed results", async () => {
     mocks.getSubAgentRuns.mockResolvedValue(
       snapshot([
         run({
@@ -295,18 +295,12 @@ describe("SubAgentRunMonitor", () => {
       await screen.findByRole("button", { name: "助手运行状态" }),
     );
 
-    expect(screen.getAllByText("已用时间 30s / 2m")).toHaveLength(1);
-    expect(screen.getAllByText("已用轮次 2 / 4")).toHaveLength(1);
-    expect(screen.queryByText("已完成的结果摘要")).toBeNull();
-
-    fireEvent.click(screen.getByRole("button", { name: "查看结果" }));
-    expect(screen.getByText("已完成的结果摘要")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "收起结果" }));
+    expect(screen.getAllByText("时间 30s / 2m")).toHaveLength(1);
+    expect(screen.getAllByText("轮次 2 / 4")).toHaveLength(1);
     expect(screen.queryByText("已完成的结果摘要")).toBeNull();
   });
 
-  it("treats a partial assistant as terminal with a collapsible result", async () => {
+  it("treats a partial assistant as terminal without displaying its result", async () => {
     mocks.getSubAgentRuns.mockResolvedValue(
       snapshot([
         run({
@@ -323,8 +317,7 @@ describe("SubAgentRunMonitor", () => {
     );
 
     expect(screen.getByText("部分完成")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "查看结果" }));
-    expect(screen.getByText("可用的部分结果")).toBeInTheDocument();
+    expect(screen.queryByText("可用的部分结果")).toBeNull();
   });
 
   it("allows stopping only running runs", async () => {
