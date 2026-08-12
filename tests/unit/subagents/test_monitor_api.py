@@ -23,7 +23,7 @@ from swe.app.subagents import (
     SubAgentStartRequest,
     builtin_definition_provider,
 )
-from swe.app.subagents.models import AgentError, Metrics
+from swe.app.subagents.models import AgentError, BudgetConfig, Metrics
 from swe.config.config import AgentProfileConfig
 
 
@@ -116,6 +116,7 @@ async def _create_run(
         ),
         definition,
         PermissionPolicy.readonly(),
+        effective_budget=BudgetConfig(timeout_ms=120_000),
         start_request=SubAgentStartRequest.model_validate(
             {
                 "name": "plan-researcher",

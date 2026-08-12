@@ -276,9 +276,9 @@ class BudgetConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_turns: int = 6
+    max_turns: int = 50
     max_tool_calls: int = 30
-    timeout_ms: int = 120000
+    timeout_ms: int = 600000
 
 
 class LifecycleConfig(BaseModel):

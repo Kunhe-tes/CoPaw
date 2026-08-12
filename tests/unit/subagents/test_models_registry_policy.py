@@ -180,6 +180,14 @@ def test_budget_does_not_accept_max_tokens() -> None:
         BudgetConfig.model_validate({"max_tokens": 1000})
 
 
+def test_budget_defaults_allow_fifty_turns_and_ten_minutes() -> None:
+    """Default SubAgent work budgets allow longer research runs."""
+    budget = BudgetConfig()
+
+    assert budget.max_turns == 50
+    assert budget.timeout_ms == 600_000
+
+
 def test_delegation_spec_uses_name_not_agent_name() -> None:
     """DelegationSpec uses the same SubAgent name field as start requests."""
     spec = DelegationSpec.model_validate(
