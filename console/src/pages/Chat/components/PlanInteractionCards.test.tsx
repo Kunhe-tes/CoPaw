@@ -1397,7 +1397,7 @@ describe("Plan interaction cards", () => {
       "data-active-plan-review-card",
       "true",
     );
-    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续修改" }));
 
     expect(onContinueModifying).toHaveBeenCalledWith(
       expect.objectContaining({ plan_id: "plan-123" }),
@@ -1420,13 +1420,13 @@ describe("Plan interaction cards", () => {
     );
     expect(screen.getByText("已接受并开始执行")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Continue modifying" }),
+      screen.queryByRole("button", { name: "继续修改" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Execute" }),
+      screen.queryByRole("button", { name: "开始执行" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Exit Plan Mode" }),
+      screen.queryByRole("button", { name: "退出计划模式" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1439,11 +1439,11 @@ describe("Plan interaction cards", () => {
       container.querySelector(`.${styles.planReviewActiveCard}`),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Continue modifying" }),
+      screen.getByRole("button", { name: "继续修改" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Execute" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始执行" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Exit Plan Mode" }),
+      screen.getByRole("button", { name: "退出计划模式" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("textbox", { name: "反馈意见" }),
@@ -1464,6 +1464,18 @@ describe("Plan interaction cards", () => {
     expect(
       container.querySelector(`.${styles.reviewSummary}`),
     ).toHaveTextContent(longSummary);
+  });
+
+  it("uses Chinese review actions with one primary execute action", () => {
+    render(<PlanReviewCard active data={createReviewData()} />);
+
+    expect(screen.getByRole("button", { name: "继续修改" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "退出计划模式" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始执行" })).toHaveClass(
+      styles.reviewPrimaryButton,
+    );
   });
 
   it("calls continue modifying without submitting a plan review response", () => {
@@ -1498,7 +1510,7 @@ describe("Plan interaction cards", () => {
     expect(screen.queryByText("Open questions")).not.toBeInTheDocument();
     expect(screen.queryByText(/Confidence:/)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续修改" }));
 
     expect(onContinueModifying).toHaveBeenCalledWith(
       expect.objectContaining({ plan_id: "plan-123" }),
@@ -1526,7 +1538,7 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Execute" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始执行" }));
 
     await waitFor(() => {
       expect(submit.handler).toHaveBeenCalledTimes(1);
@@ -1541,7 +1553,7 @@ describe("Plan interaction cards", () => {
         },
       },
     });
-    expect(screen.getByRole("button", { name: "Execute" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始执行" })).toBeDisabled();
 
     submit.cleanup();
   });
@@ -1561,7 +1573,7 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Exit Plan Mode" }));
+    fireEvent.click(screen.getByRole("button", { name: "退出计划模式" }));
 
     expect(onPlanModeDecision).toHaveBeenCalledWith(false);
     await Promise.resolve();
@@ -1570,21 +1582,24 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("uses the approved blue-gray visual state tokens", () => {
+  it("uses the approved task-panel visual state tokens", () => {
     expect(stylesheet).toContain("--clarification-card-bg: #ffffff");
-    expect(stylesheet).toContain("--clarification-border: #dce6f2");
-    expect(stylesheet).toContain("--clarification-accent: #1677ff");
-    expect(stylesheet).toContain("--clarification-selected-bg: #f0f7ff");
+    expect(stylesheet).toContain("--clarification-border: #e5e7eb");
+    expect(stylesheet).toContain("--clarification-accent: #3769fc");
+    expect(stylesheet).toContain("--clarification-selected-bg: #eef4ff");
     expect(stylesheet).toContain(
       "border-left: 3px solid var(--clarification-accent)",
     );
-    expect(stylesheet).toContain("min-height: 40px");
-    expect(stylesheet).toContain("height: 32px");
-    expect(stylesheet).toContain("height: 48vh");
-    expect(stylesheet).toContain("min-height: 270px");
-    expect(stylesheet).toContain("max-height: 480px");
-    expect(stylesheet).toContain("height: 45vh");
-    expect(stylesheet).toContain("min-height: 240px");
+    expect(stylesheet).toContain("min-height: 52px");
+    expect(stylesheet).toContain("height: 36px");
+    expect(stylesheet).toContain(".optionRowFocused");
+    expect(stylesheet).toContain(".optionRowSelected");
+    expect(stylesheet).not.toContain("optionFocusIcon");
+    expect(stylesheet).not.toContain("height: 48vh");
+    expect(stylesheet).toContain(":global(.dark-mode)");
+    expect(stylesheet).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(stylesheet).toContain("animation: none");
+    expect(stylesheet).toContain("transition: none");
     expect(stylesheet).not.toContain("#4f6f63");
   });
 });

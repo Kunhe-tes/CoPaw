@@ -3,7 +3,6 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
-  ChevronsUpDown,
   CornerDownLeft,
 } from "lucide-react";
 import { type IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
@@ -302,13 +301,10 @@ function ChoiceRows({
           >
             <span className={styles.optionNumber}>{index + 1}.</span>
             <span className={styles.optionLabel}>{option.label}</span>
-            {selected ? <Check aria-hidden="true" size={15} /> : null}
-            {focused ? (
-              <ChevronsUpDown
-                aria-hidden="true"
-                className={styles.optionFocusIcon}
-                size={14}
-              />
+            {selected ? (
+              <span className={styles.optionCheck} aria-hidden="true">
+                <Check size={15} strokeWidth={3} />
+              </span>
             ) : null}
           </button>
         );
@@ -333,13 +329,10 @@ function ChoiceRows({
         >
           <span className={styles.optionNumber}>{allRowsCount}.</span>
           <span className={styles.optionLabel}>自定义回复</span>
-          {customActive ? <Check aria-hidden="true" size={15} /> : null}
-          {focusedIndex === allRowsCount - 1 ? (
-            <ChevronsUpDown
-              aria-hidden="true"
-              className={styles.optionFocusIcon}
-              size={14}
-            />
+          {customActive ? (
+            <span className={styles.optionCheck} aria-hidden="true">
+              <Check size={15} strokeWidth={3} />
+            </span>
           ) : null}
         </button>
       ) : null}
@@ -953,6 +946,7 @@ function PlanReviewActiveCard({
         <div className={styles.reviewHeading}>
           <div>
             <strong>{data.title}</strong>
+            <p className={styles.reviewStatus}>计划待确认</p>
           </div>
         </div>
       </header>
@@ -971,15 +965,7 @@ function PlanReviewActiveCard({
           disabled={submitted}
           onClick={() => handleDecision("revise")}
         >
-          Continue modifying
-        </button>
-        <button
-          type="button"
-          className={styles.reviewPrimaryButton}
-          disabled={submitted}
-          onClick={() => handleDecision("execute")}
-        >
-          Execute
+          继续修改
         </button>
         <button
           type="button"
@@ -987,7 +973,15 @@ function PlanReviewActiveCard({
           disabled={submitted}
           onClick={() => handleDecision("exit_plan")}
         >
-          Exit Plan Mode
+          退出计划模式
+        </button>
+        <button
+          type="button"
+          className={styles.reviewPrimaryButton}
+          disabled={submitted}
+          onClick={() => handleDecision("execute")}
+        >
+          开始执行
         </button>
       </footer>
     </section>

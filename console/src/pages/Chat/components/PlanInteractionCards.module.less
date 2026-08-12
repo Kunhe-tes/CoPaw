@@ -1,291 +1,73 @@
-.planClarificationCard {
-  --clarification-card-bg: #ffffff;
-  --clarification-soft-bg: #f5f9ff;
-  --clarification-border: #dce6f2;
-  --clarification-active-bg: #f5f9ff;
-  --clarification-selected-bg: #f0f7ff;
-  --clarification-text: #1c395b;
-  --clarification-muted: #72839a;
-  --clarification-soft: #94a3b8;
-  --clarification-accent: #1677ff;
-  --clarification-accent-hover: #0958d9;
-  --clarification-accent-text: #ffffff;
-  --clarification-kbd-bg: #f4f7fa;
-
-  width: min(100%, 818px);
-  margin: 0 auto;
-  padding: 13px 8px 8px;
-  overflow: hidden;
-  border: 1px solid var(--clarification-border);
-  border-radius: 8px;
-  outline: none;
-  background: var(--clarification-card-bg);
-  box-shadow:
-    0 1px 2px rgba(28, 63, 109, 0.06),
-    0 2px 10px rgba(28, 63, 109, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.46);
-  color: var(--clarification-text);
-  animation: clarification-enter 160ms ease-out both;
-}
-
+.planClarificationCard,
 .planReviewCard {
   --clarification-card-bg: #ffffff;
-  --clarification-soft-bg: #f5f9ff;
-  --clarification-border: #dce6f2;
-  --clarification-active-bg: #f5f9ff;
-  --clarification-selected-bg: #f0f7ff;
-  --clarification-text: #1c395b;
-  --clarification-muted: #72839a;
-  --clarification-soft: #94a3b8;
-  --clarification-accent: #1677ff;
-  --clarification-accent-hover: #0958d9;
+  --clarification-soft-bg: #f7f9fc;
+  --clarification-border: #e5e7eb;
+  --clarification-active-bg: #f7f9fc;
+  --clarification-selected-bg: #eef4ff;
+  --clarification-text: #111827;
+  --clarification-muted: #4b5563;
+  --clarification-soft: #8a94a6;
+  --clarification-accent: #3769fc;
+  --clarification-accent-hover: #2957dc;
   --clarification-accent-text: #ffffff;
-  --clarification-kbd-bg: #f4f7fa;
+  --clarification-kbd-bg: #f7f9fc;
 
   width: min(100%, 818px);
   margin: 0 auto;
-  padding: 13px 8px 8px;
+  padding: 20px;
   overflow: hidden;
   border: 1px solid var(--clarification-border);
-  border-radius: 8px;
+  border-radius: 12px;
   outline: none;
   background: var(--clarification-card-bg);
-  box-shadow:
-    0 1px 2px rgba(28, 63, 109, 0.06),
-    0 2px 10px rgba(28, 63, 109, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.46);
+  box-shadow: 0 1px 2px rgba(29, 36, 51, 0.05);
   color: var(--clarification-text);
   animation: clarification-enter 160ms ease-out both;
 }
 
+.planClarificationCard:focus-visible,
 .planReviewCard:focus-within {
   box-shadow:
-    0 0 0 2px rgba(22, 119, 255, 0.12),
-    0 2px 10px rgba(28, 63, 109, 0.06);
+    0 0 0 2px rgba(55, 105, 252, 0.16),
+    0 1px 2px rgba(29, 36, 51, 0.05);
 }
 
 .planReviewActiveCard {
   display: flex;
-  height: 48vh;
-  max-height: 480px;
-  min-height: 270px;
+  height: auto;
+  min-height: 0;
+  max-height: min(560px, 62vh);
   flex-direction: column;
 }
 
+.cardHeader,
 .reviewHeader {
-  padding: 0 6px 9px;
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
 }
 
+.cardHeading,
 .reviewHeading {
   display: flex;
   min-width: 0;
   align-items: flex-start;
-  gap: 10px;
+  gap: 8px;
 }
 
+.cardHeading strong,
 .reviewHeading strong {
   display: block;
   overflow: hidden;
   color: var(--clarification-text);
-  font-size: 14px;
-  font-weight: 800;
+  font-size: 17px;
+  font-weight: 600;
   letter-spacing: -0.01em;
-  line-height: 20px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.reviewHeading p {
-  margin: 1px 0 0;
-  overflow: hidden;
-  color: var(--clarification-muted);
-  font-size: 12px;
-  line-height: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.reviewSummary {
-  margin: 0;
-  border-left: 3px solid var(--clarification-accent);
-  border-radius: 6px;
-  background: var(--clarification-soft-bg);
-  color: var(--clarification-muted);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 20px;
-  overflow-wrap: anywhere;
-  padding: 9px 11px;
-  white-space: normal;
-  word-break: break-word;
-}
-
-.reviewStatus {
-  margin: 1px 0 0;
-  color: var(--clarification-muted);
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 17px;
-  overflow-wrap: anywhere;
-  white-space: normal;
-  word-break: break-word;
-}
-
-.reviewContent {
-  display: grid;
-  min-height: 0;
-  gap: 6px;
-}
-
-.planReviewActiveCard .reviewContent {
-  overflow-y: auto;
-  padding-right: 2px;
-}
-
-.reviewSection {
-  border: 1px solid var(--clarification-border);
-  border-radius: 6px;
-  background: var(--clarification-card-bg);
-  padding: 9px 11px;
-}
-
-.reviewSection h4 {
-  margin: 0 0 5px;
-  color: var(--clarification-text);
-  font-size: 12px;
-  font-weight: 800;
-  letter-spacing: 0.01em;
-  line-height: 16px;
-}
-
-.reviewSection ul {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding-inline-start: 18px;
-}
-
-.reviewSection li {
-  color: var(--clarification-text);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 19px;
-}
-
-.reviewFeedbackSummary {
-  margin: 0;
-  color: var(--clarification-text);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 20px;
-  overflow-wrap: anywhere;
-  white-space: normal;
-  word-break: break-word;
-}
-
-.reviewActions {
-  display: flex;
-  min-height: 30px;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 7px 0 0;
-}
-
-.reviewSecondaryButton,
-.reviewPrimaryButton {
-  display: inline-flex;
-  height: 32px;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  outline: none;
-  font: inherit;
-  font-size: 13px;
-  font-weight: 700;
-  cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    box-shadow 120ms ease,
-    color 120ms ease,
-    opacity 120ms ease;
-}
-
-.reviewSecondaryButton {
-  padding: 0 4px;
-  background: transparent;
-  color: var(--clarification-muted);
-}
-
-.reviewSecondaryButton:hover:not(:disabled),
-.reviewSecondaryButton:focus-visible:not(:disabled) {
-  color: var(--clarification-text);
-}
-
-.reviewSecondaryButton:focus-visible:not(:disabled) {
-  border-radius: 6px;
-  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.24);
-}
-
-.reviewPrimaryButton {
-  min-width: 92px;
-  padding: 0 13px;
-  border-radius: 6px;
-  background: var(--clarification-accent);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-    0 1px 2px rgba(9, 88, 217, 0.18);
-  color: var(--clarification-accent-text);
-}
-
-.reviewPrimaryButton:hover:not(:disabled),
-.reviewPrimaryButton:focus-visible:not(:disabled) {
-  background: var(--clarification-accent-hover);
-}
-
-.reviewPrimaryButton:focus-visible:not(:disabled) {
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-    0 1px 2px rgba(9, 88, 217, 0.18),
-    0 0 0 2px rgba(22, 119, 255, 0.28);
-}
-
-.reviewSecondaryButton:disabled,
-.reviewPrimaryButton:disabled {
-  cursor: not-allowed;
-  opacity: 0.42;
-}
-
-.planClarificationCard:focus-visible {
-  box-shadow:
-    0 0 0 2px rgba(22, 119, 255, 0.16),
-    0 2px 10px rgba(28, 63, 109, 0.06);
-}
-
-.cardHeader {
-  display: flex;
-  min-height: 26px;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 0 6px 7px;
-}
-
-.cardHeading {
-  display: flex;
-  min-width: 0;
-  align-items: center;
-  gap: 8px;
-}
-
-.cardHeading strong {
-  overflow: hidden;
-  color: var(--clarification-text);
-  font-size: 14px;
-  font-weight: 700;
-  letter-spacing: -0.01em;
-  line-height: 20px;
+  line-height: 24px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -295,10 +77,10 @@
   border-radius: 999px;
   background: var(--clarification-selected-bg);
   color: var(--clarification-accent);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 18px;
-  padding: 0 7px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 20px;
+  padding: 0 8px;
 }
 
 .cardPager {
@@ -308,15 +90,15 @@
   gap: 8px;
   color: var(--clarification-soft);
   font-size: 12px;
-  font-weight: 700;
-  line-height: 20px;
+  font-weight: 600;
+  line-height: 24px;
   user-select: none;
 }
 
 .cardPager button {
   display: inline-grid;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   border: 0;
   border-radius: 6px;
@@ -326,24 +108,30 @@
   cursor: pointer;
 }
 
-.cardPager button:hover:not(:disabled) {
+.cardPager button:hover:not(:disabled),
+.cardPager button:focus-visible:not(:disabled) {
   background: var(--clarification-active-bg);
   color: var(--clarification-text);
 }
 
+.cardPager button:focus-visible:not(:disabled),
+.reviewSecondaryButton:focus-visible:not(:disabled),
+.dismissButton:focus-visible:not(:disabled),
+.continueButton:focus-visible:not(:disabled) {
+  box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.24);
+}
+
 .cardPager button:disabled {
   cursor: default;
-  opacity: 0.36;
+  opacity: 0.4;
 }
 
 .fieldDescription {
-  margin: -2px 6px 7px;
-  overflow: hidden;
+  margin: -8px 0 12px;
   color: var(--clarification-muted);
   font-size: 12px;
-  line-height: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 18px;
+  overflow-wrap: anywhere;
 }
 
 .cardStage {
@@ -352,12 +140,12 @@
 
 .choiceOptionsViewport {
   display: flex;
-  max-height: 144px;
+  max-height: 244px;
   flex-direction: column;
-  gap: 2px;
+  gap: 8px;
   overflow-y: auto;
   padding-right: 2px;
-  scrollbar-color: rgba(114, 131, 154, 0.28) transparent;
+  scrollbar-color: rgba(138, 148, 166, 0.36) transparent;
   scrollbar-width: thin;
 }
 
@@ -371,24 +159,23 @@
 
 .choiceOptionsViewport::-webkit-scrollbar-thumb {
   border-radius: 999px;
-  background: rgba(114, 131, 154, 0.28);
+  background: rgba(138, 148, 166, 0.36);
 }
 
 .choiceOptionsViewport + .textArea {
-  margin-top: 7px;
+  margin-top: 14px;
 }
 
 .optionRow {
-  position: relative;
   display: flex;
   width: 100%;
-  min-height: 40px;
-  flex: 0 0 40px;
+  min-height: 52px;
+  flex: 0 0 52px;
   align-items: center;
-  gap: 8px;
-  padding: 0 11px 0 9px;
+  gap: 12px;
+  padding: 8px 12px;
   border: 1px solid var(--clarification-border);
-  border-radius: 6px;
+  border-radius: 8px;
   outline: none;
   background: var(--clarification-card-bg);
   color: var(--clarification-muted);
@@ -396,21 +183,23 @@
   font: inherit;
   text-align: left;
   transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    box-shadow 120ms ease,
-    color 120ms ease;
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease;
 }
 
-.optionRow:hover,
-.optionRowFocused {
-  border-color: #a8cfff;
+.optionRow:hover {
+  border-color: #d0d7e2;
   background: var(--clarification-active-bg);
   color: var(--clarification-text);
 }
 
-.optionRowFocused {
-  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.12);
+.optionRowFocused,
+.optionRow:focus-visible {
+  border-color: var(--clarification-accent);
+  box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.18);
+  color: var(--clarification-text);
 }
 
 .optionRowSelected {
@@ -420,92 +209,106 @@
 }
 
 .optionRowSelected .optionLabel {
-  font-weight: 700;
-}
-
-.optionRowSelected > svg:not(.optionFocusIcon) {
-  color: var(--clarification-accent);
+  font-weight: 600;
 }
 
 .optionNumber {
-  width: 19px;
-  flex: 0 0 19px;
-  opacity: 0.7;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 7px;
+  place-items: center;
+  background: var(--clarification-soft-bg);
+  color: var(--clarification-muted);
   font-size: 13px;
   font-weight: 700;
+}
+
+.optionRowSelected .optionNumber {
+  background: #dceaff;
+  color: var(--clarification-accent);
 }
 
 .optionLabel {
   min-width: 0;
   flex: 1;
   overflow: hidden;
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 14px;
+  font-weight: 500;
   line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.optionFocusIcon {
-  flex: 0 0 auto;
-  color: var(--clarification-soft);
+.optionCheck {
+  display: inline-grid;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  border-radius: 50%;
+  place-items: center;
+  background: var(--clarification-accent);
+  color: var(--clarification-accent-text);
 }
 
 .textField,
 .textArea {
   width: 100%;
   border: 1px solid var(--clarification-border);
-  border-radius: 6px;
+  border-radius: 8px;
   outline: none;
   background: var(--clarification-card-bg);
   color: var(--clarification-text);
   font: inherit;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 20px;
   transition:
-    border-color 120ms ease,
-    box-shadow 120ms ease;
+    border-color 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .textField {
-  height: 38px;
-  padding: 0 11px;
+  height: 40px;
+  padding: 0 12px;
 }
 
 .textArea {
   min-height: 88px;
   max-height: 160px;
-  padding: 9px 11px;
-  resize: none;
+  padding: 12px;
+  resize: vertical;
 }
 
 .textField::placeholder,
 .textArea::placeholder {
-  color: var(--clarification-muted);
+  color: var(--clarification-soft);
 }
 
 .textField:focus,
 .textArea:focus {
   border-color: var(--clarification-accent);
-  box-shadow: 0 0 0 2px rgba(22, 119, 255, 0.12);
+  box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.16);
 }
 
-.cardFooter {
+.cardFooter,
+.reviewActions {
   display: flex;
-  min-height: 30px;
+  min-height: 36px;
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 7px 0 0;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--clarification-border);
 }
 
 .keyboardHint {
   margin: 0;
-  color: var(--clarification-muted);
-  font-size: 11px;
-  font-weight: 600;
-  line-height: 16px;
+  color: var(--clarification-soft);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
 }
 
 .cardActions {
@@ -513,63 +316,169 @@
   flex: 0 0 auto;
   align-items: center;
   justify-content: flex-end;
-  gap: 14px;
+  gap: 10px;
 }
 
 .dismissButton,
-.continueButton {
+.continueButton,
+.reviewSecondaryButton,
+.reviewPrimaryButton {
   display: inline-flex;
-  height: 28px;
+  height: 36px;
   align-items: center;
   justify-content: center;
-  border: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
   font: inherit;
   font-size: 13px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease,
+    opacity 160ms ease;
 }
 
 .dismissButton {
   gap: 6px;
-  padding: 0;
+  padding: 0 12px;
+  border-color: var(--clarification-border);
+  background: var(--clarification-card-bg);
+  color: var(--clarification-muted);
+}
+
+.dismissButton:hover:not(:disabled) {
+  border-color: #d0d7e2;
+  background: var(--clarification-active-bg);
+  color: var(--clarification-text);
+}
+
+.dismissButton kbd {
+  min-width: 28px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--clarification-kbd-bg);
+  color: var(--clarification-soft);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 20px;
+}
+
+.continueButton,
+.reviewPrimaryButton {
+  min-width: 96px;
+  gap: 8px;
+  padding: 0 15px;
+  border-color: var(--clarification-accent);
+  background: var(--clarification-accent);
+  box-shadow: 0 1px 2px rgba(41, 87, 220, 0.2);
+  color: var(--clarification-accent-text);
+}
+
+.continueButton:hover:not(:disabled),
+.reviewPrimaryButton:hover:not(:disabled),
+.continueButton:focus-visible:not(:disabled),
+.reviewPrimaryButton:focus-visible:not(:disabled) {
+  background: var(--clarification-accent-hover);
+}
+
+.reviewSecondaryButton {
+  padding: 0 10px;
   background: transparent;
   color: var(--clarification-muted);
 }
 
-.dismissButton kbd {
-  min-width: 30px;
-  height: 18px;
-  padding: 0 6px;
-  border-radius: 6px;
-  background: var(--clarification-kbd-bg);
-  box-shadow: inset 0 -1px 0 rgba(114, 131, 154, 0.12);
+.reviewSecondaryButton:hover:not(:disabled),
+.reviewSecondaryButton:focus-visible:not(:disabled) {
+  background: var(--clarification-active-bg);
+  color: var(--clarification-text);
+}
+
+.dismissButton:disabled,
+.continueButton:disabled,
+.reviewSecondaryButton:disabled,
+.reviewPrimaryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.reviewContent {
+  display: grid;
+  min-height: 0;
+  gap: 12px;
+}
+
+.planReviewActiveCard .reviewContent {
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.reviewStatus {
+  margin: 4px 0 0;
+  color: var(--clarification-soft);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.reviewSummary {
+  margin: 0;
+  border-left: 3px solid var(--clarification-accent);
+  border-radius: 7px;
+  background: var(--clarification-soft-bg);
   color: var(--clarification-muted);
-  font-family: inherit;
-  font-size: 11px;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 21px;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  word-break: break-word;
+}
+
+.reviewSection {
+  border: 1px solid var(--clarification-border);
+  border-radius: 8px;
+  background: var(--clarification-card-bg);
+  padding: 12px;
+}
+
+.reviewSection h4 {
+  margin: 0 0 8px;
+  color: var(--clarification-text);
+  font-size: 13px;
+  font-weight: 600;
   line-height: 18px;
 }
 
-.continueButton {
-  height: 32px;
-  min-width: 92px;
-  gap: 8px;
-  padding: 0 13px;
-  border-radius: 6px;
-  background: var(--clarification-accent);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.14),
-    0 1px 2px rgba(9, 88, 217, 0.18);
-  color: var(--clarification-accent-text);
+.reviewSection ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-inline-start: 18px;
 }
 
-.continueButton:hover:not(:disabled) {
-  background: var(--clarification-accent-hover);
+.reviewSection li,
+.reviewFeedbackSummary {
+  color: var(--clarification-muted);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 21px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
-.continueButton:disabled {
-  cursor: not-allowed;
-  opacity: 0.42;
+.reviewFeedbackSummary {
+  margin: 0;
+}
+
+.reviewActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 @keyframes clarification-enter {
@@ -585,37 +494,51 @@
 }
 
 @media (max-width: 768px) {
-  .planClarificationCard {
-    padding: 11px 7px 7px;
-    border-radius: 8px;
-  }
-
+  .planClarificationCard,
   .planReviewCard {
-    padding: 11px 7px 7px;
-    border-radius: 8px;
+    padding: 16px;
+    border-radius: 10px;
   }
 
-  .planReviewActiveCard {
-    height: 45vh;
-    min-height: 240px;
+  .cardHeader,
+  .reviewHeader {
+    gap: 10px;
+    padding-bottom: 12px;
   }
 
-  .cardHeader {
-    gap: 8px;
-  }
-
-  .cardHeading strong {
-    font-size: 13px;
+  .cardHeading strong,
+  .reviewHeading strong {
+    font-size: 16px;
+    line-height: 22px;
   }
 
   .cardFooter {
-    align-items: flex-end;
+    align-items: flex-start;
     flex-direction: column;
-    gap: 6px;
   }
 
-  .reviewHeading strong {
-    font-size: 13px;
+  .cardActions,
+  .reviewActions {
+    width: 100%;
+  }
+
+  .reviewActions {
+    justify-content: flex-end;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .planClarificationCard,
+  .planReviewCard,
+  .optionRow,
+  .textField,
+  .textArea,
+  .dismissButton,
+  .continueButton,
+  .reviewSecondaryButton,
+  .reviewPrimaryButton {
+    animation: none;
+    transition: none;
   }
 }
 
@@ -628,36 +551,22 @@
     --clarification-active-bg: #203249;
     --clarification-selected-bg: #17385f;
     --clarification-text: #e6f0ff;
-    --clarification-muted: #9aaec4;
-    --clarification-soft: #6f849c;
+    --clarification-muted: #b5c4d5;
+    --clarification-soft: #8da0b6;
     --clarification-accent: #5aa2ff;
     --clarification-accent-hover: #82bbff;
     --clarification-accent-text: #081827;
     --clarification-kbd-bg: #24364b;
 
-    box-shadow:
-      0 1px 2px rgba(0, 0, 0, 0.16),
-      0 6px 20px rgba(0, 0, 0, 0.14),
-      inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
   }
 
-  .textField,
-  .textArea {
+  .optionRowSelected .optionNumber {
+    background: #244b7a;
+  }
+
+  .dismissButton {
     border-color: var(--clarification-border);
     background: var(--clarification-card-bg);
-  }
-
-  .reviewSection {
-    background: var(--clarification-card-bg);
-  }
-
-  .dismissButton,
-  .reviewSecondaryButton {
-    color: var(--clarification-muted);
-  }
-
-  .dismissButton kbd {
-    box-shadow: inset 0 -1px 0 rgba(0, 0, 0, 0.18);
-    color: var(--clarification-muted);
   }
 }
