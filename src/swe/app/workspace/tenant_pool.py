@@ -212,9 +212,22 @@ class TenantWorkspacePool:
             source_id=source_id,
             scope_id=scope_id,
         )
+        if (
+            tenant_id == "default"
+            and source_id
+            and scope_id is None
+            and bootstrap_tenant_id == f"default_{source_id}"
+        ):
+            persisted_ready = inspect_source_template_readiness(
+                self._base_working_dir,
+                source_id,
+            ).ready
+        else:
+            persisted_ready = initializer.has_seeded_bootstrap()
+
         async with self._registry_lock:
             entry = self._workspaces.get(bootstrap_tenant_id)
-            if initializer.has_seeded_bootstrap():
+            if persisted_ready:
                 if entry is None:
                     entry = TenantWorkspaceEntry(
                         tenant_id=bootstrap_tenant_id,
