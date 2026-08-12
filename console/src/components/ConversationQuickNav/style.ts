@@ -19,7 +19,7 @@ export default createGlobalStyle`
 }
 
 .conversation-quick-nav__scroll {
-  --quick-nav-fade-depth: clamp(40px, 14%, 64px);
+  --quick-nav-fade-depth: clamp(56px, 18%, 80px);
 
   width: 36px;
   height: 100%;
