@@ -10,7 +10,7 @@ import logging
 import json
 import sys
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
 
@@ -776,6 +776,36 @@ class TestTenantBootstrapProcessLock:
             await pool.ensure_bootstrap("tenant-a", source_id="ruice")
 
         assert not (tmp_path / "default_ruice").exists()
+
+    @pytest.mark.asyncio
+    async def test_ready_tenant_skips_source_template_validation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A ready tenant must not depend on its initialization template."""
+        pool = TenantWorkspacePool(tmp_path)
+        require_template = Mock(
+            side_effect=AssertionError("ready tenant checked its template"),
+        )
+
+        async def existing_bootstrap(*_args, **_kwargs) -> bool:
+            return True
+
+        monkeypatch.setattr(
+            pool,
+            "_check_existing_bootstrap",
+            existing_bootstrap,
+        )
+        monkeypatch.setattr(
+            pool,
+            "_require_ready_source_template",
+            require_template,
+        )
+
+        await pool.ensure_bootstrap("tenant-a", source_id="RMASSIST")
+
+        require_template.assert_not_called()
 
 
 class TestTenantWorkspaceDirectoryLayout:

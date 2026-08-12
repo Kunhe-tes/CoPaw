@@ -448,7 +448,6 @@ class TenantWorkspacePool:
             source_id,
             scope_id,
         )
-        self._require_ready_source_template(source_id)
 
         # Fast path: check if already bootstrapped
         if await self._check_existing_bootstrap(
@@ -491,6 +490,7 @@ class TenantWorkspacePool:
                     )
                     return
 
+                self._require_ready_source_template(source_id)
                 logger.info(
                     "tenant_bootstrap_lock_wait tenant_id=%s",
                     bootstrap_tenant_id,
