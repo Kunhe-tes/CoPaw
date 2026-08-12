@@ -212,12 +212,7 @@ class TenantWorkspacePool:
             source_id=source_id,
             scope_id=scope_id,
         )
-        if (
-            tenant_id == "default"
-            and source_id
-            and scope_id is None
-            and bootstrap_tenant_id == f"default_{source_id}"
-        ):
+        if source_id and bootstrap_tenant_id == f"default_{source_id}":
             persisted_ready = inspect_source_template_readiness(
                 self._base_working_dir,
                 source_id,

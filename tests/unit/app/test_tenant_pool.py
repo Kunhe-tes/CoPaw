@@ -895,6 +895,38 @@ class TestTenantBootstrapProcessLock:
         inspect_source.assert_called_once_with(tmp_path, "RMASSIST")
 
     @pytest.mark.asyncio
+    async def test_explicit_default_source_scope_uses_provider_readiness(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Explicit default source scopes must also validate providers."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+        from swe.app.workspace.bootstrap_state import BootstrapReadiness
+
+        pool = TenantWorkspacePool(tmp_path)
+        source_readiness = BootstrapReadiness(
+            ready=False,
+            missing_paths=(tmp_path / "secret/providers",),
+            invalid_json_paths=(),
+            reason="missing_providers",
+        )
+        inspect_source = Mock(return_value=source_readiness)
+        monkeypatch.setattr(
+            tenant_pool_module,
+            "inspect_source_template_readiness",
+            inspect_source,
+        )
+
+        assert not await pool._check_existing_bootstrap(
+            "default_RMASSIST",
+            "default",
+            "RMASSIST",
+            encode_scope_id("default", "RMASSIST"),
+        )
+        inspect_source.assert_called_once_with(tmp_path, "RMASSIST")
+
+    @pytest.mark.asyncio
     async def test_readiness_check_runs_outside_registry_lock(
         self,
         tmp_path,
