@@ -92,6 +92,24 @@ async def test_per_run_store_marks_running_with_worker_metadata(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_per_run_store_persists_observed_turn_progress(tmp_path):
+    store = PerRunSubAgentRunStore(tmp_path)
+    record = await store.create(
+        _spec(),
+        _definition(),
+        PermissionPolicy.readonly(),
+    )
+    await store.mark_running(record.run_id, worker_pid=123)
+
+    updated = await store.record_turns(record.run_id, turns_used=2)
+    reloaded = await PerRunSubAgentRunStore(tmp_path).get(record.run_id)
+
+    assert updated.turns_used == 2
+    assert reloaded is not None
+    assert reloaded.turns_used == 2
+
+
+@pytest.mark.asyncio
 async def test_per_run_store_loads_record_from_individual_file(tmp_path):
     store = PerRunSubAgentRunStore(tmp_path)
     record = await store.create(

@@ -12,8 +12,10 @@ import styles from "./index.module.less";
 
 export { SUBAGENT_RUNS_REFRESH_EVENT };
 const POLL_INTERVAL_MS = 10_000;
+const EVENT_CONFIRM_REFRESH_DELAY_MS = 400;
 const TERMINAL_STATUSES = new Set<SubAgentRunStatus>([
   "completed",
+  "partial",
   "failed",
   "cancelled",
   "expired",
@@ -24,6 +26,7 @@ const STATUS_LABELS: Record<SubAgentRunStatus, string> = {
   running: "运行中",
   paused: "已暂停",
   completed: "已完成",
+  partial: "部分完成",
   failed: "失败",
   cancelled: "已停止",
   expired: "已过期",
@@ -57,10 +60,14 @@ function budgetPercent(run: SubAgentRunSnapshotItem): number {
   );
 }
 
-function budgetLabel(run: SubAgentRunSnapshotItem): string {
+function timeBudgetLabel(run: SubAgentRunSnapshotItem): string {
   return `${formatDuration(
     run.budget_consumption.elapsed_ms,
   )} / ${formatDuration(run.budget_consumption.timeout_ms)}`;
+}
+
+function turnBudgetLabel(run: SubAgentRunSnapshotItem): string {
+  return `${run.budget_consumption.turns_used} / ${run.budget_consumption.max_turns}`;
 }
 
 function displayName(run: SubAgentRunSnapshotItem): string {
@@ -78,9 +85,13 @@ export default function SubAgentRunMonitor(props: {
   const [stoppingIds, setStoppingIds] = useState<Set<string>>(() => new Set());
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({});
   const [hiddenRunIds, setHiddenRunIds] = useState<Set<string> | null>(null);
+  const [expandedResultIds, setExpandedResultIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const requestSeqRef = useRef(0);
   const resetKeyRef = useRef(resetKey);
   const snapshotRef = useRef<SubAgentRunSnapshot | null>(null);
+  const confirmRefreshTimerRef = useRef<number | null>(null);
 
   const refresh = useCallback(async () => {
     if (!chatId) {
@@ -110,6 +121,7 @@ export default function SubAgentRunMonitor(props: {
     setStoppingIds(new Set());
     setRowErrors({});
     setHiddenRunIds(null);
+    setExpandedResultIds(new Set());
     void refresh();
   }, [refresh]);
 
@@ -121,6 +133,7 @@ export default function SubAgentRunMonitor(props: {
     setExpanded(false);
     setStoppingIds(new Set());
     setRowErrors({});
+    setExpandedResultIds(new Set());
     setHiddenRunIds(
       new Set(snapshotRef.current?.runs.map((run) => run.run_id) ?? []),
     );
@@ -128,9 +141,8 @@ export default function SubAgentRunMonitor(props: {
 
   const visibleRuns = useMemo(
     () =>
-      snapshot?.runs.filter((run) =>
-        isVisibleAfterReset(run, hiddenRunIds),
-      ) ?? [],
+      snapshot?.runs.filter((run) => isVisibleAfterReset(run, hiddenRunIds)) ??
+      [],
     [hiddenRunIds, snapshot],
   );
 
@@ -145,14 +157,32 @@ export default function SubAgentRunMonitor(props: {
   useEffect(() => {
     const handler = () => {
       void refresh();
+      if (confirmRefreshTimerRef.current !== null) {
+        window.clearTimeout(confirmRefreshTimerRef.current);
+      }
+      confirmRefreshTimerRef.current = window.setTimeout(() => {
+        confirmRefreshTimerRef.current = null;
+        void refresh();
+      }, EVENT_CONFIRM_REFRESH_DELAY_MS);
     };
     document.addEventListener(SUBAGENT_RUNS_REFRESH_EVENT, handler);
     return () =>
       document.removeEventListener(SUBAGENT_RUNS_REFRESH_EVENT, handler);
   }, [refresh]);
 
+  useEffect(
+    () => () => {
+      if (confirmRefreshTimerRef.current !== null) {
+        window.clearTimeout(confirmRefreshTimerRef.current);
+        confirmRefreshTimerRef.current = null;
+      }
+    },
+    [chatId],
+  );
+
   const activeCount = useMemo(
-    () => visibleRuns.filter((run) => !TERMINAL_STATUSES.has(run.status)).length,
+    () =>
+      visibleRuns.filter((run) => !TERMINAL_STATUSES.has(run.status)).length,
     [visibleRuns],
   );
 
@@ -200,7 +230,7 @@ export default function SubAgentRunMonitor(props: {
   return (
     <div className={styles.anchor}>
       {expanded ? (
-        <section className={styles.panel} aria-label="SubAgent 运行状态">
+        <section className={styles.panel} aria-label="助手运行状态">
           <button
             type="button"
             className={styles.header}
@@ -212,13 +242,15 @@ export default function SubAgentRunMonitor(props: {
               <i />
               <i />
             </span>
-            <span className={styles.title}>SubAgent 运行状态</span>
+            <span className={styles.title}>助手运行状态</span>
             <span className={styles.count}>{visibleRuns.length}</span>
           </button>
           <ul className={styles.list}>
             {visibleRuns.map((run) => {
               const stopping = stoppingIds.has(run.run_id);
               const name = displayName(run);
+              const terminal = TERMINAL_STATUSES.has(run.status);
+              const resultExpanded = expandedResultIds.has(run.run_id);
               return (
                 <li
                   key={run.run_id}
@@ -249,8 +281,8 @@ export default function SubAgentRunMonitor(props: {
                     {run.objective}
                   </div>
                   <div className={styles.meta}>
-                    <span>预算 {budgetLabel(run)}</span>
-                    <span>运行 {formatDuration(run.duration_ms)}</span>
+                    <span>已用时间 {timeBudgetLabel(run)}</span>
+                    <span>已用轮次 {turnBudgetLabel(run)}</span>
                   </div>
                   <div
                     className={styles.progress}
@@ -265,8 +297,30 @@ export default function SubAgentRunMonitor(props: {
                       style={{ width: `${budgetPercent(run)}%` }}
                     />
                   </div>
-                  {run.summary_preview ? (
-                    <p className={styles.preview}>{run.summary_preview}</p>
+                  {terminal && run.summary_preview ? (
+                    <div className={styles.result}>
+                      <button
+                        type="button"
+                        className={styles.resultToggle}
+                        aria-expanded={resultExpanded}
+                        onClick={() =>
+                          setExpandedResultIds((previous) => {
+                            const next = new Set(previous);
+                            if (next.has(run.run_id)) {
+                              next.delete(run.run_id);
+                            } else {
+                              next.add(run.run_id);
+                            }
+                            return next;
+                          })
+                        }
+                      >
+                        {resultExpanded ? "收起结果" : "查看结果"}
+                      </button>
+                      {resultExpanded ? (
+                        <p className={styles.preview}>{run.summary_preview}</p>
+                      ) : null}
+                    </div>
                   ) : null}
                   {run.error_preview ? (
                     <p className={styles.error}>{run.error_preview}</p>
@@ -284,7 +338,7 @@ export default function SubAgentRunMonitor(props: {
           type="button"
           className={styles.trigger}
           aria-expanded="false"
-          aria-label="SubAgent 运行状态"
+          aria-label="助手运行状态"
           onClick={() => setExpanded(true)}
         >
           <span className={styles.activityDots} aria-hidden="true">
@@ -293,9 +347,7 @@ export default function SubAgentRunMonitor(props: {
             <i />
           </span>
           <span>
-            {activeCount > 0
-              ? `${activeCount} 个 SubAgent 运行中`
-              : "查看 SubAgent 状态"}
+            {activeCount > 0 ? `${activeCount} 个助手运行中` : "查看助手状态"}
           </span>
         </button>
       )}

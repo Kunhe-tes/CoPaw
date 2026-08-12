@@ -93,6 +93,13 @@ class SubAgentRuntime:
                     workspace_dir,
                 ),
             )
+            record_turns = getattr(self._store, "record_turns", None)
+            if record_turns is not None:
+
+                async def record_turn(turn: int) -> None:
+                    await record_turns(run.run_id, turns_used=turn)
+
+                agent._subagent_turn_callback = record_turn
             message = Msg(
                 "user",
                 self._delegated_task_message(spec),

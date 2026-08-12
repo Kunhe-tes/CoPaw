@@ -20,6 +20,7 @@ from swe.app.subagents import (
     DelegationSpec,
     InMemorySubAgentRunStore,
     LocalJsonSubAgentRunStore,
+    PerRunSubAgentRunStore,
     PermissionPolicy,
     SubAgentDefinition,
     SubAgentRuntime,
@@ -157,6 +158,51 @@ async def test_runtime_creates_fresh_agent_with_subagent_safe_options(
     context = json.loads(created.finalization_prompt[1].get_text_content())
     assert context["delegation_spec"]["task_id"] == "task-1"
     assert "research_record" in context
+
+
+@pytest.mark.asyncio
+async def test_runtime_persists_live_research_turn_progress(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    from swe.app.subagents import runtime as runtime_module
+
+    class ProgressAgent(_FakeSWEAgent):
+        async def run_research_phase(self, msg=None):
+            self.messages.append(msg)
+            await self._subagent_turn_callback(1)
+            return SimpleNamespace(
+                status="completed",
+                reply=Msg("Friday", "found files", "assistant"),
+                turns_used=1,
+                messages=(msg,),
+            )
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.final_texts = ["found files"]
+    monkeypatch.setattr(runtime_module, "SWEAgent", ProgressAgent)
+    definition = AgentRegistry([builtin_definition_provider()]).resolve(
+        "plan-researcher",
+    )
+    store = PerRunSubAgentRunStore(tmp_path / "subagent_runs")
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+
+    await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+    )
+
+    persisted = await store.get(record.run_id)
+    assert persisted is not None
+    assert persisted.turns_used == 1
 
 
 @pytest.mark.asyncio

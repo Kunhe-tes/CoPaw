@@ -196,13 +196,17 @@ _Avoid_: kill process tree, hard stop all tools
 A user-facing view that shows the **Background SubAgent Runs** associated with the current Main Agent conversation. It is scoped to the current conversation and is not an agent-wide operations console.
 _Avoid_: global subagent dashboard, worker pool monitor, all-agent status panel
 
+**助手**:
+The chat-facing display term for one **Background SubAgent Run**. It deliberately hides the internal implementation term “SubAgent” from users without changing the run's identity, API contract, or runtime semantics.
+_Avoid_: 用于 API 字段、事件名或运行时领域模型的 Assistant/SubAgent 替换
+
 **SubAgent Run Snapshot**:
 A point-in-time observable summary of the current conversation's **Background SubAgent Runs**. It is the authoritative state used by user-facing monitoring surfaces, while live stream events may only prompt refresh.
 _Avoid_: stream-only state, frontend cache, tool result transcript
 
 **SubAgent Budget Consumption**:
-The portion of a **Background SubAgent Run**'s execution budget that has been used. In the first monitoring surface this means elapsed time against the run's time budget, not task completion percentage.
-_Avoid_: task progress, completion percent, model confidence
+The observable consumption of a **Background SubAgent Run**'s time and turn budgets, shown as used against total for each dimension. It is not a task-completion percentage; the live turn value is a persisted runtime observation and the terminal value is the final **SubAgent Turn Usage**.
+_Avoid_: task progress, completion percent, model confidence, estimated turn count
 
 **Frontend SubAgent Stop Request**:
 A user action from a **SubAgent Run Monitor** that asks the runtime to cancel one specific **Background SubAgent Run** directly. It is not a natural-language instruction for the Main Agent to decide whether to call a tool.

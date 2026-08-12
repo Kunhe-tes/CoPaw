@@ -129,7 +129,7 @@ async def _create_run(
         ),
         definition,
         PermissionPolicy.readonly(),
-        effective_budget=BudgetConfig(timeout_ms=120_000),
+        effective_budget=BudgetConfig(max_turns=4, timeout_ms=120_000),
         start_request=SubAgentStartRequest.model_validate(
             {
                 "name": "plan-researcher",
@@ -155,7 +155,7 @@ async def _create_run(
                 agent_name="plan-researcher",
                 status="completed",
                 summary="完成" * 120,
-                metrics=Metrics(elapsed_ms=10_000),
+                metrics=Metrics(turns_used=3, elapsed_ms=10_000),
             ),
         )
     if status == "failed":
@@ -253,6 +253,8 @@ def test_snapshot_returns_slim_current_chat_runs(tmp_path) -> None:
     assert running["status"] == "running"
     assert running["stoppable"] is True
     assert running["budget_consumption"]["timeout_ms"] == 120_000
+    assert running["budget_consumption"]["turns_used"] == 0
+    assert running["budget_consumption"]["max_turns"] == 4
     assert running["budget_consumption"]["ratio"] > 0
     assert "effective_policy" not in running
     assert "delegation_spec" not in running
@@ -260,6 +262,8 @@ def test_snapshot_returns_slim_current_chat_runs(tmp_path) -> None:
     completed = payload["runs"][1]
     assert completed["summary_preview"] == "完成" * 80
     assert completed["stoppable"] is False
+    assert completed["budget_consumption"]["turns_used"] == 3
+    assert completed["budget_consumption"]["max_turns"] == 4
     assert supervisor.wait_calls == 1
 
 

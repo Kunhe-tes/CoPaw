@@ -700,6 +700,7 @@ class BackgroundSubAgentRunRecord(BaseModel):
     owner_scope: str
     effective_policy: PermissionPolicy
     effective_budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    turns_used: int = 0
     nickname: str | None = None
     start_request: SubAgentStartRequest | None = None
     definition_match: DefinitionMatchMetadata = Field(
