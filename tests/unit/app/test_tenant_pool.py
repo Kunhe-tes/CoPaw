@@ -21,6 +21,7 @@ from swe.app.workspace.tenant_pool import (  # noqa: E402
     TenantWorkspaceEntry,
 )
 from swe.config.config import (  # noqa: E402
+    AgentProfileConfig,
     Config,
     AgentsConfig,
     AgentProfileRef,
@@ -783,19 +784,72 @@ class TestTenantBootstrapProcessLock:
         tmp_path,
         monkeypatch,
     ):
-        """A ready tenant must not depend on its initialization template."""
+        """A persisted ready tenant must not depend on its template after restart."""
         pool = TenantWorkspacePool(tmp_path)
+        storage_tenant_id = pool._resolve_bootstrap_tenant_id(
+            "tenant-a",
+            "RMASSIST",
+            None,
+        )
+        tenant_dir = pool._get_tenant_workspace_dir(storage_tenant_id)
+        workspace_dir = tenant_dir / "workspaces" / "default"
+        workspace_dir.mkdir(parents=True)
+        config = Config(
+            agents=AgentsConfig(
+                active_agent="default",
+                profiles={
+                    "default": AgentProfileRef(
+                        id="default",
+                        workspace_dir=str(workspace_dir),
+                        enabled=True,
+                    ),
+                },
+            ),
+        )
+        (tenant_dir / "config.json").write_text(
+            json.dumps(config.model_dump(mode="json")),
+            encoding="utf-8",
+        )
+        agent = AgentProfileConfig(
+            id="default",
+            name="Default Agent",
+            workspace_dir=str(workspace_dir),
+        )
+        (workspace_dir / "agent.json").write_text(
+            json.dumps(agent.model_dump(mode="json")),
+            encoding="utf-8",
+        )
+        for file_name in (
+            "AGENTS.md",
+            "HEARTBEAT.md",
+            "MEMORY.md",
+            "PROFILE.md",
+            "SOUL.md",
+        ):
+            (workspace_dir / file_name).write_text(
+                "# required\n",
+                encoding="utf-8",
+            )
+        for directory_name in ("sessions", "memory", "skills"):
+            (workspace_dir / directory_name).mkdir()
+        for file_name, payload in (
+            ("chats.json", {"version": 1, "chats": []}),
+            ("jobs.json", {"version": 1, "jobs": []}),
+            ("token_usage.json", {}),
+            ("skill.json", {"version": 1, "skills": {}}),
+        ):
+            (workspace_dir / file_name).write_text(
+                json.dumps(payload),
+                encoding="utf-8",
+            )
+        skill_pool = tenant_dir / "skill_pool"
+        skill_pool.mkdir()
+        (skill_pool / "skill.json").write_text(
+            json.dumps({"version": 1, "skills": {}}),
+            encoding="utf-8",
+        )
         require_template = Mock(
             side_effect=AssertionError("ready tenant checked its template"),
-        )
-
-        async def existing_bootstrap(*_args, **_kwargs) -> bool:
-            return True
-
-        monkeypatch.setattr(
-            pool,
-            "_check_existing_bootstrap",
-            existing_bootstrap,
         )
         monkeypatch.setattr(
             pool,
@@ -806,6 +860,7 @@ class TestTenantBootstrapProcessLock:
         await pool.ensure_bootstrap("tenant-a", source_id="RMASSIST")
 
         require_template.assert_not_called()
+        assert storage_tenant_id in pool
 
 
 class TestTenantWorkspaceDirectoryLayout:

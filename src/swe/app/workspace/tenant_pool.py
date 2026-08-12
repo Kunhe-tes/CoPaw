@@ -206,26 +206,29 @@ class TenantWorkspacePool:
         Returns:
             True if already bootstrapped and complete, False otherwise.
         """
+        initializer = TenantInitializer(
+            self._base_working_dir,
+            tenant_id,
+            source_id=source_id,
+            scope_id=scope_id,
+        )
         async with self._registry_lock:
             entry = self._workspaces.get(bootstrap_tenant_id)
-            if entry is None:
-                return False
-
-            initializer = TenantInitializer(
-                self._base_working_dir,
-                tenant_id,
-                source_id=source_id,
-                scope_id=scope_id,
-            )
             if initializer.has_seeded_bootstrap():
+                if entry is None:
+                    entry = TenantWorkspaceEntry(
+                        tenant_id=bootstrap_tenant_id,
+                    )
+                    self._workspaces[bootstrap_tenant_id] = entry
                 self._mark_access(entry)
                 return True
 
-            logger.warning(
-                "Tenant %s cached in pool but scaffold is incomplete. "
-                "Running self-heal bootstrap.",
-                bootstrap_tenant_id,
-            )
+            if entry is not None:
+                logger.warning(
+                    "Tenant %s cached in pool but scaffold is incomplete. "
+                    "Running self-heal bootstrap.",
+                    bootstrap_tenant_id,
+                )
             return False
 
     def _log_seeding_results(
