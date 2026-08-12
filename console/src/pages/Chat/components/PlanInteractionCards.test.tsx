@@ -989,6 +989,32 @@ describe("Plan interaction cards", () => {
     expect(screen.getByRole("button", { name: "提交" })).toBeEnabled();
   });
 
+  it("renders persistent custom input as a single horizontally scrollable line", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "single_choice",
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    const customInput = screen.getByRole("textbox", { name: "Scope" });
+    expect(customInput.tagName).toBe("INPUT");
+    expect(stylesheet).toContain("overflow-x: auto;");
+    expect(stylesheet).toContain("white-space: nowrap;");
+  });
+
   it("replaces a single-choice selection when persistent custom text is entered", async () => {
     const submit = captureSubmitEvents();
     render(

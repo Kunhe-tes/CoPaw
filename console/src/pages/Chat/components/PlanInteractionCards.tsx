@@ -736,9 +736,9 @@ export function PlanClarificationCard({
         (activeField.type === "single_choice" ||
           activeField.type === "multi_choice") &&
         data.allow_custom_response !== false ? (
-          <textarea
+          <input
             autoFocus
-            className={styles.textArea}
+            className={`${styles.textField} ${styles.customFieldInput}`}
             aria-label={activeField.label}
             placeholder="请输入自定义填写"
             value={customFieldValues[activeField.id] || ""}
