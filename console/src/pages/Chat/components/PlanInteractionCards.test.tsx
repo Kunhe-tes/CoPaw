@@ -1013,6 +1013,8 @@ describe("Plan interaction cards", () => {
     expect(customInput.tagName).toBe("INPUT");
     expect(stylesheet).toContain("overflow-x: auto;");
     expect(stylesheet).toContain("white-space: nowrap;");
+    expect(stylesheet).toContain(".choiceOptionsViewport + .customFieldInput");
+    expect(stylesheet).toContain("margin-top: 10px;");
   });
 
   it("replaces a single-choice selection when persistent custom text is entered", async () => {
