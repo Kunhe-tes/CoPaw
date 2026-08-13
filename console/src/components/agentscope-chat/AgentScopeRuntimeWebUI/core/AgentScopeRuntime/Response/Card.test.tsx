@@ -76,7 +76,14 @@ vi.mock("./Error", () => ({
 }));
 
 vi.mock("./Actions", () => ({
-  default: () => <div data-testid="actions">actions</div>,
+  default: ({ hideReplace }: { hideReplace?: boolean }) => (
+    <div
+      data-testid="actions"
+      data-hide-replace={String(Boolean(hideReplace))}
+    >
+      actions
+    </div>
+  ),
 }));
 
 vi.mock("./Suggestions", () => ({
@@ -471,6 +478,7 @@ describe("AgentScopeRuntimeResponseCard", () => {
   it("keeps model_call_failed response errors directly visible with partial output", () => {
     render(
       <AgentScopeRuntimeResponseCard
+        isLast
         data={{
           ...response(
             [textMessage("message-1", "partial answer")],
@@ -486,6 +494,10 @@ describe("AgentScopeRuntimeResponseCard", () => {
 
     expect(screen.getByText("partial answer")).toBeInTheDocument();
     expect(screen.getByText("provider diagnostic")).toBeInTheDocument();
+    expect(screen.getByTestId("actions")).toHaveAttribute(
+      "data-hide-replace",
+      "true",
+    );
     expect(screen.queryByRole("button", { name: /执行过程/ })).toBeNull();
   });
 

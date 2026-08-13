@@ -41,7 +41,11 @@ import {
 import UserDetailModal from "./components/UserDetailModal";
 import SkillDetailModal from "./components/SkillDetailModal";
 import ErrorDetailModal from "./components/ErrorDetailModal";
-import { BBK_ID_MAP, BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
+import { BBK_ID_TO_NAME_MAP, getBbkDisplayName } from "../../../constants/bbk";
+import {
+  ensureBranchOptions,
+  getScopedBranchFilter,
+} from "../../../utils/branchScope";
 import {
   formatChange,
   formatDuration,
@@ -724,11 +728,22 @@ function buildTrendChartOption(
 export default function BusinessOverviewPage() {
   const navigate = useNavigate();
   const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
+  const currentBbkId = useIframeStore((state) => state.bbk);
+  const branchScope = useMemo(
+    () => getScopedBranchFilter(currentBbkId),
+    [currentBbkId],
+  );
+  const branchOptions = useMemo(
+    () => ensureBranchOptions(branchScope.lockedBbkId),
+    [branchScope.lockedBbkId],
+  );
 
   const [timeRange, setTimeRange] = useState<TimeRange>("day");
   const [dateRange, setDateRange] = useState<[Dayjs, Dayjs]>([dayjs(), dayjs()]);
   // 管理员多选分行；非管理员使用用户所属分行
-  const [bbkIds, setBbkIds] = useState<string[]>([]);
+  const [bbkIds, setBbkIds] = useState<string[]>(
+    () => branchScope.lockedBbkId ? [branchScope.lockedBbkId] : [],
+  );
 
   const [overviewStats, setOverviewStats] = useState<OverviewStats | null>(
     null,
@@ -805,6 +820,17 @@ export default function BusinessOverviewPage() {
   const effectiveBbkIds = useMemo(() => {
     return bbkIds.length === 0 ? undefined : bbkIds;
   }, [bbkIds]);
+
+  useEffect(() => {
+    if (!branchScope.lockedBbkId) {
+      return;
+    }
+    setBbkIds((previous) =>
+      previous.length === 1 && previous[0] === branchScope.lockedBbkId
+        ? previous
+        : [branchScope.lockedBbkId],
+    );
+  }, [branchScope.lockedBbkId]);
   const cronJobOverviewPath = useMemo(() => {
     const params = new URLSearchParams();
     params.set("start_date", startDateText);
@@ -1250,22 +1276,31 @@ export default function BusinessOverviewPage() {
               className={styles.scopeSelect}
               mode="multiple"
               value={bbkIds}
-              onChange={setBbkIds}
+              onChange={(value) => {
+                if (!branchScope.lockedBbkId) {
+                  setBbkIds(value);
+                }
+              }}
               placeholder="全部分行"
-              maxTagCount="responsive"
-              maxTagPlaceholder={(omittedValues) => (
-                <Tooltip
-                  title={omittedValues
-                    .map((item) => {
-                      const value = String(item.value ?? "");
-                      return BBK_ID_TO_NAME_MAP[value] || value;
-                    })
-                    .join("、")}
-                >
-                  <span>+{omittedValues.length} 个分行</span>
-                </Tooltip>
-              )}
-              allowClear
+              disabled={!branchScope.isHeadOffice}
+              maxTagCount={branchScope.isHeadOffice ? "responsive" : 1}
+              maxTagPlaceholder={
+                branchScope.isHeadOffice
+                  ? (omittedValues) => (
+                      <Tooltip
+                        title={omittedValues
+                          .map((item) => {
+                            const value = String(item.value ?? "");
+                            return BBK_ID_TO_NAME_MAP[value] || value;
+                          })
+                          .join("、")}
+                      >
+                        <span>+{omittedValues.length} 个分行</span>
+                      </Tooltip>
+                    )
+                  : undefined
+              }
+              allowClear={branchScope.isHeadOffice}
               showSearch
               filterOption={(input, option) => {
                 const searchValue = input.toLowerCase();
@@ -1278,7 +1313,7 @@ export default function BusinessOverviewPage() {
                 );
               }}
             >
-              {BBK_ID_MAP.map((item) => (
+              {branchOptions.map((item) => (
                 <Option key={item.value} value={item.value}>
                   {item.label}
                 </Option>

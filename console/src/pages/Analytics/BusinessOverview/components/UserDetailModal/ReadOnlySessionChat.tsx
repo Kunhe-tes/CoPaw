@@ -21,7 +21,7 @@ import styles from "./index.module.less";
 
 const READONLY_OPTIONS: IAgentScopeRuntimeWebUIOptions = {
   theme: {
-    locale: "zh-CN",
+    locale: "cn",
     bubbleList: {
       pagination: false,
     },

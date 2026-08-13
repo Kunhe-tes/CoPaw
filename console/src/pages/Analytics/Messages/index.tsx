@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Table,
@@ -16,12 +16,26 @@ import dayjs from "dayjs";
 import { PageHeader } from "@/components/PageHeader";
 import { tracingApi, UserMessageItem } from "../../../api/modules/tracing";
 import { getBbkDisplayName, BBK_ID_MAP } from "../../../constants/bbk";
+import {
+  ensureBranchOptions,
+  getScopedBranchFilter,
+} from "../../../utils/branchScope";
+import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
 
 export default function MessagesPage() {
   const { t } = useTranslation();
+  const currentBbkId = useIframeStore((state) => state.bbk);
+  const branchScope = useMemo(
+    () => getScopedBranchFilter(currentBbkId),
+    [currentBbkId],
+  );
+  const branchOptions = useMemo(
+    () => ensureBranchOptions(branchScope.lockedBbkId, BBK_ID_MAP),
+    [branchScope.lockedBbkId],
+  );
   const [loading, setLoading] = useState(true);
   const [messages, setMessages] = useState<UserMessageItem[]>([]);
   const [total, setTotal] = useState(0);
@@ -30,11 +44,19 @@ export default function MessagesPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [userIdFilter, setUserIdFilter] = useState("");
   const [sessionIdFilter, setSessionIdFilter] = useState("");
-  const [bbkIdFilter, setBbkIdFilter] = useState<string | undefined>();
+  const [bbkIdFilter, setBbkIdFilter] = useState<string | undefined>(
+    branchScope.lockedBbkId,
+  );
   const [dateRange, setDateRange] = useState<[dayjs.Dayjs, dayjs.Dayjs] | null>(
     [dayjs().subtract(7, "day"), dayjs()],
   );
   const [exporting, setExporting] = useState(false);
+
+  useEffect(() => {
+    if (branchScope.lockedBbkId) {
+      setBbkIdFilter(branchScope.lockedBbkId);
+    }
+  }, [branchScope.lockedBbkId]);
 
   // 用于追踪筛选条件变化，避免 useEffect 重复触发
   const filtersRef = useRef({
@@ -263,12 +285,15 @@ export default function MessagesPage() {
               placeholder={t("analytics.filterBbk")}
               value={bbkIdFilter}
               onChange={(v) => {
-                setBbkIdFilter(v);
-                setPage(1);
+                if (!branchScope.lockedBbkId) {
+                  setBbkIdFilter(v);
+                  setPage(1);
+                }
               }}
-              allowClear
+              allowClear={branchScope.isHeadOffice}
+              disabled={!branchScope.isHeadOffice}
               style={{ width: 150 }}
-              options={BBK_ID_MAP}
+              options={branchOptions}
             />
             <Input
               placeholder={t("analytics.filterUser", "User ID")}

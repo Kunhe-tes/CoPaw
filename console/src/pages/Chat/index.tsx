@@ -589,7 +589,8 @@ const addPlanModeScopeAlias = (
 };
 
 export default function ChatPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const runtimeLocale = i18n?.resolvedLanguage?.startsWith("zh") ? "cn" : "en";
   const navigate = useNavigate();
   const location = useLocation();
   const [isOriginY] = useState(
@@ -2083,6 +2084,7 @@ export default function ChatPage() {
       theme: {
         ...defaultConfig.theme,
         darkMode: isDark,
+        locale: runtimeLocale,
         leftHeader: {
           ...defaultConfig.theme.leftHeader,
         },
@@ -2263,6 +2265,7 @@ export default function ChatPage() {
     planModeEnabled,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
+    runtimeLocale,
     setPlanModeEnabledForActiveScope,
     selectedContextReferences,
     contextReferences,

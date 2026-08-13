@@ -46,7 +46,7 @@
   padding: 8px;
   background: #fff;
   border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 16px;
+  border-radius: 12px;
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
   pointer-events: auto;
 }
@@ -55,6 +55,10 @@
   padding-bottom: 6px;
   margin-bottom: 6px;
   border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+
+  :global(.swe-upload){
+    width: 100%;
+  }
 }
 
 .item {
@@ -143,10 +147,9 @@
   top: 0;
   left: calc(100% + 8px);
   width: min(152px, calc(100vw - 32px));
-  padding: 8px;
   background: #fff;
   border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 16px;
+  border-radius: 10px;
   box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
 
   &::before {
