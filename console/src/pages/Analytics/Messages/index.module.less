@@ -51,3 +51,406 @@
   align-items: center;
   height: 400px;
 }
+
+.headerActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.analysisModal {
+  :global(.ant-modal-content) {
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  :global(.ant-modal-header) {
+    margin-bottom: 0;
+    padding: 28px 32px 22px;
+  }
+
+  :global(.ant-modal-body) {
+    flex: 1;
+    min-height: 0;
+  }
+
+  :global(.ant-modal-footer) {
+    margin-top: 0;
+    padding: 16px 32px;
+    border-top: 1px solid #e5e7eb;
+  }
+}
+
+.analysisTitle {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  max-width: 760px;
+}
+
+.analysisTitleIcon {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  color: #ffffff;
+  background: #3769fc;
+  border-radius: 50%;
+  box-shadow: 0 8px 18px rgba(55, 105, 252, 0.18);
+}
+
+.analysisTitleText {
+  min-width: 0;
+
+  h2 {
+    margin: 0;
+    color: #111827;
+    font-size: 22px;
+    font-weight: 700;
+    line-height: 30px;
+  }
+
+  p {
+    margin: 6px 0 0;
+    color: #64748b;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 24px;
+  }
+}
+
+.analysisDialog {
+  display: flex;
+  flex-direction: column;
+  max-height: calc(80vh - 146px);
+  min-height: 560px;
+}
+
+.analysisFilters {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) minmax(220px, 0.9fr) auto;
+  gap: 18px 32px;
+  padding: 16px 32px 18px;
+  border-top: 1px solid #f0f2f5;
+  border-bottom: 1px solid #e5e7eb;
+  background: #ffffff;
+
+  label {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    color: #111827;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 22px;
+  }
+}
+
+.analysisBbkSelect {
+  width: 100%;
+}
+
+.analysisAlert {
+  margin: 16px 32px 0;
+}
+
+.analysisBody {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px 32px 24px;
+}
+
+.analysisStatusBar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border: 1px solid #cfe0ff;
+  border-radius: 8px;
+  background: #f5f8ff;
+}
+
+.analysisStatusMain {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+
+  >div {
+    min-width: 0;
+
+    strong,
+    span {
+      display: block;
+    }
+
+    strong {
+      color: #111827;
+      font-size: 14px;
+      font-weight: 600;
+      line-height: 22px;
+    }
+
+    span {
+      color: #4b5563;
+      font-size: 13px;
+      line-height: 20px;
+    }
+  }
+}
+
+.analysisStatusIcon {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  flex: 0 0 auto;
+  overflow: hidden;
+  color: #3769fc;
+  background: #e7efff;
+  border-radius: 50%;
+  line-height: 0;
+
+  svg {
+    display: block;
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    transform: translate(-50%, -50%);
+  }
+}
+
+.analysisResults {
+  margin-top: 20px;
+
+  h3 {
+    margin: 0 0 12px;
+    color: #111827;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 24px;
+  }
+}
+
+.analysisTopicList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.analysisTopic {
+  display: grid;
+  grid-template-columns: 40px minmax(100px, 1fr) minmax(320px, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 20px;
+  border: 1px solid #e5e7eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.analysisRank,
+.analysisRankGold,
+.analysisRankSilver,
+.analysisRankBronze {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  color: #ffffff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.analysisRank {
+  color: #475569;
+  background: #e2e8f0;
+}
+
+.analysisRankGold {
+  background: #f2b63d;
+}
+
+.analysisRankSilver {
+  background: #6f7f97;
+}
+
+.analysisRankBronze {
+  color: #ffffff;
+  background: #bf7b4b;
+}
+
+.analysisTopicContent {
+  min-width: 0;
+
+  strong {
+    display: block;
+    color: #111827;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 23px;
+    word-break: break-word;
+  }
+}
+
+.analysisQuestions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  color: #6b7280;
+  font-size: 13px;
+  line-height: 21px;
+
+  span {
+    display: block;
+    width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.analysisBbkDistribution {
+  min-width: 0;
+}
+
+.analysisBbkDistributionList {
+  display: grid;
+  flex-direction: column;
+  gap: 8px;
+
+}
+
+.analysisBbkDistributionRow {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 0.4fr) 52px;
+  align-items: center;
+  gap: 8px;
+}
+
+.analysisBbkDistributionName,
+.analysisBbkDistributionValue {
+  color: #344256;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.analysisBbkDistributionName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.analysisBbkDistributionValue {
+  text-align: right;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.analysisBbkDistributionTrack {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #edf2f8;
+}
+
+.analysisBbkDistributionBar {
+  height: 100%;
+  border-radius: inherit;
+  background: var(--analysis-topic-accent, #2563eb);
+}
+
+.analysisBbkDistributionEmpty {
+  color: #94a3b8;
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.analysisPercent {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 24px;
+  white-space: nowrap;
+}
+
+.analysisPercentFirst {
+  color: #f97316;
+}
+
+.analysisPercentSecond {
+  color: #1d4ed8;
+}
+
+.analysisPercentThird {
+  color: #16a34a;
+}
+
+.analysisPercentDefault {
+  color: #2563eb;
+}
+
+.analysisCenterState,
+.analysisEmpty {
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.analysisCenterState {
+  flex-direction: column;
+  gap: 12px;
+  color: #4b5563;
+  font-size: 14px;
+  line-height: 22px;
+
+  strong {
+    color: #111827;
+    font-size: 16px;
+    font-weight: 600;
+    line-height: 24px;
+  }
+}
+
+@media (max-width: 980px) {
+  .analysisFilters {
+    grid-template-columns: 1fr;
+  }
+
+  .analysisStatusBar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .analysisTopic {
+    grid-template-columns: 40px minmax(0, 1fr);
+    align-items: flex-start;
+  }
+
+  .analysisBbkDistribution,
+  .analysisPercent {
+    grid-column: 2;
+  }
+
+  .analysisPercent {
+    justify-self: flex-start;
+  }
+}
