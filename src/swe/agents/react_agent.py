@@ -591,19 +591,25 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             if builtin_tools is not None:
                 enabled_tools.update(
-                    {name: tool.enabled for name, tool in builtin_tools.items()},
+                    {
+                        name: tool.enabled
+                        for name, tool in builtin_tools.items()
+                    },
                 )
                 if "execute_shell_command" in builtin_tools:
-                    async_execution_tools["execute_shell_command"] = builtin_tools[
-                        "execute_shell_command"
-                    ].async_execution
+                    async_execution_tools["execute_shell_command"] = (
+                        builtin_tools["execute_shell_command"].async_execution
+                    )
         except Exception as exc:
             logger.warning(
                 f"Failed to load agent tools config: {exc}, "
                 "canonical tool defaults will be used",
             )
         if request_context.get("agent_role") == "subagent":
-            return self._subagent_tool_settings(request_context), async_execution_tools
+            return (
+                self._subagent_tool_settings(request_context),
+                async_execution_tools,
+            )
         if plan_mode_enabled:
             enabled_tools = {
                 name: enabled and name in _PLAN_MODE_ALLOWED_TOOLS
@@ -759,14 +765,24 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         explicit_run_id = has_explicit_subagent_run_id(request_context)
         if not (intent or registration_intent or active or explicit_run_id):
             return
+        workspace_dir = self._workspace_dir or Path(
+            self._agent_config.workspace_dir or ".",
+        )
+        effective_skill_names = (
+            resolve_effective_skills(
+                workspace_dir,
+                request_context.get("channel", "console"),
+            )
+            if intent
+            else []
+        )
         tools = create_background_subagent_tools(
             supervisor=supervisor,
             parent_agent_config=self._agent_config,
-            workspace_dir=(
-                self._workspace_dir or Path(self._agent_config.workspace_dir or ".")
-            ),
+            workspace_dir=workspace_dir,
             request_context=request_context,
             include_registration_tool=registration_intent,
+            effective_skill_names=effective_skill_names,
         )
         names = self._background_subagent_tool_names(
             intent,
@@ -786,7 +802,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         request_context: dict[str, Any],
     ) -> bool:
         return request_context.get("agent_role", "main") == "subagent" or not (
-            request_context.get("agent_id") or getattr(self._agent_config, "id", None)
+            request_context.get("agent_id")
+            or getattr(self._agent_config, "id", None)
         )
 
     @staticmethod

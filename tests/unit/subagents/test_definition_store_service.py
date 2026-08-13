@@ -89,6 +89,21 @@ def test_service_rejects_builtin_name_conflict(tmp_path: Path) -> None:
     }
 
 
+def test_service_rejects_reserved_skill_qualified_name(tmp_path: Path) -> None:
+    service = SubAgentDefinitionService(
+        store=SubAgentDefinitionStore(tmp_path),
+        builtin_registry=AgentRegistry([builtin_definition_provider()]),
+    )
+
+    result = service.register(_request("security:reviewer"))
+
+    assert result == {
+        "status": "failed",
+        "reason": "reserved_skill_qualified_name",
+        "name": "security:reviewer",
+    }
+
+
 def test_store_lists_and_gets_definitions(tmp_path: Path) -> None:
     store = SubAgentDefinitionStore(tmp_path)
     service = SubAgentDefinitionService(

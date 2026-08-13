@@ -26,6 +26,8 @@ from ...app.subagents import (
     SubAgentRegistrationRequest,
     SubAgentStartRequest,
     builtin_definition_provider,
+    build_definition_catalog,
+    load_skill_owned_definitions,
 )
 from ...config.config import AgentProfileConfig
 from ...config.utils import get_tenant_working_dir
@@ -72,6 +74,10 @@ _RUN_ID_CONTEXT_KEYS = (
 )
 _FAILURE_SUMMARY_MAX_CHARS = 1024
 _DEFAULT_SUPERVISOR = BackgroundSubAgentSupervisor()
+_START_SUBAGENT_DESCRIPTION = (
+    "Start a Background SubAgent Run. Use an exact listed Skill-qualified "
+    "name when delegating to a Skill-owned definition."
+)
 
 
 def get_default_background_subagent_supervisor() -> (
@@ -147,6 +153,7 @@ def create_background_subagent_tools(
     workspace_dir: Path,
     request_context: dict[str, Any],
     include_registration_tool: bool = False,
+    effective_skill_names: list[str] | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
     tool_scope = build_background_subagent_scope(
@@ -157,6 +164,12 @@ def create_background_subagent_tools(
         request_context=request_context,
         tool_scope=tool_scope,
     )
+    definition_catalog = _build_definition_catalog(
+        definition_service=definition_service,
+        workspace_dir=workspace_dir,
+        effective_skill_names=effective_skill_names,
+    )
+    directory = _format_skill_definition_directory(definition_catalog)
 
     async def start_subagent(
         name: str | None = None,
@@ -188,8 +201,23 @@ def create_background_subagent_tools(
                 },
             )
         try:
-            match = definition_service.match_start_request(start_request)
+            match = (
+                definition_service.resolve_start_definition(
+                    start_request,
+                    definition_catalog,
+                )
+                if definition_catalog is not None
+                else definition_service.match_start_request(start_request)
+            )
             if match is None:
+                if start_request.instruction is None:
+                    return _json_response(
+                        {
+                            "status": "not_found",
+                            "reason": "subagent_definition_not_found",
+                            "name": start_request.name,
+                        },
+                    )
                 definition_match = DefinitionMatchMetadata(matched=False)
                 definition = definition_service.build_run_scoped_definition(
                     start_request,
@@ -228,6 +256,8 @@ def create_background_subagent_tools(
                 },
             )
         return _json_response(_serialize_start_result(result))
+
+    start_subagent.__doc__ = directory
 
     async def register_subagent_definition(
         name: str,
@@ -328,6 +358,51 @@ def create_background_subagent_tools(
     if include_registration_tool:
         tools["register_subagent_definition"] = register_subagent_definition
     return tools
+
+
+def _build_definition_catalog(
+    *,
+    definition_service: SubAgentDefinitionService,
+    workspace_dir: Path,
+    effective_skill_names: list[str] | None,
+):
+    """Build the catalog only for an explicit delegation-intent turn."""
+    if effective_skill_names is None:
+        return None
+    available = definition_service.list_available_definitions()
+    return build_definition_catalog(
+        skill_definitions=load_skill_owned_definitions(
+            workspace_dir=workspace_dir,
+            effective_skill_names=effective_skill_names,
+        ).definitions,
+        stored_definitions=[
+            definition
+            for definition in available
+            if definition.source == "stored" and ":" not in definition.name
+        ],
+        builtin_definitions=[
+            definition
+            for definition in available
+            if definition.source == "builtin"
+        ],
+    )
+
+
+def _format_skill_definition_directory(catalog) -> str:
+    """Build the bounded Definition directory included in tool metadata."""
+    definitions = (
+        catalog.list_skill_definitions() if catalog is not None else []
+    )
+    if not definitions:
+        return _START_SUBAGENT_DESCRIPTION
+    lines = [_START_SUBAGENT_DESCRIPTION, "Available Skill-owned definitions:"]
+    for definition in definitions:
+        keywords = ", ".join(definition.trigger_keywords) or "(none)"
+        lines.append(
+            f"- {definition.name}: {definition.description} "
+            f"[keywords: {keywords}]",
+        )
+    return "\n".join(lines)
 
 
 def _definition_service_for_tool(

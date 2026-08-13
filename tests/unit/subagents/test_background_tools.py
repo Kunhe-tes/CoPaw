@@ -26,6 +26,8 @@ from swe.app.subagents import (
     PerRunSubAgentRunStore,
     PermissionPolicy,
     SubAgentStartRequest,
+    SubAgentDefinition,
+    SubAgentDefinitionStore,
     builtin_definition_provider,
 )
 from swe.config.config import AgentProfileConfig, ToolsConfig
@@ -450,6 +452,79 @@ async def test_start_subagent_uses_compact_request_and_falls_back_run_scoped(
 
 
 @pytest.mark.asyncio
+async def test_start_subagent_resolves_skill_owned_definition_without_instruction(
+    tmp_path: Path,
+):
+    captured = {}
+
+    async def _start(**kwargs):
+        captured.update(kwargs)
+        return BackgroundSubAgentStartBlocked(limit=1)
+
+    agents_dir = tmp_path / "skills" / "security" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "reviewer.toml").write_text(
+        'name = "reviewer"\n'
+        'description = "Review code for security regressions."\n'
+        'instruction = "Inspect evidence."\n'
+        'trigger_keywords = ["security", "review"]\n',
+        encoding="utf-8",
+    )
+    tools = create_background_subagent_tools(
+        supervisor=SimpleNamespace(start=_start),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+        effective_skill_names=["security"],
+    )
+
+    response = await tools["start_subagent"](
+        name="security:reviewer",
+        objective="Review this payment patch.",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["status"] == "blocked"
+    assert captured["definition"].name == "security:reviewer"
+    assert captured["definition"].instruction == "Inspect evidence."
+    assert captured["definition_match"].reason == "exact_name"
+    assert "security:reviewer" in tools["start_subagent"].__doc__
+    assert "security, review" in tools["start_subagent"].__doc__
+
+
+def test_catalog_ignores_legacy_reserved_stored_name(tmp_path: Path) -> None:
+    store = SubAgentDefinitionStore(tmp_path / "definitions")
+    store.upsert(
+        SubAgentDefinition.model_validate(
+            {
+                "name": "security:legacy",
+                "source": "stored",
+                "description": "Legacy definition.",
+                "instruction": "Inspect evidence.",
+            },
+        ),
+    )
+
+    tools = create_background_subagent_tools(
+        supervisor=SimpleNamespace(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+        effective_skill_names=[],
+    )
+
+    assert "start_subagent" in tools
+
+
+@pytest.mark.asyncio
 async def test_start_subagent_rejects_missing_instruction(tmp_path):
     tools = create_background_subagent_tools(
         supervisor=SimpleNamespace(),
@@ -497,7 +572,7 @@ async def test_start_subagent_rejects_old_agent_name_field(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_start_subagent_rejects_absent_instruction(tmp_path):
+async def test_start_subagent_returns_not_found_without_instruction(tmp_path):
     tools = create_background_subagent_tools(
         supervisor=SimpleNamespace(),
         parent_agent_config=_agent_config(tmp_path),
@@ -515,8 +590,11 @@ async def test_start_subagent_rejects_absent_instruction(tmp_path):
     )
     payload = json.loads(response.content[0]["text"])
 
-    assert payload["status"] == "failed"
-    assert payload["reason"] == "invalid_request"
+    assert payload == {
+        "status": "not_found",
+        "reason": "subagent_definition_not_found",
+        "name": "bad",
+    }
 
 
 @pytest.mark.asyncio

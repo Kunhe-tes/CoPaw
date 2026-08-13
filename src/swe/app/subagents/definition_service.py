@@ -47,6 +47,12 @@ class SubAgentDefinitionService:
 
     def register(self, request: SubAgentRegistrationRequest) -> dict[str, Any]:
         """Upsert a stored definition unless it conflicts with a builtin."""
+        if ":" in request.name:
+            return {
+                "status": "failed",
+                "reason": "reserved_skill_qualified_name",
+                "name": request.name,
+            }
         if self._builtin_name_exists(request.name):
             return {
                 "status": "failed",

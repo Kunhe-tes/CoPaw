@@ -340,12 +340,16 @@ def test_main_agent_registers_plan_interaction_tools_by_mode_and_source_config(
         request_context={"agent_role": "subagent", "plan_mode_enabled": True},
     )
 
-    with bind_source_system_config(_source_config_with_plan_interaction_tools(False)):
+    with bind_source_system_config(
+        _source_config_with_plan_interaction_tools(False),
+    ):
         normal_tools = SWEAgent._create_toolkit(disabled).tools
         plan_mode_tools = SWEAgent._create_toolkit(plan_mode).tools
         subagent_tools = SWEAgent._create_toolkit(subagent).tools
 
-    with bind_source_system_config(_source_config_with_plan_interaction_tools(True)):
+    with bind_source_system_config(
+        _source_config_with_plan_interaction_tools(True),
+    ):
         enabled_normal_tools = SWEAgent._create_toolkit(disabled).tools
 
     for tool_name in ("ask_plan_clarification", "submit_proposed_plan"):
@@ -381,6 +385,38 @@ def test_background_subagent_tools_require_explicit_intent(
     assert "get_subagent" in visible_tools
     assert "cancel_subagent" in visible_tools
     assert "delegate_to_subagent" not in visible_tools
+
+
+def test_start_subagent_description_lists_enabled_skill_definitions(
+    tmp_path: Path,
+) -> None:
+    agents_dir = tmp_path / "skills" / "security" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "reviewer.toml").write_text(
+        'name = "reviewer"\n'
+        'description = "Review code for security regressions."\n'
+        'instruction = "Inspect evidence."\n'
+        'trigger_keywords = ["security", "review"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "skill.json").write_text(
+        '{"layout_version":2,"skills":{"security":{"enabled":true,"channels":["all"]}}}',
+        encoding="utf-8",
+    )
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": "请使用子代理检查变更",
+        },
+    )
+
+    tool = SWEAgent._create_toolkit(agent).tools["start_subagent"]
+    description = tool.json_schema["function"]["description"]
+
+    assert "security:reviewer" in description
+    assert "Review code for security regressions." in description
+    assert "security, review" in description
 
 
 def test_register_subagent_definition_requires_registration_intent(
