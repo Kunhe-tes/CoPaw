@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from swe.app.subagents.skill_definitions import (
     load_skill_owned_definitions,
 )
@@ -206,5 +208,71 @@ instruction = "Inspect evidence."
     assert [definition.name for definition in loaded.definitions] == [
         "security:reviewer",
         "quality:reviewer",
+    ]
+    assert loaded.errors == []
+
+
+def test_loader_uses_resolved_effective_skill_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    builtin_skill = tmp_path / "packaged" / "security"
+    definition_dir = builtin_skill / "agents"
+    definition_dir.mkdir(parents=True)
+    (definition_dir / "reviewer.toml").write_text(
+        'name = "reviewer"\n'
+        'description = "Review code."\n'
+        'instruction = "Inspect evidence."\n',
+        encoding="utf-8",
+    )
+
+    import swe.app.subagents.skill_definitions as loader
+
+    monkeypatch.setattr(
+        loader,
+        "resolve_effective_skill_dir",
+        lambda _workspace, name: builtin_skill if name == "security" else None,
+    )
+
+    loaded = loader.load_skill_owned_definitions(
+        workspace_dir=tmp_path / "workspace",
+        effective_skill_names=["security"],
+    )
+
+    assert [definition.name for definition in loaded.definitions] == [
+        "security:reviewer",
+    ]
+    assert loaded.errors == []
+
+
+def test_loader_skips_symlinked_definition_file(tmp_path: Path) -> None:
+    _write_skill_definition(
+        tmp_path,
+        "security",
+        "valid",
+        'name = "valid"\n'
+        'description = "Valid."\n'
+        'instruction = "Inspect evidence."\n',
+    )
+    outside = tmp_path / "outside.toml"
+    outside.write_text(
+        'name = "outside"\n'
+        'description = "Outside."\n'
+        'instruction = "Should not load."\n',
+        encoding="utf-8",
+    )
+    link = tmp_path / "skills" / "security" / "agents" / "linked.toml"
+    try:
+        link.symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are unavailable on this platform")
+
+    loaded = load_skill_owned_definitions(
+        workspace_dir=tmp_path,
+        effective_skill_names=["security"],
+    )
+
+    assert [definition.name for definition in loaded.definitions] == [
+        "security:valid",
     ]
     assert loaded.errors == []

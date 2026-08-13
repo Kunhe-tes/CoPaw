@@ -48,6 +48,74 @@ _Avoid_: builtin, user, stored
 A reusable **SubAgent Definition** available through the definition registry across more than one **SubAgent Run**. Stored definitions may be built-in or user-owned, but user-owned persistence and CRUD are separate from run-scoped delegation.
 _Avoid_: temporary subagent, inline worker profile
 
+**Skill-owned Stored SubAgent Definition**:
+A reusable **SubAgent Definition** packaged by one Skill and available for new **SubAgent Runs** only while its owning Skill is enabled in the target Agent's Skill Runtime View. Disabling or deleting that Skill prevents new runs without interrupting runs that already captured the definition; updates apply to subsequent Main Agent runs.
+_Avoid_: skill subagent, independent skill agent, user-owned stored definition
+
+**Skill-owned Definition Package**:
+The `agents/<agent-name>.toml` file within a Skill package that declares one **Skill-owned Stored SubAgent Definition**. The package is distributed, scanned, and versioned together with its owning Skill.
+_Avoid_: inline SKILL.md agent, shared definition-store record, agent directory manifest
+
+**Declared SubAgent Dependency Set**:
+The explicit Skill and MCP dependency names in a **Skill-owned Definition Package** that are the sole source of optional capabilities eligible to load for that SubAgent Run. The owning Skill controls the Definition lifecycle but is not implicitly added as a worker capability. The worker does not inherit the target Agent's complete Skill Runtime View or MCP client set.
+_Avoid_: implicit owning-skill injection, inherited workspace skills, all enabled MCP, implicit dependency discovery
+
+**Declared SubAgent Skill Capability**:
+One available Skill in an **Effective SubAgent Dependency Set** that the worker registers through the ordinary Skill Toolkit path, including that Skill's normal prompt and Skill-tool registration behavior. A Definition instruction does not inline the Skill document.
+_Avoid_: embedded SKILL.md body, bypassed Skill Toolkit registration, all-workspace Skill tools
+
+**Effective SubAgent Dependency Set**:
+The subset of a **Declared SubAgent Dependency Set** that is available and authorized for the parent Agent's current run. Skills resolve only from that Agent's enabled Skill Runtime View, while MCPs resolve only from its configured client set; unavailable entries are silently omitted rather than blocking the **SubAgent Run**.
+_Avoid_: cross-agent dependency lookup, failed dependency resolution, all-or-nothing dependency loading, inherited capability set
+
+**Declared MCP Client Capability**:
+One MCP client in a **Declared SubAgent Dependency Set** whose complete exposed tool surface is eligible for the SubAgent Run. The launch snapshot captures the parent Agent's configured client settings; the SubAgent Worker connects it independently and silently omits it when connection fails. Every MCP tool call remains subject to the parent Agent's active Tool Guard, approval, and tenant configuration; a Definition cannot bypass them.
+_Avoid_: parent-client reuse, unguarded MCP access, Definition-owned approval bypass, MCP tool allowlist
+
+**Inherited Built-in Tool Set**:
+The parent Agent's currently enabled built-in tools, used as the default candidate set for a Skill-owned SubAgent when its TOML `[tools].inherit` is true or omitted. The effective set remains bounded by the Definition's `allow`/`deny`, SubAgent policy, and Tool Guard/approval controls; MCP clients are never inherited this way.
+_Avoid_: inherit-all permissions, inherited MCP, Tool Guard bypass, unrestricted child tools
+
+**Background SubAgent Approval Outcome**:
+The result when a Background SubAgent tool call requires human approval: the Tool Guard rejects the call and returns that rejection to the worker. A Background SubAgent Run neither starts an interactive approval request nor waits for a later human decision; only already preapproved or automatically allowed operations execute.
+_Avoid_: background approval dialog, paused-for-approval worker, approval bypass
+
+**Skill-owned Definition Selection**:
+The Main Agent's choice of a **Skill-owned Stored SubAgent Definition** by comparing the Definition's `description` and declared trigger keywords with the delegated need, then starting it by exact `name`. It does not accept caller-supplied role instructions.
+_Avoid_: task-type labels, caller-authored subagent instruction, automatic delegation
+
+**Explicit SubAgent Intent Gate**:
+The requirement that the current user message explicitly mentions a SubAgent before the Main Agent receives Background SubAgent tools. Available **Skill-owned Stored SubAgent Definitions** do not independently expose delegation tools or cause automatic delegation.
+_Avoid_: definition-driven tool exposure, implicit background work, autonomous delegation
+
+**Main-Agent-only Delegation**:
+The rule that Background SubAgent tools are never registered for a SubAgent, including a Skill-owned SubAgent with loaded Skills, MCPs, or mutable built-in tools. Only the Main Agent may create a further SubAgent Run.
+_Avoid_: nested delegation, recursive worker tree, SubAgent orchestration
+
+**Skill-owned Definition Trigger Keywords**:
+The explicit `trigger_keywords` in a **Skill-owned Definition Package** that help the Main Agent select its Definition for a delegated need. They supplement its `description`; they are not a separate automatic execution mechanism.
+_Avoid_: task_types, implicit NLP classification, automatic delegation
+
+**Skill-owned Model Reference**:
+The optional `[model]` provider-and-identifier pair in a **Skill-owned Definition Package**. It may select only a model already configured for the tenant and available to the Main Agent; when unavailable, the SubAgent silently inherits the Main Agent model and the package cannot contain provider connection or credential settings.
+_Avoid_: model-id-only reference, provider configuration, API key, arbitrary model endpoint, failed run for unavailable model
+
+**Skill-owned Model Selection**:
+The use of a resolved **Skill-owned Model Reference** by a Skill-owned SubAgent Worker. Any cloud or local model is eligible when the current tenant configuration resolves its provider-and-identifier pair; built-in and ordinary Stored SubAgent Definitions always inherit the parent model.
+_Avoid_: cloud-only model selection, model switching for built-in definitions, model switching for ordinary stored definitions, model routing in a run-scoped definition
+
+**Skill-owned Delegation Prompt**:
+The SubAgent prompt constructed from its Definition `instruction`, the delegated `objective`, and optional `background`. The Main Agent supplies the task context but cannot replace the Definition's role instruction.
+_Avoid_: instruction argument, parent transcript, inherited main-agent prompt
+
+**Skill-qualified SubAgent Name**:
+The registry-visible name formed by the runtime as `<skill-name>:<local-name>` for a Definition declared in a **Skill-owned Definition Package**. The Main Agent selects and calls this qualified name; the TOML author supplies only the local name.
+_Avoid_: globally unique local name, implicit alternative identifier, display nickname
+
+**Invalid Skill-owned Definition Package**:
+An `agents/<agent-name>.toml` file that cannot be parsed or validated as a safe **Skill-owned Stored SubAgent Definition**. It is omitted while its owning Skill and sibling Definition Packages remain available, and it does not alter the Skill package's ordinary security scan.
+_Avoid_: whole-skill load failure, unsafe best-effort definition, skipped package scan
+
 **SubAgent Definition Store**:
 The tenant-and-agent scoped store for **Stored SubAgent Definitions**. The first implementation stores one definition per JSON file and does not provide cross-pod registry consistency.
 _Avoid_: tenant-global registry, distributed definition database
@@ -56,9 +124,13 @@ _Avoid_: tenant-global registry, distributed definition database
 The definition source value `stored`, used for reusable non-built-in **Stored SubAgent Definitions** regardless of whether they were created by a user, tenant admin, system import, or another registration flow.
 _Avoid_: user source, customized source
 
+**Definition Resolution Precedence**:
+The name-reservation rule for loaded Definitions: a Skill-qualified SubAgent Name is exclusively owned by its Skill, and an inner local name is isolated by that qualification. Stored Definitions may not use any loaded Skill-qualified name, and no custom Definition may use a built-in name, so name resolution has one owner rather than a runtime precedence tie-breaker.
+_Avoid_: name-collision priority, stored-over-skill resolution, custom builtin override, nondeterministic collision handling
+
 **SubAgent Start Request**:
-The compact Main Agent tool request for starting one **SubAgent Run** with a **Run-scoped SubAgent Definition**. It must include a **SubAgent Name**, **Instruction**, and objective; it does not start a built-in or stored definition by name alone.
-_Avoid_: registration payload, full definition schema
+The compact Main Agent tool request for starting one **SubAgent Run**. It always includes a **SubAgent Name** and objective; its optional **Instruction** is considered only when no loaded Definition resolves by name, in which case it creates a **Run-scoped SubAgent Definition**. A resolved built-in, Stored, or Skill-owned Definition ignores caller-supplied Instruction and uses its own.
+_Avoid_: required instruction for every start, instruction override, registration payload, full definition schema
 
 **SubAgent Definition Short-circuit Match**:
 The start-time decision to use an existing **Stored SubAgent Definition** or built-in definition instead of the **Run-scoped SubAgent Definition** described by a **SubAgent Start Request**. The request's **Instruction** may inform matching and audit records, but the matched definition's own **Instruction** controls execution.
@@ -108,6 +180,14 @@ _Avoid_: subagent creation
 A **SubAgent Run** that is started by the Main Agent and observed later through status, result retrieval, or cancellation. It is still one run of a **SubAgent Definition**, not a new definition.
 _Avoid_: detached subagent, subprocess subagent
 
+**SubAgent Launch Snapshot**:
+The immutable execution input captured when a **Background SubAgent Run** starts: its resolved Definition, Effective SubAgent Dependency Set, effective MCP configurations, and selected model or inherited fallback. A running worker does not observe later Skill lifecycle, package, MCP, or model changes.
+_Avoid_: live dependency lookup, mid-run skill reload, mutable worker configuration
+
+**SubAgent Launch Diagnostics**:
+The audit details of a **SubAgent Launch Snapshot**, including the resolved model and loaded or silently skipped Skill and MCP dependencies. They are visible only through detailed run inspection, while ordinary start, wait, and result projections remain compact.
+_Avoid_: default parent-context diagnostics, hidden execution provenance, verbose start result
+
 **SubAgent Research Phase**:
 The portion of a **SubAgent Run** in which the worker gathers task evidence and may use its effective read-only tools. It ends before the worker produces its terminal **AgentResult**.
 _Avoid_: final response, structured-output phase, unbounded agent loop
@@ -127,6 +207,10 @@ _Avoid_: full parent conversation, unbounded transcript, raw worker memory
 **SubAgent Research Turn Budget**:
 The maximum number of ReAct reasoning turns available to a **SubAgent Research Phase**. It does not include the one terminal **SubAgent Text Finalization** call; both phases share the run's total time budget.
 _Avoid_: total model-call budget, finalization turn limit, per-phase timeout
+
+**Skill-owned SubAgent Budget**:
+The optional `[budget]` limits in a **Skill-owned Definition Package** for research turns, tool calls, and elapsed time. Omitted values use the platform defaults; supplied values may only stay within the platform maximums and are intersected with the delegated run budget.
+_Avoid_: unlimited skill budget, definition-raised platform ceiling, separate finalization budget
 
 **SubAgent Research Phase Controller**:
 The SubAgent-specific agent operation that runs the ReAct research loop and reports whether it ended normally or reached its turn limit. It prevents a turn-limit fallback summary from being mistaken for **SubAgent Research Completion**.
@@ -1816,3 +1900,15 @@ Domain Expert: "No. Only a Source Tool Administrator may publish a Source Built-
 Developer: "Will a new source tool appear only when the model asks for it?"
 
 Domain Expert: "No. Every source-enabled tool that the Agent has not disabled is part of the Agent run's catalog from the start of that run."
+
+Developer: "Can the `reviewer` agent in the security Skill collide with a `reviewer` in the Python Skill?"
+
+Domain Expert: "No. The runtime exposes them as `security:reviewer` and `python:reviewer`; each qualified name belongs only to its Skill."
+
+Developer: "Does every enabled Skill become available to `security:reviewer`?"
+
+Domain Expert: "No. It receives only Skills and MCP clients named in its Definition Package. Missing or disabled dependencies are silently omitted."
+
+Developer: "May the reviewer edit a file?"
+
+Domain Expert: "Only when its inherited built-in tool set remains permitted by its allow/deny settings and by the parent Agent's Tool Guard and approval policy. A background run never waits for a new approval."

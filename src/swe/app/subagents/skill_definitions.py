@@ -10,6 +10,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from ...agents.skills_manager import resolve_effective_skill_dir
 from .models import (
     BudgetConfig,
     KNOWN_BUILTIN_TOOLS,
@@ -181,10 +182,15 @@ def load_skill_owned_definitions(
     errors: list[SkillDefinitionLoadError] = []
     seen_local_names: dict[tuple[str, str], Path] = {}
     for skill_name in effective_skill_names:
-        agents_dir = Path(workspace_dir) / "skills" / skill_name / "agents"
-        if not agents_dir.is_dir():
+        skill_dir = resolve_effective_skill_dir(workspace_dir, skill_name)
+        if skill_dir is None or skill_dir.is_symlink():
+            continue
+        agents_dir = skill_dir / "agents"
+        if not agents_dir.is_dir() or agents_dir.is_symlink():
             continue
         for path in sorted(agents_dir.glob("*.toml")):
+            if path.is_symlink() or not path.is_file():
+                continue
             try:
                 definition = _load_one(path, skill_name)
                 local_name = definition.skill_owned.local_name  # type: ignore[union-attr]
