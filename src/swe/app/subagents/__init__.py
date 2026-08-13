@@ -31,8 +31,10 @@ from .models import (
     SkillOwnedToolConfig,
 )
 from .skill_definitions import (
+    SubAgentDefinitionCatalog,
     SkillDefinitionLoadError,
     SkillDefinitionLoadResult,
+    build_definition_catalog,
     load_skill_owned_definitions,
 )
 from .permissions import compose_effective_policy, validate_tool_call
@@ -92,6 +94,7 @@ __all__ = [
     "ToolAuthorizationDecision",
     "SkillDefinitionLoadError",
     "SkillDefinitionLoadResult",
+    "SubAgentDefinitionCatalog",
     "SkillOwnedDefinitionMetadata",
     "SkillOwnedModelReference",
     "SkillOwnedToolConfig",
@@ -103,4 +106,5 @@ __all__ = [
     "normalize_name",
     "validate_tool_call",
     "load_skill_owned_definitions",
+    "build_definition_catalog",
 ]

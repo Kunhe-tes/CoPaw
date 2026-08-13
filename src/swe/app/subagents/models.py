@@ -539,11 +539,11 @@ class SubAgentStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    instruction: str
+    instruction: str | None = None
     objective: str
     background: str = ""
 
-    @field_validator("name", "instruction", "objective", mode="after")
+    @field_validator("name", "objective", mode="after")
     @classmethod
     def _non_empty_required_string(cls, value: str) -> str:
         value = value.strip()
@@ -553,7 +553,12 @@ class SubAgentStartRequest(BaseModel):
 
     @field_validator("instruction")
     @classmethod
-    def _instruction_size(cls, value: str) -> str:
+    def _instruction_size(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("field must be non-empty")
         if len(value.encode("utf-8")) > 8192:
             raise ValueError("instruction exceeds 8192 bytes")
         return value

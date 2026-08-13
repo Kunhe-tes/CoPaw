@@ -14,6 +14,7 @@ from .models import (
     SubAgentStartRequest,
 )
 from .registry import AgentRegistry
+from .skill_definitions import SubAgentDefinitionCatalog
 
 MIN_REGISTRATION_MAX_TURNS = 1
 MIN_REGISTRATION_MAX_TOOL_CALLS = 0
@@ -88,6 +89,10 @@ class SubAgentDefinitionService:
         owner_scope: str,
     ) -> SubAgentDefinition:
         """Build a definition that is valid only for one SubAgent run."""
+        if request.instruction is None:
+            raise ValueError(
+                "instruction is required for run-scoped definition",
+            )
         return SubAgentDefinition.model_validate(
             {
                 "name": request.name,
@@ -119,6 +124,28 @@ class SubAgentDefinitionService:
     ) -> DefinitionMatchResult | None:
         """Match a compact start request against reusable definitions."""
         return self._matcher.match(request, self.list_available_definitions())
+
+    def resolve_start_definition(
+        self,
+        request: SubAgentStartRequest,
+        catalog: SubAgentDefinitionCatalog,
+    ) -> DefinitionMatchResult | None:
+        """Resolve an exact catalog name before legacy matcher fallback."""
+        exact = catalog.resolve_exact(request.name)
+        if exact is not None:
+            from .models import DefinitionMatchMetadata
+
+            return DefinitionMatchResult(
+                definition=exact,
+                metadata=DefinitionMatchMetadata(
+                    matched=True,
+                    definition_name=exact.name,
+                    definition_source=exact.source,
+                    score=1.0,
+                    reason="exact_name",
+                ),
+            )
+        return self._matcher.match(request, catalog.list_legacy_definitions())
 
     def _builtin_name_exists(self, name: str) -> bool:
         return any(

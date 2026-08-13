@@ -6,8 +6,38 @@ from pathlib import Path
 import pytest
 
 from swe.app.subagents.skill_definitions import (
+    build_definition_catalog,
     load_skill_owned_definitions,
 )
+from swe.app.subagents.models import (
+    DefinitionValidationError,
+    SkillOwnedDefinitionMetadata,
+    SubAgentDefinition,
+)
+
+
+def _definition(
+    name: str,
+    *,
+    source: str = "stored",
+    skill_name: str | None = None,
+) -> SubAgentDefinition:
+    metadata = None
+    if skill_name is not None:
+        metadata = SkillOwnedDefinitionMetadata(
+            skill_name=skill_name,
+            local_name=name.removeprefix(f"{skill_name}:"),
+        )
+    return SubAgentDefinition.model_validate(
+        {
+            "name": name,
+            "source": source,
+            "owner_scope": f"skill:{skill_name}" if skill_name else source,
+            "description": "Review code.",
+            "instruction": "Inspect evidence.",
+            "skill_owned": metadata,
+        },
+    )
 
 
 def _write_skill_definition(
@@ -276,3 +306,43 @@ def test_loader_skips_symlinked_definition_file(tmp_path: Path) -> None:
         "security:valid",
     ]
     assert loaded.errors == []
+
+
+def test_catalog_resolves_skill_owned_name_exactly_before_legacy_matching() -> (
+    None
+):
+    catalog = build_definition_catalog(
+        skill_definitions=[
+            _definition("security:reviewer", skill_name="security"),
+        ],
+        stored_definitions=[_definition("reviewer")],
+        builtin_definitions=[_definition("risk-reviewer", source="builtin")],
+    )
+
+    assert (
+        catalog.resolve_exact("security:reviewer").name == "security:reviewer"
+    )
+    assert catalog.resolve_exact("reviewer").name == "reviewer"
+    assert catalog.resolve_exact("security:missing") is None
+
+
+def test_catalog_rejects_stored_claim_of_skill_qualified_name() -> None:
+    with pytest.raises(DefinitionValidationError, match="reserved"):
+        build_definition_catalog(
+            skill_definitions=[
+                _definition("security:reviewer", skill_name="security"),
+            ],
+            stored_definitions=[_definition("security:reviewer")],
+            builtin_definitions=[],
+        )
+
+
+def test_catalog_rejects_custom_claim_of_builtin_name() -> None:
+    with pytest.raises(DefinitionValidationError, match="builtin"):
+        build_definition_catalog(
+            skill_definitions=[],
+            stored_definitions=[_definition("risk-reviewer")],
+            builtin_definitions=[
+                _definition("risk-reviewer", source="builtin"),
+            ],
+        )

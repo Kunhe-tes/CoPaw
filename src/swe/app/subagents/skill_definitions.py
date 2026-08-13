@@ -13,12 +13,14 @@ from pydantic import ValidationError
 from ...agents.skills_manager import resolve_effective_skill_dir
 from .models import (
     BudgetConfig,
+    DefinitionValidationError,
     KNOWN_BUILTIN_TOOLS,
     SkillOwnedDefinitionMetadata,
     SkillOwnedModelReference,
     SkillOwnedToolConfig,
     SubAgentDefinition,
 )
+from .registry import AgentRegistry, InMemoryDefinitionProvider
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -55,6 +57,107 @@ class SkillDefinitionLoadError:
 class SkillDefinitionLoadResult:
     definitions: list[SubAgentDefinition]
     errors: list[SkillDefinitionLoadError]
+
+
+class SubAgentDefinitionCatalog:
+    """Resolve Skill-owned definitions without changing legacy matching."""
+
+    def __init__(
+        self,
+        *,
+        skill_definitions: list[SubAgentDefinition],
+        legacy_registry: AgentRegistry,
+    ) -> None:
+        self._skill_definitions = {
+            definition.name: definition for definition in skill_definitions
+        }
+        self._legacy_registry = legacy_registry
+
+    def resolve_exact(self, name: str) -> SubAgentDefinition | None:
+        """Resolve a qualified Skill name, then an enabled legacy name."""
+        definition = self._skill_definitions.get(name)
+        if definition is not None:
+            return definition if definition.enabled else None
+        try:
+            return self._legacy_registry.resolve(name)
+        except KeyError:
+            return None
+
+    def list_skill_definitions(self) -> list[SubAgentDefinition]:
+        """List enabled Skill-owned definitions in catalog order."""
+        return [
+            definition
+            for definition in self._skill_definitions.values()
+            if definition.enabled
+        ]
+
+    def list_legacy_definitions(self) -> list[SubAgentDefinition]:
+        """List enabled Stored and built-in definitions for legacy matching."""
+        return [
+            definition
+            for definition in self._legacy_registry.list()
+            if definition.enabled
+        ]
+
+
+def _validate_skill_definition_ownership(
+    definition: SubAgentDefinition,
+    *,
+    seen_names: set[str],
+) -> None:
+    metadata = definition.skill_owned
+    if metadata is None:
+        raise DefinitionValidationError(
+            "Skill-owned definition requires skill metadata",
+        )
+    expected_name = f"{metadata.skill_name}:{metadata.local_name}"
+    if definition.name != expected_name:
+        raise DefinitionValidationError(
+            "Skill-owned definition name must match its Skill qualifier",
+        )
+    if definition.name in seen_names:
+        raise DefinitionValidationError(
+            f"duplicate Skill-owned definition: {definition.name}",
+        )
+    seen_names.add(definition.name)
+
+
+def build_definition_catalog(
+    *,
+    skill_definitions: list[SubAgentDefinition],
+    stored_definitions: list[SubAgentDefinition],
+    builtin_definitions: list[SubAgentDefinition],
+) -> SubAgentDefinitionCatalog:
+    """Build a collision-free catalog for one Main Agent runtime view."""
+    seen_skill_names: set[str] = set()
+    for definition in skill_definitions:
+        _validate_skill_definition_ownership(
+            definition,
+            seen_names=seen_skill_names,
+        )
+
+    builtin_names = {definition.name for definition in builtin_definitions}
+    for definition in stored_definitions:
+        if ":" in definition.name or definition.name in seen_skill_names:
+            raise DefinitionValidationError(
+                "stored definition cannot claim reserved Skill-qualified "
+                f"SubAgent name: {definition.name}",
+            )
+        if definition.name in builtin_names:
+            raise DefinitionValidationError(
+                "stored definition cannot shadow builtin SubAgent definition: "
+                f"{definition.name}",
+            )
+
+    return SubAgentDefinitionCatalog(
+        skill_definitions=skill_definitions,
+        legacy_registry=AgentRegistry(
+            [
+                InMemoryDefinitionProvider(builtin_definitions),
+                InMemoryDefinitionProvider(stored_definitions),
+            ],
+        ),
+    )
 
 
 def _unknown_keys(payload: dict[str, Any], allowed: frozenset[str]) -> None:

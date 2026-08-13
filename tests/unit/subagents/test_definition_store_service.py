@@ -10,9 +10,11 @@ import pytest
 
 from swe.app.subagents import (
     AgentRegistry,
+    build_definition_catalog,
     InMemoryDefinitionProvider,
     SubAgentDefinitionService,
     SubAgentDefinitionStore,
+    SubAgentDefinition,
     SubAgentRegistrationRequest,
     SubAgentStartRequest,
     assign_subagent_nickname,
@@ -175,6 +177,57 @@ def test_service_builds_run_scoped_definition(tmp_path: Path) -> None:
     assert definition.source == "run_scoped"
     assert definition.owner_scope == "tenant-a/agent-b"
     assert definition.instruction == "Act as an analyst for this run."
+
+
+def test_service_requires_instruction_only_for_run_scoped_definition(
+    tmp_path: Path,
+) -> None:
+    service = SubAgentDefinitionService(
+        store=SubAgentDefinitionStore(tmp_path),
+        builtin_registry=AgentRegistry([builtin_definition_provider()]),
+    )
+    request = SubAgentStartRequest.model_validate(
+        {"name": "ad-hoc", "objective": "Inspect the patch."},
+    )
+
+    with pytest.raises(ValueError, match="instruction is required"):
+        service.build_run_scoped_definition(request, owner_scope="tenant-a")
+
+
+def test_service_resolves_exact_skill_owned_definition_without_instruction(
+    tmp_path: Path,
+) -> None:
+    service = SubAgentDefinitionService(
+        store=SubAgentDefinitionStore(tmp_path),
+        builtin_registry=AgentRegistry([builtin_definition_provider()]),
+    )
+    skill_definition = SubAgentDefinition.model_validate(
+        {
+            "name": "security:reviewer",
+            "source": "stored",
+            "owner_scope": "skill:security",
+            "description": "Review code.",
+            "instruction": "Inspect evidence.",
+            "skill_owned": {
+                "skill_name": "security",
+                "local_name": "reviewer",
+            },
+        },
+    )
+    catalog = build_definition_catalog(
+        skill_definitions=[skill_definition],
+        stored_definitions=[],
+        builtin_definitions=builtin_definition_provider().list_definitions(),
+    )
+    request = SubAgentStartRequest.model_validate(
+        {"name": "security:reviewer", "objective": "Review the patch."},
+    )
+
+    result = service.resolve_start_definition(request, catalog)
+
+    assert result is not None
+    assert result.definition == skill_definition
+    assert result.metadata.reason == "exact_name"
 
 
 def test_service_truncates_run_scoped_description_by_utf8_bytes(
