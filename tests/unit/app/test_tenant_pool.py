@@ -6,10 +6,10 @@ Tests lazy creation, cache hits, concurrent creation safety, and stop-all cleanu
 
 # pylint: disable=wrong-import-position,protected-access,unused-import
 import asyncio
-import logging
 import json
 import sys
 from pathlib import Path
+import time
 from unittest.mock import AsyncMock, Mock, patch
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent / "src"))
@@ -688,7 +688,10 @@ class TestTenantBootstrapObservability:
 
         monkeypatch.setattr(pool, "_check_existing_bootstrap", fake_check)
         with patch.object(tenant_pool_module.logger, "debug") as mock_debug:
-            await pool.ensure_bootstrap("tenant-1")
+            outcome = await pool.ensure_bootstrap("tenant-1")
+
+        assert outcome.status == "already_ready"
+        assert outcome.tenant_id == "tenant-1"
 
         assert any(
             call.args
@@ -716,15 +719,65 @@ class TestTenantBootstrapObservability:
         monkeypatch.setattr(pool, "_check_existing_bootstrap", fake_check)
         monkeypatch.setattr(pool, "_perform_bootstrap", perform_bootstrap)
         with patch.object(tenant_pool_module.logger, "debug") as mock_debug:
-            await pool.ensure_bootstrap("tenant-1")
+            outcome = await pool.ensure_bootstrap("tenant-1")
 
         perform_bootstrap.assert_awaited_once()
+        assert outcome.status == "bootstrapped"
+        assert outcome.tenant_id == "tenant-1"
         assert any(
             call.args
             and "bootstrap_fast_path_miss tenant_id=%s" in call.args[0]
             and call.args[1] == "tenant-1"
             for call in mock_debug.call_args_list
         )
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_recovery_does_not_block_event_loop(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Recovery filesystem work must execute outside the event loop."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+
+        class NoopFlock:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+        async def fake_check(*_args, **_kwargs) -> bool:
+            return False
+
+        def blocking_recovery(self, **_kwargs):
+            del self
+            time.sleep(0.1)
+            return {"recovered_paths": []}
+
+        pool = TenantWorkspacePool(tmp_path)
+        monkeypatch.setattr(tenant_pool_module, "AsyncFlock", NoopFlock)
+        monkeypatch.setattr(pool, "_check_existing_bootstrap", fake_check)
+        monkeypatch.setattr(
+            pool,
+            "_require_ready_source_template",
+            lambda *_args: None,
+        )
+        monkeypatch.setattr(
+            tenant_pool_module.TenantInitializer,
+            "recover_seeded_bootstrap",
+            blocking_recovery,
+        )
+
+        started_at = time.perf_counter()
+        task = asyncio.create_task(pool.ensure_bootstrap("tenant-1"))
+        await asyncio.sleep(0)
+
+        assert time.perf_counter() - started_at < 0.05
+        await task
 
 
 class TestTenantBootstrapProcessLock:

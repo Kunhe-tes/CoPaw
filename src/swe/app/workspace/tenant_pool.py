@@ -13,7 +13,7 @@ import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 import time
-from typing import Optional
+from typing import Literal, Optional
 
 from ...config.context import (
     resolve_runtime_identity,
@@ -48,6 +48,15 @@ class TenantWorkspaceEntry:
     created_at: float = field(default_factory=time.monotonic)
     last_accessed_at: float = field(default_factory=time.monotonic)
     access_count: int = 0
+
+
+@dataclass(frozen=True)
+class BootstrapOutcome:
+    """Authoritative successful outcome of tenant bootstrap."""
+
+    tenant_id: str
+    status: Literal["already_ready", "bootstrapped"]
+    duration_ms: int
 
 
 class TenantWorkspacePool:
@@ -86,9 +95,6 @@ class TenantWorkspacePool:
 
         # Tenant workspace registry: tenant_id -> TenantWorkspaceEntry
         self._workspaces: dict[str, TenantWorkspaceEntry] = {}
-
-        # Per-tenant bootstrap locks to prevent duplicate concurrent bootstrap
-        self._bootstrap_locks: dict[str, asyncio.Lock] = {}
 
         # Global lock for registry operations
         self._registry_lock = asyncio.Lock()
@@ -142,23 +148,6 @@ class TenantWorkspacePool:
             Path to the tenant's workspace directory.
         """
         return self._get_tenant_workspace_dir(tenant_id)
-
-    async def _get_or_create_bootstrap_lock(
-        self,
-        tenant_id: str,
-    ) -> asyncio.Lock:
-        """Get or create a bootstrap lock for a tenant.
-
-        Args:
-            tenant_id: The tenant identifier.
-
-        Returns:
-            Lock for the tenant's bootstrap.
-        """
-        async with self._registry_lock:
-            if tenant_id not in self._bootstrap_locks:
-                self._bootstrap_locks[tenant_id] = asyncio.Lock()
-            return self._bootstrap_locks[tenant_id]
 
     def _resolve_bootstrap_tenant_id(
         self,
@@ -367,7 +356,8 @@ class TenantWorkspacePool:
                 "tenant_bootstrap_recovery_started tenant_id=%s",
                 bootstrap_tenant_id,
             )
-            recovery_result = initializer.recover_seeded_bootstrap(
+            recovery_result = await asyncio.to_thread(
+                initializer.recover_seeded_bootstrap,
                 enable_bootstrap_chat=enable_bootstrap_chat,
             )
             logger.info(
@@ -433,8 +423,8 @@ class TenantWorkspacePool:
         tenant_name: str | None = None,
         bbk_id: str | None = None,
         enable_bootstrap_chat: bool = True,
-    ) -> None:
-        """Ensure tenant directory is bootstrapped (minimal).
+    ) -> BootstrapOutcome:
+        """Ensure tenant directory has a complete, strict bootstrap.
 
         Thread-safe: Uses per-tenant locking to prevent duplicate bootstrap.
 
@@ -460,6 +450,16 @@ class TenantWorkspacePool:
             scope_id,
         )
 
+        def outcome(
+            status: Literal["already_ready", "bootstrapped"],
+        ) -> BootstrapOutcome:
+            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            return BootstrapOutcome(
+                tenant_id=bootstrap_tenant_id,
+                status=status,
+                duration_ms=duration_ms,
+            )
+
         # Fast path: check if already bootstrapped
         if await self._check_existing_bootstrap(
             bootstrap_tenant_id,
@@ -467,18 +467,15 @@ class TenantWorkspacePool:
             source_id,
             scope_id,
         ):
-            duration_ms = int((time.perf_counter() - started_at) * 1000)
+            result = outcome("already_ready")
             logger.debug(
                 "bootstrap_fast_path_hit tenant_id=%s duration_ms=%d",
                 bootstrap_tenant_id,
-                duration_ms,
+                result.duration_ms,
             )
-            return
+            return result
 
-        # Slow path: bootstrap with per-tenant lock
-        bootstrap_lock = await self._get_or_create_bootstrap_lock(
-            bootstrap_tenant_id,
-        )
+        # Slow path: bootstrap with cross-process file lock.
         try:
             async with AsyncFlock(
                 self._get_tenant_workspace_dir(bootstrap_tenant_id)
@@ -491,15 +488,13 @@ class TenantWorkspacePool:
                     source_id,
                     scope_id,
                 ):
-                    duration_ms = int(
-                        (time.perf_counter() - started_at) * 1000,
-                    )
+                    result = outcome("already_ready")
                     logger.debug(
                         "bootstrap_fast_path_hit tenant_id=%s duration_ms=%d",
                         bootstrap_tenant_id,
-                        duration_ms,
+                        result.duration_ms,
                     )
-                    return
+                    return result
 
                 self._require_ready_source_template(source_id)
                 logger.info(
@@ -515,12 +510,13 @@ class TenantWorkspacePool:
                     bbk_id,
                     enable_bootstrap_chat,
                 )
-                duration_ms = int((time.perf_counter() - started_at) * 1000)
+                result = outcome("bootstrapped")
                 logger.debug(
                     "bootstrap_fast_path_miss tenant_id=%s duration_ms=%d",
                     bootstrap_tenant_id,
-                    duration_ms,
+                    result.duration_ms,
                 )
+                return result
         except BootstrapLockTimeout as exc:
             logger.warning(
                 "tenant_bootstrap_lock_timeout tenant_id=%s",

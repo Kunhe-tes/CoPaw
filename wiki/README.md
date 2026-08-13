@@ -14,6 +14,7 @@
 | [Session 压缩](session-compaction/README.md) | 会话压缩相关行为 |
 | [Session 技能刷新](session-skill-refresh/README.md) | 会话内技能刷新相关行为 |
 | [用户环境变量配置](user-env-config/README.md) | tenant/source scope 下的运行时环境变量配置和使用 |
+| [租户请求与 Workspace 初始化](tenant-workspace-initialization/README.md) | 租户请求如何完成身份绑定、目录 bootstrap、source 模板校验和延迟启动 Agent Runtime |
 
 ## 本地分支补充
 
