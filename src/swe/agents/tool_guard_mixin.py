@@ -128,6 +128,19 @@ _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
 _PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
 
 
+def _subagent_mcp_server_key(
+    mcp_server: str | None,
+    request_context: dict[str, Any],
+) -> str | None:
+    """Translate a registered MCP client name back to its snapshot key."""
+    if mcp_server is None:
+        return None
+    mapping = request_context.get("subagent_mcp_server_keys")
+    if not isinstance(mapping, dict):
+        return mcp_server
+    return str(mapping.get(mcp_server, mcp_server))
+
+
 def _has_plan_mode_shell_structure(command: str) -> bool:
     return any(char in command for char in _PLAN_MODE_SHELL_META_CHARS)
 
@@ -1403,6 +1416,16 @@ class ToolGuardMixin:
                         PermissionPolicy.model_validate(policy_payload),
                         tool_name,
                         tool_input,
+                        mcp_server=_subagent_mcp_server_key(
+                            self._resolve_mcp_server(tool_name),
+                            request_context,
+                        ),
+                        allowed_mcp_servers=set(
+                            request_context.get(
+                                "subagent_allowed_mcp_servers",
+                            )
+                            or [],
+                        ),
                     )
                     if not decision.allowed:
                         reason = decision.reason

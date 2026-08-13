@@ -19,10 +19,11 @@ from swe.app.subagents import (
     DelegationSpec,
     PerRunSubAgentRunStore,
     PermissionPolicy,
+    SkillOwnedDefinitionMetadata,
     SubAgentStartRequest,
     builtin_definition_provider,
 )
-from swe.config.config import AgentProfileConfig
+from swe.config.config import AgentProfileConfig, MCPClientConfig, MCPConfig
 from swe.app.tenant_context import bind_tenant_context
 
 
@@ -298,6 +299,36 @@ async def test_cancel_terminates_process_group(
 
 
 @pytest.mark.asyncio
+async def test_cancel_removes_unconsumed_private_dependency_snapshots(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A killed worker cannot leave one-shot credentials behind."""
+    from swe.app.subagents import supervisor as supervisor_module
+
+    popen_factory = _FakePopenFactory()
+    supervisor = BackgroundSubAgentSupervisor(popen_factory=popen_factory)
+    scope = _scope(tmp_path)
+    started = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+    )
+    mcp_snapshot = scope.run_store_dir / f".{started.run_id}.mcp.json"
+    model_snapshot = scope.run_store_dir / f".{started.run_id}.model.json"
+    mcp_snapshot.write_text("{}", encoding="utf-8")
+    model_snapshot.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(supervisor_module.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(supervisor_module.os, "killpg", lambda *_args: None)
+
+    await supervisor.cancel(scope, started.run_id)
+
+    assert not mcp_snapshot.exists()
+    assert not model_snapshot.exists()
+
+
+@pytest.mark.asyncio
 async def test_start_failure_uses_structured_worker_start_error(tmp_path):
     def _raising_popen(command, **kwargs):
         raise OSError("no worker")
@@ -317,3 +348,53 @@ async def test_start_failure_uses_structured_worker_start_error(tmp_path):
 
     assert response.status == "failed"
     assert response.errors[-1].code == "worker_start_failed"
+
+
+@pytest.mark.asyncio
+async def test_start_failure_removes_private_mcp_snapshot(tmp_path):
+    def _raising_popen(command, **kwargs):
+        raise OSError("no worker")
+
+    config = _agent_config(tmp_path).model_copy(
+        update={
+            "mcp": MCPConfig(
+                clients={
+                    "github": MCPClientConfig(
+                        name="github",
+                        command="github-mcp",
+                    ),
+                },
+            ),
+        },
+    )
+    definition = (
+        AgentRegistry([builtin_definition_provider()])
+        .resolve(
+            "plan-researcher",
+        )
+        .model_copy(
+            update={
+                "name": "quality:reviewer",
+                "skill_owned": SkillOwnedDefinitionMetadata(
+                    skill_name="quality",
+                    local_name="reviewer",
+                    declared_mcps=["github"],
+                ),
+            },
+        )
+    )
+    supervisor = BackgroundSubAgentSupervisor(
+        popen_factory=_raising_popen,
+    )
+    scope = _scope(tmp_path)
+
+    response = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=config,
+        workspace_dir=tmp_path,
+        definition=definition,
+    )
+
+    assert response.status == "failed"
+    assert not list(scope.run_store_dir.glob(".*.mcp.json"))

@@ -217,6 +217,30 @@ instruction = "Inspect evidence."
     assert "duplicate local name" in loaded.errors[0].message
 
 
+def test_duplicate_declared_dependencies_only_skip_bad_definition(
+    tmp_path: Path,
+) -> None:
+    _write_skill_definition(
+        tmp_path,
+        "security",
+        "bad-dependencies",
+        """
+name = "bad-dependencies"
+description = "Invalid duplicate dependencies."
+instruction = "Inspect evidence."
+skills = ["security", "security"]
+""",
+    )
+
+    loaded = load_skill_owned_definitions(
+        workspace_dir=tmp_path,
+        effective_skill_names=["security"],
+    )
+
+    assert loaded.definitions == []
+    assert "skills cannot contain duplicates" in loaded.errors[0].message
+
+
 def test_same_local_name_in_different_skills_is_valid(tmp_path: Path) -> None:
     for skill_name in ("security", "quality"):
         _write_skill_definition(

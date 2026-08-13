@@ -246,6 +246,11 @@ def create_background_subagent_tools(
                 definition=definition,
                 start_request=start_request,
                 definition_match=definition_match,
+                effective_skill_names=(
+                    list(effective_skill_names or [])
+                    if definition.skill_owned is not None
+                    else []
+                ),
             )
         except Exception as exc:
             return _json_response(
@@ -546,6 +551,9 @@ def _compact_record(
                 "worker": _compact_worker(
                     getattr(record, "worker", None),
                 ),
+                "launch_diagnostics": _safe_launch_diagnostics(
+                    getattr(record, "launch_diagnostics", {}),
+                ),
                 "manageable": manageable,
             },
         )
@@ -567,6 +575,26 @@ def _compact_worker(worker: Any) -> dict[str, Any] | None:
         "exit_code": getattr(worker, "exit_code", None),
         "exited_at": _dump_json_value(getattr(worker, "exited_at", None)),
     }
+
+
+def _safe_launch_diagnostics(value: Any) -> dict[str, Any]:
+    """Return the allowlisted launch diagnostics for detailed inspection."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for field in (
+        "loaded_skills",
+        "skipped_skills",
+        "snapshotted_mcps",
+        "connected_mcps",
+        "skipped_mcps",
+        "resolved_model",
+    ):
+        if field in value and value[field] not in (None, [], {}):
+            result[field] = _dump_json_value(value[field])
+    return result
 
 
 def _parent_policy_from_config(parent_agent_config: Any) -> PermissionPolicy:

@@ -42,6 +42,11 @@ from .permissions import (
     compose_effective_policy,
     validate_tool_call,
 )
+from .launch_snapshot import (
+    capture_launch_dependencies,
+    read_and_remove_private_mcp_snapshot,
+    resolve_skill_owned_model_slot,
+)
 from .nicknames import assign_subagent_nickname
 from .registry import (
     AgentRegistry,
@@ -107,9 +112,12 @@ __all__ = [
     "assign_subagent_nickname",
     "builtin_definition_provider",
     "build_definition_policy",
+    "capture_launch_dependencies",
     "compose_effective_policy",
     "normalize_name",
     "validate_tool_call",
     "load_skill_owned_definitions",
+    "read_and_remove_private_mcp_snapshot",
+    "resolve_skill_owned_model_slot",
     "build_definition_catalog",
 ]

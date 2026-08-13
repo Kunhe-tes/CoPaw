@@ -158,6 +158,98 @@ async def test_runtime_creates_fresh_agent_with_subagent_safe_options(
     context = json.loads(created.finalization_prompt[1].get_text_content())
     assert context["delegation_spec"]["task_id"] == "task-1"
     assert "research_record" in context
+    system_prompt = created.kwargs["system_prompt_override"]
+    assert definition.instruction in system_prompt
+    assert "Objective: Find relevant files" in system_prompt
+    assert "Background: User asked for a plan" in system_prompt
+
+
+@pytest.mark.asyncio
+async def test_runtime_uses_only_snapshotted_skills_and_connected_mcp_clients(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Skill-owned runs receive copied Skill roots and their own clients."""
+    from swe.app.subagents import runtime as runtime_module
+
+    class McpAgent(_FakeSWEAgent):
+        async def register_mcp_clients(self):
+            self.mcp_registered = True
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [Msg("Friday", "found files", "assistant")]
+    _FakeSWEAgent.final_texts = ["found files"]
+    monkeypatch.setattr(runtime_module, "SWEAgent", McpAgent)
+    definition = AgentRegistry([builtin_definition_provider()]).resolve(
+        "plan-researcher",
+    )
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+    copied_skill = tmp_path / "run.skills" / "quality"
+    copied_skill.mkdir(parents=True)
+    (copied_skill / "SKILL.md").write_text("# Quality", encoding="utf-8")
+    client = SimpleNamespace(name="github")
+
+    await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+        skill_snapshot_dirs=[str(copied_skill)],
+        mcp_clients=[client],
+    )
+
+    created = _FakeSWEAgent.instances[0]
+    assert created.kwargs["enable_workspace_skills"] is True
+    assert created.kwargs["workspace_skill_dirs"] == {"quality": copied_skill}
+    assert created.kwargs["mcp_clients"] == [client]
+    assert created.mcp_registered is True
+    assert created.kwargs["request_context"][
+        "subagent_allowed_mcp_servers"
+    ] == [
+        "github",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_runtime_passes_skill_owned_model_slot_to_worker_agent(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """The resolved launch model is an opt-in worker-only constructor value."""
+    from swe.app.subagents import runtime as runtime_module
+    from swe.providers.models import ModelSlotConfig
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [Msg("Friday", "found files", "assistant")]
+    _FakeSWEAgent.final_texts = ["found files"]
+    monkeypatch.setattr(runtime_module, "SWEAgent", _FakeSWEAgent)
+    definition = AgentRegistry([builtin_definition_provider()]).resolve(
+        "plan-researcher",
+    )
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(), definition, PermissionPolicy.readonly()
+    )
+    slot = ModelSlotConfig(provider_id="openai", model="gpt-5-mini")
+
+    await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+        model_slot_override=slot,
+    )
+
+    assert _FakeSWEAgent.instances[0].kwargs["model_slot_override"] == slot
 
 
 @pytest.mark.asyncio

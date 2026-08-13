@@ -12,6 +12,7 @@ from typing import Any
 
 from agentscope.message import Msg
 from ...config.config import AgentProfileConfig, ToolsConfig
+from ...providers.models import ModelSlotConfig
 from .models import (
     AgentError,
     AgentResult,
@@ -22,7 +23,7 @@ from .models import (
     SubAgentDefinition,
     SubAgentRunRecord,
 )
-from .run_store import InMemorySubAgentRunStore
+from .run_store import InMemorySubAgentRunStore, SubAgentRunStore
 
 SWEAgent: Any = None
 _FINALIZATION_TURN_RESERVE = 1
@@ -40,7 +41,7 @@ _TEXT_FINALIZATION_MESSAGE = (
 class SubAgentRuntime:
     """Run one fresh-context SubAgent and persist its final summary."""
 
-    def __init__(self, store: InMemorySubAgentRunStore | None = None):
+    def __init__(self, store: SubAgentRunStore | None = None):
         self._store = store or InMemorySubAgentRunStore()
 
     async def run(
@@ -53,6 +54,12 @@ class SubAgentRuntime:
         workspace_dir: Path,
         effective_policy: PermissionPolicy,
         request_context: dict[str, Any] | None = None,
+        skill_snapshot_dirs: list[str] | None = None,
+        mcp_clients: list[Any] | None = None,
+        model_slot_override: ModelSlotConfig | None = None,
+        model_provider_override: Any | None = None,
+        fallback_model_slot: ModelSlotConfig | None = None,
+        fallback_model_provider: Any | None = None,
     ) -> AgentResult:
         """Execute the SubAgent and persist terminal state."""
         started = time.monotonic()
@@ -65,6 +72,30 @@ class SubAgentRuntime:
                 effective_policy,
                 budget,
             )
+            subagent_context["subagent_allowed_mcp_servers"] = sorted(
+                {
+                    str(
+                        getattr(
+                            client,
+                            "_swe_subagent_mcp_key",
+                            getattr(client, "name", ""),
+                        ),
+                    )
+                    for client in (mcp_clients or [])
+                    if getattr(client, "name", None)
+                },
+            )
+            subagent_context["subagent_mcp_server_keys"] = {
+                str(getattr(client, "name", "")): str(
+                    getattr(
+                        client,
+                        "_swe_subagent_mcp_key",
+                        getattr(client, "name", ""),
+                    ),
+                )
+                for client in (mcp_clients or [])
+                if getattr(client, "name", None)
+            }
             agent_cls = SWEAgent
             if agent_cls is None:
                 from ...agents.react_agent import SWEAgent as ImportedSWEAgent
@@ -80,12 +111,19 @@ class SubAgentRuntime:
                 ),
                 env_context=None,
                 enable_memory_manager=False,
-                mcp_clients=[],
+                mcp_clients=mcp_clients or [],
                 memory_manager=None,
                 request_context=subagent_context,
                 workspace_dir=workspace_dir,
                 task_tracker=None,
-                enable_workspace_skills=False,
+                enable_workspace_skills=bool(skill_snapshot_dirs),
+                workspace_skill_dirs=self._skill_snapshot_dirs(
+                    skill_snapshot_dirs or [],
+                ),
+                model_slot_override=model_slot_override,
+                model_provider_override=model_provider_override,
+                fallback_model_slot=fallback_model_slot,
+                fallback_model_provider=fallback_model_provider,
                 system_prompt_override=self._system_prompt(
                     definition,
                     spec,
@@ -93,6 +131,20 @@ class SubAgentRuntime:
                     workspace_dir,
                 ),
             )
+            resolved_model = getattr(agent, "_resolved_model_slot", None)
+            record_resolved_model = getattr(
+                self._store,
+                "record_resolved_model",
+                None,
+            )
+            if (
+                record_resolved_model is not None
+                and isinstance(resolved_model, dict)
+                and set(resolved_model) == {"provider_id", "model"}
+            ):
+                await record_resolved_model(run.run_id, resolved_model)
+            if mcp_clients:
+                await agent.register_mcp_clients()
             record_turns = getattr(self._store, "record_turns", None)
             if record_turns is not None:
 
@@ -167,6 +219,16 @@ class SubAgentRuntime:
             config.tools.builtin_tools = builtin_tools
         return config
 
+    @staticmethod
+    def _skill_snapshot_dirs(paths: list[str]) -> dict[str, Path]:
+        """Map the copied Skill directory names to their immutable roots."""
+        result: dict[str, Path] = {}
+        for raw_path in paths:
+            path = Path(raw_path)
+            if path.name and path.name not in result:
+                result[path.name] = path
+        return result
+
     def _request_context(
         self,
         context: dict[str, Any],
@@ -236,6 +298,8 @@ class SubAgentRuntime:
         return "\n\n".join(
             [
                 definition.instruction,
+                f"Objective: {spec.objective}",
+                (f"Background: {spec.background}" if spec.background else ""),
                 "Runtime safety: operate as a fresh-context SubAgent. Follow "
                 "the effective tool policy, do not use undeclared capabilities, "
                 "and never delegate to another SubAgent.",

@@ -180,7 +180,10 @@ def _string_list(value: Any, field: str) -> list[str]:
         return []
     if not isinstance(value, list):
         raise ValueError(f"{field} must be an array of strings")
-    return [_string(item, field) for item in value]
+    items = [_string(item, field) for item in value]
+    if len(set(items)) != len(items):
+        raise ValueError(f"{field} cannot contain duplicates")
+    return items
 
 
 def _parse_budget(value: Any) -> BudgetConfig:

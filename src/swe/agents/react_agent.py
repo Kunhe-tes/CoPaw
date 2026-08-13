@@ -408,6 +408,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         workspace_dir: Path | None = None,
         task_tracker: Any | None = None,
         enable_workspace_skills: bool = True,
+        workspace_skill_dirs: dict[str, Path] | None = None,
+        model_slot_override: Any | None = None,
+        model_provider_override: Any | None = None,
+        fallback_model_slot: Any | None = None,
+        fallback_model_provider: Any | None = None,
         system_prompt_override: str | None = None,
         source_tool_versions: tuple[Any, ...] = (),
     ):
@@ -439,6 +444,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._workspace_dir = workspace_dir
         self._task_tracker = task_tracker
         self._enable_workspace_skills = enable_workspace_skills
+        self._workspace_skill_dirs = dict(workspace_skill_dirs or {})
+        self._model_slot_override = model_slot_override
+        self._model_provider_override = model_provider_override
+        self._fallback_model_slot = fallback_model_slot
+        self._fallback_model_provider = fallback_model_provider
+        self._resolved_model_slot: dict[str, str] = {}
         self._system_prompt_override = system_prompt_override
         self._source_tool_versions = tuple(source_tool_versions)
         self._init_agent_phase_state()
@@ -460,6 +471,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         # Create model and formatter using factory method
         model, formatter = create_model_and_formatter(
             agent_id=agent_config.id,
+            model_slot_override=self._model_slot_override,
+            model_provider_override=self._model_provider_override,
+            fallback_model_slot=self._fallback_model_slot,
+            fallback_model_provider=self._fallback_model_provider,
+            resolved_model_info=self._resolved_model_slot,
             trace_context={
                 "trace_id": self._request_context.get("trace_id"),
                 "user_id": self._request_context.get("user_id"),
@@ -978,6 +994,14 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         workspace_dir = self._workspace_dir or WORKING_DIR
 
+        snapshot_skill_dirs = getattr(self, "_workspace_skill_dirs", {})
+        if snapshot_skill_dirs:
+            self._register_explicit_workspace_skills(
+                toolkit,
+                snapshot_skill_dirs,
+            )
+            return
+
         ensure_skills_initialized(workspace_dir)
 
         request_context = getattr(self, "_request_context", {})
@@ -1022,6 +1046,53 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._effective_skills = effective_skills
         self._skill_runtime_profiles = skill_runtime_profiles
 
+    def _register_explicit_workspace_skills(
+        self,
+        toolkit: Toolkit,
+        skill_dirs: dict[str, Path],
+    ) -> None:
+        """Register only immutable Skill roots supplied by a worker launch."""
+        from .skill_runtime_profile import build_skill_runtime_profile
+
+        effective_skills: list[str] = []
+        profiles: dict[str, object] = {}
+        for skill_name, skill_dir in skill_dirs.items():
+            path = Path(skill_dir)
+            if not path.is_dir() or not (path / "SKILL.md").is_file():
+                continue
+            try:
+                toolkit.register_agent_skill(str(path))
+                effective_skills.append(skill_name)
+                profiles[skill_name] = build_skill_runtime_profile(
+                    path,
+                    skill_name,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to register explicit skill '%s': %s",
+                    skill_name,
+                    exc,
+                )
+        self._sanitize_registered_skill_dirs(toolkit)
+        self._build_explicit_skill_tool_registry(profiles)
+        self._runtime_skills = effective_skills
+        self._effective_skills = effective_skills
+        self._skill_runtime_profiles = profiles
+
+    @staticmethod
+    def _build_explicit_skill_tool_registry(
+        profiles: dict[str, object],
+    ) -> None:
+        """Register copied Skill declarations without consulting a workspace."""
+        from .skill_tool_registry import get_skill_tool_registry
+
+        registry = get_skill_tool_registry()
+        registry.clear()
+        for skill_name, profile in profiles.items():
+            declared_tools = getattr(profile, "declared_tools", [])
+            if declared_tools:
+                registry.register_skill_tools(skill_name, declared_tools)
+
     def get_effective_skills(self) -> list[str]:
         """Get the list of effective skills for this agent.
 
@@ -1065,6 +1136,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Args:
             trace_id: The trace ID to setup detector for
         """
+        if getattr(self, "_workspace_skill_dirs", {}):
+            # The detector resolves manifests and asset paths relative to a
+            # workspace. Snapshot workers must never consult the mutable
+            # parent workspace after launch.
+            return
+
         try:
             from ..tracing.manager import (
                 get_trace_manager,

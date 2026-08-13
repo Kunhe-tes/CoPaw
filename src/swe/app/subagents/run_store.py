@@ -16,6 +16,7 @@ from .models import (
     BudgetConfig,
     DefinitionMatchMetadata,
     PermissionPolicy,
+    SubAgentLaunchDiagnostics,
     SubAgentDefinition,
     SubAgentRunRecord,
     SubAgentStartRequest,
@@ -263,9 +264,12 @@ class PerRunSubAgentRunStore:
         start_request: SubAgentStartRequest | None = None,
         definition_match: DefinitionMatchMetadata | None = None,
         nickname: str | None = None,
+        launch_diagnostics: SubAgentLaunchDiagnostics | None = None,
+        run_id: str | None = None,
     ) -> BackgroundSubAgentRunRecord:
         """Create a pending background run record."""
         record = BackgroundSubAgentRunRecord(
+            run_id=run_id or f"subagent-{uuid4().hex[:12]}",
             spec=spec,
             definition_name=definition.name,
             definition_version=definition.version,
@@ -276,6 +280,9 @@ class PerRunSubAgentRunStore:
             nickname=nickname,
             start_request=start_request,
             definition_match=definition_match or DefinitionMatchMetadata(),
+            launch_diagnostics=(
+                launch_diagnostics or SubAgentLaunchDiagnostics()
+            ),
         )
         self._write(record)
         return record
@@ -328,6 +335,42 @@ class PerRunSubAgentRunStore:
         updated = record.model_copy(
             update={
                 "turns_used": max(record.turns_used, int(turns_used)),
+                "updated_at": _now_utc(),
+            },
+        )
+        self._write(updated)
+        return updated
+
+    async def record_connected_mcps(
+        self,
+        run_id: str,
+        names: list[str],
+    ) -> BackgroundSubAgentRunRecord:
+        """Persist only MCPs that connected in the isolated worker."""
+        record = self._require(run_id)
+        updated = record.model_copy(
+            update={
+                "launch_diagnostics": record.launch_diagnostics.model_copy(
+                    update={"connected_mcps": sorted(set(names))},
+                ),
+                "updated_at": _now_utc(),
+            },
+        )
+        self._write(updated)
+        return updated
+
+    async def record_resolved_model(
+        self,
+        run_id: str,
+        value: dict[str, str],
+    ) -> BackgroundSubAgentRunRecord:
+        """Record the slot actually instantiated after private fallback."""
+        record = self._require(run_id)
+        updated = record.model_copy(
+            update={
+                "launch_diagnostics": record.launch_diagnostics.model_copy(
+                    update={"resolved_model": value},
+                ),
                 "updated_at": _now_utc(),
             },
         )

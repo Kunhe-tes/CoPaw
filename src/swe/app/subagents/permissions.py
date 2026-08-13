@@ -103,8 +103,19 @@ def validate_tool_call(
     policy: PermissionPolicy,
     tool_name: str,
     tool_input: dict,
+    *,
+    mcp_server: str | None = None,
+    allowed_mcp_servers: set[str] | None = None,
 ) -> ToolAuthorizationDecision:
     """Authorize one tool call against an effective SubAgent policy."""
+    if mcp_server is not None:
+        allowed_servers = allowed_mcp_servers or set()
+        if mcp_server not in allowed_servers:
+            return ToolAuthorizationDecision(
+                allowed=False,
+                reason=f"MCP server `{mcp_server}` is not allowed",
+            )
+        return ToolAuthorizationDecision(allowed=True)
     if tool_name not in set(policy.tools.allow):
         return ToolAuthorizationDecision(
             allowed=False,

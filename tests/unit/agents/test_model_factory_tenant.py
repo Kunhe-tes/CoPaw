@@ -894,3 +894,90 @@ class TestScopedModelSlotOverride:
         override_provider.get_chat_model_instance.assert_called_once_with(
             "claude-3-7-sonnet",
         )
+
+    def test_private_provider_override_does_not_read_current_provider(
+        self,
+    ):
+        """A frozen worker provider wins over mutable ProviderManager data."""
+        from swe.agents.model_factory import create_model_and_formatter
+        from swe.providers.models import ModelSlotConfig
+
+        with (
+            patch("swe.agents.model_factory.ProviderManager") as manager_cls,
+            patch("swe.agents.model_factory._create_formatter_instance"),
+            patch(
+                "swe.agents.model_factory.TokenRecordingModelWrapper",
+                side_effect=lambda _provider_id, model: model,
+            ),
+            patch(
+                "swe.agents.model_factory.RetryChatModel",
+                side_effect=lambda model, **_kwargs: model,
+            ),
+        ):
+            manager = MagicMock()
+            manager_cls.get_instance.return_value = manager
+            manager_cls.ensure_tenant_provider_storage = MagicMock()
+            frozen_provider = MagicMock()
+            frozen_provider.get_chat_model_instance.return_value = MagicMock()
+
+            create_model_and_formatter(
+                model_slot_override=ModelSlotConfig(
+                    provider_id="frozen",
+                    model="frozen-model",
+                ),
+                model_provider_override=frozen_provider,
+            )
+
+        manager.get_provider.assert_not_called()
+        manager_cls.get_instance.assert_not_called()
+        manager_cls.ensure_tenant_provider_storage.assert_not_called()
+        frozen_provider.get_chat_model_instance.assert_called_once_with(
+            "frozen-model",
+        )
+
+    def test_private_selected_model_falls_back_to_frozen_parent(self):
+        """A selected model failure does not consult changed tenant config."""
+        from swe.agents.model_factory import create_model_and_formatter
+        from swe.providers.models import ModelSlotConfig
+
+        with (
+            patch("swe.agents.model_factory.ProviderManager") as manager_cls,
+            patch("swe.agents.model_factory._create_formatter_instance"),
+            patch(
+                "swe.agents.model_factory.TokenRecordingModelWrapper",
+                side_effect=lambda _provider_id, model: model,
+            ),
+            patch(
+                "swe.agents.model_factory.RetryChatModel",
+                side_effect=lambda model, **_kwargs: model,
+            ),
+        ):
+            manager = MagicMock()
+            manager_cls.get_instance.return_value = manager
+            manager_cls.ensure_tenant_provider_storage = MagicMock()
+            selected_provider = MagicMock()
+            selected_provider.get_chat_model_instance.side_effect = ValueError(
+                "selected unavailable",
+            )
+            parent_provider = MagicMock()
+            parent_provider.get_chat_model_instance.return_value = MagicMock()
+
+            create_model_and_formatter(
+                model_slot_override=ModelSlotConfig(
+                    provider_id="selected",
+                    model="selected-model",
+                ),
+                model_provider_override=selected_provider,
+                fallback_model_slot=ModelSlotConfig(
+                    provider_id="parent",
+                    model="parent-model",
+                ),
+                fallback_model_provider=parent_provider,
+            )
+
+        manager.get_provider.assert_not_called()
+        manager_cls.get_instance.assert_not_called()
+        manager_cls.ensure_tenant_provider_storage.assert_not_called()
+        parent_provider.get_chat_model_instance.assert_called_once_with(
+            "parent-model",
+        )

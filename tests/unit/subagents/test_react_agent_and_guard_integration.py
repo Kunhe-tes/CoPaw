@@ -13,6 +13,10 @@ from agentscope.tool import ToolResponse
 from swe.agents import react_agent as react_agent_module
 from swe.agents.hook_runtime.models import MergedHookResult
 from swe.agents.react_agent import SWEAgent
+from swe.agents.skill_tool_registry import (
+    get_skill_tool_registry,
+    reset_skill_tool_registry,
+)
 from swe.agents.tool_guard_mixin import ToolGuardMixin
 from swe.app.subagents import PermissionPolicy
 from swe.security.tool_guard.models import (
@@ -114,6 +118,9 @@ class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
         self._tool_guard_lock = asyncio.Lock()
         self._emit_tool_hook_called = False
         self._acting_with_approval_called = False
+
+    def _resolve_mcp_server(self, tool_name: str) -> str | None:
+        return getattr(self, "mcp_servers", {}).get(tool_name)
 
     def _ensure_tool_guard(self) -> None:
         self._tool_guard_engine = SimpleNamespace(enabled=False)
@@ -297,6 +304,85 @@ def test_disable_workspace_skills_leaves_no_effective_skills(
     SWEAgent._register_skills(agent, toolkit)
 
     assert agent.get_effective_skills() == []
+
+
+def test_explicit_snapshot_skills_build_tool_attribution_from_copied_roots(
+    tmp_path: Path,
+) -> None:
+    """Worker attribution reads its copied Skill, never the live workspace."""
+
+    class _Toolkit:
+        def __init__(self) -> None:
+            self.skills: dict[str, dict[str, str]] = {}
+
+        def register_agent_skill(self, skill_dir: str) -> None:
+            self.skills[Path(skill_dir).name] = {"dir": skill_dir}
+
+    reset_skill_tool_registry()
+    workspace_skill = tmp_path / "skills" / "quality"
+    workspace_skill.mkdir(parents=True)
+    (workspace_skill / "SKILL.md").write_text(
+        "---\nmetadata:\n  swe:\n    uses_tools:\n      - write_file\n---\n",
+        encoding="utf-8",
+    )
+    copied_skill = tmp_path / "subagent-runs" / "run-1.skills" / "quality"
+    copied_skill.mkdir(parents=True)
+    (copied_skill / "SKILL.md").write_text(
+        "---\nmetadata:\n  swe:\n    uses_tools:\n      - read_file\n---\n",
+        encoding="utf-8",
+    )
+    agent = _bare_agent(tmp_path)
+
+    SWEAgent._register_explicit_workspace_skills(
+        agent,
+        _Toolkit(),
+        {"quality": copied_skill},
+    )
+
+    registry = get_skill_tool_registry()
+    assert registry.get_skills_for_tool("read_file") == ["quality"]
+    assert registry.get_skills_for_tool("write_file") == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_skill_agent_does_not_setup_workspace_detector(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Detector setup is disabled when it would inspect mutable workspace Skills."""
+    from swe.tracing import manager as trace_manager_module
+
+    copied_skill = tmp_path / "subagent-runs" / "run-1.skills" / "quality"
+    copied_skill.mkdir(parents=True)
+    (copied_skill / "SKILL.md").write_text("# Quality", encoding="utf-8")
+    agent = _bare_agent(tmp_path)
+    agent._workspace_skill_dirs = {"quality": copied_skill}
+    agent._runtime_skills = ["quality"]
+    agent._skill_runtime_profiles = {}
+    setup_calls: list[dict[str, object]] = []
+
+    async def setup_skill_detector(**kwargs: object) -> None:
+        setup_calls.append(kwargs)
+
+    manager = SimpleNamespace(
+        enabled=True,
+        setup_skill_detector=setup_skill_detector,
+    )
+    monkeypatch.setattr(
+        trace_manager_module, "has_trace_manager", lambda: True
+    )
+    monkeypatch.setattr(
+        trace_manager_module, "get_trace_manager", lambda: manager
+    )
+    monkeypatch.setattr(
+        trace_manager_module,
+        "get_current_trace",
+        lambda: SimpleNamespace(skill_detector=None),
+    )
+
+    await SWEAgent.setup_skill_detector(agent, "trace-1")
+
+    assert setup_calls == []
 
 
 def test_subagent_toolkit_filters_builtins_and_excludes_delegate(
@@ -775,6 +861,45 @@ async def test_subagent_hard_policy_allows_readonly_shell(
     )
 
     assert result == {"content": {"command": "git status --short"}}
+
+
+@pytest.mark.asyncio
+async def test_subagent_mcp_policy_maps_client_name_to_declared_key(
+    tmp_path: Path,
+) -> None:
+    """MCP tools use their declared config key, not display name, for scope."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent.mcp_servers = {"search": "tavily_mcp"}
+    agent._request_context.update(
+        {
+            "subagent_allowed_mcp_servers": ["tavily_search"],
+            "subagent_mcp_server_keys": {"tavily_mcp": "tavily_search"},
+        },
+    )
+
+    result = await agent._acting(
+        {"id": "tool-1", "name": "search", "input": {"query": "x"}},
+    )
+
+    assert result == {"content": {"query": "x"}}
+
+
+@pytest.mark.asyncio
+async def test_subagent_mcp_policy_denies_unsnapshotted_server(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent.mcp_servers = {"search": "unlisted"}
+    agent._request_context["subagent_allowed_mcp_servers"] = ["github"]
+
+    result = await agent._acting(
+        {"id": "tool-1", "name": "search", "input": {"query": "x"}},
+    )
+
+    assert result is None
+    assert "MCP server `unlisted` is not allowed" in str(
+        agent.printed[0].content,
+    )
 
 
 @pytest.mark.asyncio

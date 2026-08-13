@@ -732,6 +732,51 @@ async def test_get_subagent_includes_manageable_and_stderr_tail(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_get_subagent_exposes_launch_diagnostics_only_in_details(
+    tmp_path,
+):
+    run_store_dir = tmp_path / "runs"
+    definition = AgentRegistry([builtin_definition_provider()]).resolve(
+        "plan-researcher",
+    )
+    store = PerRunSubAgentRunStore(run_store_dir)
+    record = await store.create(
+        DelegationSpec(name="plan-researcher", objective="Inspect"),
+        definition,
+        PermissionPolicy.readonly(),
+        launch_diagnostics={
+            "loaded_skills": ["quality"],
+        },
+    )
+    supervisor = SimpleNamespace(
+        get=_AsyncReturn(record),
+        is_manageable=lambda _scope, _run_id: False,
+    )
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "_subagent_run_store_dir": str(run_store_dir),
+        },
+    )
+
+    compact = json.loads(
+        (await tools["get_subagent"](record.run_id)).content[0]["text"],
+    )
+    detailed = json.loads(
+        (
+            await tools["get_subagent"](record.run_id, include_details=True)
+        ).content[0]["text"],
+    )
+
+    assert "launch_diagnostics" not in compact
+    assert detailed["launch_diagnostics"] == {"loaded_skills": ["quality"]}
+
+
+@pytest.mark.asyncio
 async def test_get_subagent_defaults_to_parent_facing_partial_projection(
     tmp_path,
 ):

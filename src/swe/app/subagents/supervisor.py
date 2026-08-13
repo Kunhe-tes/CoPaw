@@ -28,9 +28,15 @@ from .models import (
     DefinitionMatchMetadata,
     PermissionPolicy,
     SubAgentDefinition,
+    SubAgentLaunchDiagnostics,
+    SubAgentLaunchSnapshot,
     SubAgentStartRequest,
     TERMINAL_BACKGROUND_RUN_STATUSES,
     WorkerLaunchSpec,
+)
+from .launch_snapshot import (
+    capture_launch_dependencies,
+    capture_model_launch_snapshot,
 )
 from .nicknames import assign_subagent_nickname
 from .permissions import build_definition_policy, compose_effective_policy
@@ -100,6 +106,40 @@ class _ActiveRun:
     stderr_log_path: Path
 
 
+def _worker_parent_agent_config(
+    parent_agent_config: AgentProfileConfig,
+) -> dict[str, Any]:
+    """Serialize worker config without any parent MCP credentials/config."""
+    payload = parent_agent_config.model_dump(mode="json")
+    payload.pop("mcp", None)
+    return payload
+
+
+def _remove_private_launch_snapshot(
+    path: str | None,
+    run_store_dir: Path,
+    run_id: str,
+) -> None:
+    """Remove an undelivered private dependency snapshot for this run."""
+    if not path:
+        return
+    candidate = Path(path)
+    try:
+        if candidate.parent.resolve() != run_store_dir.resolve():
+            return
+    except OSError:
+        return
+    if candidate.name not in {
+        f".{run_id}.mcp.json",
+        f".{run_id}.model.json",
+    }:
+        return
+    try:
+        candidate.unlink()
+    except OSError:
+        pass
+
+
 class BackgroundSubAgentSupervisor:
     """Supervise active Background SubAgent worker subprocesses."""
 
@@ -130,6 +170,7 @@ class BackgroundSubAgentSupervisor:
         workspace_policy: PermissionPolicy | None = None,
         runtime_policy: PermissionPolicy | None = None,
         request_context: dict[str, Any] | None = None,
+        effective_skill_names: list[str] | None = None,
         definition: SubAgentDefinition | None = None,
         start_request: SubAgentStartRequest | None = None,
         definition_match: DefinitionMatchMetadata | None = None,
@@ -154,6 +195,73 @@ class BackgroundSubAgentSupervisor:
         store = PerRunSubAgentRunStore(scope.run_store_dir)
         effective_budget = _effective_budget(definition.budget, spec.budget)
         nickname = assign_subagent_nickname(definition.nickname)
+        run_id = f"subagent-{uuid4().hex[:12]}"
+        try:
+            skill_snapshot_dirs, private_mcp_snapshot_path, diagnostics = (
+                capture_launch_dependencies(
+                    run_store_dir=scope.run_store_dir,
+                    run_id=run_id,
+                    workspace_dir=workspace_dir,
+                    parent_agent_config=parent_agent_config,
+                    definition=definition,
+                    effective_skill_names=effective_skill_names or [],
+                )
+            )
+        except OSError as exc:
+            record = await store.create(
+                spec,
+                definition,
+                effective_policy,
+                effective_budget=effective_budget,
+                start_request=start_request,
+                definition_match=definition_match,
+                nickname=nickname,
+                run_id=run_id,
+            )
+            return await store.fail(
+                record.run_id,
+                str(exc),
+                error_code="worker_snapshot_failed",
+            )
+        try:
+            private_model_snapshot_path, resolved_model = (
+                capture_model_launch_snapshot(
+                    tenant_id=scope.tenant_id,
+                    run_store_dir=scope.run_store_dir,
+                    run_id=run_id,
+                    definition=definition,
+                )
+            )
+        except OSError as exc:
+            _remove_private_launch_snapshot(
+                private_mcp_snapshot_path,
+                scope.run_store_dir,
+                run_id,
+            )
+            record = await store.create(
+                spec,
+                definition,
+                effective_policy,
+                effective_budget=effective_budget,
+                start_request=start_request,
+                definition_match=definition_match,
+                nickname=nickname,
+                run_id=run_id,
+            )
+            return await store.fail(
+                record.run_id,
+                str(exc),
+                error_code="worker_snapshot_failed",
+            )
+        diagnostics = diagnostics.model_copy(
+            update={
+                "resolved_model": (
+                    resolved_model.model_dump(mode="json")
+                    if resolved_model is not None
+                    else None
+                ),
+            },
+        )
         record = await store.create(
             spec,
             definition,
@@ -162,6 +270,8 @@ class BackgroundSubAgentSupervisor:
             start_request=start_request,
             definition_match=definition_match,
             nickname=nickname,
+            launch_diagnostics=diagnostics,
+            run_id=run_id,
         )
         launch_path = scope.run_store_dir / f"{record.run_id}.launch.json"
         stderr_log_path = scope.run_store_dir / f"{record.run_id}.stderr.log"
@@ -177,7 +287,9 @@ class BackgroundSubAgentSupervisor:
             run_id=record.run_id,
             run_store_dir=str(scope.run_store_dir),
             workspace_dir=str(workspace_dir),
-            parent_agent_config=parent_agent_config.model_dump(mode="json"),
+            parent_agent_config=_worker_parent_agent_config(
+                parent_agent_config,
+            ),
             definition=definition,
             delegation_spec=spec,
             effective_policy=effective_policy,
@@ -186,6 +298,12 @@ class BackgroundSubAgentSupervisor:
             nickname=record.nickname,
             request_context=worker_context,
             stderr_log_path=str(stderr_log_path),
+            launch_snapshot=SubAgentLaunchSnapshot(
+                skill_snapshot_dirs=skill_snapshot_dirs,
+                private_mcp_snapshot_path=private_mcp_snapshot_path,
+                private_model_snapshot_path=private_model_snapshot_path,
+            ),
+            launch_diagnostics=diagnostics,
         )
         logger.info(
             "background_subagent_start run_id=%s tenant_id=%s agent_id=%s "
@@ -200,7 +318,24 @@ class BackgroundSubAgentSupervisor:
             record.definition_match.matched,
             record.definition_match.reason,
         )
-        self._write_launch_spec(launch_path, launch_spec)
+        try:
+            self._write_launch_spec(launch_path, launch_spec)
+        except Exception as exc:
+            _remove_private_launch_snapshot(
+                private_mcp_snapshot_path,
+                scope.run_store_dir,
+                record.run_id,
+            )
+            _remove_private_launch_snapshot(
+                private_model_snapshot_path,
+                scope.run_store_dir,
+                record.run_id,
+            )
+            return await store.fail(
+                record.run_id,
+                str(exc),
+                error_code="worker_launch_spec_failed",
+            )
         command = [
             sys.executable,
             "-m",
@@ -211,6 +346,16 @@ class BackgroundSubAgentSupervisor:
         try:
             process = self._start_process(command, stderr_log_path)
         except Exception as exc:
+            _remove_private_launch_snapshot(
+                private_mcp_snapshot_path,
+                scope.run_store_dir,
+                record.run_id,
+            )
+            _remove_private_launch_snapshot(
+                private_model_snapshot_path,
+                scope.run_store_dir,
+                record.run_id,
+            )
             return await store.fail(
                 record.run_id,
                 str(exc),
@@ -277,6 +422,16 @@ class BackgroundSubAgentSupervisor:
             return BackgroundSubAgentNotManageable(run_id=run_id)
         self._terminate_process_group(handle.process)
         active.pop(run_id, None)
+        _remove_private_launch_snapshot(
+            str(scope.run_store_dir / f".{run_id}.mcp.json"),
+            scope.run_store_dir,
+            run_id,
+        )
+        _remove_private_launch_snapshot(
+            str(scope.run_store_dir / f".{run_id}.model.json"),
+            scope.run_store_dir,
+            run_id,
+        )
         return await store.cancel(run_id)
 
     def has_active_runs(self, scope: BackgroundSubAgentScope) -> bool:
@@ -316,6 +471,16 @@ class BackgroundSubAgentSupervisor:
         for run_id, handle in list(active.items()):
             if handle.process.poll() is None:
                 continue
+            _remove_private_launch_snapshot(
+                str(scope.run_store_dir / f".{run_id}.mcp.json"),
+                scope.run_store_dir,
+                run_id,
+            )
+            _remove_private_launch_snapshot(
+                str(scope.run_store_dir / f".{run_id}.model.json"),
+                scope.run_store_dir,
+                run_id,
+            )
             try:
                 record = await store.mark_worker_exited(
                     run_id,

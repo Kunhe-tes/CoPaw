@@ -726,6 +726,44 @@ class WorkerProcessInfo(BaseModel):
     stderr_log_path: str | None = None
 
 
+class SubAgentLaunchDiagnostics(BaseModel):
+    """Safe, reproducible dependency selection facts for one launch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    loaded_skills: list[str] = Field(default_factory=list)
+    skipped_skills: list[str] = Field(default_factory=list)
+    skill_freshness_tokens: dict[str, str] = Field(default_factory=dict)
+    snapshotted_mcps: list[str] = Field(default_factory=list)
+    connected_mcps: list[str] = Field(default_factory=list)
+    skipped_mcps: list[str] = Field(default_factory=list)
+    resolved_model: dict[str, str] | None = None
+
+    @field_validator("resolved_model")
+    @classmethod
+    def keep_only_model_identity(
+        cls,
+        value: dict[str, str] | None,
+    ) -> dict[str, str] | None:
+        if value is None:
+            return None
+        if set(value) != {"provider_id", "model"}:
+            raise ValueError(
+                "resolved_model must contain only provider_id and model",
+            )
+        return value
+
+
+class SubAgentLaunchSnapshot(BaseModel):
+    """Worker-only immutable launch inputs; private data stays out of records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_snapshot_dirs: list[str] = Field(default_factory=list)
+    private_mcp_snapshot_path: str | None = None
+    private_model_snapshot_path: str | None = None
+
+
 class WorkerLaunchSpec(BaseModel):
     """Minimal JSON contract used to launch a SubAgent worker process."""
 
@@ -745,12 +783,39 @@ class WorkerLaunchSpec(BaseModel):
     nickname: str | None = None
     request_context: dict[str, Any] = Field(default_factory=dict)
     stderr_log_path: str | None = None
+    launch_snapshot: SubAgentLaunchSnapshot = Field(
+        default_factory=SubAgentLaunchSnapshot,
+    )
+    launch_diagnostics: SubAgentLaunchDiagnostics = Field(
+        default_factory=SubAgentLaunchDiagnostics,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_flat_launch_snapshot(cls, value: Any) -> Any:
+        """Accept pre-snapshot launch JSON while workers roll forward."""
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        legacy = {
+            key: payload.pop(key)
+            for key in (
+                "skill_snapshot_dirs",
+                "private_mcp_snapshot_path",
+                "private_model_snapshot_path",
+            )
+            if key in payload
+        }
+        if legacy and "launch_snapshot" not in payload:
+            payload["launch_snapshot"] = legacy
+        return payload
 
     @model_validator(mode="after")
     def keep_only_safe_request_context(self) -> "WorkerLaunchSpec":
         self.parent_agent_config = _drop_secret_like_fields(
             self.parent_agent_config,
         )
+        self.parent_agent_config.pop("mcp", None)
         self.request_context = {
             key: value
             for key, value in self.request_context.items()
@@ -776,6 +841,9 @@ class BackgroundSubAgentRunRecord(BaseModel):
     start_request: SubAgentStartRequest | None = None
     definition_match: DefinitionMatchMetadata = Field(
         default_factory=DefinitionMatchMetadata,
+    )
+    launch_diagnostics: SubAgentLaunchDiagnostics = Field(
+        default_factory=SubAgentLaunchDiagnostics,
     )
     worker: WorkerProcessInfo | None = None
     result: AgentResult | None = None
