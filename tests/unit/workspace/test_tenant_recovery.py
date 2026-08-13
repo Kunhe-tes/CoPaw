@@ -2,6 +2,7 @@
 """Recovery lifecycle tests for explicitly invalid bootstrap JSON files."""
 
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,33 @@ from swe.app.workspace.bootstrap_state import (
     BootstrapRecoveryFailure,
 )
 from swe.app.workspace.tenant_initializer import TenantInitializer
+
+
+def test_recovery_reconciles_stale_workspace_skill_manifest(
+    tmp_path: Path,
+) -> None:
+    """A missing registered skill must not keep a tenant unavailable."""
+    tenant_dir = tmp_path / "tenant-a"
+    workspace_dir = tenant_dir / "workspaces" / "default"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps(
+            {
+                "layout_version": 2,
+                "skills": {
+                    "scripts": {"enabled": False},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    initializer = TenantInitializer(tmp_path, "tenant-a")
+
+    initializer._reconcile_stale_workspace_skills()
+
+    manifest = json.loads((workspace_dir / "skill.json").read_text())
+    assert manifest["skills"] == {}
 
 
 def test_recovery_removes_its_backup_after_final_readiness(
