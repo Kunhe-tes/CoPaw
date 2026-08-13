@@ -570,21 +570,27 @@ def _compact_worker(worker: Any) -> dict[str, Any] | None:
 
 
 def _parent_policy_from_config(parent_agent_config: Any) -> PermissionPolicy:
-    """Build parent readonly policy from enabled parent built-in tools."""
-    readonly = PermissionPolicy.readonly()
-    readonly_tools = set(readonly.tools.allow)
+    """Build a bounded parent policy from enabled parent built-in tools."""
+    from ...app.subagents.models import KNOWN_BUILTIN_TOOLS, MutationPolicy
+    from ...config.config import _default_builtin_tools
+
+    builtin_defaults = _default_builtin_tools()
     tools_config = getattr(parent_agent_config, "tools", None)
     builtin_tools = getattr(tools_config, "builtin_tools", None)
     if not isinstance(builtin_tools, dict):
-        return readonly
+        builtin_tools = builtin_defaults
     enabled = {
         name
         for name, config in builtin_tools.items()
-        if name in readonly_tools and getattr(config, "enabled", True)
+        if name in KNOWN_BUILTIN_TOOLS and getattr(config, "enabled", True)
     }
-    return PermissionPolicy.readonly(
+    return PermissionPolicy.bounded(
         allow_tools=sorted(enabled),
-        deny_tools=sorted(readonly_tools - enabled),
+        deny_tools=sorted(KNOWN_BUILTIN_TOOLS - enabled),
+        mutation=MutationPolicy(
+            allow_file_write="write_file" in enabled,
+            allow_patch="edit_file" in enabled,
+        ),
     )
 
 

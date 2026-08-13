@@ -233,7 +233,7 @@ class PermissionTools(BaseModel):
 class PermissionPolicy(BaseModel):
     """Effective or source permission policy for SubAgent execution."""
 
-    mode: Literal["readonly"] = "readonly"
+    mode: Literal["readonly", "bounded"] = "readonly"
     tools: PermissionTools = Field(default_factory=PermissionTools)
     shell: ShellPolicy = Field(default_factory=ShellPolicy)
     mutation: MutationPolicy = Field(default_factory=MutationPolicy)
@@ -252,6 +252,24 @@ class PermissionPolicy(BaseModel):
                 allow=list(allow_tools or sorted(MVP_READONLY_TOOLS)),
                 deny=list(deny_tools or []),
             ),
+        )
+
+    @classmethod
+    def bounded(
+        cls,
+        *,
+        allow_tools: list[str],
+        deny_tools: list[str] | None = None,
+        mutation: MutationPolicy | None = None,
+    ) -> "PermissionPolicy":
+        """Create a parent-bounded policy for Skill-owned Definitions."""
+        return cls(
+            mode="bounded",
+            tools=PermissionTools(
+                allow=list(allow_tools),
+                deny=list(deny_tools or []),
+            ),
+            mutation=mutation or MutationPolicy(),
         )
 
 

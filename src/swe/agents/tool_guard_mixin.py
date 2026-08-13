@@ -1510,6 +1510,13 @@ class ToolGuardMixin:
                 pre_hook_result,
             )
         ):
+            if self._request_context.get("agent_role") == "subagent":
+                result = await self._acting_hook_denied(
+                    tool_call,
+                    tool_name,
+                    "Background SubAgent calls cannot await interactive approval.",
+                )
+                return tool_call, tool_input, True, result
             result = await self._acting_with_approval(
                 tool_call,
                 tool_name,
@@ -1778,6 +1785,12 @@ class ToolGuardMixin:
                 action.tool_input,
             )
         if action.kind == "needs_approval":
+            if self._request_context.get("agent_role") == "subagent":
+                return await self._acting_auto_denied(
+                    tool_call,
+                    action.tool_name,
+                    action.guard_result,
+                )
             return await self._acting_with_approval(
                 tool_call,
                 action.tool_name,

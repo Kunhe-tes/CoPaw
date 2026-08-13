@@ -17,13 +17,21 @@ from swe.app.subagents import (
     InMemorySubAgentRunStore,
     LocalJsonSubAgentRunStore,
     PermissionPolicy,
+    SkillOwnedDefinitionMetadata,
+    SkillOwnedToolConfig,
     SubAgentDefinition,
     SubAgentRegistrationRequest,
     builtin_definition_provider,
     compose_effective_policy,
+    build_definition_policy,
     validate_tool_call,
 )
-from swe.app.subagents.models import AgentError, BudgetConfig
+from swe.app.subagents.models import (
+    AgentError,
+    BudgetConfig,
+    MutationPolicy,
+    PermissionTools,
+)
 
 
 def test_definition_uses_instruction_and_top_level_routing_fields() -> None:
@@ -203,8 +211,10 @@ def test_delegation_spec_uses_name_not_agent_name() -> None:
         )
 
 
-def test_start_request_requires_instruction_name_and_objective() -> None:
-    """Compact start requests require only the core SubAgent fields."""
+def test_start_request_allows_omitting_instruction_for_resolved_definition() -> (
+    None
+):
+    """Only a run-scoped fallback requires a caller-supplied instruction."""
     from swe.app.subagents.models import SubAgentStartRequest
 
     request = SubAgentStartRequest.model_validate(
@@ -219,13 +229,13 @@ def test_start_request_requires_instruction_name_and_objective() -> None:
     assert request.name == "aum-analyst"
     assert request.instruction == "Act as an AUM analyst."
     assert request.objective == "Analyze customer maintenance."
-    with pytest.raises(ValidationError):
-        SubAgentStartRequest.model_validate(
-            {
-                "name": "aum-analyst",
-                "objective": "Analyze customer maintenance.",
-            },
-        )
+    resolved = SubAgentStartRequest.model_validate(
+        {
+            "name": "quality:reviewer",
+            "objective": "Analyze customer maintenance.",
+        },
+    )
+    assert resolved.instruction is None
 
 
 def test_registration_request_accepts_full_definition_metadata() -> None:
@@ -582,6 +592,106 @@ def test_effective_policy_preserves_shell_deny_all() -> None:
     )
     assert not decision.allowed
     assert "deny_all" in decision.reason
+
+
+def test_skill_owned_definition_can_narrow_parent_to_mutable_tools() -> None:
+    parent = PermissionPolicy(
+        tools=PermissionTools(
+            allow=["read_file", "write_file", "edit_file"],
+        ),
+        mutation=MutationPolicy(
+            allow_file_write=True,
+            allow_patch=True,
+        ),
+    )
+    definition = SubAgentDefinition.model_validate(
+        {
+            "name": "quality:editor",
+            "source": "stored",
+            "owner_scope": "skill:quality",
+            "description": "Edit the requested file.",
+            "instruction": "Make only requested edits.",
+            "skill_owned": SkillOwnedDefinitionMetadata(
+                skill_name="quality",
+                local_name="editor",
+                tools=SkillOwnedToolConfig(
+                    allow=["read_file", "write_file"],
+                ),
+            ),
+        },
+    )
+
+    definition_policy = build_definition_policy(definition, parent)
+    effective = compose_effective_policy(
+        parent,
+        definition_policy,
+        parent,
+        parent,
+    )
+
+    assert effective.tools.allow == ["read_file", "write_file"]
+    assert validate_tool_call(
+        effective,
+        "write_file",
+        {"path": "notes.txt", "content": "updated"},
+    ).allowed
+    assert not validate_tool_call(
+        effective,
+        "edit_file",
+        {"path": "notes.txt", "old_str": "a", "new_str": "b"},
+    ).allowed
+
+
+def test_non_skill_owned_definition_is_forced_to_readonly_policy() -> None:
+    parent = PermissionPolicy.bounded(
+        allow_tools=["read_file", "write_file"],
+        mutation=MutationPolicy(allow_file_write=True),
+    )
+    definition = SubAgentDefinition.model_construct(
+        name="legacy-writer",
+        source="stored",
+        description="Legacy definition.",
+        instruction="Do not trust this policy.",
+        permission=PermissionPolicy.bounded(
+            allow_tools=["read_file", "write_file"],
+            mutation=MutationPolicy(allow_file_write=True),
+        ),
+    )
+
+    policy = build_definition_policy(definition, parent)
+
+    assert policy.mode == "readonly"
+    assert "write_file" not in policy.tools.allow
+
+
+def test_skill_owned_definition_without_inheritance_uses_explicit_allow_list() -> (
+    None
+):
+    parent = PermissionPolicy(
+        tools=PermissionTools(allow=["read_file", "write_file"]),
+        mutation=MutationPolicy(allow_file_write=True),
+    )
+    definition = SubAgentDefinition.model_validate(
+        {
+            "name": "quality:no-tools",
+            "source": "stored",
+            "owner_scope": "skill:quality",
+            "description": "Do not use built-in tools.",
+            "instruction": "Reason without tools.",
+            "skill_owned": SkillOwnedDefinitionMetadata(
+                skill_name="quality",
+                local_name="no-tools",
+                tools=SkillOwnedToolConfig(
+                    inherit=False,
+                    allow=["read_file"],
+                ),
+            ),
+        },
+    )
+
+    assert build_definition_policy(definition, parent).tools.allow == [
+        "read_file",
+    ]
 
 
 @pytest.mark.parametrize(

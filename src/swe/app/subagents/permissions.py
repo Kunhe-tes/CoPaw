@@ -7,12 +7,37 @@ import re
 import shlex
 
 from .models import (
-    MVP_READONLY_TOOLS,
+    MUTATING_TOOLS,
+    MutationPolicy,
     PermissionPolicy,
     PermissionTools,
     ShellPolicy,
     ToolAuthorizationDecision,
 )
+
+
+def build_definition_policy(
+    definition,
+    parent: PermissionPolicy,
+) -> PermissionPolicy:
+    """Derive a Definition policy that can only narrow the parent policy."""
+    metadata = definition.skill_owned
+    if metadata is None:
+        return PermissionPolicy.readonly()
+    tool_config = metadata.tools
+    if tool_config.inherit:
+        allowed = set(parent.tools.allow)
+    else:
+        allowed = set(tool_config.allow) & set(parent.tools.allow)
+    if tool_config.inherit and tool_config.allow:
+        allowed &= set(tool_config.allow)
+    denied = set(parent.tools.deny) | set(tool_config.deny)
+    allowed -= denied
+    return PermissionPolicy.bounded(
+        allow_tools=sorted(allowed),
+        deny_tools=sorted(denied),
+        mutation=parent.mutation,
+    )
 
 
 def compose_effective_policy(
@@ -39,12 +64,37 @@ def compose_effective_policy(
         else "allowlist"
     )
     return PermissionPolicy(
+        mode=(
+            "readonly"
+            if all(policy.mode == "readonly" for policy in policies)
+            else "bounded"
+        ),
         tools=PermissionTools(allow=sorted(allow), deny=sorted(deny)),
         shell=ShellPolicy(
             enabled=all(policy.shell.enabled for policy in policies),
             strategy=shell_strategy,
             allowed_commands=sorted(allowed_commands),
             denied_patterns=sorted(denied_patterns),
+        ),
+        mutation=MutationPolicy(
+            allow_file_write=all(
+                policy.mutation.allow_file_write for policy in policies
+            ),
+            allow_patch=all(
+                policy.mutation.allow_patch for policy in policies
+            ),
+            allow_delete=all(
+                policy.mutation.allow_delete for policy in policies
+            ),
+            allow_format_write=all(
+                policy.mutation.allow_format_write for policy in policies
+            ),
+            allow_migration=all(
+                policy.mutation.allow_migration for policy in policies
+            ),
+            allow_deploy=all(
+                policy.mutation.allow_deploy for policy in policies
+            ),
         ),
     )
 
@@ -67,12 +117,23 @@ def validate_tool_call(
         )
     if tool_name == "execute_shell_command":
         return _validate_shell(policy, tool_input)
-    if tool_name not in MVP_READONLY_TOOLS:
+    if tool_name in MUTATING_TOOLS and not _mutation_allowed(
+        policy,
+        tool_name,
+    ):
         return ToolAuthorizationDecision(
             allowed=False,
-            reason=f"tool `{tool_name}` is outside readonly MVP allowlist",
+            reason=f"tool `{tool_name}` is blocked by the mutation policy",
         )
     return ToolAuthorizationDecision(allowed=True)
+
+
+def _mutation_allowed(policy: PermissionPolicy, tool_name: str) -> bool:
+    if tool_name == "write_file":
+        return policy.mutation.allow_file_write
+    if tool_name == "edit_file":
+        return policy.mutation.allow_file_write and policy.mutation.allow_patch
+    return False
 
 
 def _extract_command(tool_input: dict) -> str:

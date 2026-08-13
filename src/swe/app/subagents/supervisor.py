@@ -33,7 +33,7 @@ from .models import (
     WorkerLaunchSpec,
 )
 from .nicknames import assign_subagent_nickname
-from .permissions import compose_effective_policy
+from .permissions import build_definition_policy, compose_effective_policy
 from .registry import AgentRegistry
 from .run_store import PerRunSubAgentRunStore
 
@@ -143,11 +143,13 @@ class BackgroundSubAgentSupervisor:
                 active_run_ids=sorted(active),
             )
         definition = definition or self._registry.resolve(spec.name)
+        parent_policy = parent_policy or PermissionPolicy.readonly()
+        definition_policy = build_definition_policy(definition, parent_policy)
         effective_policy = compose_effective_policy(
-            parent_policy or PermissionPolicy.readonly(),
-            definition.permission,
-            runtime_policy or PermissionPolicy.readonly(),
-            workspace_policy or PermissionPolicy.readonly(),
+            parent_policy,
+            definition_policy,
+            runtime_policy or parent_policy,
+            workspace_policy or parent_policy,
         )
         store = PerRunSubAgentRunStore(scope.run_store_dir)
         effective_budget = _effective_budget(definition.budget, spec.budget)

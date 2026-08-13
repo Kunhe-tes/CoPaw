@@ -37,7 +37,11 @@ from .skill_definitions import (
     build_definition_catalog,
     load_skill_owned_definitions,
 )
-from .permissions import compose_effective_policy, validate_tool_call
+from .permissions import (
+    build_definition_policy,
+    compose_effective_policy,
+    validate_tool_call,
+)
 from .nicknames import assign_subagent_nickname
 from .registry import (
     AgentRegistry,
@@ -102,6 +106,7 @@ __all__ = [
     "WorkerProcessInfo",
     "assign_subagent_nickname",
     "builtin_definition_provider",
+    "build_definition_policy",
     "compose_effective_policy",
     "normalize_name",
     "validate_tool_call",

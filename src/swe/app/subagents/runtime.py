@@ -151,9 +151,7 @@ class SubAgentRuntime:
         effective_policy: PermissionPolicy,
         budget: BudgetConfig,
     ) -> AgentProfileConfig:
-        allowed = set(definition.tools.allow) & set(
-            effective_policy.tools.allow,
-        )
+        allowed = set(effective_policy.tools.allow)
         config = parent_agent_config.model_copy(deep=True)
         config.running.max_iters = min(
             config.running.max_iters,
@@ -238,9 +236,9 @@ class SubAgentRuntime:
         return "\n\n".join(
             [
                 definition.instruction,
-                "Runtime safety: operate as a fresh-context readonly SubAgent. "
-                "Do not mutate files, run tests, use MCP, load skills, or "
-                "delegate to another SubAgent.",
+                "Runtime safety: operate as a fresh-context SubAgent. Follow "
+                "the effective tool policy, do not use undeclared capabilities, "
+                "and never delegate to another SubAgent.",
                 f"Workspace: {workspace_dir}",
                 f"Effective allowed tools: {', '.join(policy.tools.allow)}",
                 "When research is complete, reply without a tool call using "

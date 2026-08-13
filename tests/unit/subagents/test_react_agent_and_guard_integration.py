@@ -15,6 +15,12 @@ from swe.agents.hook_runtime.models import MergedHookResult
 from swe.agents.react_agent import SWEAgent
 from swe.agents.tool_guard_mixin import ToolGuardMixin
 from swe.app.subagents import PermissionPolicy
+from swe.security.tool_guard.models import (
+    GuardFinding,
+    GuardSeverity,
+    GuardThreatCategory,
+    ToolGuardResult,
+)
 from swe.app.source_system_config.models import (
     EffectiveSourceSystemConfig,
     SourceSystemConfig,
@@ -799,6 +805,78 @@ async def test_subagent_hard_policy_rechecks_hook_updated_input(
     assert result is None
     assert agent._emit_tool_hook_called is True
     assert "blocked by SubAgent policy" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+async def test_subagent_hook_ask_is_rejected_without_interactive_approval(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+
+    async def _request_approval(*args, **kwargs):
+        return MergedHookResult(
+            decision="ask",
+            reason="review shell",
+        )
+
+    agent._emit_tool_hook = _request_approval
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+
+    assert result is None
+    assert agent._acting_with_approval_called is False
+    assert "cannot await interactive approval" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+async def test_subagent_guard_approval_is_rejected_without_interactive_approval(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    finding = GuardFinding(
+        id="guard-1",
+        rule_id="test",
+        category=GuardThreatCategory.CODE_EXECUTION,
+        severity=GuardSeverity.HIGH,
+        title="Needs approval",
+        description="A test finding.",
+        tool_name="execute_shell_command",
+    )
+    guard_result = ToolGuardResult(
+        tool_name="execute_shell_command",
+        params={"command": "git status --short"},
+        findings=[finding],
+    )
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=True,
+        is_denied=lambda _name: False,
+        is_guarded=lambda _name: True,
+        guard=lambda *_args, **_kwargs: guard_result,
+    )
+    agent._ensure_tool_guard = lambda: None
+
+    async def _no_preapproval(*args, **kwargs):
+        return False
+
+    agent._consume_preapproval = _no_preapproval
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+
+    assert result is None
+    assert agent._acting_with_approval_called is False
+    assert "cannot be approved" in str(agent.printed[0].content)
 
 
 @pytest.mark.asyncio
