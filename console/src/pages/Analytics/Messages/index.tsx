@@ -28,7 +28,7 @@ import {
   type HighFrequencyQuestionCriteria,
   type HighFrequencyQuestionResult,
 } from "../../../api/modules/monitor";
-import { getBbkDisplayName, BBK_ID_MAP } from "../../../constants/bbk";
+import { getBbkDisplayName } from "../../../constants/bbk";
 import {
   ensureBranchOptions,
   getScopedBranchFilter,
@@ -179,7 +179,7 @@ export default function MessagesPage() {
     [currentBbkId],
   );
   const branchOptions = useMemo(
-    () => ensureBranchOptions(branchScope.lockedBbkId, BBK_ID_MAP),
+    () => ensureBranchOptions(branchScope.lockedBbkId),
     [branchScope.lockedBbkId],
   );
   const [loading, setLoading] = useState(true);
@@ -202,7 +202,9 @@ export default function MessagesPage() {
     getDefaultAnalysisRange,
   );
   const [analysisQuickRange, setAnalysisQuickRange] = useState("7");
-  const [analysisBbkId, setAnalysisBbkId] = useState<string | undefined>();
+  const [analysisBbkId, setAnalysisBbkId] = useState<string | undefined>(
+    branchScope.lockedBbkId,
+  );
   const [analysisResult, setAnalysisResult] =
     useState<HighFrequencyQuestionResult | null>(null);
   const [analysisLoading, setAnalysisLoading] = useState(false);
@@ -213,6 +215,13 @@ export default function MessagesPage() {
   >("idle");
   const [analysisQueried, setAnalysisQueried] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (branchScope.lockedBbkId) {
+      setBbkIdFilter(branchScope.lockedBbkId);
+      setAnalysisBbkId(branchScope.lockedBbkId);
+    }
+  }, [branchScope.lockedBbkId]);
 
   useEffect(() => {
     if (branchScope.lockedBbkId) {
@@ -398,8 +407,10 @@ export default function MessagesPage() {
   };
 
   const handleAnalysisBbkChange = (value?: string) => {
-    setAnalysisBbkId(value);
-    resetAnalysisResultState();
+    if (!branchScope.lockedBbkId) {
+      setAnalysisBbkId(value);
+      resetAnalysisResultState();
+    }
   };
 
   const submitAnalysisTask = async () => {
@@ -901,12 +912,13 @@ export default function MessagesPage() {
               <Select
                 value={analysisBbkId}
                 onChange={handleAnalysisBbkChange}
-                allowClear
+                allowClear={branchScope.isHeadOffice}
+                disabled={!branchScope.isHeadOffice}
                 showSearch
                 optionFilterProp="label"
                 placeholder="全部机构（ALL）"
                 className={styles.analysisBbkSelect}
-                options={BBK_ID_MAP}
+                options={branchOptions}
               />
             </label>
             <label>
