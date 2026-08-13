@@ -8,10 +8,6 @@ import {
 } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-  ChatAnywhereI18nContextProvider,
-  type Locale,
-} from "../../Context/ChatAnywhereI18nContext";
 import Error from "./Error";
 
 const mocks = vi.hoisted(() => ({
@@ -51,13 +47,11 @@ const providerError = {
     'The model provider returned an error status (401). {"error":{"code":"invalid_api_key","message":"Invalid access token or token expired","param":null,"type":"invalid_request_error"},"request_id":"982f9613-d43f-9c9a-b518-abcf1f2ed95"}',
 };
 
-function renderError(locale: Locale = "cn") {
+function renderError() {
   return render(
-    <ChatAnywhereI18nContextProvider defaultLocale={locale}>
-      <MemoryRouter>
-        <Error data={providerError} />
-      </MemoryRouter>
-    </ChatAnywhereI18nContextProvider>,
+    <MemoryRouter>
+      <Error data={providerError} />
+    </MemoryRouter>,
   );
 }
 
@@ -88,24 +82,6 @@ describe("model call failed card", () => {
     expect(screen.queryByRole("button", { name: "复制错误信息" })).toBeNull();
     expect(screen.queryByRole("button", { name: "重试" })).toBeNull();
     expect(screen.getByText("invalid_api_key")).not.toBeVisible();
-  });
-
-  it("renders the complete card in English when the runtime locale is English", () => {
-    renderError("en");
-
-    expect(screen.getByText("Model connection failed")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        "The current model credentials are invalid or expired, so a response could not be generated.",
-      ),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("link", { name: "Open model settings" }),
-    ).toHaveAttribute("href", "/models");
-    expect(
-      screen.getByRole("button", { name: "Error details" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
   });
 
   it("reveals structured details and copies only the diagnostic text", async () => {

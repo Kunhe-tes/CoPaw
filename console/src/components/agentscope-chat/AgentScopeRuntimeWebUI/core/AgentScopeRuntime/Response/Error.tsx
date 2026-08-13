@@ -9,10 +9,6 @@ import {
 } from "@agentscope-ai/icons";
 import { Bubble, useProviderContext } from "@/components/agentscope-chat";
 import { copy } from "@/components/agentscope-chat/Util/copy";
-import {
-  type MessageKey,
-  useTranslation,
-} from "../../Context/ChatAnywhereI18nContext";
 import { IAgentScopeRuntimeError, IAgentScopeRuntimeMessage } from "../types";
 import { ModelCallFailedStyle } from "./Error.style";
 
@@ -69,46 +65,40 @@ function parseModelCallDiagnostic(message: string): ModelCallDiagnostic {
   };
 }
 
-type Translate = (key: MessageKey) => string;
-
-function getUserFacingCopy(diagnostic: ModelCallDiagnostic, t: Translate) {
+function getUserFacingCopy(diagnostic: ModelCallDiagnostic) {
   if (diagnostic.status === 401 || diagnostic.errorType === "invalid_api_key") {
     return {
-      message: t("modelCallFailed.invalidCredential.message"),
-      guidance: t("modelCallFailed.invalidCredential.guidance"),
+      message: "当前模型的访问凭证无效或已过期，暂时无法生成回复。",
+      guidance: "请前往「设置 > 模型」检查 API Key，更新后重新发送消息。",
     };
   }
 
   if (diagnostic.status === 429 || diagnostic.errorType === "rate_limit") {
     return {
-      message: t("modelCallFailed.rateLimit.message"),
-      guidance: t("modelCallFailed.rateLimit.guidance"),
+      message: "模型服务请求过于频繁，暂时无法生成回复。",
+      guidance: "请稍后重新发送消息；如问题持续，请检查模型配额和服务状态。",
     };
   }
 
   if (diagnostic.errorType === "timeout") {
     return {
-      message: t("modelCallFailed.timeout.message"),
-      guidance: t("modelCallFailed.timeout.guidance"),
+      message: "模型响应超时，暂时无法生成回复。",
+      guidance: "请稍后重新发送消息；如问题持续，请检查模型服务状态。",
     };
   }
 
   return {
-    message: t("modelCallFailed.generic.message"),
-    guidance: t("modelCallFailed.generic.guidance"),
+    message: "模型服务暂时无法完成请求。",
+    guidance: "请稍后重新发送消息；如问题持续，请检查模型配置和服务状态。",
   };
 }
 
-function buildCopyText(diagnostic: ModelCallDiagnostic, t: Translate) {
+function buildCopyText(diagnostic: ModelCallDiagnostic) {
   return [
-    diagnostic.status
-      ? `${t("modelCallFailed.detail.httpStatus")}: ${diagnostic.status}`
-      : null,
-    `${t("modelCallFailed.detail.errorType")}: ${diagnostic.errorType}`,
-    `${t("modelCallFailed.detail.rawMessage")}: ${diagnostic.rawMessage}`,
-    diagnostic.requestId
-      ? `${t("modelCallFailed.detail.requestId")}: ${diagnostic.requestId}`
-      : null,
+    diagnostic.status ? `HTTP 状态: ${diagnostic.status}` : null,
+    `错误类型: ${diagnostic.errorType}`,
+    `原始信息: ${diagnostic.rawMessage}`,
+    diagnostic.requestId ? `请求 ID: ${diagnostic.requestId}` : null,
   ]
     .filter(Boolean)
     .join("\n");
@@ -125,22 +115,19 @@ function ModelCallFailedCard({
   );
   const detailsId = useId();
   const titleId = useId();
-  const { t } = useTranslation();
   const { getPrefixCls } = useProviderContext();
   const prefixCls = getPrefixCls("model-call-failed");
   const diagnostic = parseModelCallDiagnostic(data.message || "");
-  const userFacingCopy = getUserFacingCopy(diagnostic, t);
+  const userFacingCopy = getUserFacingCopy(diagnostic);
   const detailRows = [
-    [t("modelCallFailed.detail.errorType"), diagnostic.errorType],
-    [t("modelCallFailed.detail.rawMessage"), diagnostic.rawMessage],
-    ...(diagnostic.requestId
-      ? [[t("modelCallFailed.detail.requestId"), diagnostic.requestId]]
-      : []),
+    ["错误类型", diagnostic.errorType],
+    ["原始信息", diagnostic.rawMessage],
+    ...(diagnostic.requestId ? [["请求 ID", diagnostic.requestId]] : []),
   ];
 
   const handleCopy = async () => {
     try {
-      await copy(buildCopyText(diagnostic, t));
+      await copy(buildCopyText(diagnostic));
       setCopyStatus("copied");
     } catch {
       setCopyStatus("failed");
@@ -149,10 +136,10 @@ function ModelCallFailedCard({
 
   const copyLabel =
     copyStatus === "copied"
-      ? t("modelCallFailed.copied")
+      ? "已复制"
       : copyStatus === "failed"
-      ? t("modelCallFailed.copyFailed")
-      : t("modelCallFailed.copyError");
+      ? "复制失败"
+      : "复制错误信息";
 
   return (
     <>
@@ -165,7 +152,7 @@ function ModelCallFailedCard({
                 <SparkErrorCircleLine />
               </span>
               <h3 id={titleId} className={`${prefixCls}-title`}>
-                {t("modelCallFailed.title")}
+                模型连接失败
               </h3>
               {diagnostic.status ? (
                 <span className={`${prefixCls}-status`}>
@@ -177,7 +164,7 @@ function ModelCallFailedCard({
           <p className={`${prefixCls}-message`}>{userFacingCopy.message}</p>
           <p className={`${prefixCls}-guidance`}>{userFacingCopy.guidance}</p>
           <Link className={`${prefixCls}-settings-link`} to="/models">
-            {t("modelCallFailed.openSettings")}
+            打开模型设置
             <SparkRightArrowLine aria-hidden="true" />
           </Link>
         </div>
@@ -195,7 +182,7 @@ function ModelCallFailedCard({
               ) : (
                 <SparkDownLine aria-hidden="true" />
               )}
-              {t("modelCallFailed.details")}
+              详细报错信息
             </button>
             {detailsOpen ? (
               <button
