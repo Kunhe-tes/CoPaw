@@ -76,6 +76,12 @@ _TRUSTED_SWE_ENTRYPOINT = False
 _CHECKING_PATH = False
 
 
+def _protected_skill_roots():
+    if _BASE_DIR is None:
+        return ()
+    return (_BASE_DIR / "skills", _BASE_DIR / ".disabled_skills")
+
+
 def _resolve_without_guard(path, *, strict=False):
     return _ORIGINAL_PATH_RESOLVE(path, strict=strict)
 
@@ -255,6 +261,40 @@ def _check_path(path, operation):
         _CHECKING_PATH = False
 
 
+def _check_skill_write_path(path, operation):
+    global _CHECKING_PATH
+
+    if _BASE_DIR is None:
+        return
+    if _CHECKING_PATH:
+        return
+
+    _CHECKING_PATH = True
+    try:
+        decoded, resolved = _resolve_candidate(path)
+        if resolved is None:
+            return
+        for root in _protected_skill_roots():
+            if resolved == root or _is_relative_to(resolved, root):
+                raise TenantPathGuardError(
+                    f"Python runtime guard denied {operation} in the workspace "
+                    f"skill directory; use the skill import or edit APIs so "
+                    f"security scanning runs: {decoded}"
+                )
+    finally:
+        _CHECKING_PATH = False
+
+
+def _is_write_mode(mode):
+    if mode is _MISSING or mode is None:
+        return False
+    try:
+        mode_text = str(mode)
+    except Exception:
+        return False
+    return any(flag in mode_text for flag in ("w", "a", "x", "+"))
+
+
 def _argument(args, kwargs, index, keyword):
     if len(args) > index:
         return args[index]
@@ -279,6 +319,41 @@ def _wrap_path_function(module, name, specs):
     setattr(module, name, wrapper)
 
 
+def _wrap_open_function(module, name):
+    original = getattr(module, name, None)
+    if original is None or not callable(original):
+        return
+
+    @functools.wraps(original)
+    def wrapper(*args, **kwargs):
+        path = _argument(args, kwargs, 0, "file")
+        mode = _argument(args, kwargs, 1, "mode")
+        if path is not _MISSING:
+            if _is_write_mode(mode):
+                _check_skill_write_path(path, f"{name} write path")
+            _check_path(path, f"{name} path")
+        return original(*args, **kwargs)
+
+    setattr(module, name, wrapper)
+
+
+def _wrap_path_mutation_function(module, name, specs):
+    original = getattr(module, name, None)
+    if original is None or not callable(original):
+        return
+
+    @functools.wraps(original)
+    def wrapper(*args, **kwargs):
+        for index, keyword, label in specs:
+            value = _argument(args, kwargs, index, keyword)
+            if value is not _MISSING:
+                _check_skill_write_path(value, f"{label or name} path")
+                _check_path(value, f"{label or name} path")
+        return original(*args, **kwargs)
+
+    setattr(module, name, wrapper)
+
+
 def _wrap_path_method(cls, name, specs):
     original = getattr(cls, name, None)
     if original is None or not callable(original):
@@ -291,6 +366,41 @@ def _wrap_path_method(cls, name, specs):
             value = _argument(args, kwargs, index, keyword)
             if value is not _MISSING:
                 _check_path(value, f"pathlib.{label or name} path")
+        return original(self, *args, **kwargs)
+
+    setattr(cls, name, wrapper)
+
+
+def _wrap_path_write_method(cls, name, specs):
+    original = getattr(cls, name, None)
+    if original is None or not callable(original):
+        return
+
+    @functools.wraps(original)
+    def wrapper(self, *args, **kwargs):
+        _check_skill_write_path(self, f"pathlib.{name} path")
+        _check_path(self, f"pathlib.{name} path")
+        for index, keyword, label in specs:
+            value = _argument(args, kwargs, index, keyword)
+            if value is not _MISSING:
+                _check_skill_write_path(value, f"pathlib.{label or name} path")
+                _check_path(value, f"pathlib.{label or name} path")
+        return original(self, *args, **kwargs)
+
+    setattr(cls, name, wrapper)
+
+
+def _wrap_path_open_method(cls, name):
+    original = getattr(cls, name, None)
+    if original is None or not callable(original):
+        return
+
+    @functools.wraps(original)
+    def wrapper(self, *args, **kwargs):
+        mode = _argument(args, kwargs, 0, "mode")
+        if _is_write_mode(mode):
+            _check_skill_write_path(self, f"pathlib.{name} write path")
+        _check_path(self, f"pathlib.{name} path")
         return original(self, *args, **kwargs)
 
     setattr(cls, name, wrapper)
@@ -354,7 +464,7 @@ def _install_function_wrappers():
     for module in (builtins, io, _io):
         if module is None:
             continue
-        _wrap_path_function(module, "open", [(0, "file", "open")])
+        _wrap_open_function(module, "open")
         _wrap_path_function(module, "open_code", [(0, "path", "open_code")])
 
     for module in (os, posix):
@@ -368,26 +478,33 @@ def _install_function_wrappers():
             "lchown",
             "listdir",
             "lstat",
-            "mkdir",
-            "makedirs",
             "open",
             "readlink",
-            "remove",
-            "rmdir",
             "scandir",
             "stat",
-            "truncate",
-            "unlink",
             "utime",
         ):
             _wrap_path_function(module, name, [(0, "path", name)])
+        for name in (
+            "mkdir",
+            "makedirs",
+            "remove",
+            "rmdir",
+            "truncate",
+            "unlink",
+        ):
+            _wrap_path_mutation_function(
+                module,
+                name,
+                [(0, "path", name)],
+            )
         for name in ("rename", "replace", "link"):
-            _wrap_path_function(
+            _wrap_path_mutation_function(
                 module,
                 name,
                 [(0, "src", "source"), (1, "dst", "destination")],
             )
-        _wrap_path_function(
+        _wrap_path_mutation_function(
             module,
             "symlink",
             [(0, "src", "symlink target"), (1, "dst", "symlink path")],
@@ -402,12 +519,16 @@ def _install_function_wrappers():
         "copytree",
         "move",
     ):
-        _wrap_path_function(
+        _wrap_path_mutation_function(
             shutil,
             name,
             [(0, "src", "source"), (1, "dst", "destination")],
         )
-    _wrap_path_function(shutil, "rmtree", [(0, "path", "rmtree")])
+    _wrap_path_mutation_function(
+        shutil,
+        "rmtree",
+        [(0, "path", "rmtree")],
+    )
 
     for name in ("system", "popen"):
         _wrap_os_system(name)
@@ -417,7 +538,6 @@ def _install_function_wrappers():
 
 def _install_pathlib_wrappers():
     for name in (
-        "chmod",
         "exists",
         "glob",
         "is_dir",
@@ -425,30 +545,40 @@ def _install_pathlib_wrappers():
         "is_mount",
         "is_symlink",
         "iterdir",
-        "lchmod",
-        "link_to",
         "lstat",
-        "mkdir",
-        "open",
         "read_bytes",
         "read_text",
         "readlink",
-        "rename",
-        "replace",
         "rglob",
-        "rmdir",
         "samefile",
         "stat",
+    ):
+        _wrap_path_method(pathlib.Path, name, [])
+
+    for name in (
+        "chmod",
+        "lchmod",
+        "link_to",
+        "mkdir",
+        "rmdir",
         "touch",
         "unlink",
         "write_bytes",
         "write_text",
     ):
-        _wrap_path_method(pathlib.Path, name, [])
-
+        _wrap_path_write_method(pathlib.Path, name, [])
+    _wrap_path_open_method(pathlib.Path, "open")
     for name in ("rename", "replace", "link_to", "hardlink_to"):
-        _wrap_path_method(pathlib.Path, name, [(0, "target", "target")])
-    _wrap_path_method(pathlib.Path, "symlink_to", [(0, "target", "symlink target")])
+        _wrap_path_write_method(
+            pathlib.Path,
+            name,
+            [(0, "target", "target")],
+        )
+    _wrap_path_write_method(
+        pathlib.Path,
+        "symlink_to",
+        [(0, "target", "symlink target")],
+    )
 
 
 def _audit_hook(event, args):

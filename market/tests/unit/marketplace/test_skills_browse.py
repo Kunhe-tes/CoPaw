@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 import asyncio
+import io
 import json
 import pytest
+import zipfile
 from unittest.mock import AsyncMock
 from fastapi.testclient import TestClient
 
@@ -40,6 +42,19 @@ def _publish(svc, source_id, name, bbk_ids=None):
     )
     item, _ = asyncio.run(svc.publish_skill(source_id, req))
     return item
+
+
+def _skill_zip_bytes(entries: dict[str, bytes | str]) -> bytes:
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        for name, content in entries.items():
+            payload = (
+                content.encode("utf-8")
+                if isinstance(content, str)
+                else content
+            )
+            zf.writestr(name, payload)
+    return zip_buffer.getvalue()
 
 
 def test_list_skills_returns_active_items(tmp_path):
@@ -267,6 +282,45 @@ def test_extract_zip_with_chinese_filename(tmp_path):
     import shutil
 
     shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def test_extract_zip_skills_rejects_top_level_path_traversal():
+    from market.app.routers.skills_browse import _extract_zip_skills
+
+    zip_data = _skill_zip_bytes(
+        {
+            "../escape/SKILL.md": "---\nname: escape\n---\n# Escape\n",
+        },
+    )
+
+    with pytest.raises(ValueError, match="路径不安全|Unsafe path"):
+        _extract_zip_skills(zip_data)
+
+
+def test_upload_skill_rejects_ast_execution_risk(tmp_path):
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+    zip_data = _skill_zip_bytes(
+        {
+            "eval_skill/SKILL.md": "---\nname: eval_skill\n---\n# Eval Skill\n",
+            "eval_skill/run.py": "def run(expr):\n    return eval(expr)\n",
+        },
+    )
+
+    resp = client.post(
+        "/api/market/skills/upload",
+        files={
+            "file": (
+                "eval_skill.zip",
+                io.BytesIO(zip_data),
+                "application/zip",
+            ),
+        },
+        headers={"X-Source-Id": "src_a", "X-User-Id": "user1"},
+    )
+
+    assert resp.status_code == 400
+    assert "Security scan" in resp.json()["detail"]
 
 
 def test_log_skill_operation_returns_200(tmp_path):

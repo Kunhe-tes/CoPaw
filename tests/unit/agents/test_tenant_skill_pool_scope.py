@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 """技能池租户隔离与覆盖同步测试。"""
 
+import io
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from src.swe.agents.skills_manager import (
     read_skill_pool_manifest,
     reconcile_pool_manifest,
 )
+from src.swe.security.skill_scanner import SkillScanError
 
 
 def _write_skill(skill_dir: Path, description: str) -> None:
@@ -22,6 +25,15 @@ def _write_skill(skill_dir: Path, description: str) -> None:
         f"---\nname: {skill_dir.name}\ndescription: {description}\n---\n",
         encoding="utf-8",
     )
+
+
+def _zip_bytes(entries: dict[str, bytes]) -> bytes:
+    """构造内存 ZIP 数据."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
 
 
 # --- 原有租户隔离测试 ---
@@ -103,9 +115,6 @@ def test_upload_from_workspace_is_tenant_scoped(tmp_path: Path) -> None:
 
 def test_import_from_zip_is_tenant_scoped(tmp_path: Path) -> None:
     """import_from_zip 写入租户自己的技能池。"""
-    import io
-    import zipfile
-
     tenant_dir = tmp_path / "tenant-a"
     svc = SkillPoolService(working_dir=tenant_dir)
 
@@ -121,6 +130,19 @@ def test_import_from_zip_is_tenant_scoped(tmp_path: Path) -> None:
 
     assert "zip-skill" in result["imported"]
     assert (tenant_dir / "skill_pool" / "zip-skill" / "SKILL.md").exists()
+
+
+def test_import_from_zip_cleans_stage_on_unsafe_zip(
+    tmp_path: Path,
+) -> None:
+    """不安全 ZIP 失败时不保留已解包内容."""
+    svc = SkillPoolService(working_dir=tmp_path)
+    data = _zip_bytes({"../escape.py": b"print('escape')\n"})
+
+    with pytest.raises(ValueError):
+        svc.import_from_zip(data=data)
+
+    assert not any(tmp_path.rglob("escape.py"))
 
 
 def test_create_skill_is_tenant_scoped(tmp_path: Path) -> None:
@@ -187,6 +209,30 @@ def test_reconcile_pool_manifest_is_tenant_scoped(tmp_path: Path) -> None:
     assert "orphan-a" in manifest_a.get("skills", {})
     assert "orphan-b" not in manifest_a.get("skills", {})
     assert "orphan-b" not in manifest_b.get("skills", {})
+
+
+def test_reconcile_pool_manifest_blocks_unsafe_orphan_skill(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """手动写入技能池目录的高危技能刷新时也必须被阻断."""
+    monkeypatch.setenv("SWE_SKILL_SCAN_MODE", "warn")
+    tenant_dir = tmp_path / "tenant-a"
+    skill_dir = get_skill_pool_dir(working_dir=tenant_dir) / "unsafe-orphan"
+    _write_skill(skill_dir, "unsafe orphan")
+    (skill_dir / "run.py").write_text(
+        "def run(expr):\n    return eval(expr)\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SkillScanError):
+        reconcile_pool_manifest(working_dir=tenant_dir)
+
+    manifest = read_skill_pool_manifest(
+        reconcile=False,
+        working_dir=tenant_dir,
+    )
+    assert "unsafe-orphan" not in manifest.get("skills", {})
 
 
 def test_list_pool_skills_is_tenant_scoped(tmp_path: Path) -> None:
