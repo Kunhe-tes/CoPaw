@@ -38,6 +38,32 @@ const messages = {
     // Actions 相关
     "actions.regenerate": "重新生成",
 
+    // 模型调用错误相关
+    "modelCallFailed.title": "模型连接失败",
+    "modelCallFailed.invalidCredential.message":
+      "当前模型的访问凭证无效或已过期，暂时无法生成回复。",
+    "modelCallFailed.invalidCredential.guidance":
+      "请前往「设置 > 模型」检查 API Key，更新后重新发送消息。",
+    "modelCallFailed.rateLimit.message":
+      "模型服务请求过于频繁，暂时无法生成回复。",
+    "modelCallFailed.rateLimit.guidance":
+      "请稍后重新发送消息；如问题持续，请检查模型配额和服务状态。",
+    "modelCallFailed.timeout.message": "模型响应超时，暂时无法生成回复。",
+    "modelCallFailed.timeout.guidance":
+      "请稍后重新发送消息；如问题持续，请检查模型服务状态。",
+    "modelCallFailed.generic.message": "模型服务暂时无法完成请求。",
+    "modelCallFailed.generic.guidance":
+      "请稍后重新发送消息；如问题持续，请检查模型配置和服务状态。",
+    "modelCallFailed.openSettings": "打开模型设置",
+    "modelCallFailed.details": "详细报错信息",
+    "modelCallFailed.copyError": "复制错误信息",
+    "modelCallFailed.copied": "已复制",
+    "modelCallFailed.copyFailed": "复制失败",
+    "modelCallFailed.detail.httpStatus": "HTTP 状态",
+    "modelCallFailed.detail.errorType": "错误类型",
+    "modelCallFailed.detail.rawMessage": "原始信息",
+    "modelCallFailed.detail.requestId": "请求 ID",
+
     // MessageImport 相关
     "messageImport.title": "Sessions 数据导入",
     "messageImport.placeholder": "输入 JSON 数据以覆盖当前 sessions",
@@ -77,6 +103,34 @@ const messages = {
     // Actions related
     "actions.regenerate": "Regenerate",
 
+    // Model call error related
+    "modelCallFailed.title": "Model connection failed",
+    "modelCallFailed.invalidCredential.message":
+      "The current model credentials are invalid or expired, so a response could not be generated.",
+    "modelCallFailed.invalidCredential.guidance":
+      "Go to Settings > Models to check the API key, then send your message again.",
+    "modelCallFailed.rateLimit.message":
+      "The model service is receiving too many requests and cannot generate a response right now.",
+    "modelCallFailed.rateLimit.guidance":
+      "Send your message again later. If the issue persists, check the model quota and service status.",
+    "modelCallFailed.timeout.message":
+      "The model response timed out and could not be generated.",
+    "modelCallFailed.timeout.guidance":
+      "Send your message again later. If the issue persists, check the model service status.",
+    "modelCallFailed.generic.message":
+      "The model service could not complete this request.",
+    "modelCallFailed.generic.guidance":
+      "Send your message again later. If the issue persists, check the model configuration and service status.",
+    "modelCallFailed.openSettings": "Open model settings",
+    "modelCallFailed.details": "Error details",
+    "modelCallFailed.copyError": "Copy error details",
+    "modelCallFailed.copied": "Copied",
+    "modelCallFailed.copyFailed": "Copy failed",
+    "modelCallFailed.detail.httpStatus": "HTTP status",
+    "modelCallFailed.detail.errorType": "Error type",
+    "modelCallFailed.detail.rawMessage": "Original message",
+    "modelCallFailed.detail.requestId": "Request ID",
+
     // MessageImport related
     "messageImport.title": "Import Sessions Data",
     "messageImport.placeholder": "Enter JSON data to override current sessions",
@@ -104,7 +158,7 @@ export function useChatAnywhereI18n<Selected>(
   try {
     const context = useContextSelector(ChatAnywhereI18nContext, selector);
     return context;
-  } catch (error) {
+  } catch {
     return {} as Selected;
   }
 }
