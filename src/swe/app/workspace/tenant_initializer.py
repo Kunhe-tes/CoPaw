@@ -128,6 +128,7 @@ class TenantInitializer:
                 if invalid_path.is_file():
                     backups.append(move_to_recovery_backup(invalid_path))
                     recovered_paths.append(str(invalid_path))
+            self._reconcile_stale_workspace_skills()
             self.ensure_seeded_bootstrap(
                 enable_bootstrap_chat=enable_bootstrap_chat,
             )
@@ -146,6 +147,15 @@ class TenantInitializer:
         for backup_path in backups:
             backup_path.unlink(missing_ok=True)
         return {"recovered_paths": recovered_paths}
+
+    def _reconcile_stale_workspace_skills(self) -> None:
+        """Remove stale registered workspace skills before bootstrap seeding."""
+        from ...agents.skills_manager import reconcile_workspace_manifest
+
+        workspace_dir = self.tenant_dir / "workspaces" / "default"
+        manifest_path = workspace_dir / "skill.json"
+        if manifest_path.is_file():
+            reconcile_workspace_manifest(workspace_dir)
 
     def initialize_minimal(self) -> None:
         """Run minimal bootstrap sequence (idempotent).
