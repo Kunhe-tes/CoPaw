@@ -15,7 +15,6 @@ from .models import (
 )
 from .registry import AgentRegistry
 
-DEFAULT_OUTPUT_CONTRACT = "Return only valid AgentResult JSON."
 MIN_REGISTRATION_MAX_TURNS = 1
 MIN_REGISTRATION_MAX_TOOL_CALLS = 0
 MIN_REGISTRATION_TIMEOUT_MS = 1000
@@ -75,9 +74,6 @@ class SubAgentDefinitionService:
                 "nickname": request.nickname,
                 "description": request.description,
                 "instruction": request.instruction,
-                "output_contract": (
-                    request.output_contract or DEFAULT_OUTPUT_CONTRACT
-                ),
                 "trigger_keywords": request.trigger_keywords,
                 "task_types": request.task_types,
                 "priority": request.priority,
@@ -103,7 +99,6 @@ class SubAgentDefinitionService:
                     RUN_SCOPED_DESCRIPTION_MAX_BYTES,
                 ),
                 "instruction": request.instruction,
-                "output_contract": DEFAULT_OUTPUT_CONTRACT,
                 "budget": BudgetConfig().model_dump(mode="json"),
             },
         )

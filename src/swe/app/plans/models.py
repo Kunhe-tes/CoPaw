@@ -214,7 +214,7 @@ class PlanClarificationCard(PlanInteractionCard):
     options: list[PlanOption] = Field(default_factory=list)
     form_id: str | None = None
     fields: list[PlanClarificationField] = Field(default_factory=list)
-    allow_custom_response: bool = False
+    allow_custom_response: bool = True
 
     @model_validator(mode="after")
     def _validate_clarification_shape(self) -> "PlanClarificationCard":

@@ -121,10 +121,14 @@ import {
   createChatStreamAbortReason,
   shouldStopBackendForFetchAbort,
 } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/abortReasons";
-import RuntimeResponseCard from "./components/RuntimeResponseCard";
+import RuntimeResponseCard, {
+  RuntimeResponseFeedbackCard,
+} from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
-import { ActivePlanInteractionComposer } from "./components/PlanInteractionCards";
+import {
+  ActivePlanInteractionComposer,
+} from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
 import {
@@ -163,6 +167,10 @@ import {
   type ChatFeedbackRenderContextValue,
 } from "./feedbackRenderContext";
 import {
+  ChatPlanReviewRenderProvider,
+  type ChatPlanReviewRenderContextValue,
+} from "./planReviewRenderContext";
+import {
   CHAT_TASK_PROGRESS_UPDATE_EVENT,
   isTaskProgressUpdateForActiveSession,
   normalizeTaskProgressUpdateEventDetail,
@@ -191,10 +199,11 @@ const chatCardRenderers = {
   AgentScopeRuntimeResponseCard: (props: {
     data: ChatRuntimeResponseCardData;
     isLast?: boolean;
-  }) => {
+  }) => <RuntimeResponseCard {...props} />,
+  ResponseFeedback: (props: { data: ChatRuntimeResponseCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     return (
-      <RuntimeResponseCard
+      <RuntimeResponseFeedbackCard
         {...props}
         chatId={feedback.feedbackChatId}
         existingFeedback={
@@ -1929,6 +1938,14 @@ export default function ChatPage() {
       handleFeedbackSaved,
     ],
   );
+  const planReviewRenderContextValue =
+    useMemo<ChatPlanReviewRenderContextValue>(
+      () => ({
+        onContinueModifying: handleContinueModifyingPlan,
+        onPlanModeDecision: handlePlanModeDecision,
+      }),
+      [handleContinueModifyingPlan, handlePlanModeDecision],
+    );
   const htmlPreviewTrackingContextValue = useMemo(
     () => ({
       cronTaskId: feedbackTask?.cronTaskId || null,
@@ -2114,10 +2131,6 @@ export default function ChatPage() {
         beforeSubmit: handleBeforeSubmit,
         beforeUI: (
           <>
-            <SubAgentRunMonitor
-              chatId={feedbackChatId}
-              resetKey={subAgentMonitorResetKey}
-            />
             {taskProgressEnabled ? (
               <TaskProgressFloatingCard progress={taskProgress} />
             ) : null}
@@ -2329,10 +2342,18 @@ export default function ChatPage() {
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
                 <ChatContentOnlyProvider enabled={isContentOnly}>
-                  <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
-                    <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                  </GlobalVoiceRecorder>
+                  <ChatPlanReviewRenderProvider
+                    value={planReviewRenderContextValue}
+                  >
+                    <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                      <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                    </GlobalVoiceRecorder>
+                  </ChatPlanReviewRenderProvider>
                 </ChatContentOnlyProvider>
+                <SubAgentRunMonitor
+                  chatId={feedbackChatId}
+                  resetKey={subAgentMonitorResetKey}
+                />
                 {!isContentOnly && (
                   <DragUploadOverlay
                     visible={isDragging}

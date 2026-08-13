@@ -315,6 +315,25 @@ class PerRunSubAgentRunStore:
         self._write(running)
         return running
 
+    async def record_turns(
+        self,
+        run_id: str,
+        *,
+        turns_used: int,
+    ) -> BackgroundSubAgentRunRecord:
+        """Persist monotonically increasing observed research turns."""
+        record = self._require(run_id)
+        if record.status in TERMINAL_BACKGROUND_RUN_STATUSES:
+            return record
+        updated = record.model_copy(
+            update={
+                "turns_used": max(record.turns_used, int(turns_used)),
+                "updated_at": _now_utc(),
+            },
+        )
+        self._write(updated)
+        return updated
+
     async def finish(
         self,
         run_id: str,

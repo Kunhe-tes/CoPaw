@@ -65,6 +65,7 @@ export type SubAgentRunStatus =
   | "running"
   | "paused"
   | "completed"
+  | "partial"
   | "failed"
   | "cancelled"
   | "expired";
@@ -72,6 +73,8 @@ export type SubAgentRunStatus =
 export interface SubAgentBudgetConsumption {
   elapsed_ms: number;
   timeout_ms: number;
+  turns_used: number;
+  max_turns: number;
   ratio: number;
 }
 

@@ -38,6 +38,8 @@ from ..crons.manager import (
     is_batch_dispatch_managed_broadcast_child,
 )
 from ..workspace.tenant_initializer import TenantInitializer
+from ..workspace.bootstrap_state import SourceTemplateUnavailable
+from ..workspace.source_template_provisioner import SourceTemplateProvisioner
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 public_router = APIRouter(prefix="/assets", tags=["assets"])
@@ -554,6 +556,20 @@ class InternalBatchInitializeTenantsResponse(BaseModel):
     )
 
 
+class InternalEnsureSourceTemplateRequest(BaseModel):
+    """Request for explicitly provisioning a source template."""
+
+    source_id: str = Field(..., min_length=1)
+
+
+class InternalEnsureSourceTemplateResponse(BaseModel):
+    """Safe source-template provisioning result."""
+
+    source_id: str
+    template_name: str
+    status: str
+
+
 def _verify_internal_token(token: Optional[str]) -> None:
     """验证内部服务 Token（如果配置了的话）."""
     if _INTERNAL_TOKEN:
@@ -633,6 +649,36 @@ def _require_internal_token(
     x_internal_token: Optional[str],
 ) -> None:
     _verify_internal_token(authorization or x_internal_token)
+
+
+@router.post(
+    "/source-templates/ensure",
+    response_model=InternalEnsureSourceTemplateResponse,
+)
+async def ensure_source_template(
+    payload: InternalEnsureSourceTemplateRequest,
+    authorization: Optional[str] = Header(None),
+    x_internal_token: Optional[str] = Header(None),
+) -> InternalEnsureSourceTemplateResponse:
+    """Create or repair one source template outside tenant request traffic."""
+    _require_internal_token(authorization, x_internal_token)
+    if not is_valid_identity_value(payload.source_id):
+        raise _http_400("Invalid source_id")
+    try:
+        result = await SourceTemplateProvisioner(WORKING_DIR).ensure(
+            payload.source_id,
+        )
+    except SourceTemplateUnavailable as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Source template unavailable",
+            headers={"Retry-After": str(exc.retry_after_seconds)},
+        ) from exc
+    return InternalEnsureSourceTemplateResponse(
+        source_id=result.source_id,
+        template_name=result.template_name,
+        status=result.status,
+    )
 
 
 def _encode_scope_items_from_body(

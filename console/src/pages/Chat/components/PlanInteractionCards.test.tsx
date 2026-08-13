@@ -16,11 +16,12 @@ import { ChatAnywhereSessionsContext } from "@/components/agentscope-chat";
 import {
   ActivePlanClarificationCard,
   ActivePlanInteractionComposer,
-  ActivePlanReviewCard,
   PlanClarificationCard,
   PlanReviewCard,
+  PlanReviewMessageCard,
   PlanReviewSnapshot,
 } from "./PlanInteractionCards";
+import { ChatPlanReviewRenderProvider } from "../planReviewRenderContext";
 import styles from "./PlanInteractionCards.module.less";
 
 const stylesheet = readFileSync(
@@ -98,21 +99,19 @@ function renderActiveClarification(
   );
 }
 
-function renderActivePlanReview(
-  messages: IAgentScopeRuntimeWebUIMessage<unknown>[],
+function renderPlanReviewMessage(
+  data: React.ComponentProps<typeof PlanReviewCard>["data"],
+  callbacks: {
+    onContinueModifying?: (
+      value: React.ComponentProps<typeof PlanReviewCard>["data"],
+    ) => void;
+    onPlanModeDecision?: (enabled: boolean) => void;
+  } = {},
 ) {
   return render(
-    <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
-      <ChatAnywhereMessagesContext.Provider
-        value={{
-          messages,
-          setMessages: vi.fn(),
-          getMessages: () => messages,
-        }}
-      >
-        <ActivePlanReviewCard />
-      </ChatAnywhereMessagesContext.Provider>
-    </ChatAnywhereSessionsContext.Provider>,
+    <ChatPlanReviewRenderProvider value={callbacks}>
+      <PlanReviewMessageCard data={data} />
+    </ChatPlanReviewRenderProvider>,
   );
 }
 
@@ -261,7 +260,7 @@ describe("Plan interaction cards", () => {
     expect(screen.getByText("Pick scope")).toBeInTheDocument();
   });
 
-  it("replaces the composer with the latest active plan interaction card", () => {
+  it("keeps the composer when a plan review follows a clarification", () => {
     renderActiveComposer([
       createClarificationMessage({
         messageId: "assistant-clarification",
@@ -276,10 +275,7 @@ describe("Plan interaction cards", () => {
       }),
     ]);
 
-    expect(screen.queryByTestId("default-composer")).not.toBeInTheDocument();
-    expect(
-      screen.getByRole("region", { name: "Review latest plan" }),
-    ).toBeInTheDocument();
+    expect(screen.getByTestId("default-composer")).toBeInTheDocument();
     expect(
       screen.queryByRole("region", { name: "Pick scope" }),
     ).not.toBeInTheDocument();
@@ -325,26 +321,15 @@ describe("Plan interaction cards", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("restores the default composer after choosing to continue modifying a plan", () => {
-    const onContinueModifying = vi.fn();
-    renderActiveComposer(
-      [
-        createReviewMessage({
-          messageId: "assistant-review",
-          cardId: "plan-2",
-          title: "Review latest plan",
-        }),
-      ],
-      { onContinueModifying },
-    );
+  it("keeps the default composer when a plan review is pending", () => {
+    renderActiveComposer([
+      createReviewMessage({
+        messageId: "assistant-review",
+        cardId: "plan-2",
+        title: "Review latest plan",
+      }),
+    ]);
 
-    fireEvent.click(
-      screen.getByRole("button", { name: "Continue modifying" }),
-    );
-
-    expect(onContinueModifying).toHaveBeenCalledWith(
-      expect.objectContaining({ plan_id: "plan-2" }),
-    );
     expect(screen.getByTestId("default-composer")).toBeInTheDocument();
     expect(
       screen.queryByRole("region", { name: "Review latest plan" }),
@@ -871,7 +856,7 @@ describe("Plan interaction cards", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("submits paged form values and optional supplemental context", async () => {
+  it("submits paged form values without a global supplemental step", async () => {
     const submit = captureSubmitEvents();
     render(
       <PlanClarificationCard
@@ -880,7 +865,6 @@ describe("Plan interaction cards", () => {
           kind: "form",
           form_id: "customer_plan_clarification",
           prompt: "Collect planning context",
-          allow_custom_response: true,
           fields: [
             {
               id: "industry",
@@ -900,23 +884,17 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    expect(screen.getByText("1 of 3")).toBeInTheDocument();
+    expect(screen.getByText("1 of 2")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /零售\/电商/ }));
     fireEvent.click(screen.getByRole("button", { name: "继续" }));
     fireEvent.change(screen.getByPlaceholderText("请补充"), {
       target: { value: "复购率低" },
     });
     fireEvent.keyDown(screen.getByPlaceholderText("请补充"), { key: "Enter" });
-    fireEvent.change(screen.getByPlaceholderText("请输入自定义回复"), {
-      target: { value: "希望年度内看到改善" },
-    });
-    fireEvent.keyDown(screen.getByPlaceholderText("请输入自定义回复"), {
-      key: "Enter",
-    });
 
     await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
     expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
-      query: "所在行业: 零售/电商\n当前主要挑战: 复购率低\n希望年度内看到改善",
+      query: "所在行业: 零售/电商\n当前主要挑战: 复购率低",
       biz_params: {
         plan_interaction_response: {
           kind: "form",
@@ -925,7 +903,6 @@ describe("Plan interaction cards", () => {
             industry: "retail",
             challenges: "复购率低",
           },
-          text: "希望年度内看到改善",
         },
       },
     });
@@ -972,10 +949,156 @@ describe("Plan interaction cards", () => {
         },
       },
     });
+    expect(
+      submit.handler.mock.calls[0][0].detail.biz_params
+        .plan_interaction_response,
+    ).not.toHaveProperty("custom_field_values");
     submit.cleanup();
   });
 
-  it("preserves supplemental context when revisiting form fields", () => {
+  it("shows a persistent custom input for a required single-choice form field", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "single_choice",
+              required: true,
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("textbox", { name: "Scope" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "自定义填写" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "提交" })).toBeDisabled();
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Scope" }), {
+      target: { value: "CLI only" },
+    });
+    expect(screen.getByRole("button", { name: "提交" })).toBeEnabled();
+  });
+
+  it("renders persistent custom input as a single horizontally scrollable line", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "single_choice",
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    const customInput = screen.getByRole("textbox", { name: "Scope" });
+    expect(customInput.tagName).toBe("INPUT");
+    expect(stylesheet).toContain("overflow-x: auto;");
+    expect(stylesheet).toContain("white-space: nowrap;");
+    expect(stylesheet).toContain(".choiceOptionsViewport + .customFieldInput");
+    expect(stylesheet).toContain("margin-top: 10px;");
+  });
+
+  it("replaces a single-choice selection when persistent custom text is entered", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "single_choice",
+              required: true,
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Backend" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Scope" }), {
+      target: { value: "CLI only" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Scope: CLI only",
+      biz_params: {
+        plan_interaction_response: {
+          field_values: {},
+          custom_field_values: { scope: "CLI only" },
+        },
+      },
+    });
+    submit.cleanup();
+  });
+
+  it("submits multi-choice ids and field-level custom text independently", async () => {
+    const submit = captureSubmitEvents();
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "checks-context",
+          prompt: "Collect checks",
+          fields: [
+            {
+              id: "checks",
+              label: "Checks",
+              type: "multi_choice",
+              options: [{ id: "lint", label: "Lint" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Lint" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Checks" }), {
+      target: { value: "Security scan" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "提交" }));
+
+    await waitFor(() => expect(submit.handler).toHaveBeenCalledTimes(1));
+    expect(submit.handler.mock.calls[0][0].detail).toMatchObject({
+      query: "Checks: Lint, Security scan",
+      biz_params: {
+        plan_interaction_response: {
+          field_values: { checks: ["lint"] },
+          custom_field_values: { checks: "Security scan" },
+        },
+      },
+    });
+    submit.cleanup();
+  });
+
+  it("does not append a global custom-response step to forms", () => {
     render(
       <PlanClarificationCard
         data={{
@@ -989,6 +1112,59 @@ describe("Plan interaction cards", () => {
               id: "scope",
               label: "Scope",
               type: "single_choice",
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(screen.getByText("1 of 1")).toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText("请输入自定义回复"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hides the persistent custom input when explicitly disabled", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          allow_custom_response: false,
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "single_choice",
+              options: [{ id: "backend", label: "Backend" }],
+            },
+          ],
+        }}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("textbox", { name: "Scope" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("preserves custom field context when revisiting a form field", () => {
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "form",
+          form_id: "scope-context",
+          prompt: "Collect context",
+          allow_custom_response: true,
+          fields: [
+            {
+              id: "scope",
+              label: "Scope",
+              type: "multi_choice",
               required: true,
               options: [{ id: "small", label: "Small" }],
             },
@@ -997,16 +1173,12 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
-    fireEvent.click(screen.getByRole("button", { name: "继续" }));
-    fireEvent.change(screen.getByPlaceholderText("请输入自定义回复"), {
+    fireEvent.change(screen.getByPlaceholderText("请输入自定义填写"), {
       target: { value: "Keep this context" },
     });
-    fireEvent.click(screen.getByRole("button", { name: "上一项" }));
-    fireEvent.click(screen.getByRole("button", { name: /Small/ }));
-    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    fireEvent.click(screen.getByRole("button", { name: "Small" }));
 
-    expect(screen.getByPlaceholderText("请输入自定义回复")).toHaveValue(
+    expect(screen.getByPlaceholderText("请输入自定义填写")).toHaveValue(
       "Keep this context",
     );
   });
@@ -1030,6 +1202,31 @@ describe("Plan interaction cards", () => {
       container.querySelector(`.${styles.choiceOptionsViewport}`),
     ).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /Option/ })).toHaveLength(6);
+  });
+
+  it("wraps long option labels and retains their complete label", () => {
+    const longLabel =
+      "This is a deliberately long option label that must wrap inside the clarification card without being truncated";
+    render(
+      <PlanClarificationCard
+        data={{
+          card_type: "plan_clarification",
+          kind: "single_choice",
+          prompt: "Pick scope",
+          options: [{ id: "long", label: longLabel }],
+        }}
+      />,
+    );
+
+    expect(screen.getByRole("button", { name: longLabel })).toHaveAttribute(
+      "aria-label",
+      longLabel,
+    );
+    expect(screen.getByTitle(longLabel)).toBeInTheDocument();
+    expect(stylesheet).toContain("max-height: 244px;");
+    expect(stylesheet).toContain("overflow-y: auto;");
+    expect(stylesheet).toContain("white-space: normal;");
+    expect(stylesheet).toContain("overflow-wrap: anywhere;");
   });
 
   it("hides a submitted clarification in the current render", async () => {
@@ -1404,49 +1601,19 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("renders only the latest unhandled plan review as the active card", () => {
-    renderActivePlanReview([
-      createReviewMessage({
-        messageId: "message-1",
-        cardId: "review-1",
-        title: "Older review",
-      }),
-      createReviewMessage({
-        messageId: "message-2",
-        cardId: "review-2",
-        title: "Submitted review",
-        status: "submitted",
-        submittedDecision: "execute",
-      }),
-      createReviewMessage({
-        messageId: "message-3",
-        cardId: "review-3",
-        title: "Latest review",
-      }),
-    ]);
+  it("renders an interactive plan review in the message flow", () => {
+    const onContinueModifying = vi.fn();
+    renderPlanReviewMessage(createReviewData(), { onContinueModifying });
 
-    expect(
-      screen.getByRole("region", { name: "Latest review" }),
-    ).toHaveAttribute("data-active-plan-review-card", "true");
-    expect(screen.queryByText("Older review")).not.toBeInTheDocument();
-    expect(screen.queryByText("Submitted review")).not.toBeInTheDocument();
-  });
+    expect(screen.getByRole("region", { name: "Fix bug" })).toHaveAttribute(
+      "data-active-plan-review-card",
+      "true",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "继续修改" }));
 
-  it("renders no active plan review if a later user message supersedes it", () => {
-    renderActivePlanReview([
-      createReviewMessage({
-        messageId: "message-1",
-        cardId: "review-1",
-        title: "Plan to confirm",
-      }),
-      {
-        id: "user-1",
-        role: "user" as const,
-        cards: [],
-      },
-    ]);
-
-    expect(screen.queryByText("Plan to confirm")).not.toBeInTheDocument();
+    expect(onContinueModifying).toHaveBeenCalledWith(
+      expect.objectContaining({ plan_id: "plan-123" }),
+    );
   });
 
   it("renders a read-only plan review snapshot with submitted execute status", () => {
@@ -1465,13 +1632,13 @@ describe("Plan interaction cards", () => {
     );
     expect(screen.getByText("已接受并开始执行")).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Continue modifying" }),
+      screen.queryByRole("button", { name: "继续修改" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Execute" }),
+      screen.queryByRole("button", { name: "开始执行" }),
     ).not.toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: "Exit Plan Mode" }),
+      screen.queryByRole("button", { name: "退出计划模式" }),
     ).not.toBeInTheDocument();
   });
 
@@ -1484,11 +1651,13 @@ describe("Plan interaction cards", () => {
       container.querySelector(`.${styles.planReviewActiveCard}`),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Continue modifying" }),
+      screen.getByRole("button", { name: "继续修改" }),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Execute" })).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Exit Plan Mode" }),
+      screen.getByRole("button", { name: "开始执行" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "退出计划模式" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("textbox", { name: "反馈意见" }),
@@ -1509,6 +1678,20 @@ describe("Plan interaction cards", () => {
     expect(
       container.querySelector(`.${styles.reviewSummary}`),
     ).toHaveTextContent(longSummary);
+  });
+
+  it("uses Chinese review actions with one primary execute action", () => {
+    render(<PlanReviewCard active data={createReviewData()} />);
+
+    expect(
+      screen.getByRole("button", { name: "继续修改" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "退出计划模式" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始执行" })).toHaveClass(
+      styles.reviewPrimaryButton,
+    );
   });
 
   it("calls continue modifying without submitting a plan review response", () => {
@@ -1543,7 +1726,7 @@ describe("Plan interaction cards", () => {
     expect(screen.queryByText("Open questions")).not.toBeInTheDocument();
     expect(screen.queryByText(/Confidence:/)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "Continue modifying" }));
+    fireEvent.click(screen.getByRole("button", { name: "继续修改" }));
 
     expect(onContinueModifying).toHaveBeenCalledWith(
       expect.objectContaining({ plan_id: "plan-123" }),
@@ -1571,7 +1754,7 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Execute" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始执行" }));
 
     await waitFor(() => {
       expect(submit.handler).toHaveBeenCalledTimes(1);
@@ -1586,7 +1769,7 @@ describe("Plan interaction cards", () => {
         },
       },
     });
-    expect(screen.getByRole("button", { name: "Execute" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "开始执行" })).toBeDisabled();
 
     submit.cleanup();
   });
@@ -1606,7 +1789,7 @@ describe("Plan interaction cards", () => {
       />,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "Exit Plan Mode" }));
+    fireEvent.click(screen.getByRole("button", { name: "退出计划模式" }));
 
     expect(onPlanModeDecision).toHaveBeenCalledWith(false);
     await Promise.resolve();
@@ -1615,16 +1798,34 @@ describe("Plan interaction cards", () => {
     submit.cleanup();
   });
 
-  it("uses the approved blue-gray visual state tokens", () => {
+  it("uses the approved task-panel visual state tokens", () => {
     expect(stylesheet).toContain("--clarification-card-bg: #ffffff");
-    expect(stylesheet).toContain("--clarification-border: #dce6f2");
-    expect(stylesheet).toContain("--clarification-accent: #1677ff");
-    expect(stylesheet).toContain("--clarification-selected-bg: #f0f7ff");
+    expect(stylesheet).toContain("--clarification-border: #e5e7eb");
+    expect(stylesheet).toContain("--clarification-accent: #3769fc");
+    expect(stylesheet).toContain("--clarification-selected-bg: #eef4ff");
     expect(stylesheet).toContain(
       "border-left: 3px solid var(--clarification-accent)",
     );
-    expect(stylesheet).toContain("min-height: 40px");
-    expect(stylesheet).toContain("height: 32px");
+    expect(stylesheet).toContain("min-height: 44px");
+    expect(stylesheet).toContain("height: 36px");
+    expect(stylesheet).toContain(".optionRowFocused");
+    expect(stylesheet).toContain(".optionRowSelected");
+    expect(stylesheet).not.toContain("optionFocusIcon");
+    expect(stylesheet).not.toContain("height: 48vh");
+    expect(stylesheet).toContain(":global(.dark-mode)");
+    expect(stylesheet).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(stylesheet).toContain("animation: none");
+    expect(stylesheet).toContain("transition: none");
     expect(stylesheet).not.toContain("#4f6f63");
+  });
+
+  it("uses compact vertical spacing for clarification cards", () => {
+    expect(stylesheet).toContain("padding: 16px;");
+    expect(stylesheet).toContain("min-height: 44px;");
+    expect(stylesheet).not.toContain("flex: 0 0 44px;");
+    expect(stylesheet).toContain("gap: 6px;");
+    expect(stylesheet).toContain("min-height: 64px;");
+    expect(stylesheet).toContain("margin-top: 12px;");
+    expect(stylesheet).toContain("padding-top: 12px;");
   });
 });

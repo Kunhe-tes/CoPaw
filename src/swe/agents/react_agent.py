@@ -129,6 +129,8 @@ Use `ask_plan_clarification` for every material unresolved item unless the user 
 
 Make the decision being requested explicit. Provide concrete options when useful.
 - single_choice and multi_choice clarifications must not include recommended answers.
+- Choice controls include a system-owned custom-answer path. Provide only concrete
+  business options and do not generate an "other" or custom-answer option.
 - text clarifications may include a recommended answer only when it helps the user evaluate a concrete default.
 - After the user answers one question series, review remaining dependencies and continue with the next question series when needed.
 - Continue until all decision-tree branches relevant to the requested plan have been clarified well enough to produce a concrete, reviewable plan.
@@ -2099,12 +2101,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._required_structured_model = None
         self.toolkit.remove_tool_function(self.finish_function_name)
         self._start_watchdog()
+        turn_callback = getattr(self, "_subagent_turn_callback", None)
         try:
             with self.agent_phase(AgentPhase.REASONING, reason="research"):
                 for turn in range(1, self.max_iters + 1):
                     await self._compress_memory_if_needed()
                     reply = await self._reasoning()
                     last_reply = reply
+                    if turn_callback is not None:
+                        await turn_callback(turn)
                     tool_calls = reply.get_content_blocks("tool_use")
                     if not tool_calls:
                         return ResearchPhaseResult(

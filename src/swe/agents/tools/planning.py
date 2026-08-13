@@ -347,9 +347,12 @@ async def ask_plan_clarification(
     kind: Literal["single_choice", "multi_choice", "text", "form"],
     options: list[Any] | str | None = None,
     fields: list[PlanClarificationFormFieldInput] | str | None = None,
-    allow_custom_response: bool = False,
+    allow_custom_response: bool = True,
 ) -> ToolResponse:
     """生成计划澄清卡片，让前端用结构化控件收集下一轮回复。
+
+    Choice controls include a system-owned custom-answer path by default.
+    Provide only concrete business options; do not add an "other" option.
 
     Form example:
     fields=[

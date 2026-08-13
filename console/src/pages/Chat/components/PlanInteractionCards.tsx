@@ -1,11 +1,5 @@
 import { type ReactElement, useEffect, useRef, useState } from "react";
-import {
-  Check,
-  ChevronLeft,
-  ChevronRight,
-  ChevronsUpDown,
-  CornerDownLeft,
-} from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, CornerDownLeft } from "lucide-react";
 import { type IAgentScopeRuntimeWebUIMessage } from "@/components/agentscope-chat";
 import { ChatAnywhereMessagesContext } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/ChatAnywhereMessagesContext";
 import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
@@ -20,6 +14,7 @@ import {
   resolveFeedbackResponseId,
   resolveFeedbackTraceId,
 } from "../messageMeta";
+import { useChatPlanReviewRenderContext } from "../planReviewRenderContext";
 import styles from "./PlanInteractionCards.module.less";
 import { useContextSelector } from "use-context-selector";
 
@@ -74,6 +69,16 @@ function collectFormValues(
   );
 }
 
+function collectCustomFormValues(
+  values: Record<string, string>,
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(values)
+      .map(([fieldId, value]) => [fieldId, value.trim()] as const)
+      .filter(([, value]) => Boolean(value)),
+  );
+}
+
 function isPlanClarificationCardData(
   data: unknown,
 ): data is ChatPlanClarificationCardData {
@@ -111,7 +116,7 @@ function createPlanClarificationFingerprint(
     form_id: data.form_id,
     options: data.options || [],
     fields: data.fields || [],
-    allow_custom_response: data.allow_custom_response === true,
+    allow_custom_response: data.allow_custom_response !== false,
   });
 }
 
@@ -186,52 +191,12 @@ function findLatestPlanClarificationCard(
   return null;
 }
 
-function findLatestPlanReviewCard(messages: IAgentScopeRuntimeWebUIMessage[]): {
-  data: ChatPlanReviewCardData;
+type ActivePlanInteraction = {
+  type: "clarification";
+  data: ChatPlanClarificationCardData;
   instanceKey: string;
-} | null {
-  let hasLaterUserMessage = false;
-  for (
-    let messageIndex = messages.length - 1;
-    messageIndex >= 0;
-    messageIndex -= 1
-  ) {
-    const message = messages[messageIndex];
-    if (message?.role === "user") {
-      hasLaterUserMessage = true;
-      continue;
-    }
-    const cards = message?.cards || [];
-    for (let cardIndex = cards.length - 1; cardIndex >= 0; cardIndex -= 1) {
-      const card = cards[cardIndex];
-      if (
-        !hasLaterUserMessage &&
-        card.code === PLAN_INTERACTION_CARD_CODE &&
-        isPlanReviewCardData(card.data) &&
-        card.data.status !== "submitted"
-      ) {
-        return {
-          data: card.data,
-          instanceKey: `${message.id}:${card.id || card.code}:${cardIndex}`,
-        };
-      }
-    }
-  }
-  return null;
-}
-
-type ActivePlanInteraction =
-  | {
-      type: "clarification";
-      data: ChatPlanClarificationCardData;
-      instanceKey: string;
-      sourceKey: string | null;
-    }
-  | {
-      type: "review";
-      data: ChatPlanReviewCardData;
-      instanceKey: string;
-    };
+  sourceKey: string | null;
+};
 
 function findLatestActivePlanInteractionCard(
   messages: IAgentScopeRuntimeWebUIMessage[],
@@ -257,14 +222,7 @@ function findLatestActivePlanInteractionCard(
 
       const instanceKey = `${message.id}:${card.id || card.code}:${cardIndex}`;
       if (isPlanReviewCardData(card.data)) {
-        if (card.data.status === "submitted") {
-          return null;
-        }
-        return {
-          type: "review",
-          data: card.data,
-          instanceKey,
-        };
+        return null;
       }
 
       if (isPlanClarificationCardData(card.data)) {
@@ -297,23 +255,16 @@ function ChoiceRows({
   options,
   selectedIds,
   focusedIndex,
-  allowCustomResponse = false,
-  customActive = false,
   onFocusIndexChange,
   onSelect,
-  onCustomSelect,
 }: {
   options: PlanClarificationOption[];
   selectedIds: string[];
   focusedIndex: number;
-  allowCustomResponse?: boolean;
-  customActive?: boolean;
   onFocusIndexChange: (index: number) => void;
   onSelect: (optionId: string) => void;
-  onCustomSelect?: () => void;
 }) {
   const rowRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const allRowsCount = options.length + (allowCustomResponse ? 1 : 0);
 
   useEffect(() => {
     const focusedRow = rowRefs.current[focusedIndex];
@@ -343,52 +294,22 @@ function ChoiceRows({
               .join(" ")}
             aria-current={focused ? "true" : undefined}
             aria-pressed={selected}
+            aria-label={option.label}
             onFocus={() => onFocusIndexChange(index)}
             onClick={() => onSelect(option.id)}
           >
             <span className={styles.optionNumber}>{index + 1}.</span>
-            <span className={styles.optionLabel}>{option.label}</span>
-            {selected ? <Check aria-hidden="true" size={15} /> : null}
-            {focused ? (
-              <ChevronsUpDown
-                aria-hidden="true"
-                className={styles.optionFocusIcon}
-                size={14}
-              />
+            <span className={styles.optionLabel} title={option.label}>
+              {option.label}
+            </span>
+            {selected ? (
+              <span className={styles.optionCheck} aria-hidden="true">
+                <Check size={15} strokeWidth={3} />
+              </span>
             ) : null}
           </button>
         );
       })}
-      {allowCustomResponse ? (
-        <button
-          ref={(node) => {
-            rowRefs.current[allRowsCount - 1] = node;
-          }}
-          type="button"
-          className={[
-            styles.optionRow,
-            focusedIndex === allRowsCount - 1 ? styles.optionRowFocused : "",
-            customActive ? styles.optionRowSelected : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}
-          aria-current={focusedIndex === allRowsCount - 1 ? "true" : undefined}
-          aria-pressed={customActive}
-          onFocus={() => onFocusIndexChange(allRowsCount - 1)}
-          onClick={onCustomSelect}
-        >
-          <span className={styles.optionNumber}>{allRowsCount}.</span>
-          <span className={styles.optionLabel}>自定义回复</span>
-          {customActive ? <Check aria-hidden="true" size={15} /> : null}
-          {focusedIndex === allRowsCount - 1 ? (
-            <ChevronsUpDown
-              aria-hidden="true"
-              className={styles.optionFocusIcon}
-              size={14}
-            />
-          ) : null}
-        </button>
-      ) : null}
     </div>
   );
 }
@@ -411,6 +332,9 @@ export function PlanClarificationCard({
   const [formValues, setFormValues] = useState<
     Record<string, string | string[]>
   >({});
+  const [customFieldValues, setCustomFieldValues] = useState<
+    Record<string, string>
+  >({});
   const cardRef = useRef<HTMLElement | null>(null);
   const interactionResetKey =
     cardInstanceKey || createPlanClarificationFingerprint(data);
@@ -420,21 +344,12 @@ export function PlanClarificationCard({
   const fields = data.fields || [];
   const isTopLevelChoice =
     data.kind === "single_choice" || data.kind === "multi_choice";
-  const allowsCustomText =
-    data.kind === "text" ||
-    isTopLevelChoice ||
-    data.allow_custom_response === true;
-  const totalSteps =
-    data.kind === "form"
-      ? fields.length + (data.allow_custom_response ? 1 : 0)
-      : 1;
+  const totalSteps = data.kind === "form" ? fields.length : 1;
   const boundedStep = boundedIndex(activeStep, totalSteps);
   const activeField =
     data.kind === "form" && boundedStep < fields.length
       ? fields[boundedStep]
       : undefined;
-  const isSupplementStep =
-    data.kind === "form" && !activeField && data.allow_custom_response === true;
   const activeOptions =
     activeField?.type === "single_choice" ||
     activeField?.type === "multi_choice"
@@ -467,40 +382,42 @@ export function PlanClarificationCard({
     : customActive
     ? trimmedText
     : "";
+  const fieldHasCustomValue = (field: PlanClarificationField): boolean =>
+    Boolean(customFieldValues[field.id]?.trim());
+  const fieldHasResponse = (field: PlanClarificationField): boolean =>
+    hasFormValue(formValues[field.id]) || fieldHasCustomValue(field);
   const requiredFormFieldsSatisfied = fields.every(
-    (field) => !field.required || hasFormValue(formValues[field.id]),
+    (field) => !field.required || fieldHasResponse(field),
   );
   const formQueryLines = fields
     .map((field) => {
-      const formattedValue = formatFormFieldValue(field, formValues[field.id]);
-      if (!formattedValue) return "";
-      return `${field.label}: ${formattedValue}`;
+      const values = [
+        formatFormFieldValue(field, formValues[field.id]),
+        customFieldValues[field.id]?.trim(),
+      ].filter(Boolean);
+      return values.length > 0 ? `${field.label}: ${values.join(", ")}` : "";
     })
     .filter(Boolean);
   const disabled =
     data.kind === "text"
       ? !trimmedText
       : data.kind === "form"
-      ? !requiredFormFieldsSatisfied ||
-        [...formQueryLines, trimmedText].filter(Boolean).length === 0
+      ? !requiredFormFieldsSatisfied || formQueryLines.length === 0
       : selectedIds.length === 0 && !effectiveChoiceText;
   const currentFieldComplete = activeField
-    ? !activeField.required || hasFormValue(formValues[activeField.id])
+    ? !activeField.required || fieldHasResponse(activeField)
     : true;
   const isFinalStep = boundedStep >= totalSteps - 1;
   const canGoNext = !isFinalStep && currentFieldComplete;
   const pageTitle =
-    data.kind === "form" ? activeField?.label || "补充说明" : data.prompt;
+    data.kind === "form" ? activeField?.label || data.prompt : data.prompt;
   const showChoiceRows =
-    (isTopLevelChoice ||
-      activeField?.type === "single_choice" ||
-      activeField?.type === "multi_choice");
+    isTopLevelChoice ||
+    activeField?.type === "single_choice" ||
+    activeField?.type === "multi_choice";
   const showTopLevelChoiceCustomInput = isTopLevelChoice;
   const showCustomInput =
-    data.kind === "text" ||
-    showTopLevelChoiceCustomInput ||
-    customActive ||
-    isSupplementStep;
+    data.kind === "text" || showTopLevelChoiceCustomInput || customActive;
 
   useEffect(() => {
     setSubmitted(false);
@@ -510,6 +427,7 @@ export function PlanClarificationCard({
     setTextInput("");
     setCustomActive(false);
     setFormValues({});
+    setCustomFieldValues({});
     setFocusedIndex(0);
     setActiveStep(0);
   }, [interactionResetKey]);
@@ -518,6 +436,13 @@ export function PlanClarificationCard({
     setTextInput(value);
     if (data.kind === "single_choice" && value.trim()) {
       setSingleChoice("");
+    }
+  };
+
+  const handleCustomFieldTextChange = (fieldId: string, value: string) => {
+    setCustomFieldValues((current) => ({ ...current, [fieldId]: value }));
+    if (activeField?.id === fieldId && activeField.type === "single_choice") {
+      setFormValues((current) => ({ ...current, [fieldId]: "" }));
     }
   };
 
@@ -539,14 +464,12 @@ export function PlanClarificationCard({
     const effectiveSelectedIds = selectedOverride || selectedIds;
     const effectiveSelectedLabels = optionLabels(options, effectiveSelectedIds);
     const effectiveText =
-      data.kind === "form" || data.kind === "text"
-        ? trimmedText
-        : effectiveChoiceText;
+      data.kind === "text" ? trimmedText : effectiveChoiceText;
     const effectiveQuery =
       data.kind === "text"
         ? effectiveText
         : data.kind === "form"
-        ? [...formQueryLines, effectiveText].filter(Boolean).join("\n")
+        ? formQueryLines.join("\n")
         : [effectiveSelectedLabels, effectiveText].filter(Boolean).join("\n");
     const effectiveDisabled =
       data.kind === "text"
@@ -557,13 +480,18 @@ export function PlanClarificationCard({
     if (effectiveDisabled || submitted) return;
     const payload =
       data.kind === "form"
-        ? {
-            card_type: "plan_clarification" as const,
-            kind: "form" as const,
-            form_id: data.form_id,
-            field_values: collectFormValues(fields, formValues),
-            text: effectiveText || undefined,
-          }
+        ? (() => {
+            const customValues = collectCustomFormValues(customFieldValues);
+            return {
+              card_type: "plan_clarification" as const,
+              kind: "form" as const,
+              form_id: data.form_id,
+              field_values: collectFormValues(fields, formValues),
+              ...(Object.keys(customValues).length > 0
+                ? { custom_field_values: customValues }
+                : {}),
+            };
+          })()
         : {
             card_type: "plan_clarification" as const,
             kind: data.kind,
@@ -607,11 +535,17 @@ export function PlanClarificationCard({
   };
 
   const selectActiveOption = (optionId: string) => {
-    setCustomActive(false);
     if (!activeField && data.kind === "single_choice") {
+      setCustomActive(false);
       setTextInput("");
     }
     if (activeField) {
+      if (activeField.type === "single_choice") {
+        setCustomFieldValues((current) => ({
+          ...current,
+          [activeField.id]: "",
+        }));
+      }
       setFormValues((current) => {
         const currentValue = current[activeField.id];
         if (activeField.type === "multi_choice") {
@@ -638,12 +572,6 @@ export function PlanClarificationCard({
     setSingleChoice(optionId);
   };
 
-  const activateCustomResponse = () => {
-    setSingleChoice("");
-    setMultiChoice([]);
-    setCustomActive(true);
-  };
-
   const handleCardKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -660,9 +588,7 @@ export function PlanClarificationCard({
       }
       return;
     }
-    const rowCount =
-      activeOptions.length +
-      (!isTopLevelChoice && data.kind !== "form" && allowsCustomText ? 1 : 0);
+    const rowCount = activeOptions.length;
     if (event.key === "ArrowUp" || event.key === "ArrowDown") {
       event.preventDefault();
       setFocusedIndex((current) =>
@@ -687,21 +613,13 @@ export function PlanClarificationCard({
       if (index < rowCount) {
         event.preventDefault();
         setFocusedIndex(index);
-        if (index === activeOptions.length && !isTopLevelChoice) {
-          activateCustomResponse();
-        } else {
-          selectActiveOption(activeOptions[index].id);
-        }
+        selectActiveOption(activeOptions[index].id);
       }
       return;
     }
     if (event.key === " ") {
       event.preventDefault();
-      const hasCustomRow =
-        !isTopLevelChoice && data.kind !== "form" && allowsCustomText;
-      if (hasCustomRow && focusedIndex === activeOptions.length) {
-        activateCustomResponse();
-      } else if (activeOptions[focusedIndex]) {
+      if (activeOptions[focusedIndex]) {
         selectActiveOption(activeOptions[focusedIndex].id);
       }
       return;
@@ -775,13 +693,8 @@ export function PlanClarificationCard({
             options={activeOptions}
             selectedIds={activeSelectedIds}
             focusedIndex={focusedIndex}
-            allowCustomResponse={
-              !isTopLevelChoice && data.kind !== "form" && allowsCustomText
-            }
-            customActive={customActive}
             onFocusIndexChange={setFocusedIndex}
             onSelect={selectActiveOption}
-            onCustomSelect={activateCustomResponse}
           />
         ) : null}
         {activeField?.type === "text" ? (
@@ -817,6 +730,21 @@ export function PlanClarificationCard({
             }
             value={textInput}
             onChange={(event) => handleCustomTextChange(event.target.value)}
+          />
+        ) : null}
+        {activeField &&
+        (activeField.type === "single_choice" ||
+          activeField.type === "multi_choice") &&
+        data.allow_custom_response !== false ? (
+          <input
+            autoFocus
+            className={`${styles.textField} ${styles.customFieldInput}`}
+            aria-label={activeField.label}
+            placeholder="请输入自定义填写"
+            value={customFieldValues[activeField.id] || ""}
+            onChange={(event) =>
+              handleCustomFieldTextChange(activeField.id, event.target.value)
+            }
           />
         ) : null}
       </div>
@@ -999,6 +927,7 @@ function PlanReviewActiveCard({
         <div className={styles.reviewHeading}>
           <div>
             <strong>{data.title}</strong>
+            <p className={styles.reviewStatus}>计划待确认</p>
           </div>
         </div>
       </header>
@@ -1017,15 +946,7 @@ function PlanReviewActiveCard({
           disabled={submitted}
           onClick={() => handleDecision("revise")}
         >
-          Continue modifying
-        </button>
-        <button
-          type="button"
-          className={styles.reviewPrimaryButton}
-          disabled={submitted}
-          onClick={() => handleDecision("execute")}
-        >
-          Execute
+          继续修改
         </button>
         <button
           type="button"
@@ -1033,7 +954,15 @@ function PlanReviewActiveCard({
           disabled={submitted}
           onClick={() => handleDecision("exit_plan")}
         >
-          Exit Plan Mode
+          退出计划模式
+        </button>
+        <button
+          type="button"
+          className={styles.reviewPrimaryButton}
+          disabled={submitted}
+          onClick={() => handleDecision("execute")}
+        >
+          开始执行
         </button>
       </footer>
     </section>
@@ -1069,25 +998,19 @@ export function PlanReviewCard({
   );
 }
 
-export function ActivePlanReviewCard({
-  onContinueModifying,
-  onPlanModeDecision,
+export function PlanReviewMessageCard({
+  data,
 }: {
-  onContinueModifying?: (data: ChatPlanReviewCardData) => void;
-  onPlanModeDecision?: (enabled: boolean) => void;
+  data: ChatPlanReviewCardData;
 }) {
-  const review = useContextSelector(ChatAnywhereMessagesContext, (value) =>
-    findLatestPlanReviewCard(value.messages || []),
-  );
+  const { onContinueModifying, onPlanModeDecision } =
+    useChatPlanReviewRenderContext();
 
-  if (!review) {
-    return null;
-  }
   return (
     <PlanReviewCard
-      active
-      data={review.data}
-      cardInstanceKey={review.instanceKey}
+      active={data.status !== "submitted"}
+      data={data}
+      cardInstanceKey={data.plan_id}
       onContinueModifying={onContinueModifying}
       onPlanModeDecision={onPlanModeDecision}
     />
@@ -1096,8 +1019,6 @@ export function ActivePlanReviewCard({
 
 export function ActivePlanInteractionComposer({
   defaultComposer,
-  onContinueModifying,
-  onPlanModeDecision,
 }: {
   defaultComposer: ReactElement;
   onContinueModifying?: (data: ChatPlanReviewCardData) => void;
@@ -1116,19 +1037,6 @@ export function ActivePlanInteractionComposer({
 
   if (completedInstanceKey === interaction.instanceKey) {
     return defaultComposer;
-  }
-
-  if (interaction.type === "review") {
-    return (
-      <PlanReviewCard
-        active
-        data={interaction.data}
-        cardInstanceKey={interaction.instanceKey}
-        onContinueModifying={onContinueModifying}
-        onPlanModeDecision={onPlanModeDecision}
-        onComplete={() => setCompletedInstanceKey(interaction.instanceKey)}
-      />
-    );
   }
 
   return (

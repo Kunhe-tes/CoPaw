@@ -19,6 +19,16 @@ from ...config.context import (
     resolve_runtime_identity,
     resolve_storage_tenant_id,
 )
+from .bootstrap_lock import (
+    AsyncFlock,
+    BootstrapLockFailure,
+    BootstrapLockTimeout,
+)
+from .bootstrap_state import (
+    SourceTemplateUnavailable,
+    TenantBootstrapUnavailable,
+)
+from .source_template_provisioner import inspect_source_template_readiness
 from .tenant_initializer import TenantInitializer
 from .tenant_skill_sync import sync_skills_to_db
 from .workspace import Workspace
@@ -196,26 +206,37 @@ class TenantWorkspacePool:
         Returns:
             True if already bootstrapped and complete, False otherwise.
         """
+        initializer = TenantInitializer(
+            self._base_working_dir,
+            tenant_id,
+            source_id=source_id,
+            scope_id=scope_id,
+        )
+        if source_id and bootstrap_tenant_id == f"default_{source_id}":
+            persisted_ready = inspect_source_template_readiness(
+                self._base_working_dir,
+                source_id,
+            ).ready
+        else:
+            persisted_ready = initializer.has_seeded_bootstrap()
+
         async with self._registry_lock:
             entry = self._workspaces.get(bootstrap_tenant_id)
-            if entry is None:
-                return False
-
-            initializer = TenantInitializer(
-                self._base_working_dir,
-                tenant_id,
-                source_id=source_id,
-                scope_id=scope_id,
-            )
-            if initializer.has_seeded_bootstrap():
+            if persisted_ready:
+                if entry is None:
+                    entry = TenantWorkspaceEntry(
+                        tenant_id=bootstrap_tenant_id,
+                    )
+                    self._workspaces[bootstrap_tenant_id] = entry
                 self._mark_access(entry)
                 return True
 
-            logger.warning(
-                "Tenant %s cached in pool but scaffold is incomplete. "
-                "Running self-heal bootstrap.",
-                bootstrap_tenant_id,
-            )
+            if entry is not None:
+                logger.warning(
+                    "Tenant %s cached in pool but scaffold is incomplete. "
+                    "Running self-heal bootstrap.",
+                    bootstrap_tenant_id,
+                )
             return False
 
     def _log_seeding_results(
@@ -325,7 +346,7 @@ class TenantWorkspacePool:
             enable_bootstrap_chat: Whether to keep BOOTSTRAP.md for first chat.
 
         Raises:
-            RuntimeError: If bootstrap fails.
+            TenantBootstrapUnavailable: If bootstrap cannot safely become ready.
         """
         workspace_dir = self._get_tenant_workspace_dir(bootstrap_tenant_id)
         logger.info(
@@ -342,19 +363,18 @@ class TenantWorkspacePool:
         )
 
         try:
-            bootstrap_result = initializer.ensure_seeded_bootstrap(
+            logger.info(
+                "tenant_bootstrap_recovery_started tenant_id=%s",
+                bootstrap_tenant_id,
+            )
+            recovery_result = initializer.recover_seeded_bootstrap(
                 enable_bootstrap_chat=enable_bootstrap_chat,
             )
-
-            # Log seeding results
-            self._log_seeding_results(tenant_id, bootstrap_result)
-
-            # Record template mapping if template was dynamically created
-            if initializer._template_created_from_default and source_id:
-                await self._record_template_init_source_mapping(
-                    template_name=initializer.template_name,
-                    source_id=source_id,
-                )
+            logger.info(
+                "tenant_bootstrap_recovery_succeeded tenant_id=%s recovered_paths=%d",
+                bootstrap_tenant_id,
+                len(recovery_result["recovered_paths"]),
+            )
 
             # Record init source mapping
             logical_tenant_id, resolved_source_id, init_source = (
@@ -378,14 +398,20 @@ class TenantWorkspacePool:
 
             logger.info("Tenant bootstrapped: %s", bootstrap_tenant_id)
 
+        except TenantBootstrapUnavailable:
+            logger.error(
+                "tenant_bootstrap_recovery_failed tenant_id=%s",
+                bootstrap_tenant_id,
+            )
+            raise
         except Exception as e:
             logger.error(
-                "Failed to bootstrap tenant %s: %s",
+                "tenant_bootstrap_recovery_failed tenant_id=%s error=%s",
                 bootstrap_tenant_id,
-                e,
+                type(e).__name__,
             )
-            raise RuntimeError(
-                f"Failed to bootstrap tenant {bootstrap_tenant_id}: {e}",
+            raise TenantBootstrapUnavailable(
+                f"tenant bootstrap recovery failed: {bootstrap_tenant_id}",
             ) from e
 
         # 同步 swe_skills 表（失败仅 warn，不影响 bootstrap 整体成功）
@@ -453,38 +479,83 @@ class TenantWorkspacePool:
         bootstrap_lock = await self._get_or_create_bootstrap_lock(
             bootstrap_tenant_id,
         )
-        async with bootstrap_lock:
-            # Double-check after acquiring lock
-            if await self._check_existing_bootstrap(
-                bootstrap_tenant_id,
-                tenant_id,
-                source_id,
-                scope_id,
+        try:
+            async with AsyncFlock(
+                self._get_tenant_workspace_dir(bootstrap_tenant_id)
+                / ".bootstrap.lock",
             ):
+                # Double-check after acquiring the cross-process lock.
+                if await self._check_existing_bootstrap(
+                    bootstrap_tenant_id,
+                    tenant_id,
+                    source_id,
+                    scope_id,
+                ):
+                    duration_ms = int(
+                        (time.perf_counter() - started_at) * 1000,
+                    )
+                    logger.debug(
+                        "bootstrap_fast_path_hit tenant_id=%s duration_ms=%d",
+                        bootstrap_tenant_id,
+                        duration_ms,
+                    )
+                    return
+
+                self._require_ready_source_template(source_id)
+                logger.info(
+                    "tenant_bootstrap_lock_wait tenant_id=%s",
+                    bootstrap_tenant_id,
+                )
+                await self._perform_bootstrap(
+                    bootstrap_tenant_id,
+                    tenant_id,
+                    source_id,
+                    scope_id,
+                    tenant_name,
+                    bbk_id,
+                    enable_bootstrap_chat,
+                )
                 duration_ms = int((time.perf_counter() - started_at) * 1000)
                 logger.debug(
-                    "bootstrap_fast_path_hit tenant_id=%s duration_ms=%d",
+                    "bootstrap_fast_path_miss tenant_id=%s duration_ms=%d",
                     bootstrap_tenant_id,
                     duration_ms,
                 )
-                return
+        except BootstrapLockTimeout as exc:
+            logger.warning(
+                "tenant_bootstrap_lock_timeout tenant_id=%s",
+                bootstrap_tenant_id,
+            )
+            raise TenantBootstrapUnavailable(
+                "tenant bootstrap is busy; retry shortly",
+            ) from exc
+        except BootstrapLockFailure as exc:
+            logger.error(
+                "tenant_bootstrap_lock_error tenant_id=%s",
+                bootstrap_tenant_id,
+            )
+            raise TenantBootstrapUnavailable(
+                "tenant bootstrap lock is unavailable",
+            ) from exc
 
-            # Perform bootstrap
-            await self._perform_bootstrap(
-                bootstrap_tenant_id,
-                tenant_id,
-                source_id,
-                scope_id,
-                tenant_name,
-                bbk_id,
-                enable_bootstrap_chat,
-            )
-            duration_ms = int((time.perf_counter() - started_at) * 1000)
-            logger.debug(
-                "bootstrap_fast_path_miss tenant_id=%s duration_ms=%d",
-                bootstrap_tenant_id,
-                duration_ms,
-            )
+    def _require_ready_source_template(self, source_id: str | None) -> None:
+        """Reject normal source-scoped traffic when its template is absent."""
+        if not source_id:
+            return
+        readiness = inspect_source_template_readiness(
+            self._base_working_dir,
+            source_id,
+        )
+        if readiness.ready:
+            return
+        logger.warning(
+            "tenant_bootstrap_source_template_not_ready source_id=%s reason=%s",
+            source_id,
+            readiness.reason,
+        )
+        raise SourceTemplateUnavailable(
+            f"source template default_{source_id} is not ready",
+        )
 
     async def _record_init_source_mapping(
         self,

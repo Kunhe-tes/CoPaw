@@ -98,6 +98,43 @@ async def test_research_phase_runs_tools_then_finishes_on_plain_reply(
 
 
 @pytest.mark.asyncio
+async def test_research_phase_reports_each_completed_turn_to_subagent_callback(
+    monkeypatch,
+) -> None:
+    from swe.agents import react_agent as react_agent_module
+
+    monkeypatch.setattr(
+        react_agent_module,
+        "process_file_and_media_blocks_in_message",
+        AsyncMock(),
+    )
+    tool_reply = Msg(
+        "Friday",
+        [
+            {
+                "type": "tool_use",
+                "id": "tool-1",
+                "name": "read_file",
+                "input": {"path": "README.md"},
+            },
+        ],
+        "assistant",
+    )
+    final_reply = Msg("Friday", "research synthesis", "assistant")
+    agent = _agent(max_iters=2, replies=[tool_reply, final_reply])
+    turns: list[int] = []
+
+    async def record_turn(turn: int) -> None:
+        turns.append(turn)
+
+    agent._subagent_turn_callback = record_turn
+
+    await agent.run_research_phase(Msg("user", "research this", "user"))
+
+    assert turns == [1, 2]
+
+
+@pytest.mark.asyncio
 async def test_research_phase_reports_turn_limit_without_summarizing(
     monkeypatch,
 ) -> None:

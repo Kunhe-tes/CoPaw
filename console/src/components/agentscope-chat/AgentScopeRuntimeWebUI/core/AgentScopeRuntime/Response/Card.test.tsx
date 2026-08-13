@@ -80,7 +80,9 @@ vi.mock("./Actions", () => ({
     <div
       data-testid="actions"
       data-hide-replace={String(Boolean(hideReplace))}
-    />
+    >
+      actions
+    </div>
   ),
 }));
 
@@ -184,6 +186,20 @@ function getDisclosureBody() {
 }
 
 describe("AgentScopeRuntimeResponseCard", () => {
+  it("renders content before response actions", () => {
+    const props = {
+      data: response([textMessage("message-1", "正文")]),
+      beforeActions: <div data-testid="plan-review">plan-review</div>,
+    } as React.ComponentProps<typeof AgentScopeRuntimeResponseCard> & {
+      beforeActions: React.ReactNode;
+    };
+    const { container } = render(
+      <AgentScopeRuntimeResponseCard {...props} />,
+    );
+
+    expect(container.textContent).toBe("正文plan-reviewactions");
+  });
+
   it("renders fallback markdown when the final visible output is reasoning", () => {
     render(
       <AgentScopeRuntimeResponseCard

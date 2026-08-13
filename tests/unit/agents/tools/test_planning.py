@@ -57,6 +57,39 @@ async def test_ask_plan_clarification_emits_card_metadata(
 
 
 @pytest.mark.asyncio
+async def test_ask_plan_clarification_enables_custom_response_by_default() -> (
+    None
+):
+    response = await ask_plan_clarification(
+        prompt="Pick a scope",
+        kind="single_choice",
+        options=["Backend"],
+    )
+
+    assert (
+        response.metadata["plan_interaction_card"]["allow_custom_response"]
+        is True
+    )
+
+
+@pytest.mark.asyncio
+async def test_ask_plan_clarification_allows_custom_response_to_be_disabled() -> (
+    None
+):
+    response = await ask_plan_clarification(
+        prompt="Pick a scope",
+        kind="single_choice",
+        options=["Backend"],
+        allow_custom_response=False,
+    )
+
+    assert (
+        response.metadata["plan_interaction_card"]["allow_custom_response"]
+        is False
+    )
+
+
+@pytest.mark.asyncio
 async def test_ask_plan_clarification_normalizes_form_payload() -> None:
     response = await ask_plan_clarification(
         prompt="Collect customer planning context",
