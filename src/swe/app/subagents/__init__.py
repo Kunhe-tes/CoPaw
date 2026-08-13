@@ -26,6 +26,14 @@ from .models import (
     WorkerLaunchSpec,
     WorkerProcessInfo,
     ToolAuthorizationDecision,
+    SkillOwnedDefinitionMetadata,
+    SkillOwnedModelReference,
+    SkillOwnedToolConfig,
+)
+from .skill_definitions import (
+    SkillDefinitionLoadError,
+    SkillDefinitionLoadResult,
+    load_skill_owned_definitions,
 )
 from .permissions import compose_effective_policy, validate_tool_call
 from .nicknames import assign_subagent_nickname
@@ -82,6 +90,11 @@ __all__ = [
     "SubAgentStartRequest",
     "TERMINAL_BACKGROUND_RUN_STATUSES",
     "ToolAuthorizationDecision",
+    "SkillDefinitionLoadError",
+    "SkillDefinitionLoadResult",
+    "SkillOwnedDefinitionMetadata",
+    "SkillOwnedModelReference",
+    "SkillOwnedToolConfig",
     "WorkerLaunchSpec",
     "WorkerProcessInfo",
     "assign_subagent_nickname",
@@ -89,4 +102,5 @@ __all__ = [
     "compose_effective_policy",
     "normalize_name",
     "validate_tool_call",
+    "load_skill_owned_definitions",
 ]

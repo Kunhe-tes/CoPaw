@@ -281,6 +281,38 @@ class BudgetConfig(BaseModel):
     timeout_ms: int = 600000
 
 
+class SkillOwnedToolConfig(BaseModel):
+    """Built-in tool policy declared by a Skill-owned definition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    inherit: bool = True
+    allow: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+
+
+class SkillOwnedModelReference(BaseModel):
+    """Optional tenant model reference declared by a Skill-owned definition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    id: str
+
+
+class SkillOwnedDefinitionMetadata(BaseModel):
+    """Metadata retained for a definition packaged by a Skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str
+    local_name: str
+    declared_skills: list[str] = Field(default_factory=list)
+    declared_mcps: list[str] = Field(default_factory=list)
+    tools: SkillOwnedToolConfig = Field(default_factory=SkillOwnedToolConfig)
+    model: SkillOwnedModelReference | None = None
+
+
 class LifecycleConfig(BaseModel):
     """SubAgent lifecycle capabilities."""
 
@@ -316,6 +348,7 @@ class SubAgentDefinition(BaseModel):
     trigger_keywords: list[str] = Field(default_factory=list)
     priority: int = 100
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
+    skill_owned: SkillOwnedDefinitionMetadata | None = None
 
     @field_validator("name", "description", "instruction", mode="after")
     @classmethod
