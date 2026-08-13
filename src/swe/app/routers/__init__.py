@@ -40,6 +40,7 @@ _ROUTER_MODULES = (
     ("..greeting", "greeting_router"),
     ("..featured_case", "featured_case_router"),
     ("..feedback", "router"),
+    ("..skill_result", "router"),
     ("..html_preview_clicks", "router"),
     (".dream_logs", "router"),
     (".user_info", "router"),
