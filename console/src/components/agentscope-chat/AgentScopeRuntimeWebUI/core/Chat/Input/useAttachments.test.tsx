@@ -143,7 +143,7 @@ describe("useAttachments", () => {
     expect(uploadItem.props.className).toBe(quickMenuStyles.uploadTrigger);
   });
 
-  it("keeps the uploader mounted while choosing a file from the quick menu", async () => {
+  it("keeps the uploader mounted until a file is selected, then closes the quick menu", async () => {
     const customRequest = vi.fn();
     const { result } = renderHook(() => useAttachments({ customRequest }));
 
@@ -174,6 +174,12 @@ describe("useAttachments", () => {
 
     await waitFor(() => {
       expect(customRequest).toHaveBeenCalledTimes(1);
+    });
+
+    await waitFor(() => {
+      expect(
+        document.querySelector(`.${quickMenuStyles.panel}`),
+      ).not.toBeInTheDocument();
     });
   });
 

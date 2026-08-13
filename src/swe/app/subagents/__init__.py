@@ -12,13 +12,11 @@ from .matcher import (
 )
 from .models import (
     AgentResult,
-    SubAgentResponse,
     BackgroundRunStatus,
     BackgroundSubAgentRunRecord,
     DelegationSpec,
     DefinitionMatchMetadata,
     DefinitionValidationError,
-    EvidenceRef,
     PermissionPolicy,
     SubAgentDefinition,
     SubAgentRegistrationRequest,
@@ -54,7 +52,6 @@ from .runtime import SubAgentRuntime
 __all__ = [
     "AgentRegistry",
     "AgentResult",
-    "SubAgentResponse",
     "BackgroundRunStatus",
     "BackgroundSubAgentNotManageable",
     "BackgroundSubAgentRunRecord",
@@ -68,7 +65,6 @@ __all__ = [
     "DefinitionMatchMetadata",
     "DefinitionUpsertResult",
     "DefinitionValidationError",
-    "EvidenceRef",
     "InMemoryDefinitionProvider",
     "InMemorySubAgentRunStore",
     "LocalJsonSubAgentRunStore",

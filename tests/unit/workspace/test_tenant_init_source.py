@@ -171,11 +171,11 @@ class TestTenantInitializerSourceId:
         assert legacy_dir.exists()
         assert not (initializer.tenant_dir / "legacy.txt").exists()
 
-    def test_source_id_creates_template_from_default_when_missing(
+    def test_source_id_does_not_create_template_from_default_when_missing(
         self,
         tmp_path,
     ):
-        """With source_id but no matching template dir, creates from default."""
+        """With source_id, template provisioning is never implicit."""
         # Setup default template
         default_dir = tmp_path / "default"
         default_dir.mkdir()
@@ -189,23 +189,20 @@ class TestTenantInitializerSourceId:
             "tenant-1",
             source_id="unknown",
         )
-        # Should create default_unknown from default
         assert initializer.template_name == "default_unknown"
-        assert (tmp_path / "default_unknown").exists()
-        assert (tmp_path / "default_unknown" / "config.json").exists()
+        assert not (tmp_path / "default_unknown").exists()
 
-    def test_source_id_falls_back_to_default_when_no_default_exists(
+    def test_source_id_keeps_explicit_template_name_without_default(
         self,
         tmp_path,
     ):
-        """With source_id and no default template, falls back to 'default'."""
+        """With source_id, normal traffic never falls back to default."""
         initializer = TenantInitializer(
             tmp_path,
             "tenant-1",
             source_id="unknown",
         )
-        # No default to copy from, so fallback
-        assert initializer.template_name == "default"
+        assert initializer.template_name == "default_unknown"
 
     def test_empty_source_id_uses_default(self, tmp_path):
         """Empty string source_id is treated as no source_id."""
@@ -377,11 +374,25 @@ class TestTenantInitializerSourceId:
                 encoding="utf-8",
             )
 
-        # Initialize default tenant with source_id and seed template dir
+        # Source templates are provisioned before traffic, never copied here.
+        tenant_dir = tmp_path / "default_ruice"
+        tenant_workspace = tenant_dir / "workspaces" / "default"
+        tenant_workspace.mkdir(parents=True)
+        source_config = json.loads(
+            (default_dir / "config.json").read_text(encoding="utf-8"),
+        )
+        source_config["agents"]["profiles"]["default"]["workspace_dir"] = str(
+            tenant_workspace,
+        )
+        (tenant_dir / "config.json").write_text(
+            json.dumps(source_config),
+            encoding="utf-8",
+        )
+
+        # Source-scoped default uses the explicitly provisioned template.
         new_init = TenantInitializer(tmp_path, "default", source_id="ruice")
         new_init.ensure_seeded_bootstrap()
 
-        tenant_dir = tmp_path / "default_ruice"
         config_data = json.loads(
             (tenant_dir / "config.json").read_text(encoding="utf-8"),
         )

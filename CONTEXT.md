@@ -4,6 +4,34 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 
 ## Language
 
+**Tenant Bootstrap**:
+The creation or repair of one tenant scope's minimum runnable directory state, including its default Agent Profile and required workspace assets. A Tenant Bootstrap completes only when that scope can load its Default Agent Profile.
+_Avoid_: directory creation, partial initialization, workspace startup
+
+**Tenant Bootstrap Recovery**:
+The repair of an incomplete or unusable Tenant Bootstrap into its minimum runnable state. Its temporary rollback backup is removed immediately after successful recovery and retained when recovery fails; it is distinct from a first Tenant Bootstrap because it begins with an existing tenant scope.
+_Avoid_: silent reset, tenant recreation, best-effort startup
+
+**Tenant Bootstrap Lock**:
+The cross-instance exclusive ownership of one Tenant Bootstrap, keyed by that tenant scope's effective storage identity. It prevents two application instances from initializing or recovering the same tenant scope concurrently and rejects bootstrap when this lock cannot be used.
+_Avoid_: process-local bootstrap lock, logical-tenant lock, global initialization lock
+
+**Tenant Bootstrap Readiness**:
+The verified condition that a tenant scope's required configuration and Default Agent Profile assets are individually valid and mutually consistent. A ready-marker file may describe this condition but cannot establish it by itself.
+_Avoid_: file-exists check, marker-only readiness, directory-present check
+
+**Tenant Staging Artifact**:
+A temporary file created within a tenant scope before an atomic replacement of its intended target. It is not tenant workspace content and must not be considered a configuration or an agent asset; artifacts left by abrupt process termination require explicit recovery or manual removal.
+_Avoid_: workspace file, configuration file, recoverable user document
+
+**Source Template**:
+The explicitly provisioned and ready `default_<source_id>` tenant-scope asset used as the initialization source for tenants entering through one source system. A Source Template is distinct from both the global `default` template and an ordinary tenant scope.
+_Avoid_: source tenant, default tenant, per-request configuration
+
+**Source Template Provisioning**:
+The privileged internal or CLI operation that creates or repairs a Source Template before tenant requests may consume it. It never force-overwrites a ready Source Template, fails without creating a partial template when the global default template is not ready, and ordinary tenant requests cannot initiate it.
+_Avoid_: lazy template creation, tenant self-service initialization, request-time template repair
+
 **SubAgent Definition**:
 A named, versioned worker profile that describes what kind of delegated work a SubAgent can perform. One **SubAgent Definition** can be used by many **SubAgent Runs**.
 _Avoid_: custom subagent, subagent template, agent config
@@ -85,15 +113,19 @@ The portion of a **SubAgent Run** in which the worker gathers task evidence and 
 _Avoid_: final response, structured-output phase, unbounded agent loop
 
 **SubAgent Research Completion**:
-The normal end of a **SubAgent Research Phase**, reached when the worker replies without requesting a tool. It supplies a **SubAgent Research Synthesis** to **SubAgent Structured Finalization**; reaching the turn limit instead follows the distinct **SubAgent Turn-limit Finalization** path.
+The normal end of a **SubAgent Research Phase**, reached when the worker replies without requesting a tool. Its evidence becomes a **Bounded SubAgent Research Record** for **SubAgent Text Finalization**; reaching the turn limit instead follows the distinct **SubAgent Turn-limit Finalization** path.
 _Avoid_: implicit final tool call, budget-exhaustion normal completion, forced completion
 
 **SubAgent Research Synthesis**:
-The concise natural-language, tool-free reply emitted at **SubAgent Research Completion**. It summarizes the research evidence for **SubAgent Structured Finalization** and is not an **AgentResult**.
-_Avoid_: final JSON, terminal result, user-facing completion claim
+The concise natural-language, tool-free reply emitted at **SubAgent Research Completion**. It is retained as evidence in the **Bounded SubAgent Research Record** and is not an **AgentResult**.
+_Avoid_: terminal result, user-facing completion claim
+
+**Bounded SubAgent Research Record**:
+The size-limited record of SubAgent research messages, including assistant replies, tool calls, and tool results. It prioritizes the newest evidence; an oversized message is truncated to fit the remaining capacity and marked as truncated. It is the research evidence supplied to **SubAgent Text Finalization** after normal completion or a turn-limit exit.
+_Avoid_: full parent conversation, unbounded transcript, raw worker memory
 
 **SubAgent Research Turn Budget**:
-The maximum number of ReAct reasoning turns available to a **SubAgent Research Phase**. It does not include the one terminal **SubAgent Structured Finalization** call; both phases share the run's total time budget.
+The maximum number of ReAct reasoning turns available to a **SubAgent Research Phase**. It does not include the one terminal **SubAgent Text Finalization** call; both phases share the run's total time budget.
 _Avoid_: total model-call budget, finalization turn limit, per-phase timeout
 
 **SubAgent Research Phase Controller**:
@@ -104,44 +136,40 @@ _Avoid_: opaque reply outcome, automatic ReAct summarization, runtime-owned prot
 The actual number of model calls made by a **SubAgent Run**. It includes each research reasoning turn and the one **SubAgent Finalization Attempt**, when one occurs; it can therefore exceed the **SubAgent Research Turn Budget** by one.
 _Avoid_: research-only call count, hidden terminal-call cost, turn-budget alias
 
-**SubAgent Structured Finalization**:
-The terminal, tool-free step after a **SubAgent Research Phase** that produces the run's validated **SubAgent Response Payload**. The runtime then constructs the **SubAgent Application Result**; finalization does not gather new evidence or execute work tools.
-_Avoid_: ordinary ReAct turn, tool-call loop, free-form final answer
+**SubAgent Text Finalization**:
+The terminal, tool-free step after a **SubAgent Research Phase** that asks the model for one final summary text using the supplied research context. The runtime stores that text as the `summary` of the **SubAgent Application Result**; finalization does not gather new evidence or execute work tools.
+_Avoid_: ordinary ReAct turn, tool-call loop, structured output
 
-**SubAgent Response Payload**:
-The validated structured task content produced by **SubAgent Structured Finalization**. It contains research conclusions and suggested follow-up, but no run identity, lifecycle status, budget usage, or runtime errors.
-_Avoid_: persisted run record, execution envelope, model-generated metrics
+**SubAgent Final Summary**:
+The final plain-text summary generated by **SubAgent Text Finalization**. It is the only model-authored content field in a **SubAgent Application Result**.
+_Avoid_: structured payload, model-generated result envelope
 
 **SubAgent Finalization Context**:
-The bounded handoff supplied to **SubAgent Structured Finalization**: the original delegation request and the **SubAgent Research Synthesis**, together with the terminal response contract. It excludes ReAct memory, tool-call records, and raw tool output.
-_Avoid_: full transcript replay, tool-result dump, implicit memory access
+The bounded handoff supplied to **SubAgent Text Finalization**: the original **DelegationSpec** and a **Bounded SubAgent Research Record**. It excludes the Main Agent conversation and all worker state outside that record.
+_Avoid_: full parent conversation, unbounded transcript, implicit memory access
 
 **SubAgent Turn-limit Finalization**:
-The one terminal **SubAgent Structured Finalization** call made after a **SubAgent Research Phase** reaches its turn budget without a **SubAgent Research Synthesis**. Its finalization context includes a size-limited research record of assistant replies, tool calls, and tool results so it can produce a structured response without further research.
+The one terminal **SubAgent Text Finalization** call made after a **SubAgent Research Phase** reaches its turn budget. It uses the same **SubAgent Finalization Context** as normal completion, but the resulting **SubAgent Application Result** remains partial.
 _Avoid_: unbounded transcript replay, extra research turn, skipped terminal response
 
 **SubAgent Turn-limit Partial Result**:
-The **SubAgent Application Result** emitted when a **SubAgent Turn-limit Finalization** produces a valid **SubAgent Response Payload**. It retains the structured response while reporting `partial` and `research_turn_limit_reached`, because the research phase did not complete normally.
-_Avoid_: completed after turn exhaustion, discarded structured evidence, runtime failure
+The **SubAgent Application Result** emitted when a **SubAgent Turn-limit Finalization** produces a final summary. It retains that summary while reporting `partial` and `research_turn_limit_reached`, because the research phase did not complete normally.
+_Avoid_: completed after turn exhaustion, discarded research summary, runtime failure
 
 **SubAgent Finalization Attempt**:
-The single **SubAgent Structured Finalization** call allowed after **SubAgent Research Completion** or through **SubAgent Turn-limit Finalization**. A failed or invalid attempt produces a **SubAgent Partial Result** and is not retried.
-_Avoid_: JSON repair loop, schema retry, repeated terminal calls
-
-**SubAgent Structured Finalization Compatibility**:
-The requirement that terminal output be read from native structured-response metadata. A Provider endpoint that rejects the tool-free structured-response request yields a **SubAgent Partial Result**; the runtime does not fall back to parsing free-form JSON or perform a separate capability probe.
-_Avoid_: text JSON fallback, tool-choice workaround, startup capability call
+The single **SubAgent Text Finalization** call allowed after **SubAgent Research Completion** or through **SubAgent Turn-limit Finalization**. A failed attempt produces a **SubAgent Partial Result** and is not retried.
+_Avoid_: repeated terminal calls
 
 **SubAgent Application Result**:
-The application-constructed terminal result of a **SubAgent Run**. It combines a **SubAgent Response Payload**, when available, with runtime-owned identity, lifecycle status, metrics, and errors.
+The application-constructed terminal result of a **SubAgent Run**. It combines a **SubAgent Final Summary**, when available, with runtime-owned identity, lifecycle status, metrics, and errors.
 _Avoid_: model-authored result envelope, raw model response, unvalidated payload
 
 **SubAgent Result Projection**:
-The stable, flat caller-facing representation of a **SubAgent Application Result** returned by the Background SubAgent tools. The internal **SubAgent Response Payload** is merged into this representation rather than exposed as a nested API object.
+The stable, flat caller-facing representation of a **SubAgent Application Result** returned by the Background SubAgent tools. It exposes the terminal summary without exposing the full persisted run record.
 _Avoid_: payload-only API, nested response migration, internal schema leak
 
 **SubAgent Partial Result**:
-An **AgentResult** that retains available research evidence without representing the delegated task as completed. It is produced when **SubAgent Structured Finalization** cannot produce a validated terminal result, or when **SubAgent Turn-limit Finalization** produces a valid payload after research exhausted its budget.
+An **AgentResult** that retains an available final summary without representing the delegated task as completed. It is produced when **SubAgent Text Finalization** fails, or when **SubAgent Turn-limit Finalization** produces a summary after research exhausted its budget.
 _Avoid_: completed result with warning, discarded research, research timeout result
 
 **Background SubAgent Concurrency Limit**:
@@ -168,13 +196,17 @@ _Avoid_: kill process tree, hard stop all tools
 A user-facing view that shows the **Background SubAgent Runs** associated with the current Main Agent conversation. It is scoped to the current conversation and is not an agent-wide operations console.
 _Avoid_: global subagent dashboard, worker pool monitor, all-agent status panel
 
+**助手**:
+The chat-facing display term for one **Background SubAgent Run**. It deliberately hides the internal implementation term “SubAgent” from users without changing the run's identity, API contract, or runtime semantics.
+_Avoid_: 用于 API 字段、事件名或运行时领域模型的 Assistant/SubAgent 替换
+
 **SubAgent Run Snapshot**:
 A point-in-time observable summary of the current conversation's **Background SubAgent Runs**. It is the authoritative state used by user-facing monitoring surfaces, while live stream events may only prompt refresh.
 _Avoid_: stream-only state, frontend cache, tool result transcript
 
 **SubAgent Budget Consumption**:
-The portion of a **Background SubAgent Run**'s execution budget that has been used. In the first monitoring surface this means elapsed time against the run's time budget, not task completion percentage.
-_Avoid_: task progress, completion percent, model confidence
+The observable consumption of a **Background SubAgent Run**'s time and turn budgets, shown as used against total for each dimension. It is not a task-completion percentage; the live turn value is a persisted runtime observation and the terminal value is the final **SubAgent Turn Usage**.
+_Avoid_: task progress, completion percent, model confidence, estimated turn count
 
 **Frontend SubAgent Stop Request**:
 A user action from a **SubAgent Run Monitor** that asks the runtime to cancel one specific **Background SubAgent Run** directly. It is not a natural-language instruction for the Main Agent to decide whether to call a tool.

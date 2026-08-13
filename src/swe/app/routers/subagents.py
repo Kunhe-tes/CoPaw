@@ -5,10 +5,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..agent_context import get_agent_for_request
+from ..runner.api import get_workspace
 from ..subagents.monitor import (
     SubAgentCancelResult,
     SubAgentMonitorService,
@@ -24,16 +24,6 @@ class CancelSubAgentRunRequest(BaseModel):
     """Frontend stop request for one Background SubAgent Run."""
 
     chat_id: str = Field(..., min_length=1)
-
-
-async def _get_workspace(request: Request) -> Any:
-    workspace = getattr(request.state, "workspace", None)
-    if workspace is not None:
-        return workspace
-    workspace = getattr(request.app.state, "workspace", None)
-    if workspace is not None:
-        return workspace
-    return await get_agent_for_request(request)
 
 
 async def _get_chat(workspace: Any, chat_id: str) -> Any:
@@ -56,7 +46,7 @@ def _monitor_service(workspace: Any) -> SubAgentMonitorService:
 @router.get("/runs", response_model=SubAgentRunSnapshot)
 async def get_subagent_runs(
     chat_id: str = Query(..., min_length=1),
-    workspace: Any = Depends(_get_workspace),
+    workspace: Any = Depends(get_workspace),
 ) -> SubAgentRunSnapshot:
     """Return slim Background SubAgent Run snapshots for one chat."""
     chat = await _get_chat(workspace, chat_id)
@@ -73,7 +63,7 @@ async def get_subagent_runs(
 async def cancel_subagent_run(
     run_id: str,
     body: CancelSubAgentRunRequest,
-    workspace: Any = Depends(_get_workspace),
+    workspace: Any = Depends(get_workspace),
 ) -> SubAgentCancelResult:
     """Cancel one running Background SubAgent Run in the current chat."""
     chat = await _get_chat(workspace, body.chat_id)

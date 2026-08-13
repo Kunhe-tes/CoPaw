@@ -16,6 +16,7 @@ export interface ChatRuntimeRequestCardData extends IAgentScopeRuntimeRequest {
 export interface ChatRuntimeResponseCardData
   extends IAgentScopeRuntimeResponse {
   headerMeta?: ChatMessageHeaderMeta;
+  planReviewCard?: ChatPlanReviewCardData;
 }
 
 function readMetadataOriginalId(metadata: unknown): string | null {
@@ -275,7 +276,7 @@ function normalizePlanInteractionCard(
       options,
       form_id: typeof card.form_id === "string" ? card.form_id : undefined,
       fields: kind === "form" ? fields || undefined : undefined,
-      allow_custom_response: card.allow_custom_response === true,
+      allow_custom_response: card.allow_custom_response !== false,
     };
   }
 

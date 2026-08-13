@@ -237,7 +237,6 @@ def create_background_subagent_tools(
         task_types: list[str] | None = None,
         priority: int = 100,
         budget: dict[str, Any] | None = None,
-        output_contract: str = "Return only valid AgentResult JSON.",
         enabled: bool = True,
         nickname: str | None = None,
     ) -> ToolResponse:
@@ -253,7 +252,6 @@ def create_background_subagent_tools(
                     "task_types": task_types or [],
                     "priority": priority,
                     "budget": budget or {},
-                    "output_contract": output_contract,
                     "enabled": enabled,
                 },
             )
@@ -436,29 +434,13 @@ def _compact_failure_without_result(record: Any) -> dict[str, str] | None:
 
 
 def _compact_agent_result(result: Any) -> dict[str, Any]:
-    payload = {
-        "status": result.status,
-        "summary": result.summary,
-        "findings": _dump_json_value(getattr(result, "findings", [])),
-        "relevant_files": _dump_json_value(
-            getattr(result, "relevant_files", []),
-        ),
-        "risks": _dump_json_value(getattr(result, "risks", [])),
-        "recommendations": _dump_json_value(
-            getattr(result, "recommendations", []),
-        ),
-        "open_questions": _dump_json_value(
-            getattr(result, "open_questions", []),
-        ),
-        "suggested_next_steps": _dump_json_value(
-            getattr(result, "suggested_next_steps", []),
-        ),
-    }
+    payload = {"summary": result.summary}
     errors = getattr(result, "errors", []) or []
-    if errors:
-        payload["error_code"] = str(
-            getattr(errors[-1], "code", "") or "",
-        )
+    if any(
+        getattr(error, "code", "") == "text_finalization_failed"
+        for error in errors
+    ):
+        payload["error_code"] = "text_finalization_failed"
     return payload
 
 

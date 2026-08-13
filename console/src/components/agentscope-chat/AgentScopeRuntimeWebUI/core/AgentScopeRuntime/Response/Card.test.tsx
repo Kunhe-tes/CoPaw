@@ -76,7 +76,14 @@ vi.mock("./Error", () => ({
 }));
 
 vi.mock("./Actions", () => ({
-  default: () => <div data-testid="actions" />,
+  default: ({ hideReplace }: { hideReplace?: boolean }) => (
+    <div
+      data-testid="actions"
+      data-hide-replace={String(Boolean(hideReplace))}
+    >
+      actions
+    </div>
+  ),
 }));
 
 vi.mock("./Suggestions", () => ({
@@ -179,6 +186,20 @@ function getDisclosureBody() {
 }
 
 describe("AgentScopeRuntimeResponseCard", () => {
+  it("renders content before response actions", () => {
+    const props = {
+      data: response([textMessage("message-1", "正文")]),
+      beforeActions: <div data-testid="plan-review">plan-review</div>,
+    } as React.ComponentProps<typeof AgentScopeRuntimeResponseCard> & {
+      beforeActions: React.ReactNode;
+    };
+    const { container } = render(
+      <AgentScopeRuntimeResponseCard {...props} />,
+    );
+
+    expect(container.textContent).toBe("正文plan-reviewactions");
+  });
+
   it("renders fallback markdown when the final visible output is reasoning", () => {
     render(
       <AgentScopeRuntimeResponseCard
@@ -457,6 +478,7 @@ describe("AgentScopeRuntimeResponseCard", () => {
   it("keeps model_call_failed response errors directly visible with partial output", () => {
     render(
       <AgentScopeRuntimeResponseCard
+        isLast
         data={{
           ...response(
             [textMessage("message-1", "partial answer")],
@@ -472,6 +494,10 @@ describe("AgentScopeRuntimeResponseCard", () => {
 
     expect(screen.getByText("partial answer")).toBeInTheDocument();
     expect(screen.getByText("provider diagnostic")).toBeInTheDocument();
+    expect(screen.getByTestId("actions")).toHaveAttribute(
+      "data-hide-replace",
+      "true",
+    );
     expect(screen.queryByRole("button", { name: /执行过程/ })).toBeNull();
   });
 

@@ -288,6 +288,9 @@ export default function ComposerQuickMenu(props: ComposerQuickMenuProps) {
               className={styles.panel}
               style={panelStyle || { visibility: "hidden" }}
               onClick={() => setOpen(false)}
+              onChange={() => {
+                window.setTimeout(() => setOpen(false), 0);
+              }}
             >
               {items.map((item, index) => (
                 <div

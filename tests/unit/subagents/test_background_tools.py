@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from swe.agents.tools.subagent_background import (
+    _compact_agent_result,
     create_background_subagent_tools,
 )
 from swe.app.subagents import BackgroundSubAgentStartBlocked
@@ -153,7 +154,7 @@ async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
                         summary="partial research",
                         errors=[
                             AgentError(
-                                code="structured_finalization_failed",
+                                code="text_finalization_failed",
                                 message="finalization timed out",
                             ),
                         ],
@@ -194,17 +195,29 @@ async def test_wait_subagent_returns_parent_facing_partial_result(tmp_path):
         "nickname": "研究员",
         "objective": "Inspect",
         "result": {
-            "status": "partial",
             "summary": "partial research",
-            "error_code": "structured_finalization_failed",
-            "findings": [],
-            "relevant_files": [],
-            "risks": [],
-            "recommendations": [],
-            "open_questions": [],
-            "suggested_next_steps": [],
+            "error_code": "text_finalization_failed",
         },
     }
+
+
+def test_compact_result_omits_non_finalization_error_code() -> None:
+    """A turn-limit partial result exposes only its usable summary."""
+    result = AgentResult(
+        task_id="task-1",
+        agent_run_id="subagent-done",
+        agent_name="plan-researcher",
+        status="partial",
+        summary="bounded research",
+        errors=[
+            AgentError(
+                code="research_turn_limit_reached",
+                message="The research turn budget was exhausted.",
+            ),
+        ],
+    )
+
+    assert _compact_agent_result(result) == {"summary": "bounded research"}
 
 
 @pytest.mark.asyncio
@@ -681,8 +694,7 @@ async def test_get_subagent_defaults_to_parent_facing_partial_projection(
     payload = json.loads(response.content[0]["text"])
 
     assert payload["status"] == "partial"
-    assert payload["result"]["status"] == "partial"
-    assert payload["result"]["summary"] == "partial research"
+    assert payload["result"] == {"summary": "partial research"}
     assert "definition_match" not in payload
     assert "worker" not in payload
     assert "errors" not in payload

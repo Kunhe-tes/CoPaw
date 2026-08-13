@@ -276,9 +276,9 @@ class BudgetConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    max_turns: int = 6
+    max_turns: int = 50
     max_tool_calls: int = 30
-    timeout_ms: int = 120000
+    timeout_ms: int = 600000
 
 
 class LifecycleConfig(BaseModel):
@@ -307,7 +307,6 @@ class SubAgentDefinition(BaseModel):
     description: str
     role: str = "researcher"
     instruction: str
-    output_contract: str = "Return only valid AgentResult JSON."
     model: ModelRouting = Field(default_factory=ModelRouting)
     tools: ToolSet = Field(default_factory=ToolSet)
     permission: PermissionPolicy = Field(default_factory=PermissionPolicy)
@@ -340,16 +339,6 @@ class SubAgentDefinition(BaseModel):
             raise ValueError("description exceeds 1024 bytes")
         return value
 
-    @field_validator("output_contract")
-    @classmethod
-    def _output_contract_size(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("output_contract must be non-empty")
-        if len(value.encode("utf-8")) > 2048:
-            raise ValueError("output_contract exceeds 2048 bytes")
-        return value
-
     @field_validator("task_types", "trigger_keywords")
     @classmethod
     def _validate_matching_lists(
@@ -373,6 +362,13 @@ class SubAgentDefinition(BaseModel):
     def validation_errors(self) -> list[str]:
         """Return MVP safety validation errors for this definition."""
         errors: list[str] = []
+        errors.extend(self._configuration_validation_errors())
+        errors.extend(self._tool_validation_errors())
+        errors.extend(self._permission_validation_errors())
+        return errors
+
+    def _configuration_validation_errors(self) -> list[str]:
+        errors = []
         if not self.instruction.strip():
             errors.append("missing instruction")
         if self.lifecycle.allow_nested_delegation:
@@ -389,6 +385,10 @@ class SubAgentDefinition(BaseModel):
             errors.append("MCP tools are unsupported")
         if self.model.behavior != "inherit":
             errors.append("custom model routing is unsupported")
+        return errors
+
+    def _tool_validation_errors(self) -> list[str]:
+        errors = []
         for tool in self.tools.allow + self.tools.deny:
             if tool.startswith("mcp:"):
                 errors.append("MCP tools are unsupported")
@@ -399,6 +399,10 @@ class SubAgentDefinition(BaseModel):
             errors.append(
                 f"mutating tool is unsupported: {', '.join(mutating)}",
             )
+        return errors
+
+    def _permission_validation_errors(self) -> list[str]:
+        errors = []
         permission_mutating = sorted(
             set(self.permission.tools.allow) & MUTATING_TOOLS,
         )
@@ -458,23 +462,6 @@ class EvidenceRequirement(BaseModel):
     description: str
 
 
-class ExpectedOutput(BaseModel):
-    """Delegated output contract metadata."""
-
-    format: Literal["json"] = "json"
-    schema_name: Literal["AgentResult"] = "AgentResult"
-    required_sections: list[str] = Field(
-        default_factory=lambda: [
-            "summary",
-            "findings",
-            "relevant_files",
-            "risks",
-            "recommendations",
-            "open_questions",
-        ],
-    )
-
-
 class ReturnPolicy(BaseModel):
     """Controls how much raw SubAgent material can return to the parent."""
 
@@ -501,7 +488,6 @@ class DelegationSpec(BaseModel):
     evidence_requirements: list[EvidenceRequirement] = Field(
         default_factory=list,
     )
-    expected_output: ExpectedOutput = Field(default_factory=ExpectedOutput)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     return_policy: ReturnPolicy = Field(default_factory=ReturnPolicy)
 
@@ -567,7 +553,6 @@ class SubAgentRegistrationRequest(BaseModel):
     task_types: list[str] = Field(default_factory=list)
     priority: int = 100
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
-    output_contract: str = "Return only valid AgentResult JSON."
     enabled: bool = True
 
     @field_validator("name", "instruction", "description", mode="after")
@@ -590,16 +575,6 @@ class SubAgentRegistrationRequest(BaseModel):
     def _description_size(cls, value: str) -> str:
         if len(value.encode("utf-8")) > 1024:
             raise ValueError("description exceeds 1024 bytes")
-        return value
-
-    @field_validator("output_contract")
-    @classmethod
-    def _output_contract_size(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("output_contract must be non-empty")
-        if len(value.encode("utf-8")) > 2048:
-            raise ValueError("output_contract exceeds 2048 bytes")
         return value
 
     @field_validator("task_types", "trigger_keywords")
@@ -625,64 +600,6 @@ class DefinitionMatchMetadata(BaseModel):
     reason: str | None = None
 
 
-class LineRange(BaseModel):
-    """Line range for evidence references."""
-
-    start: int
-    end: int
-
-
-class EvidenceRef(BaseModel):
-    """Reference to evidence gathered by a SubAgent."""
-
-    type: Literal[
-        "file",
-        "symbol",
-        "command",
-        "diff",
-        "test",
-        "log",
-        "artifact",
-    ]
-    ref: str
-    detail: str = ""
-    line_range: LineRange | None = None
-    command_exit_code: int | None = None
-
-
-class Finding(BaseModel):
-    """A claim and its supporting evidence."""
-
-    claim: str
-    evidence: list[EvidenceRef] = Field(default_factory=list)
-    confidence: Literal["high", "medium", "low"] = "medium"
-
-
-class RelevantFile(BaseModel):
-    """File surfaced by a SubAgent."""
-
-    path: str
-    reason: str = ""
-    importance: Literal["high", "medium", "low"] = "medium"
-
-
-class Risk(BaseModel):
-    """Risk surfaced by a SubAgent."""
-
-    risk: str
-    reason: str = ""
-    mitigation: str | None = None
-    severity: Literal["critical", "high", "medium", "low"] = "medium"
-
-
-class Recommendation(BaseModel):
-    """Recommended parent-agent action."""
-
-    recommendation: str
-    rationale: str = ""
-    priority: Literal["must", "should", "could"] = "should"
-
-
 class Metrics(BaseModel):
     """Runtime metrics for a SubAgent result."""
 
@@ -693,14 +610,6 @@ class Metrics(BaseModel):
     elapsed_ms: int = 0
 
 
-class ArtifactRef(BaseModel):
-    """Reference to an artifact produced by a SubAgent."""
-
-    type: str = "artifact"
-    ref: str
-    description: str = ""
-
-
 class AgentError(BaseModel):
     """Structured SubAgent error."""
 
@@ -709,26 +618,14 @@ class AgentError(BaseModel):
     recoverable: bool = False
 
 
-class SubAgentResponse(BaseModel):
-    """Model-generated, validated content from a SubAgent finalization."""
-
-    summary: str
-    findings: list[Finding] = Field(default_factory=list)
-    relevant_files: list[RelevantFile] = Field(default_factory=list)
-    risks: list[Risk] = Field(default_factory=list)
-    recommendations: list[Recommendation] = Field(default_factory=list)
-    open_questions: list[str] = Field(default_factory=list)
-    suggested_next_steps: list[str] = Field(default_factory=list)
-    artifacts: list[ArtifactRef] = Field(default_factory=list)
-
-
-class AgentResult(SubAgentResponse):
+class AgentResult(BaseModel):
     """Application-owned terminal result returned from a SubAgent run."""
 
     task_id: str
     agent_run_id: str
     agent_name: str
     status: AgentResultStatus
+    summary: str
     metrics: Metrics = Field(default_factory=Metrics)
     errors: list[AgentError] = Field(default_factory=list)
 
@@ -818,6 +715,7 @@ class BackgroundSubAgentRunRecord(BaseModel):
     owner_scope: str
     effective_policy: PermissionPolicy
     effective_budget: BudgetConfig = Field(default_factory=BudgetConfig)
+    turns_used: int = 0
     nickname: str | None = None
     start_request: SubAgentStartRequest | None = None
     definition_match: DefinitionMatchMetadata = Field(

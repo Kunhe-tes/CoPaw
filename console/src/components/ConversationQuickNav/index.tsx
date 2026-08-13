@@ -143,7 +143,15 @@ export default function ConversationQuickNav({
       >
         <div
           ref={navScrollRef}
-          className="conversation-quick-nav__scroll"
+          className={`conversation-quick-nav__scroll ${
+            hiddenQuestionCount.above > 0
+              ? "conversation-quick-nav__scroll--fade-top"
+              : ""
+          } ${
+            hiddenQuestionCount.below > 0
+              ? "conversation-quick-nav__scroll--fade-bottom"
+              : ""
+          }`}
           aria-label="会话快速导航"
           onScroll={updateHiddenQuestionCount}
         >

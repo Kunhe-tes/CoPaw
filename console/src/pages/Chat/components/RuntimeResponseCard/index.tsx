@@ -11,6 +11,7 @@ import styles from "../ChatMessageMeta/index.module.less";
 import ResponseFeedbackCard, {
   type ResponseFeedbackTaskMeta,
 } from "../ResponseFeedbackCard";
+import { PlanReviewMessageCard } from "../PlanInteractionCards";
 
 const ASSISTANT_MESSAGE_NAME = "小助 Claw";
 const ORIGIN_Y_ASSISTANT_MESSAGE_NAME = "AI伙伴";
@@ -36,26 +37,9 @@ export function getAssistantMessageName(
 export default function RuntimeResponseCard(props: {
   data: ChatRuntimeResponseCardData;
   isLast?: boolean;
-  showFeedback?: boolean;
-  chatId?: string | null;
-  sessionId?: string | null;
-  task?: ResponseFeedbackTaskMeta | null;
-  existingFeedback?: FeedbackRecord | null;
-  loadingFeedback?: boolean;
-  onFeedbackSaved?: (
-    feedback: FeedbackRecord,
-    response: ChatRuntimeResponseCardData,
-  ) => void;
 }) {
   const hideMenu = useIframeStore((state) => state.hideMenu);
   const source = useIframeStore((state) => state.source);
-  const shouldShowFeedback =
-    props.showFeedback !== false &&
-    props.data.status === "completed" &&
-    !props.data.error &&
-    Boolean(props.chatId || props.sessionId);
-  const feedbackResponseId = resolveFeedbackResponseId(props.data);
-  const feedbackTraceId = resolveFeedbackTraceId(props.data);
 
   return (
     <div className={styles.messageBlockStart}>
@@ -67,21 +51,54 @@ export default function RuntimeResponseCard(props: {
         })}
         timestamp={props.data.headerMeta?.timestamp}
       />
-      <AgentScopeRuntimeResponseCard data={props.data} isLast={props.isLast} />
-      {shouldShowFeedback ? (
-        <ResponseFeedbackCard
-          chatId={props.chatId}
-          existingFeedback={props.existingFeedback}
-          loadingExisting={props.loadingFeedback}
-          onFeedbackSaved={(feedback) =>
-            props.onFeedbackSaved?.(feedback, props.data)
-          }
-          responseId={feedbackResponseId}
-          sessionId={props.sessionId}
-          task={props.task}
-          traceId={feedbackTraceId}
-        />
-      ) : null}
+      <AgentScopeRuntimeResponseCard
+        beforeActions={
+          props.data.planReviewCard && (
+            <PlanReviewMessageCard data={props.data.planReviewCard} />
+          )
+        }
+        data={props.data}
+        isLast={props.isLast}
+      />
     </div>
+  );
+}
+
+export function RuntimeResponseFeedbackCard(props: {
+  data: ChatRuntimeResponseCardData;
+  showFeedback?: boolean;
+  chatId?: string | null;
+  sessionId?: string | null;
+  task?: ResponseFeedbackTaskMeta | null;
+  existingFeedback?: FeedbackRecord | null;
+  loadingFeedback?: boolean;
+  onFeedbackSaved?: (
+    feedback: FeedbackRecord,
+    response: ChatRuntimeResponseCardData,
+  ) => void;
+}) {
+  const shouldShowFeedback =
+    props.showFeedback !== false &&
+    props.data.status === "completed" &&
+    !props.data.error &&
+    Boolean(props.chatId || props.sessionId);
+  const feedbackResponseId = resolveFeedbackResponseId(props.data);
+  const feedbackTraceId = resolveFeedbackTraceId(props.data);
+
+  if (!shouldShowFeedback) return null;
+
+  return (
+    <ResponseFeedbackCard
+      chatId={props.chatId}
+      existingFeedback={props.existingFeedback}
+      loadingExisting={props.loadingFeedback}
+      onFeedbackSaved={(feedback) =>
+        props.onFeedbackSaved?.(feedback, props.data)
+      }
+      responseId={feedbackResponseId}
+      sessionId={props.sessionId}
+      task={props.task}
+      traceId={feedbackTraceId}
+    />
   );
 }

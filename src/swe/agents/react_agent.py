@@ -129,6 +129,8 @@ Use `ask_plan_clarification` for every material unresolved item unless the user 
 
 Make the decision being requested explicit. Provide concrete options when useful.
 - single_choice and multi_choice clarifications must not include recommended answers.
+- Choice controls include a system-owned custom-answer path. Provide only concrete
+  business options and do not generate an "other" or custom-answer option.
 - text clarifications may include a recommended answer only when it helps the user evaluate a concrete default.
 - After the user answers one question series, review remaining dependencies and continue with the next question series when needed.
 - Continue until all decision-tree branches relevant to the requested plan have been clarified well enough to produce a concrete, reviewable plan.
@@ -530,9 +532,46 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Returns:
             Configured toolkit instance
         """
+        request_context = getattr(self, "_request_context", {}) or {}
+        plan_mode_enabled = bool(request_context.get("plan_mode_enabled"))
+        enabled_tools, async_execution_tools = self._tool_settings(
+            request_context,
+            plan_mode_enabled,
+        )
+        tool_functions = self._tool_functions(
+            request_context,
+            plan_mode_enabled,
+        )
         toolkit = Toolkit()
+        self._register_enabled_tools(
+            toolkit,
+            tool_functions,
+            enabled_tools,
+            async_execution_tools,
+            plan_mode_enabled,
+            namesake_strategy,
+        )
+        self._register_background_task_tools(
+            toolkit,
+            tool_functions,
+            enabled_tools,
+            async_execution_tools,
+            namesake_strategy,
+        )
 
-        # Check which tools are enabled from agent config
+        self._register_background_subagent_tools(
+            toolkit,
+            namesake_strategy,
+            request_context,
+        )
+
+        return toolkit
+
+    def _tool_settings(
+        self,
+        request_context: dict[str, Any],
+        plan_mode_enabled: bool,
+    ) -> tuple[dict[str, bool], dict[str, bool]]:
         from ..config.config import _default_builtin_tools
 
         builtin_tool_defaults = _default_builtin_tools()
@@ -545,69 +584,72 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             ].async_execution,
         }
         try:
-            if hasattr(self._agent_config, "tools") and hasattr(
-                self._agent_config.tools,
+            builtin_tools = getattr(
+                getattr(self._agent_config, "tools", None),
                 "builtin_tools",
-            ):
-                builtin_tools = self._agent_config.tools.builtin_tools
+                None,
+            )
+            if builtin_tools is not None:
                 enabled_tools.update(
-                    {
-                        name: tool.enabled
-                        for name, tool in builtin_tools.items()
-                    },
+                    {name: tool.enabled for name, tool in builtin_tools.items()},
                 )
-                # Only execute_shell_command supports async_execution
                 if "execute_shell_command" in builtin_tools:
-                    async_execution_tools["execute_shell_command"] = (
-                        builtin_tools["execute_shell_command"].async_execution
-                    )
-        except Exception as e:
+                    async_execution_tools["execute_shell_command"] = builtin_tools[
+                        "execute_shell_command"
+                    ].async_execution
+        except Exception as exc:
             logger.warning(
-                f"Failed to load agent tools config: {e}, "
+                f"Failed to load agent tools config: {exc}, "
                 "canonical tool defaults will be used",
             )
-        request_context = getattr(self, "_request_context", {}) or {}
-        plan_mode_enabled = bool(request_context.get("plan_mode_enabled"))
         if request_context.get("agent_role") == "subagent":
-            allowed = set()
-            policy = request_context.get("subagent_policy") or {}
-            if isinstance(policy, dict):
-                tools_policy = policy.get("tools") or {}
-                if isinstance(tools_policy, dict):
-                    allowed = set(tools_policy.get("allow") or [])
-            enabled_tools = {
-                name: name in allowed
-                for name in (
-                    "execute_shell_command",
-                    "start_background_process",
-                    "list_background_processes",
-                    "get_process_output",
-                    "stop_background_process",
-                    "read_file",
-                    "write_file",
-                    "edit_file",
-                    "grep_search",
-                    "glob_search",
-                    "get_current_time",
-                    "set_user_timezone",
-                    "get_token_usage",
-                    "copy_file_to_static",
-                    "update_task_progress",
-                )
-            }
-        elif plan_mode_enabled:
+            return self._subagent_tool_settings(request_context), async_execution_tools
+        if plan_mode_enabled:
             enabled_tools = {
                 name: enabled and name in _PLAN_MODE_ALLOWED_TOOLS
                 for name, enabled in enabled_tools.items()
             }
+        return enabled_tools, async_execution_tools
 
-        # Map of tool functions
+    @staticmethod
+    def _subagent_tool_settings(
+        request_context: dict[str, Any],
+    ) -> dict[str, bool]:
+        policy = request_context.get("subagent_policy") or {}
+        tools_policy = policy.get("tools") if isinstance(policy, dict) else {}
+        allowed = (
+            set(tools_policy.get("allow") or [])
+            if isinstance(tools_policy, dict)
+            else set()
+        )
+        return {
+            name: name in allowed
+            for name in (
+                "execute_shell_command",
+                "start_background_process",
+                "list_background_processes",
+                "get_process_output",
+                "stop_background_process",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "grep_search",
+                "glob_search",
+                "get_current_time",
+                "set_user_timezone",
+                "get_token_usage",
+                "copy_file_to_static",
+                "update_task_progress",
+            )
+        }
+
+    def _tool_functions(
+        self,
+        request_context: dict[str, Any],
+        plan_mode_enabled: bool,
+    ) -> dict[str, Any]:
         tool_functions = {
             "execute_shell_command": execute_shell_command,
-            # "start_background_process": start_background_process,
-            # "list_background_processes": list_background_processes,
-            # "get_process_output": get_process_output,
-            # "stop_background_process": stop_background_process,
             "read_file": read_file,
             "write_file": write_file,
             "edit_file": edit_file,
@@ -617,29 +659,32 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             "copy_file_to_static": copy_file_to_static,
             "update_task_progress": update_task_progress,
         }
-        is_main_agent = request_context.get("agent_role", "main") != "subagent"
-        if is_main_agent:
+        if request_context.get("agent_role", "main") != "subagent":
             _add_main_agent_tools(
                 tool_functions,
                 request_context=request_context,
                 workspace_dir=self._workspace_dir,
                 plan_mode_enabled=plan_mode_enabled,
             )
+        return tool_functions
 
-        # Register only enabled tools
+    def _register_enabled_tools(
+        self,
+        toolkit: Toolkit,
+        tool_functions: dict[str, Any],
+        enabled_tools: dict[str, bool],
+        async_execution_tools: dict[str, bool],
+        plan_mode_enabled: bool,
+        namesake_strategy: NamesakeStrategy,
+    ) -> None:
         for tool_name, tool_func in tool_functions.items():
             if plan_mode_enabled and tool_name not in _PLAN_MODE_ALLOWED_TOOLS:
                 logger.debug("Skipped Plan Mode forbidden tool: %s", tool_name)
                 continue
-            # If tool not in config, enable by default (backward compatibility)
             if not enabled_tools.get(tool_name, True):
                 logger.debug("Skipped disabled tool: %s", tool_name)
                 continue
-
-            # Get async_execution setting (default to False for backward
-            # compatibility)
             async_exec = async_execution_tools.get(tool_name, False)
-
             toolkit.register_tool_function(
                 tool_func,
                 namesake_strategy=namesake_strategy,
@@ -652,43 +697,37 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             self._normalize_registered_tool_functions(toolkit, [tool_name])
 
-        # Auto-register background task management tools if any *enabled*
-        # tool has async_execution set
+    @staticmethod
+    def _register_background_task_tools(
+        toolkit: Toolkit,
+        tool_functions: dict[str, Any],
+        enabled_tools: dict[str, bool],
+        async_execution_tools: dict[str, bool],
+        namesake_strategy: NamesakeStrategy,
+    ) -> None:
         has_async_tools = any(
             async_execution_tools.get(name, False)
             for name in tool_functions
             if enabled_tools.get(name, True)
         )
-        if has_async_tools:
-            try:
+        if not has_async_tools:
+            return
+        try:
+            for task_tool in (
+                toolkit.view_task,
+                toolkit.wait_task,
+                toolkit.cancel_task,
+            ):
                 toolkit.register_tool_function(
-                    toolkit.view_task,
+                    task_tool,
                     namesake_strategy=namesake_strategy,
                 )
-                toolkit.register_tool_function(
-                    toolkit.wait_task,
-                    namesake_strategy=namesake_strategy,
-                )
-                toolkit.register_tool_function(
-                    toolkit.cancel_task,
-                    namesake_strategy=namesake_strategy,
-                )
-                logger.debug(
-                    "Registered background task management tools "
-                    "(view_task, wait_task, cancel_task)",
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to register task management tools: {e}",
-                )
-
-        self._register_background_subagent_tools(
-            toolkit,
-            namesake_strategy,
-            request_context,
-        )
-
-        return toolkit
+            logger.debug(
+                "Registered background task management tools "
+                "(view_task, wait_task, cancel_task)",
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to register task management tools: {exc}")
 
     def _register_background_subagent_tools(
         self,
@@ -696,12 +735,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         namesake_strategy: NamesakeStrategy,
         request_context: dict[str, Any],
     ) -> None:
-        if request_context.get("agent_role", "main") == "subagent":
-            return
-        if not (
-            request_context.get("agent_id")
-            or getattr(self._agent_config, "id", None)
-        ):
+        if self._background_subagent_registration_blocked(request_context):
             return
         supervisor = (
             request_context.get(
@@ -729,12 +763,39 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             supervisor=supervisor,
             parent_agent_config=self._agent_config,
             workspace_dir=(
-                self._workspace_dir
-                or Path(self._agent_config.workspace_dir or ".")
+                self._workspace_dir or Path(self._agent_config.workspace_dir or ".")
             ),
             request_context=request_context,
             include_registration_tool=registration_intent,
         )
+        names = self._background_subagent_tool_names(
+            intent,
+            registration_intent,
+            active,
+            explicit_run_id,
+        )
+        for name in names:
+            toolkit.register_tool_function(
+                tools[name],
+                namesake_strategy=namesake_strategy,
+            )
+        self._normalize_registered_tool_functions(toolkit, names)
+
+    def _background_subagent_registration_blocked(
+        self,
+        request_context: dict[str, Any],
+    ) -> bool:
+        return request_context.get("agent_role", "main") == "subagent" or not (
+            request_context.get("agent_id") or getattr(self._agent_config, "id", None)
+        )
+
+    @staticmethod
+    def _background_subagent_tool_names(
+        intent: bool,
+        registration_intent: bool,
+        active: bool,
+        explicit_run_id: bool,
+    ) -> list[str]:
         names = []
         if intent:
             names.append("start_subagent")
@@ -744,12 +805,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             names.append("wait_subagent")
         if intent or active or explicit_run_id:
             names.extend(["get_subagent", "cancel_subagent"])
-        for name in names:
-            toolkit.register_tool_function(
-                tools[name],
-                namesake_strategy=namesake_strategy,
-            )
-        self._normalize_registered_tool_functions(toolkit, names)
+        return names
 
     def _register_source_tools(self, toolkit: Toolkit) -> None:
         """Register the Agent-start source-tool snapshot after skills are known."""
@@ -2099,12 +2155,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._required_structured_model = None
         self.toolkit.remove_tool_function(self.finish_function_name)
         self._start_watchdog()
+        turn_callback = getattr(self, "_subagent_turn_callback", None)
         try:
             with self.agent_phase(AgentPhase.REASONING, reason="research"):
                 for turn in range(1, self.max_iters + 1):
                     await self._compress_memory_if_needed()
                     reply = await self._reasoning()
                     last_reply = reply
+                    if turn_callback is not None:
+                        await turn_callback(turn)
                     tool_calls = reply.get_content_blocks("tool_use")
                     if not tool_calls:
                         return ResearchPhaseResult(

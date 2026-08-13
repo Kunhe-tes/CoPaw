@@ -104,7 +104,7 @@ export function useChatAnywhereI18n<Selected>(
   try {
     const context = useContextSelector(ChatAnywhereI18nContext, selector);
     return context;
-  } catch (error) {
+  } catch {
     return {} as Selected;
   }
 }

@@ -258,7 +258,7 @@ def test_registration_budget_can_only_narrow_defaults(
                     "name": "too-large",
                     "instruction": "Act as an analyst.",
                     "description": "Too large budget.",
-                    "budget": {"max_turns": 7},
+                    "budget": {"max_turns": 51},
                 },
             ),
         )

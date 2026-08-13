@@ -35,6 +35,8 @@ class SubAgentBudgetConsumption(BaseModel):
 
     elapsed_ms: int
     timeout_ms: int
+    turns_used: int
+    max_turns: int
     ratio: float
 
 
@@ -232,6 +234,12 @@ def _budget_consumption(
     return SubAgentBudgetConsumption(
         elapsed_ms=elapsed_ms,
         timeout_ms=timeout_ms,
+        turns_used=(
+            record.result.metrics.turns_used
+            if record.result is not None
+            else record.turns_used
+        ),
+        max_turns=max(int(record.effective_budget.max_turns), 0),
         ratio=ratio,
     )
 

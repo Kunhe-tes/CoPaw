@@ -24,6 +24,7 @@ function Usage(props: { input_tokens: string; output_tokens: string }) {
 
 export default function Tools(props: {
   data: IAgentScopeRuntimeResponse;
+  hideReplace?: boolean;
   isLast?: boolean;
 }) {
   const { t } = useTranslation();
@@ -52,7 +53,7 @@ export default function Tools(props: {
         },
       };
     }),
-    replace && props.isLast
+    replace && props.isLast && !props.hideReplace
       ? {
           icon: (
             <Tooltip title={t?.("actions.regenerate") || "重新生成"}>

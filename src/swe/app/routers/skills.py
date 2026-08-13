@@ -418,12 +418,13 @@ def _read_pool_skill_entry(
     return entry, source_dir
 
 
-def _broadcast_skills_to_tenant(
+async def _broadcast_skills_to_tenant(
     *,
     source_working_dir: Path,
     target_tenant_id: str,
     skill_names: list[str],
     source_id: str | None,
+    tenant_workspace_pool: Any,
 ) -> BroadcastDefaultAgentTenantResult:
     from ..workspace.tenant_initializer import TenantInitializer
 
@@ -432,6 +433,12 @@ def _broadcast_skills_to_tenant(
         target_tenant_id,
         source_id=source_id,
     )
+    was_bootstrapped = initializer.has_seeded_bootstrap()
+    if not was_bootstrapped:
+        await tenant_workspace_pool.ensure_bootstrap(
+            target_tenant_id,
+            source_id=source_id,
+        )
     target_working_dir = initializer.tenant_dir
     workspace_dir = target_working_dir / "workspaces" / "default"
     workspace_service = SkillService(workspace_dir)
@@ -450,10 +457,6 @@ def _broadcast_skills_to_tenant(
                 f"Workspace skill '{final_name}' conflicts with "
                 "unmanaged content",
             )
-
-    was_bootstrapped = initializer.has_seeded_bootstrap()
-    if not was_bootstrapped:
-        initializer.ensure_seeded_bootstrap()
 
     pool_service = SkillPoolService(working_dir=target_working_dir)
     pool_updated: list[str] = []
@@ -495,17 +498,18 @@ async def _broadcast_default_agents(
     target_tenant_ids: list[str],
     skill_names: list[str],
     source_id: str | None,
+    tenant_workspace_pool: Any,
 ) -> BroadcastDefaultAgentsResponse:
     results: list[BroadcastDefaultAgentTenantResult] = []
     for tenant_id in target_tenant_ids:
         try:
             validated_tenant_id = _validate_target_tenant_id(tenant_id)
-            result = await asyncio.to_thread(
-                _broadcast_skills_to_tenant,
+            result = await _broadcast_skills_to_tenant(
                 source_working_dir=source_working_dir,
                 target_tenant_id=validated_tenant_id,
                 skill_names=skill_names,
                 source_id=source_id,
+                tenant_workspace_pool=tenant_workspace_pool,
             )
             results.append(result)
         except Exception as exc:
@@ -1441,10 +1445,21 @@ async def broadcast_pool_skills_to_default_agents(
         working_dir=source_working_dir,
         skill_names=body.skill_names,
     )
+    tenant_workspace_pool = getattr(
+        getattr(getattr(request, "app", None), "state", request.state),
+        "tenant_workspace_pool",
+        None,
+    )
+    if tenant_workspace_pool is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Tenant pool not available",
+        )
     return await _broadcast_default_agents(
         source_working_dir=source_working_dir,
         target_tenant_ids=body.target_tenant_ids,
         skill_names=body.skill_names,
+        tenant_workspace_pool=tenant_workspace_pool,
         source_id=source_id,
     )
 
