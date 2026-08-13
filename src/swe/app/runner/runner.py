@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
 
 from ..mcp.http_headers import build_mcp_http_headers
+from ..mcp.lazy_client import LazyMCPClient, get_mcp_tool_discovery_cache
 from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
@@ -1069,6 +1071,83 @@ async def _build_and_connect_mcp_clients(
         int((time.perf_counter() - started_at) * 1000),
         len(clients),
     )
+    return clients
+
+
+def _build_lazy_mcp_clients(
+    mcp_config: MCPConfig | None,
+    *,
+    tenant_id: str | None,
+    user_id: str | None,
+    passthrough_headers: dict[str, str] | None = None,
+    session_id: str | None = None,
+    chat_id: str | None = None,
+    trace_id: str | None = None,
+) -> list[LazyMCPClient]:
+    """Build request-lazy MCP clients without opening transport sessions."""
+    if mcp_config is None or not mcp_config.clients:
+        return []
+
+    clients: list[LazyMCPClient] = []
+    for key, client_config in mcp_config.clients.items():
+        if not client_config.enabled:
+            continue
+
+        config_payload = client_config.model_dump(mode="json")
+        config_fingerprint = hashlib.sha256(
+            json.dumps(
+                config_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        ).hexdigest()
+        request_scope_headers = {
+            header_name.casefold(): header_value
+            for header_name, header_value in (
+                passthrough_headers or {}
+            ).items()
+        }
+        request_scope_fingerprint = hashlib.sha256(
+            json.dumps(
+                request_scope_headers,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        ).hexdigest()
+        discovery_key = ":".join(
+            [
+                tenant_id or "default",
+                user_id or "default",
+                key,
+                config_fingerprint,
+                request_scope_fingerprint,
+            ],
+        )
+
+        async def create_client(
+            config: MCPClientConfig = client_config,
+            headers: dict[str, str] | None = passthrough_headers,
+            request_session_id: str | None = session_id,
+            request_chat_id: str | None = chat_id,
+            request_trace_id: str | None = trace_id,
+        ) -> Any:
+            return await _create_mcp_client_with_headers(
+                config,
+                headers,
+                session_id=request_session_id,
+                chat_id=request_chat_id,
+                trace_id=request_trace_id,
+            )
+
+        clients.append(
+            LazyMCPClient(
+                name=client_config.name,
+                discovery_key=discovery_key,
+                create_client=create_client,
+                discovery_cache=get_mcp_tool_discovery_cache(),
+                connect_timeout=_MCP_CONNECT_TIMEOUT_SECONDS,
+            ),
+        )
     return clients
 
 
@@ -3239,8 +3318,10 @@ class AgentRunner(Runner):
                 directive.render() for directive in all_context_directives
             ]
         mcp_clients.extend(
-            await _build_and_connect_mcp_clients(
+            _build_lazy_mcp_clients(
                 inputs.agent_config.mcp,
+                tenant_id=self.tenant_id,
+                user_id=inputs.user_id,
                 passthrough_headers=inputs.passthrough_headers or None,
                 session_id=inputs.session_id,
                 chat_id=chat.id if chat is not None else None,

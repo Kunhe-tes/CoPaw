@@ -26,6 +26,7 @@ from anyio import ClosedResourceError
 from pydantic import BaseModel
 
 from ..app.mcp.http_headers import build_mcp_http_headers
+from ..app.mcp.lazy_client import LazyMCPClient, mcp_tool_json_schema
 from ..app.mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_handler import CommandHandler
 from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
@@ -1313,6 +1314,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 (default: "skip")
         """
         for i, client in enumerate(self._mcp_clients):
+            if isinstance(client, LazyMCPClient):
+                await self._register_lazy_mcp_client(
+                    client,
+                    namesake_strategy=namesake_strategy,
+                )
+                continue
             client_name = getattr(client, "name", repr(client))
             configured_tools = getattr(
                 self._agent_config.tools,
@@ -1416,6 +1423,81 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     "MCP tool collides with an active source tool: "
                     + ", ".join(collisions),
                 )
+
+    async def _register_lazy_mcp_client(
+        self,
+        client: LazyMCPClient,
+        *,
+        namesake_strategy: NamesakeStrategy,
+    ) -> None:
+        """Register cached schemas whose calls create short-lived clients."""
+        configured_tools = getattr(
+            self._agent_config.tools,
+            "builtin_tools",
+            {},
+        )
+        source_tool_names = {
+            version.name
+            for version in self._source_tool_versions
+            if configured_tools.get(version.name, None) is None
+            or configured_tools[version.name].enabled
+        }
+        try:
+            client_tools = await client.list_tools()
+        except asyncio.CancelledError as error:
+            if self._should_propagate_cancelled_error(error):
+                raise
+            logger.warning(
+                "Lazy MCP client '%s' discovery cancelled, skipping",
+                client.name,
+            )
+            return
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to discover lazy MCP client '%s', skipping: %s",
+                client.name,
+                error,
+                exc_info=True,
+            )
+            return
+
+        collisions = sorted(
+            source_tool_names
+            & {str(getattr(tool, "name", "")) for tool in client_tools},
+        )
+        if collisions:
+            raise RuntimeError(
+                "MCP tool collides with an active source tool: "
+                + ", ".join(collisions),
+            )
+
+        try:
+            client.on_progress_callback = self._reset_watchdog
+            existing_tool_names = set(self.toolkit.tools)
+            for tool in client_tools:
+                self.toolkit.register_tool_function(
+                    client.get_tool_function(tool),
+                    func_name=tool.name,
+                    func_description=getattr(tool, "description", "") or "",
+                    json_schema=mcp_tool_json_schema(tool),
+                    namesake_strategy=namesake_strategy,
+                )
+            registered_names = sorted(
+                set(self.toolkit.tools) - existing_tool_names,
+            )
+            for tool_name in registered_names:
+                self.toolkit.tools[tool_name].mcp_name = client.name
+            self._normalize_registered_tool_functions(
+                self.toolkit,
+                registered_names,
+            )
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to register lazy MCP client '%s', skipping: %s",
+                client.name,
+                error,
+                exc_info=True,
+            )
 
     def _wire_mcp_progress_callbacks(self, client: Any) -> None:
         """Set on_progress_callback on MCPToolFunction instances registered
