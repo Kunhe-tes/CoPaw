@@ -362,7 +362,6 @@ class SubAgentDefinition(BaseModel):
     permission: PermissionPolicy = Field(default_factory=PermissionPolicy)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
-    task_types: list[str] = Field(default_factory=list)
     trigger_keywords: list[str] = Field(default_factory=list)
     priority: int = 100
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
@@ -390,7 +389,7 @@ class SubAgentDefinition(BaseModel):
             raise ValueError("description exceeds 1024 bytes")
         return value
 
-    @field_validator("task_types", "trigger_keywords")
+    @field_validator("trigger_keywords")
     @classmethod
     def _validate_matching_lists(
         cls,
@@ -606,7 +605,6 @@ class SubAgentRegistrationRequest(BaseModel):
     description: str
     nickname: str | None = None
     trigger_keywords: list[str] = Field(default_factory=list)
-    task_types: list[str] = Field(default_factory=list)
     priority: int = 100
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
     enabled: bool = True
@@ -633,7 +631,7 @@ class SubAgentRegistrationRequest(BaseModel):
             raise ValueError("description exceeds 1024 bytes")
         return value
 
-    @field_validator("task_types", "trigger_keywords")
+    @field_validator("trigger_keywords")
     @classmethod
     def _validate_matching_lists(
         cls,

@@ -23,7 +23,6 @@ def _definition(
     priority: int = 100,
     enabled: bool = True,
     trigger_keywords: list[str] | None = None,
-    task_types: list[str] | None = None,
     description: str = "Research analyst.",
 ) -> SubAgentDefinition:
     return SubAgentDefinition.model_validate(
@@ -34,7 +33,6 @@ def _definition(
             "description": description,
             "instruction": f"Act as {name}.",
             "trigger_keywords": trigger_keywords or [],
-            "task_types": task_types or [],
             "priority": priority,
             "updated_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
         },
@@ -97,11 +95,11 @@ def test_keyword_match_can_short_circuit_at_threshold() -> None:
     assert result.metadata.score == 0.85
 
 
-def test_low_score_falls_back_without_match() -> None:
+def test_description_match_below_threshold_falls_back_without_match() -> None:
     matcher = SubAgentDefinitionMatcher()
     result = matcher.match(
         _request("customer worker", "Summarize meeting notes."),
-        [_definition("risk-reviewer", task_types=["risk"])],
+        [_definition("risk-reviewer", description="risk")],
     )
 
     assert result is None

@@ -78,14 +78,6 @@ class SubAgentDefinitionMatcher:
             score = min(0.85, 0.65 + 0.1 * len(keyword_hits))
             return self._result(candidate, score, "trigger_keywords")
 
-        task_hits = [
-            task_type
-            for task_type in candidate.task_types
-            if task_type.strip().casefold() in query
-        ]
-        if task_hits:
-            return self._result(candidate, 0.75, "task_types")
-
         description = candidate.description.strip().casefold()
         if description and description in query:
             return self._result(candidate, 0.70, "description")

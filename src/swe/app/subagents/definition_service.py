@@ -82,7 +82,6 @@ class SubAgentDefinitionService:
                 "description": request.description,
                 "instruction": request.instruction,
                 "trigger_keywords": request.trigger_keywords,
-                "task_types": request.task_types,
                 "priority": request.priority,
                 "budget": request.budget.model_dump(mode="json"),
             },

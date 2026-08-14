@@ -43,7 +43,6 @@ def test_definition_uses_instruction_and_top_level_routing_fields() -> None:
             "description": "Analyzes 1M AUM customer maintenance strategy.",
             "instruction": "Act as a customer strategy analyst.",
             "trigger_keywords": ["AUM", "客户维护"],
-            "task_types": ["research", "analysis"],
             "priority": 20,
         },
     )
@@ -52,7 +51,6 @@ def test_definition_uses_instruction_and_top_level_routing_fields() -> None:
     assert definition.instruction == "Act as a customer strategy analyst."
     assert "output_contract" not in definition.model_dump()
     assert definition.trigger_keywords == ["AUM", "客户维护"]
-    assert definition.task_types == ["research", "analysis"]
     assert definition.priority == 20
     assert definition.source == "stored"
 
@@ -63,9 +61,6 @@ def test_definition_uses_instruction_and_top_level_routing_fields() -> None:
         ("trigger_keywords", [""]),
         ("trigger_keywords", ["x" * 65]),
         ("trigger_keywords", [f"keyword-{index}" for index in range(21)]),
-        ("task_types", [""]),
-        ("task_types", ["x" * 65]),
-        ("task_types", [f"type-{index}" for index in range(21)]),
     ],
 )
 def test_definition_rejects_invalid_matching_lists(
@@ -248,7 +243,6 @@ def test_registration_request_accepts_full_definition_metadata() -> None:
             "instruction": "Act as an AUM analyst.",
             "description": "Analyzes customer maintenance.",
             "trigger_keywords": ["AUM"],
-            "task_types": ["analysis"],
             "priority": 20,
             "budget": {"max_turns": 4, "max_tool_calls": 20},
             "enabled": False,

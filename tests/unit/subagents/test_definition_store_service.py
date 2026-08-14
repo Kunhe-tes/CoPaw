@@ -31,7 +31,6 @@ def _request(
             "instruction": "Act as a customer strategy analyst.",
             "description": "Analyzes 1M AUM customer maintenance strategy.",
             "trigger_keywords": ["AUM", "客户维护"],
-            "task_types": ["research", "analysis"],
             "priority": 20,
             "budget": {
                 "max_turns": 4,
@@ -116,6 +115,28 @@ def test_store_lists_and_gets_definitions(tmp_path: Path) -> None:
 
     assert store.get("aum-customer-analyst") == definition
     assert store.list_definitions() == [definition]
+
+
+def test_store_ignores_removed_task_types_in_legacy_json(
+    tmp_path: Path,
+) -> None:
+    store = SubAgentDefinitionStore(tmp_path)
+    legacy = {
+        "name": "legacy-worker",
+        "source": "stored",
+        "description": "Legacy definition.",
+        "instruction": "Inspect repository evidence.",
+        "task_types": ["research"],
+    }
+    (tmp_path / "legacy.json").write_text(
+        json.dumps(legacy),
+        encoding="utf-8",
+    )
+
+    [definition] = store.list_definitions()
+
+    assert definition is not None
+    assert "task_types" not in definition.model_dump()
 
 
 def test_store_avoids_filename_collisions(tmp_path: Path) -> None:

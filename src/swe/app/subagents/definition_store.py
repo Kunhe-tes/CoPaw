@@ -35,11 +35,7 @@ class SubAgentDefinitionStore:
             return []
         definitions: list[SubAgentDefinition] = []
         for path in sorted(self._root.glob("*.json")):
-            definitions.append(
-                SubAgentDefinition.model_validate_json(
-                    path.read_text(encoding="utf-8"),
-                ),
-            )
+            definitions.append(self._load(path))
         return definitions
 
     def get(self, name: str) -> SubAgentDefinition | None:
@@ -47,9 +43,15 @@ class SubAgentDefinitionStore:
         path = self._path_for_name(name)
         if not path.exists():
             return None
-        return SubAgentDefinition.model_validate_json(
-            path.read_text(encoding="utf-8"),
-        )
+        return self._load(path)
+
+    @staticmethod
+    def _load(path: Path) -> SubAgentDefinition:
+        """Load definitions while ignoring the removed legacy task_types field."""
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if isinstance(payload, dict):
+            payload.pop("task_types", None)
+        return SubAgentDefinition.model_validate(payload)
 
     def upsert(
         self,
