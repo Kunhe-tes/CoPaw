@@ -9,6 +9,7 @@ from .models import (
     HtmlPreviewClickEventCreate,
     HtmlPreviewClickEventItem,
     HtmlPreviewClickSummaryItem,
+    HtmlPreviewEventType,
     HtmlPreviewCustomerClickItem,
     HtmlPreviewCustomerClickSummaryItem,
     HtmlPreviewListSnapshotCreate,
@@ -181,14 +182,16 @@ class HtmlPreviewClickStore:
             event.list_name,
             event.file_url,
         )
-        button_type = cls._classify_button(
-            {
-                "button_type": event.button_type,
-                "button_id": event.button_id,
-                "button_name": event.button_name,
-                "button_text": event.button_text,
-            },
-        )
+        button_type = None
+        if event.event_type == "button_click":
+            button_type = cls._classify_button(
+                {
+                    "button_type": event.button_type,
+                    "button_id": event.button_id,
+                    "button_name": event.button_name,
+                    "button_text": event.button_text,
+                },
+            )
         return {
             "list_key": list_key,
             "list_name": list_name,
@@ -261,13 +264,21 @@ class HtmlPreviewClickStore:
             customer_name=customer_name,
             customer_info=cls._decode_customer_info(row.get("customer_info")),
             clicked_at=row.get("clicked_at"),
+            event_type=row.get("event_type") or "button_click",
+            template_id=row.get("template_id"),
+            result_id=row.get("result_id"),
+            root_template_id=row.get("root_template_id"),
+            root_result_id=row.get("root_result_id"),
+            event_target_id=row.get("event_target_id"),
+            event_target_name=row.get("event_target_name"),
+            trace_id=row.get("trace_id"),
         )
 
     async def create_event(
         self,
         event: HtmlPreviewClickEventCreate,
     ) -> None:
-        """保存一条 HTML 预览按钮点击明细。"""
+        """保存一条 HTML 预览行为事件明细。"""
         if not self._use_db:
             return
 
@@ -291,11 +302,20 @@ class HtmlPreviewClickStore:
                 customer_id,
                 customer_name,
                 customer_info,
-                clicked_at
+                clicked_at,
+                event_type,
+                template_id,
+                result_id,
+                root_template_id,
+                root_result_id,
+                event_target_id,
+                event_target_name,
+                trace_id
             )
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s, %s, %s
             )
         """
         await self.db.execute(
@@ -319,6 +339,14 @@ class HtmlPreviewClickStore:
                 normalized["customer_name"],
                 self._encode_customer_info(event.customer_info),
                 self._shift_to_db_timezone(event.clicked_at),
+                event.event_type,
+                event.template_id,
+                self._clean_text(event.result_id),
+                event.root_template_id,
+                self._clean_text(event.root_result_id),
+                self._clean_text(event.event_target_id),
+                self._clean_text(event.event_target_name),
+                self._clean_text(event.trace_id),
             ),
         )
 
@@ -408,9 +436,17 @@ class HtmlPreviewClickStore:
         cron_task_id: Optional[str] = None,
         file_url: Optional[str] = None,
         list_key: Optional[str] = None,
+        event_type: Optional[HtmlPreviewEventType] = "button_click",
+        template_id: Optional[int] = None,
+        result_id: Optional[str] = None,
+        root_template_id: Optional[int] = None,
+        root_result_id: Optional[str] = None,
+        event_target_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[HtmlPreviewClickEventItem]:
-        """查询 HTML 预览按钮点击明细。"""
+        """查询 HTML 预览行为事件明细。"""
         if not self._use_db:
             return []
 
@@ -422,8 +458,16 @@ class HtmlPreviewClickStore:
             cron_task_id=cron_task_id,
             file_url=file_url,
             list_key=list_key,
+            event_type=event_type,
+            template_id=template_id,
+            result_id=result_id,
+            root_template_id=root_template_id,
+            root_result_id=root_result_id,
+            event_target_id=event_target_id,
+            trace_id=trace_id,
         )
         safe_limit = max(1, min(limit, 200))
+        safe_offset = max(0, offset)
         query = f"""
             SELECT
                 id,
@@ -444,11 +488,19 @@ class HtmlPreviewClickStore:
                 customer_id,
                 customer_name,
                 customer_info,
+                event_type,
+                template_id,
+                result_id,
+                root_template_id,
+                root_result_id,
+                event_target_id,
+                event_target_name,
+                trace_id,
                 clicked_at
             FROM swe_html_preview_click_events
             {where_sql}
             ORDER BY clicked_at DESC, id DESC
-            LIMIT {safe_limit}
+            LIMIT {safe_limit} OFFSET {safe_offset}
         """
         rows = await self.db.fetch_all(query, tuple(params))
         return [self._to_event_item(row) for row in rows]
@@ -477,6 +529,7 @@ class HtmlPreviewClickStore:
             cron_task_id=cron_task_id,
             file_url=file_url,
             list_key=list_key,
+            event_type="button_click",
         )
         safe_limit = max(1, min(limit, 200))
 
@@ -667,6 +720,7 @@ class HtmlPreviewClickStore:
             cron_task_id=cron_task_id,
             file_url=file_url,
             list_key=list_key,
+            event_type="button_click",
         )
         query = f"""
             SELECT
@@ -711,6 +765,7 @@ class HtmlPreviewClickStore:
             cron_task_id=None,
             file_url=None,
             list_key=None,
+            event_type="button_click",
         )
         list_key_expr = self._sql_list_key_expr()
         customer_key_expr = self._sql_event_customer_key_expr()
@@ -856,6 +911,7 @@ class HtmlPreviewClickStore:
             cron_task_id=None,
             file_url=None,
             list_key=None,
+            event_type="button_click",
         )
         list_key_expr = self._sql_list_key_expr()
         snapshot_customer_key_expr = self._sql_snapshot_customer_key_expr()
@@ -1535,9 +1591,16 @@ class HtmlPreviewClickStore:
         cron_task_id: Optional[str] = None,
         file_url: Optional[str] = None,
         list_key: Optional[str] = None,
+        event_type: Optional[HtmlPreviewEventType] = None,
+        template_id: Optional[int] = None,
+        result_id: Optional[str] = None,
+        root_template_id: Optional[int] = None,
+        root_result_id: Optional[str] = None,
+        event_target_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
         """构造点击查询的公共筛选条件。"""
-        return self._build_where_clause(
+        where_sql, params = self._build_where_clause(
             source_id=source_id,
             time_column="clicked_at",
             start_time=start_time,
@@ -1546,7 +1609,25 @@ class HtmlPreviewClickStore:
             cron_task_id=cron_task_id,
             file_url=file_url,
             list_key=list_key,
+            event_type=event_type,
         )
+        dimension_filters = (
+            ("template_id", template_id),
+            ("result_id", result_id),
+            ("root_template_id", root_template_id),
+            ("root_result_id", root_result_id),
+            ("event_target_id", event_target_id),
+            ("trace_id", trace_id),
+        )
+        dimension_clauses = []
+        for column, value in dimension_filters:
+            if value is not None:
+                dimension_clauses.append(f"{column} = %s")
+                params.append(value)
+        if dimension_clauses:
+            conjunction = " AND " if where_sql else "WHERE "
+            where_sql += conjunction + " AND ".join(dimension_clauses)
+        return where_sql, params
 
     def _build_snapshot_where_clause(
         self,
@@ -1574,6 +1655,7 @@ class HtmlPreviewClickStore:
         cron_task_id: Optional[str] = None,
         file_url: Optional[str] = None,
         list_key: Optional[str] = None,
+        event_type: Optional[HtmlPreviewEventType] = None,
     ) -> tuple[str, list[Any]]:
         """构造查询的公共筛选条件。"""
         where_clauses: list[str] = []
@@ -1600,6 +1682,9 @@ class HtmlPreviewClickStore:
         if list_key:
             where_clauses.append("list_key = %s")
             params.append(list_key)
+        if event_type:
+            where_clauses.append("event_type = %s")
+            params.append(event_type)
 
         where_sql = (
             f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""

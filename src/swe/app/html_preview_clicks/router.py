@@ -16,6 +16,7 @@ from .models import (
     HtmlPreviewClickSummaryResponse,
     HtmlPreviewCustomerClickResponse,
     HtmlPreviewCustomerClickSummaryResponse,
+    HtmlPreviewEventTypeFilter,
     HtmlPreviewListSnapshotCreate,
     HtmlPreviewListSnapshotResponse,
     HtmlPreviewListSummaryResponse,
@@ -153,7 +154,7 @@ async def create_html_preview_click_event(
     request: Request,
     event: HtmlPreviewClickEventCreate,
 ) -> HtmlPreviewClickCreateResponse:
-    """提交一次 HTML 预览按钮点击事件。"""
+    """提交一次 HTML 预览行为事件。"""
     try:
         service = get_service()
     except RuntimeError as exc:
@@ -251,9 +252,25 @@ async def list_html_preview_click_events(
     cron_task_id: Optional[str] = None,
     file_url: Optional[str] = None,
     list_key: Optional[str] = None,
+    event_type: HtmlPreviewEventTypeFilter = "button_click",
+    template_id: Optional[int] = Query(default=None, ge=1),
+    result_id: Optional[str] = Query(
+        default=None,
+        min_length=1,
+        max_length=128,
+    ),
+    root_template_id: Optional[int] = Query(default=None, ge=1),
+    root_result_id: Optional[str] = Query(
+        default=None,
+        min_length=1,
+        max_length=128,
+    ),
+    event_target_id: Optional[str] = Query(default=None, max_length=255),
+    trace_id: Optional[str] = Query(default=None, max_length=128),
     limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
 ) -> HtmlPreviewClickEventListResponse:
-    """查询 HTML 预览按钮点击明细。"""
+    """查询 HTML 预览行为事件明细。"""
     try:
         service = get_service()
     except RuntimeError as exc:
@@ -267,7 +284,15 @@ async def list_html_preview_click_events(
         cron_task_id=_first_text(cron_task_id),
         file_url=_first_text(file_url),
         list_key=_first_text(list_key),
+        event_type=None if event_type == "all" else event_type,
+        template_id=template_id,
+        result_id=_first_text(result_id),
+        root_template_id=root_template_id,
+        root_result_id=_first_text(root_result_id),
+        event_target_id=_first_text(event_target_id),
+        trace_id=_first_text(trace_id),
         limit=limit,
+        offset=offset,
     )
     return HtmlPreviewClickEventListResponse(items=items)
 

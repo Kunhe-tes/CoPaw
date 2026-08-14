@@ -10,6 +10,7 @@ from .models import (
     HtmlPreviewClickSummaryItem,
     HtmlPreviewCustomerClickItem,
     HtmlPreviewCustomerClickSummaryItem,
+    HtmlPreviewEventType,
     HtmlPreviewListSnapshotCreate,
     HtmlPreviewListSummaryItem,
     HtmlPreviewListSummaryResponse,
@@ -32,7 +33,7 @@ class HtmlPreviewClickService:
         self,
         event: HtmlPreviewClickEventCreate,
     ) -> None:
-        """保存一条 HTML 预览按钮点击事件。"""
+        """保存一条 HTML 预览行为事件。"""
         await self.store.create_event(event)
 
     async def list_summary(
@@ -69,9 +70,17 @@ class HtmlPreviewClickService:
         cron_task_id: Optional[str] = None,
         file_url: Optional[str] = None,
         list_key: Optional[str] = None,
+        event_type: Optional[HtmlPreviewEventType] = "button_click",
+        template_id: Optional[int] = None,
+        result_id: Optional[str] = None,
+        root_template_id: Optional[int] = None,
+        root_result_id: Optional[str] = None,
+        event_target_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
         limit: int = 100,
+        offset: int = 0,
     ) -> list[HtmlPreviewClickEventItem]:
-        """查询 HTML 预览按钮点击明细。"""
+        """查询 HTML 预览行为事件明细。"""
         return await self.store.list_events(
             source_id=source_id,
             start_time=start_time,
@@ -80,7 +89,15 @@ class HtmlPreviewClickService:
             cron_task_id=cron_task_id,
             file_url=file_url,
             list_key=list_key,
+            event_type=event_type,
+            template_id=template_id,
+            result_id=result_id,
+            root_template_id=root_template_id,
+            root_result_id=root_result_id,
+            event_target_id=event_target_id,
+            trace_id=trace_id,
             limit=limit,
+            offset=offset,
         )
 
     async def list_customer_summary(

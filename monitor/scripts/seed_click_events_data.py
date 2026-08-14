@@ -68,11 +68,23 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
   customer_id VARCHAR(128) NULL COMMENT '客户唯一标识',
   customer_name VARCHAR(255) NULL COMMENT '客户展示名称',
   customer_info JSON NULL COMMENT '客户扩展信息',
+  event_type VARCHAR(32) NOT NULL DEFAULT 'button_click' COMMENT '事件类型',
+  template_id BIGINT NULL COMMENT '当前事件所在模板ID',
+  result_id VARCHAR(128) NULL COMMENT '当前模板生成结果ID',
+  root_template_id BIGINT NULL COMMENT '入口主模板ID',
+  root_result_id VARCHAR(128) NULL COMMENT '入口主模板生成结果ID',
+  event_target_id VARCHAR(255) NULL COMMENT '事件对象稳定标识',
+  event_target_name VARCHAR(512) NULL COMMENT '事件对象展示名称',
+  trace_id VARCHAR(128) NULL COMMENT '方案生成与浏览链路标识',
   clicked_at DATETIME NOT NULL COMMENT '前端点击时间',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '入库时间',
   INDEX idx_clicked_at (clicked_at),
   INDEX idx_task_clicked (cron_task_id, clicked_at),
   INDEX idx_button_type_clicked (button_type, clicked_at),
+  INDEX idx_source_event_target_clicked (source_id, event_type, event_target_id, clicked_at),
+  INDEX idx_source_root_event_clicked (source_id, root_template_id, root_result_id, event_type, clicked_at),
+  INDEX idx_source_template_result_clicked (source_id, template_id, result_id, clicked_at),
+  INDEX idx_trace_clicked (trace_id, clicked_at),
   INDEX idx_source_clicked (source_id, clicked_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='HTML 预览按钮点击明细'
 """

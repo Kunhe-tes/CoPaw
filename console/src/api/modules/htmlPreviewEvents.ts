@@ -14,6 +14,7 @@ import type {
   HtmlPreviewListSnapshotPayload,
   HtmlPreviewListSnapshotResponse,
   HtmlPreviewListSummaryResponse,
+  HtmlPreviewEventType,
 } from "../types/htmlPreviewEvents";
 
 function withClickRuntimeContext(
@@ -88,7 +89,15 @@ export const htmlPreviewEventsApi = {
     cronTaskId?: string | null;
     fileUrl?: string | null;
     listKey?: string | null;
+    eventType?: HtmlPreviewEventType | "all" | null;
+    templateId?: number | null;
+    resultId?: string | null;
+    rootTemplateId?: number | null;
+    rootResultId?: string | null;
+    eventTargetId?: string | null;
+    traceId?: string | null;
     limit?: number;
+    offset?: number;
   }) => {
     const search = buildSearchParams(params);
     const query = search.toString();
@@ -174,7 +183,15 @@ function buildSearchParams(params?: {
   cronTaskId?: string | null;
   fileUrl?: string | null;
   listKey?: string | null;
+  eventType?: HtmlPreviewEventType | "all" | null;
+  templateId?: number | null;
+  resultId?: string | null;
+  rootTemplateId?: number | null;
+  rootResultId?: string | null;
+  eventTargetId?: string | null;
+  traceId?: string | null;
   limit?: number;
+  offset?: number;
 }) {
   const search = new URLSearchParams();
   if (params?.startTime) {
@@ -195,8 +212,32 @@ function buildSearchParams(params?: {
   if (params?.listKey) {
     search.set("list_key", params.listKey);
   }
+  if (params?.eventType) {
+    search.set("event_type", params.eventType);
+  }
+  if (params?.templateId) {
+    search.set("template_id", String(params.templateId));
+  }
+  if (params?.resultId) {
+    search.set("result_id", params.resultId);
+  }
+  if (params?.rootTemplateId) {
+    search.set("root_template_id", String(params.rootTemplateId));
+  }
+  if (params?.rootResultId) {
+    search.set("root_result_id", params.rootResultId);
+  }
+  if (params?.eventTargetId) {
+    search.set("event_target_id", params.eventTargetId);
+  }
+  if (params?.traceId) {
+    search.set("trace_id", params.traceId);
+  }
   if (params?.limit) {
     search.set("limit", String(params.limit));
+  }
+  if (params?.offset !== undefined) {
+    search.set("offset", String(params.offset));
   }
   return search;
 }

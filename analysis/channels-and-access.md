@@ -14,6 +14,7 @@
 | 路由层 | `src/swe/app/routers/*.py` | Agent、配置、Provider、文件、消息、技能、Tracing 等 API |
 | 中间件 | `src/swe/app/middleware/*.py` | Header 透传、租户身份、租户工作区注入 |
 | 认证与审批 | `src/swe/app/auth.py`, `src/swe/app/approvals/service.py` | 身份校验与审批服务 |
+| HTML 预览行为事件 | `src/swe/app/html_preview_clicks/`, `console/src/api/modules/htmlPreviewEvents.ts` | 记录主方案、子方案、按钮点击和模块曝光，并提供明细与旧版点击聚合查询 |
 
 ## 主要路由文件
 
@@ -38,6 +39,22 @@
 - `src/swe/app/routers/zhaohu.py`
 
 补充约定：`PUT /envs` 采用当前请求 scope 的全量替换语义，请求体只能包含实际 env 键值对；`tenant_id`、`source_id`、`target_tenant_id`、`target_source_id` 属于保留 scope 字段，普通 API 遇到这些字段必须返回 `400`，不能静默忽略后继续保存。
+
+### HTML 预览行为事件
+
+`POST /api/html-preview/events` 使用 `event_type` 区分
+`button_click`、`main_preview_view`、`sub_preview_view` 和
+`module_exposure`。旧请求缺省为 `button_click`；`template_id/result_id`
+标识当前模板和生成结果，`root_template_id/root_result_id` 关联入口主模板，
+模块通过 `event_target_id/name` 标识，`trace_id` 串联生成与浏览链路。
+旧版按钮、名单和客户统计只聚合
+`button_click`，避免曝光事件污染原有点击口径。旧客户端查询事件明细时
+若不传 `event_type`，也只返回 `button_click`，保持原接口语义。
+传 `event_type=all` 可查询全部行为事件，并支持按当前模板、入口主模板、
+生成结果、模块、链路字段筛选及 `limit/offset` 分页。
+
+详细字段约定与示例见
+[HTML 预览事件维度设计](../docs/superpowers/specs/2026-08-14-html-preview-event-dimensions-design.md)。
 
 ## 前端目录
 
