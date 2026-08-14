@@ -547,6 +547,7 @@ def test_register_subagent_definition_requires_registration_intent(
     [
         "帮我注册一个账号",
         "讨论一下可复用代码结构",
+        "注册一个可复用 Definition",
     ],
 )
 def test_register_subagent_definition_ignores_unrelated_registration_terms(
@@ -564,6 +565,29 @@ def test_register_subagent_definition_ignores_unrelated_registration_terms(
 
     tools = SWEAgent._create_toolkit(agent).tools
 
+    assert "register_subagent_definition" not in tools
+
+
+@pytest.mark.parametrize(
+    "requested_key",
+    ["subagent_tools_requested", "subagent_registration_tools_requested"],
+)
+def test_subagent_tool_request_flags_do_not_bypass_text_intent_gate(
+    tmp_path: Path,
+    requested_key: str,
+) -> None:
+    """Only the current user message can open SubAgent tools."""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            requested_key: True,
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "start_subagent" not in tools
     assert "register_subagent_definition" not in tools
 
 

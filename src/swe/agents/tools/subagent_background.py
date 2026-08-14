@@ -41,19 +41,6 @@ _SUBAGENT_INTENT_TERMS = (
     "子Agent",
     "后台子代理",
 )
-_SUBAGENT_REGISTRATION_INTENT_TERMS = (
-    "register subagent",
-    "register_subagent",
-    "SubAgent Definition",
-    "subagent definition",
-    "subagent",
-    "SubAgent",
-    "subAgent",
-    "definition",
-    "Definition",
-    "子代理",
-    "子Agent",
-)
 _SUBAGENT_REGISTRATION_ACTION_TERMS = (
     "register",
     "registration",
@@ -89,8 +76,6 @@ def get_default_background_subagent_supervisor() -> (
 
 def has_subagent_intent(request_context: dict[str, Any]) -> bool:
     """Return whether the current turn explicitly asks for SubAgents."""
-    if request_context.get("subagent_tools_requested") is True:
-        return True
     text = "\n".join(
         str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
     )
@@ -101,14 +86,12 @@ def has_subagent_registration_intent(
     request_context: dict[str, Any],
 ) -> bool:
     """Return whether the current turn explicitly asks to register definitions."""
-    if request_context.get("subagent_registration_tools_requested") is True:
-        return True
+    if not has_subagent_intent(request_context):
+        return False
     text = "\n".join(
         str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
     )
-    return any(
-        term in text for term in _SUBAGENT_REGISTRATION_INTENT_TERMS
-    ) and any(term in text for term in _SUBAGENT_REGISTRATION_ACTION_TERMS)
+    return any(term in text for term in _SUBAGENT_REGISTRATION_ACTION_TERMS)
 
 
 def has_explicit_subagent_run_id(request_context: dict[str, Any]) -> bool:
