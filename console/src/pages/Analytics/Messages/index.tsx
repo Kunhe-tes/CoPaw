@@ -90,7 +90,12 @@ function getTopicBbkDistribution(
 
   return entries.slice(0, 5).map((item) => {
     const name = getBbkDisplayName(item.bbkId);
-    const width = entries.length === 1 ? 100 : (total > 0 ? Math.max((item.value / total) * 100, 10) : 0);
+    const width =
+      entries.length === 1
+        ? 100
+        : total > 0
+        ? Math.max((item.value / total) * 100, 10)
+        : 0;
     return {
       bbkId: item.bbkId,
       name,
@@ -215,6 +220,7 @@ export default function MessagesPage() {
   >("idle");
   const [analysisQueried, setAnalysisQueried] = useState(false);
   const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const analysisQuerySeqRef = useRef(0);
 
   useEffect(() => {
     if (branchScope.lockedBbkId) {
@@ -333,15 +339,18 @@ export default function MessagesPage() {
 
   const queryAnalysisResult = useCallback(
     async (range = analysisRange, bbkId = analysisBbkId) => {
+      const querySeq = analysisQuerySeqRef.current + 1;
+      analysisQuerySeqRef.current = querySeq;
       setAnalysisLoading(true);
       setAnalysisError(null);
       setAnalysisTaskId(null);
       setAnalysisTaskStatus("idle");
       try {
         const criteria = toHighFrequencyCriteria(range, bbkId);
-        const data = await monitorApi.getHighFrequencyQuestionResults(
-          criteria,
-        );
+        const data = await monitorApi.getHighFrequencyQuestionResults(criteria);
+        if (querySeq !== analysisQuerySeqRef.current) {
+          return;
+        }
         if (data.state === "EMPTY") {
           const tasks = await monitorApi.getAsyncTasks({
             task_type: HIGH_FREQUENCY_QUESTION_TASK_TYPE,
@@ -349,6 +358,9 @@ export default function MessagesPage() {
             page: 1,
             page_size: 100,
           });
+          if (querySeq !== analysisQuerySeqRef.current) {
+            return;
+          }
           const runningTask = tasks.items.find((task) =>
             isMatchingRunningAnalysisTask(task, criteria),
           );
@@ -363,20 +375,31 @@ export default function MessagesPage() {
         setAnalysisResult(data);
         setAnalysisQueried(true);
       } catch (error) {
+        if (querySeq !== analysisQuerySeqRef.current) {
+          return;
+        }
         const errorMsg =
           error instanceof Error ? error.message : "查询高频问题结果失败";
         setAnalysisError(errorMsg);
         message.error(errorMsg);
       } finally {
-        setAnalysisLoading(false);
+        if (querySeq === analysisQuerySeqRef.current) {
+          setAnalysisLoading(false);
+        }
       }
     },
     [analysisRange, analysisBbkId],
   );
 
+  useEffect(() => {
+    if (!analysisOpen) {
+      return;
+    }
+    void queryAnalysisResult();
+  }, [analysisOpen, queryAnalysisResult]);
+
   const openAnalysisModal = () => {
     setAnalysisOpen(true);
-    void queryAnalysisResult(analysisRange, analysisBbkId);
   };
 
   const handleAnalysisQuickRangeChange = (value: string | number) => {
@@ -420,12 +443,10 @@ export default function MessagesPage() {
       const shouldForceRegenerate =
         analysisResult?.state === "AVAILABLE" ||
         analysisResult?.state === "AVAILABLE_STALE";
-      const data = await monitorApi.submitHighFrequencyQuestionTask(
-        {
-          ...toHighFrequencyCriteria(analysisRange, analysisBbkId),
-          force: shouldForceRegenerate,
-        },
-      );
+      const data = await monitorApi.submitHighFrequencyQuestionTask({
+        ...toHighFrequencyCriteria(analysisRange, analysisBbkId),
+        force: shouldForceRegenerate,
+      });
       if (data.state === "AVAILABLE") {
         setAnalysisResult({ ...data, state: "AVAILABLE" });
         setAnalysisTaskId(null);
@@ -546,7 +567,7 @@ export default function MessagesPage() {
                           topic.rank_no,
                         ),
                       } as CSSProperties &
-                      Record<"--analysis-topic-accent", string>
+                        Record<"--analysis-topic-accent", string>
                     }
                   >
                     <div className={getRankClassName(topic.rank_no)}>
@@ -572,9 +593,7 @@ export default function MessagesPage() {
                             >
                               <Tooltip title={item.name}>
                                 <span
-                                  className={
-                                    styles.analysisBbkDistributionName
-                                  }
+                                  className={styles.analysisBbkDistributionName}
                                 >
                                   {item.name}
                                 </span>
@@ -596,15 +615,15 @@ export default function MessagesPage() {
                           ))}
                         </div>
                       ) : (
-                        <span className={styles.analysisBbkDistributionEmpty}>
-
-                        </span>
+                        <span
+                          className={styles.analysisBbkDistributionEmpty}
+                        ></span>
                       )}
                     </div>
                     <span
-                      className={`${styles.analysisPercent} ${getPercentClassName(
-                        topic.rank_no,
-                      )}`}
+                      className={`${
+                        styles.analysisPercent
+                      } ${getPercentClassName(topic.rank_no)}`}
                     >
                       {getTopicMetricText(topic)}
                     </span>
@@ -888,8 +907,8 @@ export default function MessagesPage() {
               ? "生成中..."
               : analysisResult?.state === "AVAILABLE" ||
                 analysisResult?.state === "AVAILABLE_STALE"
-                ? "重新生成分析"
-                : "生成分析"}
+              ? "重新生成分析"
+              : "生成分析"}
           </Button>,
         ]}
       >
