@@ -120,6 +120,16 @@ class SubtaskCreateRequest(BaseModel):
         le=1,
         description="是否需要通知: 0-否, 1-是",
     )
+    template_id: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="模板ID，用于通知内容渲染",
+    )
+    result_id: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="es数据doc_id",
+    )
 
 
 class SubtaskCreateResponse(BaseModel):

@@ -39,6 +39,8 @@ class QueryService:
         notification_content_wplus: Optional[str] = None,
         notification_content_zhaohu: Optional[str] = None,
         need_notification: int = 1,
+        template_id: Optional[str] = None,
+        result_id: Optional[str] = None,
     ) -> SubtaskCreateResponse:
         """Create a subtask record.
 
@@ -52,6 +54,8 @@ class QueryService:
             notification_content_wplus: W+ channel notification content
             notification_content_zhaohu: Zhaohu channel notification content
             need_notification: Whether notification is needed (0 or 1)
+            template_id: Template ID for html content rendering
+            result_id: ES document ID for reference
 
         Returns:
             SubtaskCreateResponse with creation result
@@ -68,8 +72,8 @@ class QueryService:
         if existing:
             logger.debug(
                 "Subtask already exists: trace_id=%s task_id=%s",
-                trace_id[:20],
-                task_id[:20],
+                trace_id,
+                task_id,
             )
             return SubtaskCreateResponse(
                 success=True,
@@ -92,9 +96,11 @@ class QueryService:
                 status,
                 info,
                 created_at,
-                updated_at
+                updated_at,
+                template_id,
+                result_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, '', %s, NULL)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, '', %s, NULL, %s, %s)
         """
         now = datetime.now()
         await self.db.execute(
@@ -120,9 +126,9 @@ class QueryService:
 
         logger.info(
             "Created subtask: trace_id=%s task_id=%s filename=%s id=%s",
-            trace_id[:20],
-            task_id[:20],
-            filename[:30],
+            trace_id,
+            task_id,
+            filename,
             inserted_id,
         )
 

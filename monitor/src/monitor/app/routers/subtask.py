@@ -57,6 +57,8 @@ async def create_subtask(
             notification_content_wplus=request.notification_content_wplus,
             notification_content_zhaohu=request.notification_content_zhaohu,
             need_notification=request.need_notification,
+            template_id=request.template_id,
+            result_id=request.result_id,
         )
     except Exception as e:
         logger.error("Failed to create subtask: %s", e)
