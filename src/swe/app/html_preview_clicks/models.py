@@ -8,17 +8,16 @@ from pydantic import BaseModel, Field, model_validator
 
 HtmlPreviewEventType = Literal[
     "button_click",
-    "main_preview_view",
-    "sub_preview_view",
+    "preview_view",
     "module_exposure",
 ]
 HtmlPreviewEventTypeFilter = Literal[
     "button_click",
-    "main_preview_view",
-    "sub_preview_view",
+    "preview_view",
     "module_exposure",
     "all",
 ]
+HtmlPreviewTemplateType = Literal["main", "sub"]
 
 
 class HtmlPreviewClickEventCreate(BaseModel):
@@ -43,14 +42,9 @@ class HtmlPreviewClickEventCreate(BaseModel):
     customer_info: Optional[dict[str, str]] = None
     clicked_at: Optional[datetime] = None
     event_type: HtmlPreviewEventType = "button_click"
+    template_type: Optional[HtmlPreviewTemplateType] = None
     template_id: Optional[int] = Field(default=None, ge=1)
     result_id: Optional[str] = Field(
-        default=None,
-        min_length=1,
-        max_length=128,
-    )
-    root_template_id: Optional[int] = Field(default=None, ge=1)
-    root_result_id: Optional[str] = Field(
         default=None,
         min_length=1,
         max_length=128,
@@ -66,31 +60,20 @@ class HtmlPreviewClickEventCreate(BaseModel):
             raise ValueError(
                 "template_id and result_id must be provided together",
             )
-        if (self.root_template_id is None) != (self.root_result_id is None):
+        if self.template_type is not None and self.template_id is None:
             raise ValueError(
-                "root_template_id and root_result_id must be provided together",
+                "template_id and result_id are required with template_type",
             )
 
-        template_events = {
-            "main_preview_view",
-            "sub_preview_view",
-            "module_exposure",
-        }
+        template_events = {"preview_view", "module_exposure"}
         if self.event_type in template_events and self.template_id is None:
             raise ValueError(
                 f"template_id and result_id are required for {self.event_type}",
             )
 
-        if self.event_type == "main_preview_view":
-            if self.root_template_id is None:
-                self.root_template_id = self.template_id
-                self.root_result_id = self.result_id
-        elif self.event_type in {"sub_preview_view", "module_exposure"} and (
-            self.root_template_id is None
-        ):
+        if self.template_id is not None and self.template_type is None:
             raise ValueError(
-                "root_template_id and root_result_id are required for "
-                f"{self.event_type}",
+                f"template_type is required for {self.event_type}",
             )
 
         if self.event_type == "module_exposure" and not (
@@ -180,10 +163,9 @@ class HtmlPreviewClickEventItem(BaseModel):
     customer_info: Optional[dict[str, str]] = None
     clicked_at: Optional[datetime] = None
     event_type: HtmlPreviewEventType = "button_click"
+    template_type: Optional[HtmlPreviewTemplateType] = None
     template_id: Optional[int] = None
     result_id: Optional[str] = None
-    root_template_id: Optional[int] = None
-    root_result_id: Optional[str] = None
     event_target_id: Optional[str] = None
     event_target_name: Optional[str] = None
     trace_id: Optional[str] = None

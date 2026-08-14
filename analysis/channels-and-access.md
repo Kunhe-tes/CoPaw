@@ -43,15 +43,15 @@
 ### HTML 预览行为事件
 
 `POST /api/html-preview/events` 使用 `event_type` 区分
-`button_click`、`main_preview_view`、`sub_preview_view` 和
-`module_exposure`。旧请求缺省为 `button_click`；`template_id/result_id`
-标识当前模板和生成结果，`root_template_id/root_result_id` 关联入口主模板，
-模块通过 `event_target_id/name` 标识，`trace_id` 串联生成与浏览链路。
+`button_click`、`preview_view` 和 `module_exposure`。旧请求缺省为
+`button_click`；`template_type` 区分 `main` 主模板与 `sub` 子模板，
+`template_id/result_id` 标识本条事件实际关联的模板和生成结果。模块通过
+`event_target_id/name` 标识，`trace_id` 串联生成与浏览链路。
 旧版按钮、名单和客户统计只聚合
 `button_click`，避免曝光事件污染原有点击口径。旧客户端查询事件明细时
 若不传 `event_type`，也只返回 `button_click`，保持原接口语义。
-传 `event_type=all` 可查询全部行为事件，并支持按当前模板、入口主模板、
-生成结果、模块、链路字段筛选及 `limit/offset` 分页。
+传 `event_type=all` 可查询全部行为事件，并支持按模板类型、模板、生成结果、
+模块、链路字段筛选及 `limit/offset` 分页。
 
 详细字段约定与示例见
 [HTML 预览事件维度设计](../docs/superpowers/specs/2026-08-14-html-preview-event-dimensions-design.md)。

@@ -161,10 +161,9 @@ describe("htmlPreviewEventsApi", () => {
 
     await htmlPreviewEventsApi.getEvents({
       eventType: "all",
+      templateType: "sub",
       templateId: 12,
       resultId: "result-sub",
-      rootTemplateId: 11,
-      rootResultId: "result-main",
       eventTargetId: "module-customer-profile",
       traceId: "trace-001",
       limit: 20,
@@ -172,7 +171,7 @@ describe("htmlPreviewEventsApi", () => {
     });
 
     expect(mocks.request).toHaveBeenCalledWith(
-      "/html-preview/events?event_type=all&template_id=12&result_id=result-sub&root_template_id=11&root_result_id=result-main&event_target_id=module-customer-profile&trace_id=trace-001&limit=20&offset=40",
+      "/html-preview/events?event_type=all&template_type=sub&template_id=12&result_id=result-sub&event_target_id=module-customer-profile&trace_id=trace-001&limit=20&offset=40",
     );
   });
 

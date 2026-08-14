@@ -10,6 +10,7 @@ from .models import (
     HtmlPreviewClickEventItem,
     HtmlPreviewClickSummaryItem,
     HtmlPreviewEventType,
+    HtmlPreviewTemplateType,
     HtmlPreviewCustomerClickItem,
     HtmlPreviewCustomerClickSummaryItem,
     HtmlPreviewListSnapshotCreate,
@@ -265,10 +266,9 @@ class HtmlPreviewClickStore:
             customer_info=cls._decode_customer_info(row.get("customer_info")),
             clicked_at=row.get("clicked_at"),
             event_type=row.get("event_type") or "button_click",
+            template_type=row.get("template_type"),
             template_id=row.get("template_id"),
             result_id=row.get("result_id"),
-            root_template_id=row.get("root_template_id"),
-            root_result_id=row.get("root_result_id"),
             event_target_id=row.get("event_target_id"),
             event_target_name=row.get("event_target_name"),
             trace_id=row.get("trace_id"),
@@ -304,10 +304,9 @@ class HtmlPreviewClickStore:
                 customer_info,
                 clicked_at,
                 event_type,
+                template_type,
                 template_id,
                 result_id,
-                root_template_id,
-                root_result_id,
                 event_target_id,
                 event_target_name,
                 trace_id
@@ -315,7 +314,7 @@ class HtmlPreviewClickStore:
             VALUES (
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
                 %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                %s, %s, %s, %s, %s, %s, %s, %s
+                %s, %s, %s, %s, %s, %s, %s
             )
         """
         await self.db.execute(
@@ -340,10 +339,9 @@ class HtmlPreviewClickStore:
                 self._encode_customer_info(event.customer_info),
                 self._shift_to_db_timezone(event.clicked_at),
                 event.event_type,
+                event.template_type,
                 event.template_id,
                 self._clean_text(event.result_id),
-                event.root_template_id,
-                self._clean_text(event.root_result_id),
                 self._clean_text(event.event_target_id),
                 self._clean_text(event.event_target_name),
                 self._clean_text(event.trace_id),
@@ -437,10 +435,9 @@ class HtmlPreviewClickStore:
         file_url: Optional[str] = None,
         list_key: Optional[str] = None,
         event_type: Optional[HtmlPreviewEventType] = "button_click",
+        template_type: Optional[HtmlPreviewTemplateType] = None,
         template_id: Optional[int] = None,
         result_id: Optional[str] = None,
-        root_template_id: Optional[int] = None,
-        root_result_id: Optional[str] = None,
         event_target_id: Optional[str] = None,
         trace_id: Optional[str] = None,
         limit: int = 100,
@@ -459,10 +456,9 @@ class HtmlPreviewClickStore:
             file_url=file_url,
             list_key=list_key,
             event_type=event_type,
+            template_type=template_type,
             template_id=template_id,
             result_id=result_id,
-            root_template_id=root_template_id,
-            root_result_id=root_result_id,
             event_target_id=event_target_id,
             trace_id=trace_id,
         )
@@ -489,10 +485,9 @@ class HtmlPreviewClickStore:
                 customer_name,
                 customer_info,
                 event_type,
+                template_type,
                 template_id,
                 result_id,
-                root_template_id,
-                root_result_id,
                 event_target_id,
                 event_target_name,
                 trace_id,
@@ -1592,10 +1587,9 @@ class HtmlPreviewClickStore:
         file_url: Optional[str] = None,
         list_key: Optional[str] = None,
         event_type: Optional[HtmlPreviewEventType] = None,
+        template_type: Optional[HtmlPreviewTemplateType] = None,
         template_id: Optional[int] = None,
         result_id: Optional[str] = None,
-        root_template_id: Optional[int] = None,
-        root_result_id: Optional[str] = None,
         event_target_id: Optional[str] = None,
         trace_id: Optional[str] = None,
     ) -> tuple[str, list[Any]]:
@@ -1612,10 +1606,9 @@ class HtmlPreviewClickStore:
             event_type=event_type,
         )
         dimension_filters = (
+            ("template_type", template_type),
             ("template_id", template_id),
             ("result_id", result_id),
-            ("root_template_id", root_template_id),
-            ("root_result_id", root_result_id),
             ("event_target_id", event_target_id),
             ("trace_id", trace_id),
         )

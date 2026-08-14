@@ -16,9 +16,9 @@
 
 | 字段 | 说明 |
 |------|------|
-| `event_type` | `button_click`、`main_preview_view`、`sub_preview_view`、`module_exposure` |
-| `template_id/result_id` | 当前事件所在模板及其生成结果；模块事件指向当前子模板 |
-| `root_template_id/root_result_id` | 本次预览入口的主模板及其生成结果；主模板事件与当前模板相同 |
+| `event_type` | `button_click`、`preview_view`、`module_exposure` |
+| `template_type` | 当前事件关联模板的类型：`main` 主模板、`sub` 子模板 |
+| `template_id/result_id` | 当前事件实际关联的模板记录及其生成结果；不重复记录入口主模板 |
 | `event_target_id/name` | 模块等模板内具体曝光对象的稳定标识与展示名称 |
 | `trace_id` | 方案生成与浏览链路标识；同一链路的事件应传相同值 |
 
@@ -36,15 +36,15 @@ HTML 和业务上下文关联，但可视化查询不依赖解析 URL 获得模�
 ## 兼容策略
 
 - `event_type` 为 `NOT NULL DEFAULT 'button_click'`，旧记录和旧客户端无需回填。
-- 四个模板关联字段允许为空，旧按钮点击继续兼容；新的主方案、子方案和模块
-  事件必须传当前模板与结果。主方案事件未传 `root_*` 时由后端补成当前模板，
-  子方案和模块事件必须显式传主模板与主结果。
-- 写接口只接受四个受控事件类型，避免看板出现拼写不同的同义事件。
+- `template_type`、`template_id` 和 `result_id` 均允许为空，旧按钮点击继续兼容；
+  新的页面查看和模块曝光事件必须同时传这三个字段。按钮点击一旦传模板与结果，
+  也必须同时传 `template_type`。
+- 写接口只接受三个受控事件类型，避免看板出现拼写不同的同义事件。
 - 原按钮汇总、名单汇总和客户汇总显式过滤 `event_type='button_click'`。
 - `GET /api/html-preview/events` 支持 `event_type` 查询参数并返回新增字段；
   未传参数时默认查询 `button_click`，保持旧点击明细接口语义。
-- 明细接口传 `event_type=all` 时查询全部事件类型；可按当前模板、主模板、
-  结果、模块和链路字段筛选，并通过 `limit/offset` 分批读取。
+- 明细接口传 `event_type=all` 时查询全部事件类型；可按模板类型、模板、结果、
+  模块和链路字段筛选，并通过 `limit/offset` 分批读取。
 
 ## 上报示例
 
@@ -54,19 +54,19 @@ HTML 和业务上下文关联，但可视化查询不依赖解析 URL 获得模�
 {
   "file_url": "https://example.com/plan.html",
   "event_type": "module_exposure",
+  "template_type": "sub",
   "template_id": 12,
   "result_id": "result-sub",
-  "root_template_id": 11,
-  "root_result_id": "result-main",
   "event_target_id": "module-customer-profile",
   "event_target_name": "客户核心信息",
   "trace_id": "trace-001"
 }
 ```
 
-子方案查看把 `event_type` 改为 `sub_preview_view`，当前模板字段写子模板，
-`root_*` 写入口主模板。主方案查看使用 `main_preview_view`，当前模板字段写
-主模板，`root_*` 可省略并由后端自动补齐。按钮点击继续兼容不传模板字段。
+主方案和子方案查看都使用 `preview_view`，分别通过 `template_type=main` 和
+`template_type=sub` 区分，`template_id/result_id` 始终填写本条事件实际关联的
+模板和结果。模块曝光按当前业务只由子模板上报，但后端不额外限制其
+`template_type`。按钮点击继续兼容不传模板字段。
 
 ## 迁移与发布顺序
 
