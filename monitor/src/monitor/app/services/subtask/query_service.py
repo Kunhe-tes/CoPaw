@@ -39,7 +39,7 @@ class QueryService:
         notification_content_wplus: Optional[str] = None,
         notification_content_zhaohu: Optional[str] = None,
         need_notification: int = 1,
-        template_id: Optional[str] = None,
+        template_id: Optional[int] = None,
         result_id: Optional[str] = None,
     ) -> SubtaskCreateResponse:
         """Create a subtask record.
@@ -116,6 +116,8 @@ class QueryService:
                 notification_content_zhaohu,
                 need_notification,
                 now,
+                template_id,
+                result_id,
             ),
         )
 
