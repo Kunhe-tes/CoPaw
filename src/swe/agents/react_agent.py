@@ -67,10 +67,8 @@ from .tools import (
     update_task_progress,
     ask_plan_clarification,
     create_submit_proposed_plan_tool,
-    build_background_subagent_scope,
     create_background_subagent_tools,
     get_default_background_subagent_supervisor,
-    has_explicit_subagent_run_id,
     has_subagent_registration_intent,
     has_subagent_intent,
 )
@@ -766,21 +764,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             or get_default_background_subagent_supervisor()
         )
-        scope = build_background_subagent_scope(
-            parent_agent_config=self._agent_config,
-            request_context=request_context,
-        )
-        active = bool(
-            getattr(supervisor, "has_active_runs", lambda _scope: False)(
-                scope,
-            ),
-        )
         intent = has_subagent_intent(request_context)
         registration_intent = has_subagent_registration_intent(
             request_context,
         )
-        explicit_run_id = has_explicit_subagent_run_id(request_context)
-        if not (intent or registration_intent or active or explicit_run_id):
+        if not (intent or registration_intent):
             return
         workspace_dir = self._workspace_dir or Path(
             self._agent_config.workspace_dir or ".",
@@ -804,8 +792,6 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         names = self._background_subagent_tool_names(
             intent,
             registration_intent,
-            active,
-            explicit_run_id,
         )
         for name in names:
             toolkit.register_tool_function(
@@ -827,17 +813,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     def _background_subagent_tool_names(
         intent: bool,
         registration_intent: bool,
-        active: bool,
-        explicit_run_id: bool,
     ) -> list[str]:
         names = []
         if intent:
             names.append("start_subagent")
         if registration_intent:
             names.append("register_subagent_definition")
-        if intent or active:
+        if intent:
             names.append("wait_subagent")
-        if intent or active or explicit_run_id:
+        if intent:
             names.extend(["get_subagent", "cancel_subagent"])
         return names
 

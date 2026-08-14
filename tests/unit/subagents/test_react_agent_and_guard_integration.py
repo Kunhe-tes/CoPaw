@@ -369,10 +369,14 @@ async def test_snapshot_skill_agent_does_not_setup_workspace_detector(
         setup_skill_detector=setup_skill_detector,
     )
     monkeypatch.setattr(
-        trace_manager_module, "has_trace_manager", lambda: True
+        trace_manager_module,
+        "has_trace_manager",
+        lambda: True,
     )
     monkeypatch.setattr(
-        trace_manager_module, "get_trace_manager", lambda: manager
+        trace_manager_module,
+        "get_trace_manager",
+        lambda: manager,
     )
     monkeypatch.setattr(
         trace_manager_module,
@@ -566,7 +570,7 @@ def test_register_subagent_definition_ignores_unrelated_registration_terms(
 def test_background_subagent_observe_tools_visible_with_active_runs(
     tmp_path: Path,
 ) -> None:
-    """Active scope runs expose wait/get/cancel without fresh start intent."""
+    """Active runs do not bypass the explicit SubAgent intent gate."""
 
     class _Supervisor:
         def has_active_runs(self, scope):
@@ -584,6 +588,26 @@ def test_background_subagent_observe_tools_visible_with_active_runs(
     tools = SWEAgent._create_toolkit(agent).tools
 
     assert "start_subagent" not in tools
+    assert "wait_subagent" not in tools
+    assert "get_subagent" not in tools
+    assert "cancel_subagent" not in tools
+
+
+def test_background_subagent_management_tools_require_fresh_intent(
+    tmp_path: Path,
+) -> None:
+    """A new explicit SubAgent turn exposes all management tools."""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": "请继续管理这个子代理任务",
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "start_subagent" in tools
     assert "wait_subagent" in tools
     assert "get_subagent" in tools
     assert "cancel_subagent" in tools
