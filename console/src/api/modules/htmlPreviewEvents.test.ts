@@ -46,7 +46,9 @@ describe("htmlPreviewEventsApi", () => {
   });
 
   it("records clicks with auth headers without using global request", async () => {
-    const fetchMock = vi.fn().mockResolvedValue(new Response("", { status: 401 }));
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("", { status: 401 }));
     vi.stubGlobal("fetch", fetchMock);
 
     const { htmlPreviewEventsApi } = await import("./htmlPreviewEvents");
@@ -145,11 +147,32 @@ describe("htmlPreviewEventsApi", () => {
       startTime: "2026-05-30T00:00:00.000Z",
       bbkIds: "branch-1",
       listKey: "list-1",
+      eventType: "module_exposure",
       limit: 10,
     });
 
     expect(mocks.request).toHaveBeenCalledWith(
-      "/html-preview/events?start_time=2026-05-30T00%3A00%3A00.000Z&bbk_ids=branch-1&list_key=list-1&limit=10",
+      "/html-preview/events?start_time=2026-05-30T00%3A00%3A00.000Z&bbk_ids=branch-1&list_key=list-1&event_type=module_exposure&limit=10",
+    );
+  });
+
+  it("passes all-event dimension filters and offset to event detail query", async () => {
+    const { htmlPreviewEventsApi } = await import("./htmlPreviewEvents");
+
+    await htmlPreviewEventsApi.getEvents({
+      eventType: "all",
+      templateId: 12,
+      resultId: "result-sub",
+      rootTemplateId: 11,
+      rootResultId: "result-main",
+      eventTargetId: "module-customer-profile",
+      traceId: "trace-001",
+      limit: 20,
+      offset: 40,
+    });
+
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/html-preview/events?event_type=all&template_id=12&result_id=result-sub&root_template_id=11&root_result_id=result-main&event_target_id=module-customer-profile&trace_id=trace-001&limit=20&offset=40",
     );
   });
 
