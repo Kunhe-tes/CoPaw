@@ -48,13 +48,6 @@ _SUBAGENT_REGISTRATION_ACTION_TERMS = (
     "登记",
     "可复用",
 )
-_TEXT_CONTEXT_KEYS = (
-    "current_user_text",
-    "user_message",
-    "query",
-    "prompt",
-    "message_text",
-)
 _RUN_ID_CONTEXT_KEYS = (
     "subagent_run_id",
     "requested_subagent_run_id",
@@ -76,9 +69,7 @@ def get_default_background_subagent_supervisor() -> (
 
 def has_subagent_intent(request_context: dict[str, Any]) -> bool:
     """Return whether the current turn explicitly asks for SubAgents."""
-    text = "\n".join(
-        str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
-    )
+    text = str(request_context.get("current_user_text") or "")
     return any(term in text for term in _SUBAGENT_INTENT_TERMS)
 
 
@@ -88,9 +79,7 @@ def has_subagent_registration_intent(
     """Return whether the current turn explicitly asks to register definitions."""
     if not has_subagent_intent(request_context):
         return False
-    text = "\n".join(
-        str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
-    )
+    text = str(request_context.get("current_user_text") or "")
     return any(term in text for term in _SUBAGENT_REGISTRATION_ACTION_TERMS)
 
 

@@ -591,6 +591,29 @@ def test_subagent_tool_request_flags_do_not_bypass_text_intent_gate(
     assert "register_subagent_definition" not in tools
 
 
+@pytest.mark.parametrize(
+    "context_key",
+    ["user_message", "query", "prompt", "message_text"],
+)
+def test_only_current_user_text_can_open_subagent_tools(
+    tmp_path: Path,
+    context_key: str,
+) -> None:
+    """Other request context text is not the current user message."""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            context_key: "请使用子代理注册一个可复用定义",
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "start_subagent" not in tools
+    assert "register_subagent_definition" not in tools
+
+
 def test_background_subagent_observe_tools_visible_with_active_runs(
     tmp_path: Path,
 ) -> None:
