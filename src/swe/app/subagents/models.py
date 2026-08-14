@@ -326,7 +326,7 @@ class SkillOwnedDefinitionMetadata(BaseModel):
     skill_name: str
     local_name: str
     declared_skills: list[str] = Field(default_factory=list)
-    declared_mcps: list[str] = Field(default_factory=list)
+    declared_mcps: list[str] | None = None
     tools: SkillOwnedToolConfig = Field(default_factory=SkillOwnedToolConfig)
     model: SkillOwnedModelReference | None = None
 

@@ -642,7 +642,7 @@ def test_skill_owned_definition_can_narrow_parent_to_mutable_tools() -> None:
     ).allowed
 
 
-def test_non_skill_owned_definition_is_forced_to_readonly_policy() -> None:
+def test_run_scoped_definition_inherits_parent_enabled_tools() -> None:
     parent = PermissionPolicy.bounded(
         allow_tools=["read_file", "write_file"],
         mutation=MutationPolicy(allow_file_write=True),
@@ -660,8 +660,9 @@ def test_non_skill_owned_definition_is_forced_to_readonly_policy() -> None:
 
     policy = build_definition_policy(definition, parent)
 
-    assert policy.mode == "readonly"
-    assert "write_file" not in policy.tools.allow
+    assert policy.mode == "bounded"
+    assert policy.tools.allow == ["read_file", "write_file"]
+    assert policy.mutation.allow_file_write is True
 
 
 def test_skill_owned_definition_without_inheritance_uses_explicit_allow_list() -> (
@@ -692,6 +693,67 @@ def test_skill_owned_definition_without_inheritance_uses_explicit_allow_list() -
     assert build_definition_policy(definition, parent).tools.allow == [
         "read_file",
     ]
+
+
+def test_skill_owned_definition_inherits_parent_enabled_tools_by_default() -> (
+    None
+):
+    """An omitted tools table preserves the parent's supported tool set."""
+    parent = PermissionPolicy.bounded(
+        allow_tools=[
+            "execute_shell_command",
+            "read_file",
+            "write_file",
+            "edit_file",
+            "grep_search",
+            "glob_search",
+            "get_current_time",
+            "copy_file_to_static",
+            "update_task_progress",
+        ],
+        mutation=MutationPolicy(
+            allow_file_write=True,
+            allow_patch=True,
+        ),
+    )
+    definition = SubAgentDefinition.model_validate(
+        {
+            "name": "quality:editor",
+            "source": "stored",
+            "owner_scope": "skill:quality",
+            "description": "Edit the requested files.",
+            "instruction": "Keep the patch minimal.",
+            "skill_owned": SkillOwnedDefinitionMetadata(
+                skill_name="quality",
+                local_name="editor",
+            ),
+        },
+    )
+
+    definition_policy = build_definition_policy(definition, parent)
+    effective = compose_effective_policy(
+        parent,
+        definition_policy,
+        parent,
+        parent,
+    )
+
+    assert set(effective.tools.allow) == set(parent.tools.allow)
+    assert validate_tool_call(
+        effective,
+        "write_file",
+        {"path": "notes.txt", "content": "updated"},
+    ).allowed
+    assert validate_tool_call(
+        effective,
+        "edit_file",
+        {"path": "notes.txt", "old_str": "a", "new_str": "b"},
+    ).allowed
+    assert not validate_tool_call(
+        effective,
+        "copy_file_to_static",
+        {"path": "notes.txt"},
+    ).allowed
 
 
 @pytest.mark.parametrize(

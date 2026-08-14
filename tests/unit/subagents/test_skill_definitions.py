@@ -96,6 +96,39 @@ timeout_ms = 120000
     assert definition.skill_owned.tools.inherit is True
 
 
+def test_skill_definition_preserves_missing_vs_empty_mcps(tmp_path: Path) -> None:
+    _write_skill_definition(
+        tmp_path,
+        "quality",
+        "inherits-mcp",
+        """
+name = "inherits-mcp"
+description = "Inherit MCP."
+instruction = "Inspect evidence."
+""",
+    )
+    _write_skill_definition(
+        tmp_path,
+        "quality",
+        "blocks-mcp",
+        """
+name = "blocks-mcp"
+description = "Block MCP."
+instruction = "Inspect evidence."
+mcps = []
+""",
+    )
+
+    loaded = load_skill_owned_definitions(
+        workspace_dir=tmp_path,
+        effective_skill_names=["quality"],
+    )
+
+    definitions = {definition.name: definition for definition in loaded.definitions}
+    assert definitions["quality:inherits-mcp"].skill_owned.declared_mcps is None
+    assert definitions["quality:blocks-mcp"].skill_owned.declared_mcps == []
+
+
 def test_invalid_package_does_not_hide_valid_sibling(tmp_path: Path) -> None:
     _write_skill_definition(
         tmp_path,

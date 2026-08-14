@@ -33,39 +33,37 @@ def capture_launch_dependencies(
     definition: SubAgentDefinition,
     effective_skill_names: list[str],
 ) -> tuple[list[str], str | None, SubAgentLaunchDiagnostics]:
-    """Copy declared Skills and persist declared MCP configuration privately."""
+    """Snapshot effective Skills and MCP configuration privately."""
     metadata = definition.skill_owned
-    if metadata is None:
-        return [], None, _diagnostics([], [], {}, [], [])
-
     snapshot_root = run_store_dir / f"{run_id}.skills"
     loaded_skills: list[str] = []
     skipped_skills: list[str] = []
     freshness_tokens: dict[str, str] = {}
-    available_skills = set(effective_skill_names)
-    for skill_name in metadata.declared_skills:
-        if skill_name not in available_skills:
-            skipped_skills.append(skill_name)
-            continue
-        source = resolve_effective_skill_dir(workspace_dir, skill_name)
-        target = snapshot_root / skill_name
-        if (
-            source is None
-            or source.is_symlink()
-            or not skill_tree_is_regular(source)
-        ):
-            skipped_skills.append(skill_name)
-            continue
-        try:
-            _copy_skill_tree_no_symlinks(source, target)
-            loaded_skills.append(skill_name)
-            freshness_tokens[skill_name] = get_skill_freshness_token(source)
-        except OSError:
-            skipped_skills.append(skill_name)
+    if metadata is not None:
+        available_skills = set(effective_skill_names)
+        for skill_name in metadata.declared_skills:
+            if skill_name not in available_skills:
+                skipped_skills.append(skill_name)
+                continue
+            source = resolve_effective_skill_dir(workspace_dir, skill_name)
+            target = snapshot_root / skill_name
+            if (
+                source is None
+                or source.is_symlink()
+                or not skill_tree_is_regular(source)
+            ):
+                skipped_skills.append(skill_name)
+                continue
+            try:
+                _copy_skill_tree_no_symlinks(source, target)
+                loaded_skills.append(skill_name)
+                freshness_tokens[skill_name] = get_skill_freshness_token(source)
+            except OSError:
+                skipped_skills.append(skill_name)
     try:
         mcp_payload, snapshotted_mcps, skipped_mcps = _snapshot_declared_mcps(
             parent_agent_config,
-            metadata.declared_mcps,
+            metadata.declared_mcps if metadata is not None else None,
         )
         private_path = _write_private_mcp_snapshot(
             run_store_dir,
@@ -90,13 +88,18 @@ def capture_launch_dependencies(
 
 def _snapshot_declared_mcps(
     parent_agent_config: AgentProfileConfig,
-    declared_mcps: list[str],
+    declared_mcps: list[str] | None,
 ) -> tuple[dict[str, Any], list[str], list[str]]:
     payload: dict[str, Any] = {}
     snapshotted: list[str] = []
     skipped: list[str] = []
     clients = getattr(getattr(parent_agent_config, "mcp", None), "clients", {})
-    for name in declared_mcps:
+    names = (
+        declared_mcps
+        if declared_mcps is not None
+        else sorted(clients) if isinstance(clients, dict) else []
+    )
+    for name in names:
         client = clients.get(name) if isinstance(clients, dict) else None
         if client is None or not client.enabled:
             skipped.append(name)

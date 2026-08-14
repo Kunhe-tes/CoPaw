@@ -271,6 +271,62 @@ def test_dependency_capture_cleans_copied_skills_when_mcp_snapshot_fails(
     assert not (run_store / "run-one.skills").exists()
 
 
+@pytest.mark.parametrize(
+    ("mcps_value", "expected_names"),
+    [
+        (None, {"github", "calendar"}),
+        ([], set()),
+    ],
+)
+def test_dependency_capture_distinguishes_inherited_and_empty_mcps(
+    tmp_path: Path,
+    mcps_value: list[str] | None,
+    expected_names: set[str],
+) -> None:
+    config = _agent_config(tmp_path).model_copy(
+        update={
+            "mcp": MCPConfig(
+                clients={
+                    "github": MCPClientConfig(
+                        name="github",
+                        command="github-mcp",
+                    ),
+                    "calendar": MCPClientConfig(
+                        name="calendar",
+                        command="calendar-mcp",
+                    ),
+                },
+            ),
+        },
+    )
+    definition = _definition().model_copy(
+        update={
+            "skill_owned": SkillOwnedDefinitionMetadata(
+                skill_name="quality",
+                local_name="reviewer",
+                declared_mcps=mcps_value,
+            ),
+        },
+    )
+
+    _skills, private_path, diagnostics = capture_launch_dependencies(
+        run_store_dir=tmp_path / "runs",
+        run_id="run-mcp-policy",
+        workspace_dir=tmp_path,
+        parent_agent_config=config,
+        definition=definition,
+        effective_skill_names=[],
+    )
+
+    assert set(diagnostics.snapshotted_mcps) == expected_names
+    if expected_names:
+        assert private_path is not None
+        snapshot = json.loads(Path(private_path).read_text(encoding="utf-8"))
+        assert set(snapshot) == expected_names
+    else:
+        assert private_path is None
+
+
 def test_private_mcp_snapshot_rejects_a_symlink_before_reading(
     tmp_path: Path,
 ) -> None:
@@ -470,7 +526,7 @@ def test_model_snapshot_never_honors_an_injected_override_for_builtin(
         run_id="subagent-one",
         definition=_definition().model_copy(
             update={
-                "model_slot_override": {"provider_id": "evil", "model": "x"}
+                "model_slot_override": {"provider_id": "evil", "model": "x"},
             },
         ),
     )
@@ -609,6 +665,84 @@ def test_non_skill_or_unavailable_model_reference_falls_back_to_parent(
             ),
         )
         is None
+    )
+
+
+def test_unavailable_skill_model_is_snapshotted_as_parent_model(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An unavailable TOML model override falls back before Worker launch."""
+    from swe.app.subagents import SkillOwnedModelReference
+    from swe.app.subagents import launch_snapshot as snapshot_module
+    from swe.providers.models import ModelSlotConfig
+
+    parent_slot = ModelSlotConfig(
+        provider_id="parent",
+        model="parent-model",
+    )
+
+    class Provider:
+        def __init__(self, provider_id: str, models: set[str]) -> None:
+            self.provider_id = provider_id
+            self.models = models
+
+        def has_model(self, model_id: str) -> bool:
+            return model_id in self.models
+
+        def model_dump(self, **_kwargs):
+            return {
+                "id": self.provider_id,
+                "name": self.provider_id,
+                "models": [
+                    {"id": model_id, "name": model_id}
+                    for model_id in self.models
+                ],
+            }
+
+    class Manager:
+        def get_active_model(self):
+            return parent_slot
+
+        def get_provider(self, provider_id: str):
+            return {
+                "parent": Provider("parent", {"parent-model"}),
+                "openai": Provider("openai", {"gpt-5"}),
+            }.get(provider_id)
+
+    monkeypatch.setattr(
+        snapshot_module.ProviderManager,
+        "get_instance",
+        lambda _tenant_id: Manager(),
+    )
+    definition = _definition().model_copy(
+        update={
+            "skill_owned": SkillOwnedDefinitionMetadata(
+                skill_name="quality",
+                local_name="reviewer",
+                model=SkillOwnedModelReference(
+                    provider="openai",
+                    id="gpt-5-mini",
+                ),
+            ),
+        },
+    )
+
+    path, resolved = capture_model_launch_snapshot(
+        tenant_id="tenant-a",
+        run_store_dir=tmp_path / "runs",
+        run_id="subagent-one",
+        definition=definition,
+    )
+
+    assert resolved == parent_slot
+    assert (
+        read_and_remove_private_model_snapshot(
+            path,
+            run_store_dir=tmp_path / "runs",
+            run_id="subagent-one",
+        )["selected"]["slot"]
+        == parent_slot.model_dump()
     )
 
 

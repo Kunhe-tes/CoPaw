@@ -23,7 +23,7 @@ def build_definition_policy(
     """Derive a Definition policy that can only narrow the parent policy."""
     metadata = definition.skill_owned
     if metadata is None:
-        return PermissionPolicy.readonly()
+        return parent.model_copy(deep=True)
     tool_config = metadata.tools
     if tool_config.inherit:
         allowed = set(parent.tools.allow)

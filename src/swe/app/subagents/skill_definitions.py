@@ -250,7 +250,11 @@ def _load_one(path: Path, skill_name: str) -> SubAgentDefinition:
     description = _string(payload.get("description"), "description")
     instruction = _string(payload.get("instruction"), "instruction")
     declared_skills = _string_list(payload.get("skills"), "skills")
-    declared_mcps = _string_list(payload.get("mcps"), "mcps")
+    declared_mcps = (
+        _string_list(payload["mcps"], "mcps")
+        if "mcps" in payload
+        else None
+    )
     trigger_keywords = _string_list(
         payload.get("trigger_keywords"),
         "trigger_keywords",
