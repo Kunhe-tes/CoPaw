@@ -129,6 +129,11 @@ class SubtaskCreateRequest(BaseModel):
         max_length=100,
         description="es数据doc_id",
     )
+    bbk_org_id: Optional[str] = Field(
+        default=None,
+        max_length=10,
+        description="客户归属分行ID",
+    )
 
 
 class SubtaskCreateResponse(BaseModel):

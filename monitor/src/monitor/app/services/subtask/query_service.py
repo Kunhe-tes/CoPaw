@@ -35,6 +35,7 @@ class QueryService:
         filename: str,
         task_type: Optional[str] = None,
         custuid: Optional[str] = None,
+        bbk_org_id: Optional[str] = None,
         cust_nm: Optional[str] = None,
         notification_content_wplus: Optional[str] = None,
         notification_content_zhaohu: Optional[str] = None,
@@ -50,6 +51,7 @@ class QueryService:
             filename: File name
             task_type: Task type (list/plan)
             custuid: Customer ID
+            bbk_org_id: Customer branch ID for reference
             cust_nm: Customer name
             notification_content_wplus: W+ channel notification content
             notification_content_zhaohu: Zhaohu channel notification content
@@ -89,6 +91,7 @@ class QueryService:
                 filename,
                 task_type,
                 custuid,
+                bbk_org_id,
                 cust_nm,
                 notification_content_wplus,
                 notification_content_zhaohu,
@@ -100,7 +103,7 @@ class QueryService:
                 template_id,
                 result_id
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NULL, '', %s, NULL, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s,%s, %s, %s, %s, NULL, '', %s, NULL, %s, %s)
         """
         now = datetime.now()
         await self.db.execute(
@@ -111,6 +114,7 @@ class QueryService:
                 filename,
                 task_type,
                 custuid,
+                bbk_org_id,
                 cust_nm,
                 notification_content_wplus,
                 notification_content_zhaohu,
