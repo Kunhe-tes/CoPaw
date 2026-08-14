@@ -20,6 +20,10 @@ from ...providers.models import ModelSlotConfig
 from .models import SubAgentDefinition, SubAgentLaunchDiagnostics
 
 
+class ModelLaunchSnapshotError(RuntimeError):
+    """The worker cannot safely launch without a complete model snapshot."""
+
+
 def capture_launch_dependencies(
     *,
     run_store_dir: Path,
@@ -114,13 +118,15 @@ def capture_model_launch_snapshot(
         manager = ProviderManager.get_instance(tenant_id)
         parent_slot = _valid_model_slot(manager.get_active_model())
         if parent_slot is None:
-            return None, None
+            raise ModelLaunchSnapshotError("No active model is available")
         selected_slot = resolve_skill_owned_model_slot(tenant_id, definition)
         chosen_slot = selected_slot or parent_slot
         selected_provider = manager.get_provider(chosen_slot.provider_id)
         parent_provider = manager.get_provider(parent_slot.provider_id)
         if selected_provider is None or parent_provider is None:
-            return None, parent_slot
+            raise ModelLaunchSnapshotError(
+                "Model snapshot provider is unavailable",
+            )
         payload = {
             "selected": _model_snapshot_entry(chosen_slot, selected_provider),
             "parent": _model_snapshot_entry(parent_slot, parent_provider),
@@ -136,8 +142,17 @@ def capture_model_launch_snapshot(
         )
     except OSError:
         raise
-    except Exception:
-        return None, None
+    except ModelLaunchSnapshotError:
+        raise
+    except Exception as exc:
+        raise ModelLaunchSnapshotError(
+            "Unable to capture the worker model snapshot",
+        ) from exc
+
+
+def remove_launch_skill_snapshot(run_store_dir: Path, run_id: str) -> None:
+    """Remove the copied Skill tree for a launch that never reaches worker."""
+    _remove_snapshot_tree(run_store_dir / f"{run_id}.skills")
 
 
 def read_and_remove_private_model_snapshot(

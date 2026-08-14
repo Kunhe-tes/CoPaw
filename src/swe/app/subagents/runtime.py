@@ -145,6 +145,7 @@ class SubAgentRuntime:
                 await record_resolved_model(run.run_id, resolved_model)
             if mcp_clients:
                 await agent.register_mcp_clients()
+                self._tag_snapshotted_mcp_tools(agent, mcp_clients)
             record_turns = getattr(self._store, "record_turns", None)
             if record_turns is not None:
 
@@ -228,6 +229,27 @@ class SubAgentRuntime:
             if path.name and path.name not in result:
                 result[path.name] = path
         return result
+
+    @staticmethod
+    def _tag_snapshotted_mcp_tools(agent: Any, clients: list[Any]) -> None:
+        """Bind Stateful MCP tool entries to their immutable snapshot keys."""
+        snapshot_keys = {
+            str(getattr(client, "name", "")): str(
+                getattr(client, "_swe_subagent_mcp_key", client.name),
+            )
+            for client in clients
+            if getattr(client, "name", None)
+        }
+        toolkit = getattr(agent, "toolkit", None)
+        for tool_entry in getattr(toolkit, "tools", {}).values():
+            mcp_name = getattr(tool_entry, "mcp_name", None)
+            if mcp_name is None:
+                original_func = getattr(tool_entry, "original_func", None)
+                mcp_func = getattr(original_func, "__self__", None)
+                mcp_name = getattr(mcp_func or original_func, "mcp_name", None)
+            snapshot_key = snapshot_keys.get(str(mcp_name))
+            if snapshot_key is not None:
+                tool_entry.mcp_name = snapshot_key
 
     def _request_context(
         self,

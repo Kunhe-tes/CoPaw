@@ -278,8 +278,20 @@ async def test_wait_subagent_returns_error_summary_for_failed_no_result_run(
 
 @pytest.mark.asyncio
 async def test_wait_subagent_does_not_duplicate_error_code_in_summary(
+    monkeypatch,
     tmp_path,
 ):
+    from swe.app.subagents import supervisor as supervisor_module
+    from swe.providers.models import ModelSlotConfig
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "capture_model_launch_snapshot",
+        lambda **_kwargs: (
+            None,
+            ModelSlotConfig(provider_id="test", model="test-model"),
+        ),
+    )
     popen_factory = _FakePopenFactory()
     supervisor = BackgroundSubAgentSupervisor(
         max_running_per_scope=1,

@@ -218,6 +218,79 @@ async def test_runtime_uses_only_snapshotted_skills_and_connected_mcp_clients(
 
 
 @pytest.mark.asyncio
+async def test_runtime_tags_stateful_mcp_tools_with_their_snapshot_key(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Stateful MCP tools must reach the SubAgent MCP authorization path."""
+    from swe.app.subagents import runtime as runtime_module
+
+    class StatefulMcpAgent(_FakeSWEAgent):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.toolkit = SimpleNamespace(tools={})
+
+        async def register_mcp_clients(self):
+            class StatefulToolFunction:
+                mcp_name = "tavily_mcp"
+
+                def __call__(self):
+                    return None
+
+            self.toolkit.tools["search"] = SimpleNamespace(
+                mcp_name=None,
+                original_func=StatefulToolFunction().__call__,
+            )
+
+    _FakeSWEAgent.instances = []
+    _FakeSWEAgent.replies = [Msg("Friday", "found files", "assistant")]
+    _FakeSWEAgent.final_texts = ["found files"]
+    monkeypatch.setattr(runtime_module, "SWEAgent", StatefulMcpAgent)
+    definition = AgentRegistry([builtin_definition_provider()]).resolve(
+        "plan-researcher",
+    )
+    store = InMemorySubAgentRunStore()
+    record = await store.create(
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
+    )
+    client = SimpleNamespace(
+        name="tavily_mcp",
+        _swe_subagent_mcp_key="tavily_search",
+    )
+
+    await SubAgentRuntime(store=store).run(
+        run=record,
+        definition=definition,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        effective_policy=PermissionPolicy.readonly(),
+        mcp_clients=[client],
+    )
+
+    created = _FakeSWEAgent.instances[0]
+    assert created.toolkit.tools["search"].mcp_name == "tavily_search"
+    from swe.app.subagents.permissions import validate_tool_call
+
+    assert validate_tool_call(
+        PermissionPolicy.readonly(),
+        "search",
+        {"query": "x"},
+        mcp_server=created.toolkit.tools["search"].mcp_name,
+        allowed_mcp_servers={"tavily_search"},
+    ).allowed
+    assert not validate_tool_call(
+        PermissionPolicy.readonly(),
+        "search",
+        {"query": "x"},
+        mcp_server="unlisted",
+        allowed_mcp_servers={"tavily_search"},
+    ).allowed
+
+
+@pytest.mark.asyncio
 async def test_runtime_passes_skill_owned_model_slot_to_worker_agent(
     monkeypatch,
     tmp_path: Path,
@@ -235,7 +308,9 @@ async def test_runtime_passes_skill_owned_model_slot_to_worker_agent(
     )
     store = InMemorySubAgentRunStore()
     record = await store.create(
-        _spec(), definition, PermissionPolicy.readonly()
+        _spec(),
+        definition,
+        PermissionPolicy.readonly(),
     )
     slot = ModelSlotConfig(provider_id="openai", model="gpt-5-mini")
 

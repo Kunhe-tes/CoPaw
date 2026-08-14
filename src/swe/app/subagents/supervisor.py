@@ -35,8 +35,10 @@ from .models import (
     WorkerLaunchSpec,
 )
 from .launch_snapshot import (
+    ModelLaunchSnapshotError,
     capture_launch_dependencies,
     capture_model_launch_snapshot,
+    remove_launch_skill_snapshot,
 )
 from .nicknames import assign_subagent_nickname
 from .permissions import build_definition_policy, compose_effective_policy
@@ -232,12 +234,13 @@ class BackgroundSubAgentSupervisor:
                     definition=definition,
                 )
             )
-        except OSError as exc:
+        except (OSError, ModelLaunchSnapshotError) as exc:
             _remove_private_launch_snapshot(
                 private_mcp_snapshot_path,
                 scope.run_store_dir,
                 run_id,
             )
+            remove_launch_skill_snapshot(scope.run_store_dir, run_id)
             record = await store.create(
                 spec,
                 definition,

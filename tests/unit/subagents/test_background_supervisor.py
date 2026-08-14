@@ -27,6 +27,22 @@ from swe.config.config import AgentProfileConfig, MCPClientConfig, MCPConfig
 from swe.app.tenant_context import bind_tenant_context
 
 
+@pytest.fixture(autouse=True)
+def _snapshot_model_for_supervisor_tests(monkeypatch):
+    """Keep supervisor tests independent from the local tenant provider state."""
+    from swe.app.subagents import supervisor as supervisor_module
+    from swe.providers.models import ModelSlotConfig
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "capture_model_launch_snapshot",
+        lambda **_kwargs: (
+            None,
+            ModelSlotConfig(provider_id="test", model="test-model"),
+        ),
+    )
+
+
 class _FakeProcess:
     def __init__(self, pid: int = 4321):
         self.pid = pid
@@ -398,3 +414,86 @@ async def test_start_failure_removes_private_mcp_snapshot(tmp_path):
 
     assert response.status == "failed"
     assert not list(scope.run_store_dir.glob(".*.mcp.json"))
+
+
+@pytest.mark.asyncio
+async def test_start_stops_when_model_snapshot_serialization_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A worker cannot launch without an immutable model/provider snapshot."""
+    from swe.app.subagents import launch_snapshot as snapshot_module
+    from swe.providers.models import ModelSlotConfig
+
+    class UnserializableProvider:
+        def model_dump(self, **_kwargs):
+            raise ValueError("provider serialization failed")
+
+    class Manager:
+        def get_active_model(self):
+            return ModelSlotConfig(provider_id="openai", model="gpt-test")
+
+        def get_provider(self, _provider_id):
+            return UnserializableProvider()
+
+    monkeypatch.setattr(
+        snapshot_module.ProviderManager,
+        "get_instance",
+        lambda _tenant_id: Manager(),
+    )
+    from swe.app.subagents import supervisor as supervisor_module
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "capture_model_launch_snapshot",
+        snapshot_module.capture_model_launch_snapshot,
+    )
+    popen_factory = _FakePopenFactory()
+    config = _agent_config(tmp_path).model_copy(
+        update={
+            "mcp": MCPConfig(
+                clients={
+                    "github": MCPClientConfig(
+                        name="github",
+                        command="github-mcp",
+                    ),
+                },
+            ),
+        },
+    )
+    definition = (
+        AgentRegistry([builtin_definition_provider()])
+        .resolve("plan-researcher")
+        .model_copy(
+            update={
+                "name": "quality:reviewer",
+                "skill_owned": SkillOwnedDefinitionMetadata(
+                    skill_name="quality",
+                    local_name="reviewer",
+                    declared_skills=["quality"],
+                    declared_mcps=["github"],
+                ),
+            },
+        )
+    )
+    supervisor = BackgroundSubAgentSupervisor(popen_factory=popen_factory)
+    scope = _scope(tmp_path)
+    skill_dir = tmp_path / "skills" / "quality"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Quality", encoding="utf-8")
+
+    response = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=config,
+        workspace_dir=tmp_path,
+        definition=definition,
+        effective_skill_names=["quality"],
+    )
+
+    assert response.status == "failed"
+    assert response.errors[-1].code == "worker_snapshot_failed"
+    assert popen_factory.processes == []
+    assert not list(scope.run_store_dir.glob(".*.mcp.json"))
+    assert not list(scope.run_store_dir.glob(".*.model.json"))
+    assert not list(scope.run_store_dir.glob("*.skills"))
