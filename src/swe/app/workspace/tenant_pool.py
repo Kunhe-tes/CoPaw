@@ -356,10 +356,22 @@ class TenantWorkspacePool:
                 "tenant_bootstrap_recovery_started tenant_id=%s",
                 bootstrap_tenant_id,
             )
-            recovery_result = await asyncio.to_thread(
-                initializer.recover_seeded_bootstrap,
-                enable_bootstrap_chat=enable_bootstrap_chat,
+            recovery_task = asyncio.create_task(
+                asyncio.to_thread(
+                    initializer.recover_seeded_bootstrap,
+                    enable_bootstrap_chat=enable_bootstrap_chat,
+                ),
             )
+            try:
+                recovery_result = await asyncio.shield(recovery_task)
+            except asyncio.CancelledError:
+                while not recovery_task.done():
+                    try:
+                        await asyncio.shield(recovery_task)
+                    except asyncio.CancelledError:
+                        continue
+                await recovery_task
+                raise
             logger.info(
                 "tenant_bootstrap_recovery_succeeded tenant_id=%s recovered_paths=%d",
                 bootstrap_tenant_id,

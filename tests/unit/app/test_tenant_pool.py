@@ -8,6 +8,7 @@ Tests lazy creation, cache hits, concurrent creation safety, and stop-all cleanu
 import asyncio
 import json
 import sys
+import threading
 from pathlib import Path
 import time
 from unittest.mock import AsyncMock, Mock, patch
@@ -778,6 +779,70 @@ class TestTenantBootstrapObservability:
 
         assert time.perf_counter() - started_at < 0.05
         await task
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_cancellation_waits_for_recovery_before_unlocking(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Cancellation must retain the file lock until recovery completes."""
+        import swe.app.workspace.tenant_pool as tenant_pool_module
+
+        recovery_started = threading.Event()
+        release_recovery = threading.Event()
+        lock_released = threading.Event()
+
+        class TrackingFlock:
+            def __init__(self, *_args, **_kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                lock_released.set()
+
+        async def incomplete_bootstrap(*_args, **_kwargs) -> bool:
+            return False
+
+        def blocking_recovery(self, **_kwargs):
+            del self
+            recovery_started.set()
+            assert release_recovery.wait(timeout=1)
+            return {"recovered_paths": []}
+
+        pool = TenantWorkspacePool(tmp_path)
+        monkeypatch.setattr(tenant_pool_module, "AsyncFlock", TrackingFlock)
+        monkeypatch.setattr(
+            pool,
+            "_check_existing_bootstrap",
+            incomplete_bootstrap,
+        )
+        monkeypatch.setattr(
+            pool,
+            "_require_ready_source_template",
+            lambda *_args: None,
+        )
+        monkeypatch.setattr(
+            tenant_pool_module.TenantInitializer,
+            "recover_seeded_bootstrap",
+            blocking_recovery,
+        )
+
+        task = asyncio.create_task(pool.ensure_bootstrap("tenant-1"))
+        assert await asyncio.to_thread(recovery_started.wait, 1)
+
+        task.cancel()
+        try:
+            await asyncio.sleep(0)
+            assert not await asyncio.to_thread(lock_released.wait, 0.05)
+        finally:
+            release_recovery.set()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert lock_released.is_set()
 
 
 class TestTenantBootstrapProcessLock:
