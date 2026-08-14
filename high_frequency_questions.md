@@ -1,340 +1,578 @@
-请在当前 monitor 服务中新增一个“用户高频问题分析”模块，为后续 AI 智能工场工作流提供接口。
+可以，按现在已经定下来的方案，用户视角的完整生命周期可以梳理成下面这套。
 
-请先阅读项目现有目录结构、路由注册方式、数据库访问方式、请求/响应模型、统一返回格式和异常处理方式，严格复用现有项目规范，不要另起一套架构。
+# 一、入口：用户进入“用户消息”页面
 
-功能背景：
-1. AI 智能工场会先调用取数接口，从 swe_tracing_traces 查询指定日期范围内的有效用户消息。
-2. 工作流会调用大模型，对消息进行问题主题归纳并统计全机构、各 bbk_id 的 Top 10。
-3. 工作流完成后，再调用结果保存接口，将结果批量写入 swe_high_frequency_question_result。
-4. 本次只实现后端接口，不实现前端，也不在 monitor 服务中调用大模型。
+用户正常进入“用户消息”页面后，页面顶部保留原有的消息查询区域，同时增加一个按钮：
 
-建议在 monitor 服务中新增独立模块，例如：
-- high_frequency_question
-或遵循项目现有模块命名方式。
+```text
+高频问题分析
+```
 
-需要实现两个接口：
+这个按钮只是打开分析弹窗，不会立即提交任务。
 
-========================================
-一、查询高频问题分析源消息
-========================================
+用户当前登录账号已经对应一个固定的 `source_id`，例如：
 
-接口建议：
+```text
+RMASSIST
+default
+```
 
-POST /monitor/high-frequency-question/messages
+前端不展示 `source_id` 选择器，也不允许用户切换数据来源。后端根据当前用户上下文或页面已有参数，始终只查询该用户所属 `source_id` 下的数据。
 
-请求参数：
+---
 
+# 二、点击“高频问题分析”
+
+用户点击按钮后，打开一个居中的大弹窗。
+
+弹窗特点：
+
+* 宽度较大；
+* 高度约为浏览器的 80%；
+* 弹窗主体区域可以纵向滚动；
+* 顶部筛选区固定；
+* 底部操作栏可以固定；
+* Top 10 内容在中间滚动展示。
+
+弹窗默认带入：
+
+```text
+时间范围：最近 7 天
+所属机构：全部机构
+```
+
+不直接沿用用户消息列表当前任意日期，因为高频问题分析最多支持 7 天，且有自己独立的结果缓存逻辑。
+
+---
+
+# 三、弹窗打开后的默认查询
+
+弹窗打开时，前端自动调用“查询高频问题状态及结果”的接口，传入：
+
+```json
 {
-  "start_time": "2026-07-23 00:00:00",
-  "end_time": "2026-07-30 00:00:00",
+  "source_id": "当前用户的 source_id",
+  "start_time": "最近7天开始时间",
+  "end_time": "最近7天结束时间",
   "bbk_id": null
 }
+```
 
-参数说明：
-- start_time：必填，查询开始时间，包含。
-- end_time：必填，查询结束时间，不包含。
-- bbk_id：选填；为空时查询全部机构，有值时只查询该 bbk_id。
-- 时间查询必须使用：
-  start_time <= 消息时间 < end_time
-- 校验 start_time < end_time。
-- 建议限制查询时间跨度最大为 31 天，避免误调用产生超大查询。
+其中：
 
-数据来源：
-swe_tracing_traces
+* `source_id` 由系统自动传入，用户不可编辑；
+* `bbk_id=null` 表示全部机构；
+* 后端规范化为 `scope_type=ALL、bbk_id=ALL`；
+* 开始和结束条件按日期匹配，不比较具体时分秒。
 
-请先检查 swe_tracing_traces 在当前项目中的 ORM Model、Mapper、DAO 或已有 SQL，确认以下字段的真实字段名，不要凭空创建字段：
-- 消息唯一 ID
-- 用户 ID
-- 会话 ID
-- bbk_id
-- 用户消息内容
-- 消息创建时间
-- 消息角色或消息类型
-- 定时任务标识、任务来源或能够排除定时任务消息的字段
+默认场景一般会命中每天凌晨生成的预跑结果，因此用户打开弹窗后能够直接看到内容。
 
-查询要求：
-1. 只查询用户发送的消息，不查询 assistant、system 等消息。
-2. 排除定时任务产生的消息。
-3. content 不能为 NULL，TRIM 后不能为空。
-4. 过滤明显无意义的过短消息。
-5. 优先使用项目中已经存在的定时任务识别逻辑；如果没有，请根据 swe_tracing_traces 的真实字段设计过滤条件，并在修改说明中明确说明。
-6. 不要把所有长度较短的内容直接过滤掉，类似“查保险”“看持仓”等短文本仍可能是有效问题。
-7. 可以过滤明确无意义的内容，例如“好的”“收到”“继续”“谢谢”等。
-8. 按消息时间升序返回，保证输出稳定。
-9. 当前约有 7 天 4000 条有效数据，MVP 可以一次返回，不需要分页；但请设置合理的最大返回数量，例如 10000 条，超过时返回明确错误，不要静默截断。
+---
 
-响应示例：
+# 四、默认结果展示
 
+命中结果后，弹窗显示：
+
+```text
+当前结果已生成
+本结果更新于 2026-08-04 03:07
+```
+
+这里的更新时间取：
+
+```text
+swe_high_frequency_question_result.created_at
+```
+
+同一个 `batch_id` 有多条 Top 10 数据时，取：
+
+```text
+MAX(created_at)
+```
+
+下面展示高频问题 Top 10。
+
+每一个高频问题以独立卡片或分隔列表展示：
+
+```text
+1  保险产品咨询与购买                            18.5%
+
+   “我想给自己买一份重疾险，应该怎么选择？”
+   “意外险和医疗险有什么区别，哪种更适合我？”
+   “如何给父母配置合适的保险方案？”
+```
+
+展示规则：
+
+* 高频问题主题使用黑色、较粗字体；
+* `sample_questions` 使用灰色字体；
+* 每个主题展示 3 条代表问题；
+* 代表问题使用中文引号；
+* 问题较长时允许自动换行，不强制截成一行；
+* 占比显示在卡片右侧；
+* 不展示消息次数；
+* 不使用占比进度条；
+* 前三名可以使用金色、蓝色、橙色等排名标识；
+* 其他排名使用低饱和度颜色，保持整体轻盈。
+
+弹窗主体可滚动查看完整 Top 10。
+
+---
+
+# 五、用户调整时间范围
+
+用户可以在弹窗顶部调整时间范围。
+
+支持：
+
+```text
+最近 1 天
+最近 3 天
+最近 7 天
+自定义日期
+```
+
+自定义日期最长不能超过 7 天。
+
+前端在日期选择器中直接限制：
+
+* 开始时间不能晚于结束时间；
+* 时间跨度不能超过 7 个自然日；
+* 超过 7 天时不允许提交，并提示：
+
+```text
+高频问题分析最多支持 7 天的数据范围
+```
+
+用户修改日期后，当前结果区域进入“待查询”状态，不立即自动生成任务。
+
+建议按钮根据状态显示为：
+
+```text
+查询结果
+```
+
+用户确认日期后点击查询。
+
+---
+
+# 六、用户调整机构
+
+机构选择器支持：
+
+```text
+全部机构
+某一个具体机构
+```
+
+不支持多选。
+
+前端传参规则：
+
+```text
+全部机构：
+bbk_id = null
+
+具体机构：
+bbk_id = 实际机构 ID
+```
+
+后端规范化：
+
+```text
+bbk_id 为空：
+scope_type = ALL
+bbk_id = ALL
+
+bbk_id 非空：
+scope_type = ORG
+bbk_id = 实际值
+```
+
+修改机构后，同样先进入待查询状态，由用户点击查询。
+
+---
+
+# 七、点击“查询结果”后的四种情况
+
+后端根据以下条件判断是否为相同分析条件：
+
+```text
+source_id 相同
+开始日期相同
+结束日期相同
+scope_type 相同
+bbk_id 相同
+```
+
+## 情况 1：24 小时内已有成功结果
+
+如果其他用户或当前用户已经生成过完全相同的结果，并且结果更新时间不超过 24 小时，直接返回已有结果。
+
+用户看到：
+
+```text
+当前结果已生成
+本结果更新于 2026-08-04 10:26
+```
+
+不重新调用工作流。
+
+因为同一个 `source_id` 下的用户共享分析结果，所以不需要判断是谁生成的。
+
+---
+
+## 情况 2：相同条件已有任务正在运行
+
+如果没有可用结果，但已经存在相同条件的 `RUNNING` 任务，前端直接复用该任务，不重复创建。
+
+弹窗显示运行中状态：
+
+```text
+高频问题分析生成中
+
+相同条件的分析任务已提交，结果生成后可直接查看。
+你可以关闭弹窗，稍后重新打开。
+```
+
+按钮可以显示：
+
+```text
+生成中
+```
+
+并置灰，防止重复点击。
+
+前端可以每隔几秒轮询一次任务状态，例如：
+
+```text
+3～5 秒一次
+```
+
+也可以让用户主动刷新，但自动轮询体验更好。
+
+---
+
+## 情况 3：没有结果，也没有运行中任务
+
+弹窗显示：
+
+```text
+当前筛选条件暂无分析结果
+```
+
+并提供按钮：
+
+```text
+生成分析
+```
+
+用户点击后：
+
+1. 前端提交任务；
+2. 后端创建 `swe_async_tasks`，状态为 `RUNNING`；
+3. 后端立即返回 `task_id`；
+4. 后端后台线程同步调用工作流；
+5. 前端进入轮询状态。
+
+用户无需一直停留在弹窗中。
+
+---
+
+## 情况 4：最近任务失败，但存在更早成功结果
+
+后端返回历史成功结果，同时标记：
+
+```text
+AVAILABLE_STALE
+```
+
+前端在结果顶部显示黄色轻提示：
+
+```text
+最近一次更新失败，当前展示历史结果
+```
+
+同时正常展示历史 Top 10，并显示：
+
+```text
+本结果更新于 2026-08-02 09:18
+```
+
+底部提供：
+
+```text
+重新生成分析
+```
+
+---
+
+# 八、用户点击“生成分析”
+
+用户点击后，前端提交：
+
+```json
 {
-  "total": 4000,
-  "data": [
-    {
-      "message_id": "msg_001",
-      "user_id": "136807",
-      "session_id": "session_001",
-      "bbk_id": "110",
-      "content": "帮我查询这个客户目前有哪些保险产品",
-      "message_time": "2026-07-29 10:20:00"
-    }
-  ]
+  "source_id": "当前用户 source_id",
+  "start_time": "用户选择的开始时间",
+  "end_time": "用户选择的结束时间",
+  "bbk_id": "具体机构ID或null"
 }
+```
 
-要求：
-- 返回格式必须遵循 monitor 服务已有统一响应结构。
-- 如果 user_id、session_id 或 bbk_id 在个别数据中允许为空，请按数据库实际情况处理，不要因为单条字段为空导致整个接口失败。
-- content 不得在日志中完整打印，避免日志记录用户输入和潜在敏感信息。
-- 日志只记录日期范围、bbk_id、查询数量和耗时。
+后端处理顺序：
 
-========================================
-二、批量保存高频问题分析结果
-========================================
+```text
+检查24小时内成功结果
+→ 检查相同条件RUNNING任务
+→ 都没有才创建新任务
+```
 
-接口建议：
+创建任务后返回：
 
-POST /monitor/high-frequency-question/results
-
-请求示例：
-
+```json
 {
-  "batch_id": "HFQ_20260730_030000",
-  "stat_start_time": "2026-07-23 00:00:00",
-  "stat_end_time": "2026-07-30 00:00:00",
-  "results": [
-    {
-      "scope_type": "ALL",
-      "bbk_id": "ALL",
-      "rank_no": 1,
-      "topic_name": "查询客户保险持仓",
-      "message_count": 520,
-      "user_count": 210,
-      "valid_message_count": 4000,
-      "sample_questions": [
-        "查询客户目前有哪些保险产品",
-        "帮我看看客户买过什么保险"
-      ]
-    },
-    {
-      "scope_type": "ORG",
-      "bbk_id": "110",
-      "rank_no": 1,
-      "topic_name": "生成客户营销话术",
-      "message_count": 86,
-      "user_count": 41,
-      "valid_message_count": 525,
-      "sample_questions": [
-        "帮我给这个客户写一段营销话术"
-      ]
-    }
-  ]
+  "state": "RUNNING",
+  "task_id": "HFQ_xxx"
 }
+```
 
-校验要求：
-1. batch_id、stat_start_time、stat_end_time、results 必填。
-2. stat_start_time 必须小于 stat_end_time。
-3. results 不能为空。
-4. scope_type 只允许 ALL、ORG。
-5. scope_type=ALL 时，bbk_id 必须为 ALL。
-6. scope_type=ORG 时，bbk_id 必须有实际值，且不能为 ALL。
-7. rank_no 必须大于 0；MVP 建议限制在 1～10。
-8. topic_name 不能为空，去除首尾空格后保存。
-9. message_count、user_count、valid_message_count 不能小于 0。
-10. message_count 不能大于 valid_message_count。
-11. user_count 原则上不能大于 message_count。
-12. sample_questions 最多保留 3～5 条，每条设置合理长度限制，例如 1000 字符。
-13. 同一个 batch_id + scope_type + bbk_id + rank_no 不能出现重复数据。
-14. 一次请求中的全部结果必须使用同一事务批量保存，任意一条失败则整体回滚。
-15. 不要循环逐条提交数据库，使用项目现有批量插入方式。
-16. 接口需要支持幂等重试。
+前端立即显示：
 
-幂等策略建议：
-- 以 batch_id 作为一次完整预跑批次标识。
-- 在同一个事务内，先删除该 batch_id 已有结果，再批量插入本次完整结果。
-- 这样工作流因网络问题重试时不会重复插入。
-- 不允许影响其他 batch_id 的历史数据。
+```text
+分析任务已提交
+正在生成高频问题结果……
+```
 
-响应示例：
+此时按钮变为禁用状态。
 
-{
-  "batch_id": "HFQ_20260730_030000",
-  "saved_count": 120
-}
+---
 
-========================================
-三、测试环境已有结果表结构
-========================================
+# 九、生成过程中的用户操作
 
-表名：
+## 用户一直停留在弹窗
 
-swe_high_frequency_question_result
+前端轮询任务状态。
 
-表结构如下，请基于真实数据库类型和项目 ORM 规范建立对应 Model/Entity/Mapper，不要重新建表：
+任务仍运行时：
 
-CREATE TABLE swe_high_frequency_question_result (
-    id BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+```text
+RUNNING
+```
 
-    batch_id VARCHAR(64) NOT NULL COMMENT '分析批次号，例如 HFQ_20260730_030000',
+继续显示加载状态。
 
-    stat_start_time DATETIME NOT NULL COMMENT '统计开始时间，包含',
-    stat_end_time DATETIME NOT NULL COMMENT '统计结束时间，不包含',
+任务成功时：
 
-    scope_type VARCHAR(16) NOT NULL COMMENT '统计范围：ALL-全部机构，ORG-单个机构',
-    bbk_id VARCHAR(64) NOT NULL COMMENT '分行机构ID，全部机构统一保存为ALL',
+```text
+SUCCEEDED
+```
 
-    rank_no INT NOT NULL COMMENT '当前统计范围内的高频问题排名',
+前端自动请求结果详情，然后替换为 Top 10 内容。
 
-    topic_name VARCHAR(255) NOT NULL COMMENT '归纳后的高频问题主题',
+任务失败时：
 
-    message_count INT NOT NULL DEFAULT 0 COMMENT '归入该主题的消息数量',
-    user_count INT NOT NULL DEFAULT 0 COMMENT '归入该主题的去重用户数量',
-    valid_message_count INT NOT NULL DEFAULT 0 COMMENT '当前统计范围内参与分析的有效消息总数',
+```text
+FAILED
+```
 
-    sample_questions JSON DEFAULT NULL COMMENT '代表性原始问题列表，JSON数组',
+前端显示：
 
-    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '结果生成并写入时间',
+```text
+高频问题分析生成失败
+请稍后重新生成
+```
 
-    PRIMARY KEY (id),
+并提供：
 
-    UNIQUE KEY uk_batch_scope_rank (
-        batch_id,
-        scope_type,
-        bbk_id,
-        rank_no
-    ),
+```text
+重新生成分析
+```
 
-    KEY idx_scope_latest (
-        scope_type,
-        bbk_id,
-        created_at
-    ),
+---
 
-    KEY idx_batch_id (
-        batch_id
-    ),
+## 用户关闭弹窗
 
-    KEY idx_stat_time (
-        stat_start_time,
-        stat_end_time
-    )
-) ENGINE = InnoDB
-  DEFAULT CHARSET = utf8mb4
-  COLLATE = utf8mb4_unicode_ci
-  COMMENT = '用户高频问题预跑结果表';
+用户在任务运行过程中可以直接关闭弹窗。
 
-sample_questions 是 JSON 数组。请根据项目当前数据库框架选择正确处理方式：
-- 如果 ORM 已支持 JSON 类型，直接映射为 List<String> 或项目常用 JSON 类型。
-- 如果当前项目通常使用字符串保存 JSON，则实体中按 String 处理，并在接口 DTO 与数据库 Entity 之间进行序列化和反序列化。
-- 不要为了该字段额外引入重量级依赖。
--- rmassistdata.swe_tracing_traces definition
+任务不会取消，后端继续运行。
 
-CREATE TABLE `swe_tracing_traces` (
-  `trace_id` varchar(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '追踪唯一标识，UUID格式',
-  `b3_trace_id` varchar(64) DEFAULT NULL,
-  `source_id` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '数据源标识，用于多租户数据隔离',
-  `user_id` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '用户标识，发起请求的用户ID',
-  `user_name` varchar(20) DEFAULT NULL COMMENT '用户姓名',
-  `bbk_id` varchar(10) DEFAULT NULL COMMENT '分行编号',
-  `session_id` varchar(256) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '会话标识，同一会话的多次请求共享此ID',
-  `session_name` varchar(100) DEFAULT NULL COMMENT '会话名称',
-  `channel` varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci NOT NULL COMMENT '通道来源，如 console/webhook/api 等',
-  `start_time` datetime(3) NOT NULL COMMENT '追踪开始时间，用户请求发起时刻',
-  `end_time` datetime(3) DEFAULT NULL COMMENT '追踪结束时间，请求完成时刻',
-  `duration_ms` int DEFAULT NULL COMMENT '总耗时（毫秒），从开始到结束的时长',
-  `model_name` varchar(128) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT NULL COMMENT '主要使用的模型名称，如 gpt-4/claude-3',
-  `total_input_tokens` int DEFAULT '0' COMMENT '输入Token总数，所有LLM调用的输入累计',
-  `total_output_tokens` int DEFAULT '0' COMMENT '输出Token总数，所有LLM调用的输出累计',
-  `total_tokens` int DEFAULT '0' COMMENT 'Token总数，等于输入+输出',
-  `tools_used` json DEFAULT NULL COMMENT '使用的工具列表，JSON数组格式',
-  `skills_used` json DEFAULT NULL COMMENT '使用的技能列表，JSON数组格式',
-  `status` varchar(32) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci DEFAULT 'running' COMMENT '追踪状态：running/completed/error/cancelled',
-  `error` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci COMMENT '错误信息，失败时记录的错误描述',
-  `user_message` text CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci COMMENT '用户输入消息，截断后的摘要内容',
-  `created_at` datetime DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
-  `start_date` varchar(20) DEFAULT NULL COMMENT '数据日期',
-  PRIMARY KEY (`trace_id`),
-  KEY `idx_user_id` (`user_id`),
-  KEY `idx_model_name` (`model_name`),
-  KEY `idx_session_id` (`session_id`),
-  KEY `idx_source_start_time` (`source_id`,`start_time`),
-  KEY `idx_source_user` (`source_id`,`user_id`),
-  KEY `idx_source_session` (`source_id`,`session_id`),
-  KEY `idx_user_name` (`user_name`),
-  KEY `idx_bbk_id` (`bbk_id`),
-  KEY `idx_user_source_time_name` (`user_id`,`source_id`,`start_time` DESC,`user_name`),
-  KEY `idx_source_start_date` (`start_date`),
-  KEY `idx_source_start_user` (`source_id`,`start_time`,`user_id`,`session_id`),
-  KEY `idx_source_date_user` (`source_id`,`start_date`,`user_id`,`session_id`),
-  KEY `idx_source_id` (`source_id`),
-  KEY `idx_start_time` (`start_time`),
-  KEY `idx_source_b3_trace` (`source_id`,`b3_trace_id`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
-========================================
-四、代码结构要求
-========================================
+用户下次重新打开弹窗时，前端仍然使用当前筛选条件查询：
 
-请根据 monitor 服务现有架构增加完整代码，包括但不限于：
+* 如果任务还在运行，恢复“生成中”状态；
+* 如果已经成功，直接展示结果；
+* 如果失败，显示失败状态或历史结果。
 
-1. 路由或 Controller
-2. 请求 DTO
-3. 响应 DTO
-4. Service 接口及实现
-5. Repository、Mapper 或 DAO
-6. swe_high_frequency_question_result 对应 Entity/Model
-7. 从 swe_tracing_traces 查询消息所需的 SQL 或 Mapper 方法
-8. 批量删除同 batch_id 旧数据的方法
-9. 批量插入结果的方法
-10. 参数校验
-11. 事务控制
-12. 必要日志
-13. 单元测试或至少提供可执行的接口测试样例
+因此整个流程不依赖浏览器内存或当前页面是否保持打开。
 
-命名建议：
-- HighFrequencyQuestionController
-- HighFrequencyQuestionService
-- HighFrequencyQuestionServiceImpl
-- HighFrequencyQuestionResult
-- HighFrequencyQuestionMessageQueryRequest
-- HighFrequencyQuestionMessageResponse
-- HighFrequencyQuestionResultSaveRequest
+---
 
-但必须优先遵循当前项目已有命名风格。
+# 十、工作流执行成功后的用户体验
 
-========================================
-五、实现边界
-========================================
+后台工作流完成：
 
-本次不要实现：
-- 前端页面
-- 定时任务
-- 大模型调用
-- Prompt
-- 高频主题归类
-- Top 10 计算
-- 查询前端展示结果的接口
-- 长期主题库
+```text
+/message 取数
+→ 数据处理
+→ 高频问题总结
+→ /result 写入结果表
+→ 工作流返回成功
+```
 
-monitor 服务本次只负责：
-1. 从 swe_tracing_traces 提供干净的源消息。
-2. 接收 AI 工作流生成的结果并写入结果表。
+后端更新：
 
-========================================
-六、代码质量要求
-========================================
+```text
+swe_async_tasks.status = SUCCEEDED
+```
 
-1. 不要修改无关代码。
-3. 优先复用已有 Trace Model、Mapper 和查询逻辑。
-4. SQL 参数必须使用参数绑定，禁止字符串拼接，避免 SQL 注入。
-5. 时间字段使用项目统一的时间类型和序列化格式。
-6. 写入接口必须有 @Transactional 或项目等价事务机制。
-7. 批量保存失败时必须回滚。
-8. 对重复 batch_id 支持安全重试。
-9. 日志不要输出完整消息正文和 sample_questions。
-10. 请在完成后列出：
-   - 新增和修改了哪些文件
-   - 两个接口的路径
-   - swe_tracing_traces 实际使用了哪些字段
-   - 定时任务消息的具体过滤条件
-   - 幂等和事务如何实现
-   - curl 或 Postman 测试示例
-   - 当前仍需人工确认的字段或业务规则
+前端轮询发现成功后，自动刷新弹窗。
 
-请先分析代码，再直接完成实现，不要只给方案或伪代码。
+展示：
+
+```text
+当前结果已生成
+本结果更新于 2026-08-04 14:56
+```
+
+以及完整 Top 10。
+
+底部按钮可以变为：
+
+```text
+重新生成分析
+```
+
+不过建议 24 小时内不要鼓励用户频繁重新生成。可以将按钮弱化，或者点击时提示：
+
+```text
+当前已有 24 小时内生成的最新结果，无需重复生成
+```
+
+---
+
+# 十一、任务失败后的体验
+
+工作流执行失败后，后端将任务状态更新为：
+
+```text
+FAILED
+```
+
+如果该条件从未有过成功结果，弹窗显示：
+
+```text
+分析生成失败
+任务执行过程中出现异常，请稍后重试
+```
+
+按钮：
+
+```text
+重新生成分析
+```
+
+如果存在更早的成功结果：
+
+```text
+最近一次更新失败，当前展示历史结果
+```
+
+继续展示历史结果，避免弹窗完全空白。
+
+---
+
+# 十二、凌晨预跑后的默认体验
+
+每天凌晨，系统会针对指定 `source_id` 自动生成：
+
+```text
+全部机构
+最近 7 天
+```
+
+定时任务同样写入 `swe_async_tasks`，并使用同一套状态流转。
+
+因此绝大多数用户白天首次点击“高频问题分析”时，会直接进入：
+
+```text
+打开弹窗
+→ 自动查询默认条件
+→ 命中凌晨预跑结果
+→ 直接展示 Top 10
+```
+
+不会看到生成过程。
+
+只有用户切换到其他机构或其他日期范围时，才可能进入按需生成流程。
+
+---
+
+# 十三、弹窗底部按钮建议
+
+根据不同状态动态变化。
+
+### 已有结果
+
+```text
+关闭
+重新生成分析
+```
+
+### 没有结果
+
+```text
+取消
+生成分析
+```
+
+### 生成中
+
+```text
+关闭
+生成中……
+```
+
+生成按钮禁用。
+
+### 生成失败
+
+```text
+关闭
+重新生成分析
+```
+
+### 历史结果
+
+```text
+关闭
+重新生成分析
+```
+
+---
+
+# 十四、完整用户路径
+
+可以压缩成这一条主链路：
+
+```text
+进入用户消息页面
+→ 点击“高频问题分析”
+→ 打开弹窗
+→ 默认查询自己的 source_id + 全部机构 + 最近7天
+→ 命中凌晨预跑结果
+→ 展示更新时间和Top10
+→ 用户修改日期或机构
+→ 点击查询
+→ 命中24小时缓存则直接展示
+→ 有运行中任务则等待同一任务
+→ 无结果则点击生成分析
+→ 后端创建RUNNING任务
+→ 前端轮询
+→ 成功后展示结果
+→ 失败则展示失败或历史结果
+→ 用户关闭弹窗
+```
+
+这套流程的核心体验是：
+
+> 默认场景打开即看，自定义场景先查缓存，没有缓存才异步生成；任务运行时用户可以自由关闭弹窗，之后随时回来查看。

@@ -362,6 +362,13 @@ class SubAgentDefinition(BaseModel):
     def validation_errors(self) -> list[str]:
         """Return MVP safety validation errors for this definition."""
         errors: list[str] = []
+        errors.extend(self._configuration_validation_errors())
+        errors.extend(self._tool_validation_errors())
+        errors.extend(self._permission_validation_errors())
+        return errors
+
+    def _configuration_validation_errors(self) -> list[str]:
+        errors = []
         if not self.instruction.strip():
             errors.append("missing instruction")
         if self.lifecycle.allow_nested_delegation:
@@ -378,6 +385,10 @@ class SubAgentDefinition(BaseModel):
             errors.append("MCP tools are unsupported")
         if self.model.behavior != "inherit":
             errors.append("custom model routing is unsupported")
+        return errors
+
+    def _tool_validation_errors(self) -> list[str]:
+        errors = []
         for tool in self.tools.allow + self.tools.deny:
             if tool.startswith("mcp:"):
                 errors.append("MCP tools are unsupported")
@@ -388,6 +399,10 @@ class SubAgentDefinition(BaseModel):
             errors.append(
                 f"mutating tool is unsupported: {', '.join(mutating)}",
             )
+        return errors
+
+    def _permission_validation_errors(self) -> list[str]:
+        errors = []
         permission_mutating = sorted(
             set(self.permission.tools.allow) & MUTATING_TOOLS,
         )

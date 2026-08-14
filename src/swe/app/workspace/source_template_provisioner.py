@@ -172,6 +172,35 @@ class SourceTemplateProvisioner:
     def _publish(self, template_name: str) -> None:
         target_dir = self._base_working_dir / template_name
         target_secret_dir = SECRET_DIR / template_name
+        staged_dir, staged_secret_dir = self._create_staging_dirs(template_name)
+        template_backup: Path | None = None
+        secret_backup: Path | None = None
+        published_template = False
+        published_secret = False
+        try:
+            self._stage_template(staged_dir, staged_secret_dir, target_dir)
+            template_backup = self._backup_target(target_dir)
+            secret_backup = self._backup_target(target_secret_dir)
+
+            staged_dir.replace(target_dir)
+            published_template = True
+            staged_secret_dir.replace(target_secret_dir)
+            published_secret = True
+            self._remove_backups(template_backup, secret_backup)
+        except Exception:
+            self._restore_targets(
+                target_dir,
+                target_secret_dir,
+                template_backup,
+                secret_backup,
+                published_template,
+                published_secret,
+            )
+            raise
+        finally:
+            self._remove_staging_dirs(staged_dir, staged_secret_dir)
+
+    def _create_staging_dirs(self, template_name: str) -> tuple[Path, Path]:
         staged_dir = Path(
             tempfile.mkdtemp(
                 prefix=f".{template_name}.",
@@ -179,74 +208,85 @@ class SourceTemplateProvisioner:
                 dir=self._base_working_dir,
             ),
         )
-        secret_parent = SECRET_DIR
-        secret_parent.mkdir(parents=True, exist_ok=True)
+        SECRET_DIR.mkdir(parents=True, exist_ok=True)
         staged_secret_dir = Path(
             tempfile.mkdtemp(
                 prefix=f".{template_name}.",
                 suffix=".tmp",
-                dir=secret_parent,
+                dir=SECRET_DIR,
             ),
         )
-        template_backup: Path | None = None
-        secret_backup: Path | None = None
-        published_template = False
-        published_secret = False
-        try:
-            shutil.copytree(
-                self._base_working_dir / "default",
-                staged_dir,
-                dirs_exist_ok=True,
-            )
-            shutil.copytree(
-                SECRET_DIR / "default",
-                staged_secret_dir,
-                dirs_exist_ok=True,
-            )
-            self._rewrite_workspace_paths(staged_dir, target_dir)
-            staged_readiness = inspect_bootstrap_readiness(
-                staged_dir,
-                expected_tenant_dir=target_dir,
-            )
-            if not staged_readiness.ready:
-                raise SourceTemplateUnavailable(
-                    "staged source template is invalid",
-                )
+        return staged_dir, staged_secret_dir
 
-            if target_dir.exists():
-                template_backup = target_dir.with_name(
-                    f"{target_dir.name}.{uuid4().hex}.bak",
-                )
-                target_dir.replace(template_backup)
-            if target_secret_dir.exists():
-                secret_backup = target_secret_dir.with_name(
-                    f"{target_secret_dir.name}.{uuid4().hex}.bak",
-                )
-                target_secret_dir.replace(secret_backup)
+    def _stage_template(
+        self,
+        staged_dir: Path,
+        staged_secret_dir: Path,
+        target_dir: Path,
+    ) -> None:
+        shutil.copytree(
+            self._base_working_dir / "default",
+            staged_dir,
+            dirs_exist_ok=True,
+        )
+        shutil.copytree(
+            SECRET_DIR / "default",
+            staged_secret_dir,
+            dirs_exist_ok=True,
+        )
+        self._rewrite_workspace_paths(staged_dir, target_dir)
+        staged_readiness = inspect_bootstrap_readiness(
+            staged_dir,
+            expected_tenant_dir=target_dir,
+        )
+        if not staged_readiness.ready:
+            raise SourceTemplateUnavailable("staged source template is invalid")
 
-            staged_dir.replace(target_dir)
-            published_template = True
-            staged_secret_dir.replace(target_secret_dir)
-            published_secret = True
-            if template_backup is not None:
-                shutil.rmtree(template_backup)
-            if secret_backup is not None:
-                shutil.rmtree(secret_backup)
-        except Exception:
-            if published_secret and target_secret_dir.exists():
-                shutil.rmtree(target_secret_dir)
-            if published_template and target_dir.exists():
-                shutil.rmtree(target_dir)
-            if secret_backup is not None and secret_backup.exists():
-                secret_backup.replace(target_secret_dir)
-            if template_backup is not None and template_backup.exists():
-                template_backup.replace(target_dir)
-            raise
-        finally:
-            if staged_dir.exists():
-                shutil.rmtree(staged_dir)
-            if staged_secret_dir.exists():
-                shutil.rmtree(staged_secret_dir)
+    @staticmethod
+    def _backup_target(target_dir: Path) -> Path | None:
+        if not target_dir.exists():
+            return None
+        backup = target_dir.with_name(f"{target_dir.name}.{uuid4().hex}.bak")
+        target_dir.replace(backup)
+        return backup
+
+    @staticmethod
+    def _remove_backups(
+        template_backup: Path | None,
+        secret_backup: Path | None,
+    ) -> None:
+        for backup in (template_backup, secret_backup):
+            if backup is not None:
+                shutil.rmtree(backup)
+
+    @staticmethod
+    def _restore_targets(
+        target_dir: Path,
+        target_secret_dir: Path,
+        template_backup: Path | None,
+        secret_backup: Path | None,
+        published_template: bool,
+        published_secret: bool,
+    ) -> None:
+        if published_secret and target_secret_dir.exists():
+            shutil.rmtree(target_secret_dir)
+        if published_template and target_dir.exists():
+            shutil.rmtree(target_dir)
+        for backup, target in (
+            (secret_backup, target_secret_dir),
+            (template_backup, target_dir),
+        ):
+            if backup is not None and backup.exists():
+                backup.replace(target)
+
+    @staticmethod
+    def _remove_staging_dirs(
+        staged_dir: Path,
+        staged_secret_dir: Path,
+    ) -> None:
+        for staged in (staged_dir, staged_secret_dir):
+            if staged.exists():
+                shutil.rmtree(staged)
 
     @staticmethod
     def _rewrite_workspace_paths(staged_dir: Path, target_dir: Path) -> None:
