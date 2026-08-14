@@ -15,6 +15,7 @@ import type {
   HtmlPreviewListSnapshotResponse,
   HtmlPreviewListSummaryResponse,
   HtmlPreviewEventType,
+  HtmlPreviewTemplateType,
 } from "../types/htmlPreviewEvents";
 
 function withClickRuntimeContext(
@@ -90,10 +91,9 @@ export const htmlPreviewEventsApi = {
     fileUrl?: string | null;
     listKey?: string | null;
     eventType?: HtmlPreviewEventType | "all" | null;
+    templateType?: HtmlPreviewTemplateType | null;
     templateId?: number | null;
     resultId?: string | null;
-    rootTemplateId?: number | null;
-    rootResultId?: string | null;
     eventTargetId?: string | null;
     traceId?: string | null;
     limit?: number;
@@ -184,10 +184,9 @@ function buildSearchParams(params?: {
   fileUrl?: string | null;
   listKey?: string | null;
   eventType?: HtmlPreviewEventType | "all" | null;
+  templateType?: HtmlPreviewTemplateType | null;
   templateId?: number | null;
   resultId?: string | null;
-  rootTemplateId?: number | null;
-  rootResultId?: string | null;
   eventTargetId?: string | null;
   traceId?: string | null;
   limit?: number;
@@ -215,17 +214,14 @@ function buildSearchParams(params?: {
   if (params?.eventType) {
     search.set("event_type", params.eventType);
   }
+  if (params?.templateType) {
+    search.set("template_type", params.templateType);
+  }
   if (params?.templateId) {
     search.set("template_id", String(params.templateId));
   }
   if (params?.resultId) {
     search.set("result_id", params.resultId);
-  }
-  if (params?.rootTemplateId) {
-    search.set("root_template_id", String(params.rootTemplateId));
-  }
-  if (params?.rootResultId) {
-    search.set("root_result_id", params.rootResultId);
   }
   if (params?.eventTargetId) {
     search.set("event_target_id", params.eventTargetId);

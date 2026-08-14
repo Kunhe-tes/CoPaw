@@ -31,7 +31,7 @@ html_preview_router_module = importlib.import_module(
 
 
 def test_event_model_validates_event_type_and_template_association():
-    """旧点击保持兼容，新查看事件必须携带稳定模板关联。"""
+    """旧点击保持兼容，新事件必须携带当前模板和模板类型。"""
     legacy_event = HtmlPreviewClickEventCreate(
         file_url="https://example.com/a.html",
     )
@@ -47,34 +47,33 @@ def test_event_model_validates_event_type_and_template_association():
     with pytest.raises(ValidationError):
         HtmlPreviewClickEventCreate(
             file_url="https://example.com/a.html",
-            event_type="main_preview_view",
+            event_type="preview_view",
         )
 
     main_view = HtmlPreviewClickEventCreate(
         file_url="https://example.com/a.html",
-        event_type="main_preview_view",
+        event_type="preview_view",
+        template_type="main",
         template_id=11,
         result_id="result-main",
     )
 
-    assert main_view.root_template_id == 11
-    assert main_view.root_result_id == "result-main"
+    assert main_view.template_type == "main"
 
     with pytest.raises(ValidationError):
         HtmlPreviewClickEventCreate(
             file_url="https://example.com/sub.html",
-            event_type="sub_preview_view",
+            event_type="preview_view",
             template_id=12,
             result_id="result-sub",
         )
 
     sub_view = HtmlPreviewClickEventCreate(
         file_url="https://example.com/sub.html",
-        event_type="sub_preview_view",
+        event_type="preview_view",
+        template_type="sub",
         template_id=12,
         result_id="result-sub",
-        root_template_id=11,
-        root_result_id="result-main",
     )
 
     assert sub_view.event_target_id is None
@@ -83,10 +82,15 @@ def test_event_model_validates_event_type_and_template_association():
         HtmlPreviewClickEventCreate(
             file_url="https://example.com/sub.html",
             event_type="module_exposure",
+            template_type="sub",
             template_id=12,
             result_id="result-sub",
-            root_template_id=11,
-            root_result_id="result-main",
+        )
+
+    with pytest.raises(ValidationError):
+        HtmlPreviewClickEventCreate(
+            file_url="https://example.com/a.html",
+            template_type="main",
         )
 
 
@@ -154,23 +158,21 @@ async def test_create_event_writes_click_detail(mock_db):
         None,
         None,
         None,
-        None,
     )
 
 
 @pytest.mark.asyncio
 async def test_create_event_writes_view_event_metadata(mock_db):
-    """模块埋点应保存当前模板、主模板、事件对象与链路标识。"""
+    """模块埋点应保存当前模板、模板类型、事件对象与链路标识。"""
     store = HtmlPreviewClickStore(mock_db)
 
     await store.create_event(
         HtmlPreviewClickEventCreate(
             file_url="https://example.com/plan.html",
             event_type="module_exposure",
+            template_type="sub",
             template_id=12,
             result_id="result-sub",
-            root_template_id=11,
-            root_result_id="result-main",
             event_target_id="module-customer-profile",
             event_target_name="客户核心信息",
             trace_id="trace-001",
@@ -181,20 +183,20 @@ async def test_create_event_writes_view_event_metadata(mock_db):
     assert "event_type" in query
     assert "template_id" in query
     assert "result_id" in query
-    assert "root_template_id" in query
-    assert "root_result_id" in query
+    assert "template_type" in query
+    assert "root_template_id" not in query
+    assert "root_result_id" not in query
     assert "event_target_id" in query
     assert "event_target_name" in query
     assert "parent_target_id" not in query
     assert "parent_target_name" not in query
     assert "trace_id" in query
     assert params[13] is None
-    assert params[-8:] == (
+    assert params[-7:] == (
         "module_exposure",
+        "sub",
         12,
         "result-sub",
-        11,
-        "result-main",
         "module-customer-profile",
         "客户核心信息",
         "trace-001",
@@ -407,10 +409,9 @@ async def test_list_events_returns_customer_info(mock_db):
             "customer_name": "祝话",
             "customer_info": '{"客户姓名": "祝话"}',
             "event_type": "module_exposure",
+            "template_type": "sub",
             "template_id": 12,
             "result_id": "result-sub",
-            "root_template_id": 11,
-            "root_result_id": "result-main",
             "event_target_id": "module-customer-profile",
             "event_target_name": "客户核心信息",
             "trace_id": "trace-001",
@@ -440,10 +441,9 @@ async def test_list_events_returns_customer_info(mock_db):
     assert items[0].customer_name == "祝话"
     assert items[0].customer_info == {"客户姓名": "祝话"}
     assert items[0].event_type == "module_exposure"
+    assert items[0].template_type == "sub"
     assert items[0].template_id == 12
     assert items[0].result_id == "result-sub"
-    assert items[0].root_template_id == 11
-    assert items[0].root_result_id == "result-main"
     assert items[0].event_target_id == "module-customer-profile"
     assert items[0].event_target_name == "客户核心信息"
     assert items[0].trace_id == "trace-001"
@@ -458,12 +458,10 @@ async def test_service_passes_event_type_to_event_list_store():
 
     await service.list_events(
         source_id="copaw",
-        event_type="sub_preview_view",
+        event_type="preview_view",
     )
 
-    assert (
-        store.list_events.await_args.kwargs["event_type"] == "sub_preview_view"
-    )
+    assert store.list_events.await_args.kwargs["event_type"] == "preview_view"
 
 
 @pytest.mark.asyncio
@@ -499,10 +497,9 @@ async def test_event_list_supports_all_types_dimensions_and_offset(mock_db):
     await store.list_events(
         source_id="copaw",
         event_type=None,
+        template_type="sub",
         template_id=12,
         result_id="result-sub",
-        root_template_id=11,
-        root_result_id="result-main",
         event_target_id="module-customer-profile",
         trace_id="trace-001",
         limit=20,
@@ -511,19 +508,17 @@ async def test_event_list_supports_all_types_dimensions_and_offset(mock_db):
 
     query, params = mock_db.fetch_all.call_args[0]
     assert "event_type = %s" not in query
+    assert "template_type = %s" in query
     assert "template_id = %s" in query
     assert "result_id = %s" in query
-    assert "root_template_id = %s" in query
-    assert "root_result_id = %s" in query
     assert "event_target_id = %s" in query
     assert "trace_id = %s" in query
     assert "LIMIT 20 OFFSET 40" in query
     assert params == (
         "copaw",
+        "sub",
         12,
         "result-sub",
-        11,
-        "result-main",
         "module-customer-profile",
         "trace-001",
     )
@@ -1421,10 +1416,9 @@ def test_event_list_route_returns_customer_items(monkeypatch):
                     "id": 1,
                     "file_url": "https://example.com/a.html",
                     "event_type": "module_exposure",
+                    "template_type": "sub",
                     "template_id": 12,
                     "result_id": "result-sub",
-                    "root_template_id": 11,
-                    "root_result_id": "result-main",
                     "event_target_id": "module-customer-profile",
                     "event_target_name": "客户核心信息",
                     "button_name": "洞察页面",
@@ -1453,8 +1447,8 @@ def test_event_list_route_returns_customer_items(monkeypatch):
     payload = response.json()
     assert payload["success"] is True
     assert payload["items"][0]["event_type"] == "module_exposure"
+    assert payload["items"][0]["template_type"] == "sub"
     assert payload["items"][0]["template_id"] == 12
-    assert payload["items"][0]["root_template_id"] == 11
     assert payload["items"][0]["event_target_id"] == "module-customer-profile"
     assert payload["items"][0]["customer_info"]["客户姓名"] == "祝话"
 
@@ -1499,10 +1493,9 @@ def test_event_list_route_supports_all_types_dimensions_and_offset(
                 "file_url": None,
                 "list_key": None,
                 "event_type": None,
+                "template_type": "sub",
                 "template_id": 12,
                 "result_id": "result-sub",
-                "root_template_id": 11,
-                "root_result_id": "result-main",
                 "event_target_id": "module-customer-profile",
                 "trace_id": "trace-001",
                 "limit": 20,
@@ -1525,10 +1518,9 @@ def test_event_list_route_supports_all_types_dimensions_and_offset(
         "/html-preview/events",
         params={
             "event_type": "all",
+            "template_type": "sub",
             "template_id": 12,
             "result_id": "result-sub",
-            "root_template_id": 11,
-            "root_result_id": "result-main",
             "event_target_id": "module-customer-profile",
             "trace_id": "trace-001",
             "limit": 20,

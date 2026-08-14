@@ -6,16 +6,13 @@
 
 ALTER TABLE swe_html_preview_click_events
 ADD COLUMN event_type VARCHAR(32) NOT NULL DEFAULT 'button_click'
-  COMMENT '事件类型：button_click/main_preview_view/sub_preview_view/module_exposure',
+  COMMENT '事件类型：button_click/preview_view/module_exposure',
+ADD COLUMN template_type VARCHAR(16) NULL COMMENT '模板类型：main/sub',
 ADD COLUMN template_id BIGINT NULL COMMENT '当前事件所在模板ID',
 ADD COLUMN result_id VARCHAR(128) NULL COMMENT '当前模板生成结果ID',
-ADD COLUMN root_template_id BIGINT NULL COMMENT '入口主模板ID',
-ADD COLUMN root_result_id VARCHAR(128) NULL COMMENT '入口主模板生成结果ID',
 ADD COLUMN event_target_id VARCHAR(255) NULL COMMENT '模块的稳定标识',
 ADD COLUMN event_target_name VARCHAR(512) NULL COMMENT '模块的展示名称',
-ADD COLUMN trace_id VARCHAR(128) NULL COMMENT '方案生成与浏览链路标识',
-ALGORITHM=INPLACE,
-LOCK=NONE;
+ADD COLUMN trace_id VARCHAR(128) NULL COMMENT '方案生成与浏览链路标识';
 
 ALTER TABLE swe_html_preview_click_events
 ADD INDEX idx_source_event_target_clicked (
@@ -24,10 +21,9 @@ ADD INDEX idx_source_event_target_clicked (
   event_target_id,
   clicked_at
 ),
-ADD INDEX idx_source_root_event_clicked (
+ADD INDEX idx_source_template_type_event_clicked (
   source_id,
-  root_template_id,
-  root_result_id,
+  template_type,
   event_type,
   clicked_at
 ),
@@ -37,6 +33,4 @@ ADD INDEX idx_source_template_result_clicked (
   result_id,
   clicked_at
 ),
-ADD INDEX idx_trace_clicked (trace_id, clicked_at),
-ALGORITHM=INPLACE,
-LOCK=NONE;
+ADD INDEX idx_trace_clicked (trace_id, clicked_at);

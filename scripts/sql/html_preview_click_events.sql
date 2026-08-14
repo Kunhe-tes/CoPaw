@@ -23,11 +23,10 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
   customer_info JSON NULL COMMENT '点击按钮所在行的客户扩展信息',
 
   event_type VARCHAR(32) NOT NULL DEFAULT 'button_click'
-    COMMENT '事件类型：button_click/main_preview_view/sub_preview_view/module_exposure',
+    COMMENT '事件类型：button_click/preview_view/module_exposure',
+  template_type VARCHAR(16) NULL COMMENT '模板类型：main/sub',
   template_id BIGINT NULL COMMENT '当前事件所在模板ID',
   result_id VARCHAR(128) NULL COMMENT '当前模板生成结果ID',
-  root_template_id BIGINT NULL COMMENT '入口主模板ID',
-  root_result_id VARCHAR(128) NULL COMMENT '入口主模板生成结果ID',
   event_target_id VARCHAR(255) NULL COMMENT '模块的稳定标识',
   event_target_name VARCHAR(512) NULL COMMENT '模块的展示名称',
   trace_id VARCHAR(128) NULL COMMENT '方案生成与浏览链路标识',
@@ -46,8 +45,8 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
   INDEX idx_source_event_target_clicked (
     source_id, event_type, event_target_id, clicked_at
   ),
-  INDEX idx_source_root_event_clicked (
-    source_id, root_template_id, root_result_id, event_type, clicked_at
+  INDEX idx_source_template_type_event_clicked (
+    source_id, template_type, event_type, clicked_at
   ),
   INDEX idx_source_template_result_clicked (
     source_id, template_id, result_id, clicked_at

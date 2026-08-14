@@ -31,13 +31,27 @@ def test_event_target_comments_only_describe_modules():
     assert "模块的稳定标识" in baseline_sql
 
 
-def test_root_event_index_includes_root_result_dimension():
-    """同一主模板的不同生成结果应能使用联合索引筛选。"""
+def test_event_schema_uses_template_type_without_root_template_fields():
+    """事件仅保存当前模板，并用 template_type 区分主子模板。"""
     migration_sql = MIGRATION_PATH.read_text(encoding="utf-8")
     baseline_sql = BASELINE_PATH.read_text(encoding="utf-8")
-    expected_columns = (
-        "source_id, root_template_id, root_result_id, event_type, clicked_at"
-    )
+    normalized_migration = " ".join(migration_sql.split())
+    normalized_baseline = " ".join(baseline_sql.split())
 
-    assert expected_columns in " ".join(migration_sql.split())
-    assert expected_columns in " ".join(baseline_sql.split())
+    assert "template_type VARCHAR(16)" in normalized_migration
+    assert "template_type VARCHAR(16)" in normalized_baseline
+    assert "root_template_id" not in normalized_migration
+    assert "root_result_id" not in normalized_migration
+    assert "root_template_id" not in normalized_baseline
+    assert "root_result_id" not in normalized_baseline
+
+
+def test_event_schema_documents_three_event_types():
+    """数据库事件类型说明应只包含点击、页面查看和模块曝光。"""
+    migration_sql = MIGRATION_PATH.read_text(encoding="utf-8")
+    baseline_sql = BASELINE_PATH.read_text(encoding="utf-8")
+
+    for sql in (migration_sql, baseline_sql):
+        assert "button_click/preview_view/module_exposure" in sql
+        assert "main_preview_view" not in sql
+        assert "sub_preview_view" not in sql
