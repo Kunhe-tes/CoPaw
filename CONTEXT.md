@@ -57,24 +57,28 @@ The `agents/<agent-name>.toml` file within a Skill package that declares one **S
 _Avoid_: inline SKILL.md agent, shared definition-store record, agent directory manifest
 
 **Declared SubAgent Dependency Set**:
-The explicit Skill and MCP dependency names in a **Skill-owned Definition Package** that are the sole source of optional capabilities eligible to load for that SubAgent Run. The owning Skill controls the Definition lifecycle but is not implicitly added as a worker capability. The worker does not inherit the target Agent's complete Skill Runtime View or MCP client set.
-_Avoid_: implicit owning-skill injection, inherited workspace skills, all enabled MCP, implicit dependency discovery
+The explicit Skill dependency names, plus an optional MCP restriction, in a **Skill-owned Definition Package**. Skills are the sole optional Skill capabilities eligible to load; when `mcps` is present, it is the sole MCP capability set eligible to load. The owning Skill controls the Definition lifecycle but is not implicitly added as a worker capability.
+_Avoid_: implicit owning-skill injection, inherited workspace skills, implicit Skill discovery
 
 **Declared SubAgent Skill Capability**:
 One available Skill in an **Effective SubAgent Dependency Set** that the worker registers through the ordinary Skill Toolkit path, including that Skill's normal prompt and Skill-tool registration behavior. A Definition instruction does not inline the Skill document.
 _Avoid_: embedded SKILL.md body, bypassed Skill Toolkit registration, all-workspace Skill tools
 
 **Effective SubAgent Dependency Set**:
-The subset of a **Declared SubAgent Dependency Set** that is available and authorized for the parent Agent's current run. Skills resolve only from that Agent's enabled Skill Runtime View, while MCPs resolve only from its configured client set; unavailable entries are silently omitted rather than blocking the **SubAgent Run**.
-_Avoid_: cross-agent dependency lookup, failed dependency resolution, all-or-nothing dependency loading, inherited capability set
+The available and authorized dependency subset for one **SubAgent Run**. Skills resolve only from declared names in the parent Agent's enabled Skill Runtime View; MCPs resolve from declared names when `mcps` is present, including an empty list that disables all MCPs, otherwise from the parent Agent's enabled MCP client set. Unavailable entries are silently omitted rather than blocking the run.
+_Avoid_: cross-agent dependency lookup, failed dependency resolution, all-or-nothing dependency loading, inherited workspace Skills
 
 **Declared MCP Client Capability**:
-One MCP client in a **Declared SubAgent Dependency Set** whose complete exposed tool surface is eligible for the SubAgent Run. The launch snapshot captures the parent Agent's configured client settings; the SubAgent Worker connects it independently and silently omits it when connection fails. Every MCP tool call remains subject to the parent Agent's active Tool Guard, approval, and tenant configuration; a Definition cannot bypass them.
+One MCP client named by a present `mcps` field in a **Skill-owned Definition Package**, whose complete exposed tool surface is eligible for the SubAgent Run. The launch snapshot captures the parent Agent's configured client settings; the SubAgent Worker connects it independently and silently omits it when connection fails. Every MCP tool call remains subject to the parent Agent's active Tool Guard, approval, and tenant configuration; a Definition cannot bypass them.
 _Avoid_: parent-client reuse, unguarded MCP access, Definition-owned approval bypass, MCP tool allowlist
 
 **Inherited Built-in Tool Set**:
-The parent Agent's currently enabled built-in tools, used as the default candidate set for a Skill-owned SubAgent when its TOML `[tools].inherit` is true or omitted. The effective set remains bounded by the Definition's `allow`/`deny`, SubAgent policy, and Tool Guard/approval controls; MCP clients are never inherited this way.
-_Avoid_: inherit-all permissions, inherited MCP, Tool Guard bypass, unrestricted child tools
+The parent Agent's currently enabled built-in tools, used as the default candidate set for every SubAgent. A Skill-owned SubAgent may narrow that set through TOML `[tools].allow` and `[tools].deny`; a Run-scoped SubAgent inherits it without a Definition-level tool override. The effective set remains bounded by SubAgent policy and Tool Guard/approval controls.
+_Avoid_: unrestricted child tools, Tool Guard bypass, inherited Skill Toolkit tools
+
+**Inherited MCP Client Set**:
+The parent Agent's enabled MCP client set used by a Run-scoped SubAgent and by a Skill-owned SubAgent whose Definition Package omits `mcps`. A present `mcps` field replaces this default with its named subset; `mcps = []` explicitly disables all MCPs. An MCP client always connects from the immutable launch snapshot.
+_Avoid_: live parent-client reuse, inherited workspace Skills, mutable MCP configuration
 
 **Background SubAgent Approval Outcome**:
 The result when a Background SubAgent tool call requires human approval: the Tool Guard rejects the call and returns that rejection to the worker. A Background SubAgent Run neither starts an interactive approval request nor waits for a later human decision; only already preapproved or automatically allowed operations execute.
@@ -94,7 +98,7 @@ _Avoid_: nested delegation, recursive worker tree, SubAgent orchestration
 
 **Skill-owned Definition Trigger Keywords**:
 The explicit `trigger_keywords` in a **Skill-owned Definition Package** that help the Main Agent select its Definition for a delegated need. They supplement its `description`; they are not a separate automatic execution mechanism.
-_Avoid_: task_types, implicit NLP classification, automatic delegation
+_Avoid_: task-type labels, implicit NLP classification, automatic delegation
 
 **Skill-owned Model Reference**:
 The optional `[model]` provider-and-identifier pair in a **Skill-owned Definition Package**. It may select only a model already configured for the tenant and available to the Main Agent; when unavailable, the SubAgent silently inherits the Main Agent model and the package cannot contain provider connection or credential settings.
@@ -105,7 +109,7 @@ The use of a resolved **Skill-owned Model Reference** by a Skill-owned SubAgent 
 _Avoid_: cloud-only model selection, model switching for built-in definitions, model switching for ordinary stored definitions, model routing in a run-scoped definition
 
 **Skill-owned Delegation Prompt**:
-The SubAgent prompt constructed from its Definition `instruction`, the delegated `objective`, and optional `background`. The Main Agent supplies the task context but cannot replace the Definition's role instruction.
+The layered SubAgent prompt constructed from its Definition `instruction`, fixed runtime safety rules, the delegated `objective`, and optional `background`. The Definition instruction and safety rules are trusted system instructions; `background` is delimited as untrusted task material in that system message, while `objective` is structured user input. Neither task field can replace the Definition's role instruction.
 _Avoid_: instruction argument, parent transcript, inherited main-agent prompt
 
 **Skill-qualified SubAgent Name**:
