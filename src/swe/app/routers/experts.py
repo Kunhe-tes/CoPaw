@@ -9,8 +9,6 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
-from ...config.context import resolve_request_effective_tenant_id
-from ...config.utils import get_tenant_config_path_strict, load_config
 from ...app.subagents import (
     AgentOwnedDefinitionConflict,
     AgentOwnedDefinitionPackage,
@@ -47,30 +45,18 @@ class ExpertResponse(BaseModel):
     toml: str
 
 
-def _effective_tenant_id(request: Request) -> str | None:
-    return resolve_request_effective_tenant_id(
-        getattr(request.state, "tenant_id", None),
-        getattr(request.state, "source_id", None),
-        getattr(request.state, "scope_id", None),
-    )
+async def _repository(request: Request) -> AgentOwnedDefinitionRepository:
+    """Resolve the selected Agent, falling back to its active profile."""
+    from ..agent_context import get_agent_and_config_for_request
 
-
-def _repository(request: Request) -> AgentOwnedDefinitionRepository:
-    tenant_id = _effective_tenant_id(request)
-    agent_id = str(getattr(request.state, "agent_id", "") or "")
-    if not agent_id:
-        raise HTTPException(status_code=404, detail="Agent Profile not found")
-    config = load_config(get_tenant_config_path_strict(tenant_id))
-    profile = config.agents.profiles.get(agent_id)
-    if profile is None:
-        raise HTTPException(status_code=404, detail="Agent Profile not found")
+    workspace, _ = await get_agent_and_config_for_request(request)
     builtin_names = {
         definition.name
         for definition in builtin_definition_provider().list_definitions()
     }
     return AgentOwnedDefinitionRepository(
-        Path(profile.workspace_dir).expanduser() / "agents",
-        owner_scope=f"{tenant_id}/{agent_id}",
+        Path(workspace.workspace_dir).expanduser() / "agents",
+        owner_scope=f"{workspace.tenant_id}/{workspace.agent_id}",
         builtin_names=builtin_names,
     )
 
@@ -95,13 +81,15 @@ def _conflict(exc: ValueError) -> HTTPException:
 
 @router.get("", response_model=list[ExpertResponse])
 async def list_experts(request: Request) -> list[ExpertResponse]:
-    return [_response(package) for package in _repository(request).list()]
+    return [
+        _response(package) for package in (await _repository(request)).list()
+    ]
 
 
 @router.get("/{definition_id}", response_model=ExpertResponse)
 async def get_expert(definition_id: str, request: Request) -> ExpertResponse:
     try:
-        package = _repository(request).get(definition_id)
+        package = (await _repository(request)).get(definition_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     if package is None:
@@ -115,7 +103,9 @@ async def preview_expert(
     request: Request,
 ) -> ExpertResponse:
     try:
-        return _response(_repository(request).preview(payload.model_dump()))
+        return _response(
+            (await _repository(request)).preview(payload.model_dump()),
+        )
     except ValueError as exc:
         raise _conflict(exc) from exc
 
@@ -126,7 +116,9 @@ async def create_expert(
     request: Request,
 ) -> ExpertResponse:
     try:
-        return _response(_repository(request).create(payload.model_dump()))
+        return _response(
+            (await _repository(request)).create(payload.model_dump()),
+        )
     except ValueError as exc:
         raise _conflict(exc) from exc
 
@@ -139,7 +131,7 @@ async def update_expert(
     if_match: Annotated[str, Header(alias="If-Match")],
 ) -> ExpertResponse:
     try:
-        package = _repository(request).update(
+        package = (await _repository(request)).update(
             definition_id,
             payload.model_dump(),
             expected_revision=if_match,
@@ -156,7 +148,7 @@ async def enable_expert(
     if_match: Annotated[str, Header(alias="If-Match")],
 ) -> ExpertResponse:
     try:
-        package = _repository(request).enable(
+        package = (await _repository(request)).enable(
             definition_id,
             expected_revision=if_match,
         )
@@ -172,7 +164,7 @@ async def disable_expert(
     if_match: Annotated[str, Header(alias="If-Match")],
 ) -> ExpertResponse:
     try:
-        package = _repository(request).disable(
+        package = (await _repository(request)).disable(
             definition_id,
             expected_revision=if_match,
         )
@@ -188,6 +180,9 @@ async def delete_expert(
     if_match: Annotated[str, Header(alias="If-Match")],
 ) -> None:
     try:
-        _repository(request).delete(definition_id, expected_revision=if_match)
+        (await _repository(request)).delete(
+            definition_id,
+            expected_revision=if_match,
+        )
     except ValueError as exc:
         raise _conflict(exc) from exc
