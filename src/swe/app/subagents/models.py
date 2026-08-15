@@ -15,7 +15,13 @@ from pydantic import (
     model_validator,
 )
 
-DefinitionSource = Literal["builtin", "stored", "run_scoped"]
+DefinitionSource = Literal[
+    "builtin",
+    "stored",
+    "agent_owned",
+    "skill_owned",
+    "run_scoped",
+]
 AgentResultStatus = Literal[
     "completed",
     "partial",
@@ -331,6 +337,18 @@ class SkillOwnedDefinitionMetadata(BaseModel):
     model: SkillOwnedModelReference | None = None
 
 
+class AgentOwnedDefinitionMetadata(BaseModel):
+    """Metadata retained for a definition configured by one Agent Profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    definition_id: str
+    declared_skills: list[str] = Field(default_factory=list)
+    declared_mcps: list[str] | None = None
+    tools: SkillOwnedToolConfig = Field(default_factory=SkillOwnedToolConfig)
+    model: SkillOwnedModelReference | None = None
+
+
 class LifecycleConfig(BaseModel):
     """SubAgent lifecycle capabilities."""
 
@@ -366,6 +384,7 @@ class SubAgentDefinition(BaseModel):
     priority: int = 100
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
     skill_owned: SkillOwnedDefinitionMetadata | None = None
+    agent_owned: AgentOwnedDefinitionMetadata | None = None
 
     @field_validator("name", "description", "instruction", mode="after")
     @classmethod
