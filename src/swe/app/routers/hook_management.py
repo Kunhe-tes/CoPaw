@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any, Annotated
 
@@ -21,7 +22,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from ...agents.hook_runtime.models import HookContext
 from ...config.config import AgentProfileRef
 from ...config.context import resolve_request_effective_tenant_id
-from ...config.utils import get_tenant_config_path_strict, load_config
+from ...config.utils import (
+    get_tenant_config_path_strict,
+    get_tenant_request_working_dir,
+    list_logical_tenant_ids,
+    load_config,
+)
 from ..hook_management import (
     HookAuditActor,
     HookConfigurationSnapshot,
@@ -33,6 +39,7 @@ from ..hook_management import (
     UploadFilePayload,
 )
 from ..utils import schedule_agent_reload
+from ..workspace.tenant_initializer import TenantInitializer
 
 router = APIRouter(prefix="/hook-management", tags=["hook-management"])
 
@@ -54,6 +61,31 @@ class HookManualTestRequest(BaseModel):
     context: HookContext
 
 
+class HookDistributionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    matcher_group_ids: list[str] = Field(alias="matcherGroupIds")
+    target_tenant_ids: list[str] = Field(alias="targetTenantIds")
+
+
+class HookDistributionTenantResult(BaseModel):
+    tenant_id: str
+    success: bool
+    bootstrapped: bool = False
+    matcher_group_ids: list[str] = Field(default_factory=list)
+    script_names: list[str] = Field(default_factory=list)
+    error: str = ""
+
+
+class HookDistributionResponse(BaseModel):
+    source_revision: str
+    results: list[HookDistributionTenantResult] = Field(default_factory=list)
+
+
+class HookDistributionTenantListResponse(BaseModel):
+    tenant_ids: list[str] = Field(default_factory=list)
+
+
 def _effective_tenant_id(request: Request) -> str | None:
     return resolve_request_effective_tenant_id(
         getattr(request.state, "tenant_id", None),
@@ -71,6 +103,10 @@ def _actor_for_request(request: Request) -> HookAuditActor:
 
 def _service_for_request(request: Request) -> HookManagementService:
     tenant_id = _effective_tenant_id(request)
+    return _service_for_tenant(tenant_id)
+
+
+def _service_for_tenant(tenant_id: str | None) -> HookManagementService:
     config = load_config(get_tenant_config_path_strict(tenant_id))
     profile: AgentProfileRef | None = config.agents.profiles.get("default")
     if profile is None:
@@ -81,6 +117,75 @@ def _service_for_request(request: Request) -> HookManagementService:
     return HookManagementService(
         Path(profile.workspace_dir).expanduser(),
         tenant_id=tenant_id,
+    )
+
+
+def _request_source_id(request: Request) -> str | None:
+    return getattr(request.state, "source_id", None)
+
+
+def _validate_target_tenant_id(tenant_id: str) -> str:
+    normalized = str(tenant_id or "").strip()
+    has_invalid_component = any(
+        (
+            len(normalized) > 256,
+            ".." in normalized,
+            "/" in normalized,
+            "\\" in normalized,
+            any(ord(character) < 32 for character in normalized),
+        ),
+    )
+    if not normalized or has_invalid_component:
+        raise ValueError(f"invalid target tenant id: {tenant_id}")
+    return normalized
+
+
+def _get_multi_agent_manager(request: Request) -> Any:
+    manager = getattr(request.app.state, "multi_agent_manager", None)
+    if manager is None:
+        raise RuntimeError("MultiAgentManager not initialized")
+    return manager
+
+
+async def _reload_target_default_agent(
+    manager: Any,
+    target_tenant_id: str,
+) -> None:
+    await manager.reload_agent("default", tenant_id=target_tenant_id)
+
+
+async def _ensure_target_hook_service(
+    request: Request,
+    target_tenant_id: str,
+) -> tuple[HookManagementService, str, bool]:
+    initializer = TenantInitializer(
+        get_tenant_request_working_dir(
+            getattr(request.state, "tenant_id", None),
+        ).parent,
+        target_tenant_id,
+        source_id=_request_source_id(request),
+    )
+    was_bootstrapped = initializer.has_seeded_bootstrap()
+    if not was_bootstrapped:
+        pool = getattr(request.app.state, "tenant_workspace_pool", None)
+        if pool is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Tenant pool not available",
+            )
+        await pool.ensure_bootstrap(
+            target_tenant_id,
+            source_id=_request_source_id(request),
+        )
+    effective_target_tenant_id = getattr(
+        initializer,
+        "effective_tenant_id",
+        target_tenant_id,
+    )
+    return (
+        _service_for_tenant(effective_target_tenant_id),
+        effective_target_tenant_id,
+        not was_bootstrapped,
     )
 
 
@@ -201,3 +306,97 @@ async def manual_test(
     return {
         "redacted_summary": result.redacted_summary,
     }
+
+
+@router.get(
+    "/distribution/tenants",
+    response_model=HookDistributionTenantListResponse,
+)
+async def list_distribution_tenants(
+    request: Request,
+) -> HookDistributionTenantListResponse:
+    return HookDistributionTenantListResponse(
+        tenant_ids=await list_logical_tenant_ids(
+            _request_source_id(request),
+            source_filter=True,
+            include_templates=True,
+        ),
+    )
+
+
+@router.post(
+    "/distribute/default-agents",
+    response_model=HookDistributionResponse,
+)
+async def distribute_to_default_agents(
+    payload: HookDistributionRequest,
+    request: Request,
+) -> HookDistributionResponse:
+    if not payload.target_tenant_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="at least one target tenant must be selected",
+        )
+    source_tenant_id = getattr(request.state, "tenant_id", None)
+    try:
+        target_tenant_ids = [
+            _validate_target_tenant_id(tenant_id)
+            for tenant_id in payload.target_tenant_ids
+        ]
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if source_tenant_id in target_tenant_ids:
+        raise HTTPException(
+            status_code=400,
+            detail="current tenant cannot be a distribution target",
+        )
+
+    source_service = _service_for_request(request)
+    try:
+        distribution = source_service.prepare_distribution(
+            payload.matcher_group_ids,
+        )
+    except HookManagementValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    actor = _actor_for_request(request)
+    manager = _get_multi_agent_manager(request)
+    results: list[HookDistributionTenantResult] = []
+    for target_tenant_id in target_tenant_ids:
+        try:
+            target_service, effective_target_tenant_id, bootstrapped = (
+                await _ensure_target_hook_service(request, target_tenant_id)
+            )
+
+            result = await source_service.distribute_payload_to_target(
+                payload=distribution,
+                target=target_service,
+                actor=actor,
+                activate=partial(
+                    _reload_target_default_agent,
+                    manager,
+                    effective_target_tenant_id,
+                ),
+            )
+            results.append(
+                HookDistributionTenantResult(
+                    tenant_id=target_tenant_id,
+                    success=True,
+                    bootstrapped=bootstrapped,
+                    matcher_group_ids=list(result.matcher_group_ids),
+                    script_names=list(result.script_names),
+                ),
+            )
+        except Exception as exc:
+            results.append(
+                HookDistributionTenantResult(
+                    tenant_id=target_tenant_id,
+                    success=False,
+                    error=str(exc),
+                ),
+            )
+
+    return HookDistributionResponse(
+        source_revision=distribution.revision,
+        results=results,
+    )

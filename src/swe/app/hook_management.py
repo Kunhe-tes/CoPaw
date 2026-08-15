@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 from contextlib import contextmanager
 from dataclasses import dataclass
 import hashlib
@@ -13,7 +14,7 @@ from pathlib import Path
 import tempfile
 import threading
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -100,6 +101,41 @@ class HookManualTestResult:
 
     handler_result: HookHandlerResult
     redacted_summary: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class HookDistributionScript:
+    """A source-controlled script selected for a Hook distribution."""
+
+    filename: str
+    content: bytes
+    sha256: str
+
+
+@dataclass(frozen=True)
+class HookDistributionPayload:
+    """The latest saved source groups and their controlled script files."""
+
+    matcher_group_ids: tuple[str, ...]
+    groups_by_event: dict[str, list[dict[str, Any]]]
+    scripts: tuple[HookDistributionScript, ...]
+    revision: str
+
+
+@dataclass(frozen=True)
+class HookDistributionTargetResult:
+    """Metadata about one successfully updated target Hook configuration."""
+
+    matcher_group_ids: tuple[str, ...]
+    script_names: tuple[str, ...]
+    revision: str
+
+
+@dataclass(frozen=True)
+class _FileBackup:
+    path: Path
+    content: bytes | None
+    mode: int | None
 
 
 class HookManagementService:
@@ -202,9 +238,7 @@ class HookManagementService:
                         f"script already exists: {file.filename}",
                     )
 
-                old_hash = (
-                    self._sha256_file(target) if target.exists() else None
-                )
+                old_hash = self._sha256_file(target) if target.exists() else None
                 scan_outcome = self._scan_upload(file)
                 self._atomic_write(target, file.content)
                 new_hash = hashlib.sha256(file.content).hexdigest()
@@ -213,9 +247,7 @@ class HookManagementService:
                     warned.append(file.filename)
                 self._emit_audit(
                     event=(
-                        "script_replaced"
-                        if old_hash is not None
-                        else "script_uploaded"
+                        "script_replaced" if old_hash is not None else "script_uploaded"
                     ),
                     actor=actor,
                     revision=self.get_configuration().revision,
@@ -318,6 +350,327 @@ class HookManagementService:
             },
         )
         return result
+
+    async def distribute_to_target(
+        self,
+        *,
+        target: "HookManagementService",
+        matcher_group_ids: list[str],
+        actor: HookAuditActor,
+        activate: Callable[[], Awaitable[None]],
+    ) -> HookDistributionTargetResult:
+        """Apply selected source groups to one target as a single transaction."""
+        payload = self.prepare_distribution(matcher_group_ids)
+        return await self.distribute_payload_to_target(
+            payload=payload,
+            target=target,
+            actor=actor,
+            activate=activate,
+        )
+
+    def prepare_distribution(
+        self,
+        matcher_group_ids: list[str],
+    ) -> HookDistributionPayload:
+        """Build the latest saved source payload before any target is changed."""
+        return self._build_distribution_payload(matcher_group_ids)
+
+    async def distribute_payload_to_target(
+        self,
+        *,
+        payload: HookDistributionPayload,
+        target: "HookManagementService",
+        actor: HookAuditActor,
+        activate: Callable[[], Awaitable[None]],
+    ) -> HookDistributionTargetResult:
+        """Apply a prevalidated source payload to one target transactionally."""
+        return await target._apply_distribution_payload(
+            payload=payload,
+            source_tenant_id=self._tenant_id,
+            actor=actor,
+            activate=activate,
+        )
+
+    def _build_distribution_payload(
+        self,
+        matcher_group_ids: list[str],
+    ) -> HookDistributionPayload:
+        selected_ids = self._normalize_distribution_group_ids(
+            matcher_group_ids,
+        )
+        with self._configuration_lock():
+            snapshot = self.get_configuration()
+            groups_by_id: dict[str, tuple[str, dict[str, Any]]] = {}
+            for event, groups in snapshot.hooks.get("events", {}).items():
+                for group in groups:
+                    groups_by_id[group["id"]] = (event, group)
+
+            missing_ids = [
+                group_id for group_id in selected_ids if group_id not in groups_by_id
+            ]
+            if missing_ids:
+                raise HookManagementValidationError(
+                    "selected matcher group no longer exists: "
+                    + ", ".join(missing_ids),
+                )
+
+            groups_by_event: dict[str, list[dict[str, Any]]] = {}
+            selected_groups: list[dict[str, Any]] = []
+            for group_id in selected_ids:
+                event, group = groups_by_id[group_id]
+                copied_group = copy.deepcopy(group)
+                groups_by_event.setdefault(event, []).append(copied_group)
+                selected_groups.append(copied_group)
+            scripts = self._distribution_scripts(selected_groups)
+
+        return HookDistributionPayload(
+            matcher_group_ids=selected_ids,
+            groups_by_event=groups_by_event,
+            scripts=scripts,
+            revision=snapshot.revision,
+        )
+
+    async def _apply_distribution_payload(
+        self,
+        *,
+        payload: HookDistributionPayload,
+        source_tenant_id: str | None,
+        actor: HookAuditActor,
+        activate: Callable[[], Awaitable[None]],
+    ) -> HookDistributionTargetResult:
+        with self._configuration_lock():
+            try:
+                agent_config = self._load_agent_config()
+                target_hooks = self._validate_hooks(
+                    agent_config.get("hooks", {}),
+                )
+                merged_hooks = self._merge_distribution_groups(
+                    target_hooks,
+                    payload,
+                )
+                script_backups = self._prepare_script_distribution(payload)
+                agent_backup = _FileBackup(
+                    path=self._agent_config_path,
+                    content=self._agent_config_path.read_bytes(),
+                    mode=self._agent_config_path.stat().st_mode,
+                )
+
+                try:
+                    self._write_distribution_scripts(payload)
+                    normalized_hooks = self._validate_hooks(merged_hooks)
+                    agent_config["hooks"] = normalized_hooks
+                    self._write_agent_config(agent_config)
+                    await activate()
+                except Exception as exc:
+                    rollback_error = await self._rollback_distribution(
+                        agent_backup,
+                        script_backups,
+                        activate,
+                    )
+                    if rollback_error:
+                        raise RuntimeError(
+                            f"{exc}; rollback failed: {rollback_error}",
+                        ) from exc
+                    raise
+            except Exception as exc:
+                self._emit_audit(
+                    event="distribution_failed",
+                    actor=actor,
+                    revision=payload.revision,
+                    details={
+                        "source_tenant_id": source_tenant_id,
+                        "matcher_group_ids": list(payload.matcher_group_ids),
+                        "script_digests": {
+                            script.filename: script.sha256 for script in payload.scripts
+                        },
+                        "error": str(exc),
+                    },
+                )
+                raise
+
+        result = HookDistributionTargetResult(
+            matcher_group_ids=payload.matcher_group_ids,
+            script_names=tuple(script.filename for script in payload.scripts),
+            revision=self.get_configuration().revision,
+        )
+        self._emit_audit(
+            event="distribution_applied",
+            actor=actor,
+            revision=result.revision,
+            details={
+                "source_tenant_id": source_tenant_id,
+                "matcher_group_ids": list(result.matcher_group_ids),
+                "script_digests": {
+                    script.filename: script.sha256 for script in payload.scripts
+                },
+            },
+        )
+        return result
+
+    @staticmethod
+    def _normalize_distribution_group_ids(
+        matcher_group_ids: list[str],
+    ) -> tuple[str, ...]:
+        normalized_ids = tuple(
+            group_id.strip()
+            for group_id in matcher_group_ids
+            if isinstance(group_id, str) and group_id.strip()
+        )
+        if not normalized_ids:
+            raise HookManagementValidationError(
+                "at least one matcher group must be selected",
+            )
+        if len(set(normalized_ids)) != len(normalized_ids):
+            raise HookManagementValidationError(
+                "matcher group ids must be unique",
+            )
+        return normalized_ids
+
+    def _distribution_scripts(
+        self,
+        groups: list[dict[str, Any]],
+    ) -> tuple[HookDistributionScript, ...]:
+        filenames: set[str] = set()
+        for group in groups:
+            for handler in group.get("hooks", []):
+                if handler.get("type") != "command":
+                    continue
+                for argument in handler.get("argv", []):
+                    path = Path(str(argument))
+                    if path.parts[:2] == ("hooks", "scripts"):
+                        filenames.add(path.name)
+
+        script_root = self._ensure_script_root()
+        scripts: list[HookDistributionScript] = []
+        for filename in sorted(filenames):
+            path = script_root / filename
+            if path.is_symlink() or not path.is_file():
+                raise HookManagementValidationError(
+                    f"source script is not in the controlled library: {filename}",
+                )
+            content = path.read_bytes()
+            scripts.append(
+                HookDistributionScript(
+                    filename=filename,
+                    content=content,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                ),
+            )
+        return tuple(scripts)
+
+    def _merge_distribution_groups(
+        self,
+        target_hooks: dict[str, Any],
+        payload: HookDistributionPayload,
+    ) -> dict[str, Any]:
+        merged_hooks = copy.deepcopy(target_hooks)
+        selected_ids = set(payload.matcher_group_ids)
+        events = merged_hooks.setdefault("events", {})
+        for event, groups in list(events.items()):
+            events[event] = [
+                group for group in groups if group["id"] not in selected_ids
+            ]
+            if not events[event]:
+                del events[event]
+        for event, groups in payload.groups_by_event.items():
+            events.setdefault(event, []).extend(copy.deepcopy(groups))
+        return merged_hooks
+
+    def _prepare_script_distribution(
+        self,
+        payload: HookDistributionPayload,
+    ) -> tuple[_FileBackup, ...]:
+        script_root = self._ensure_script_root()
+        retained_references = self._script_references(
+            self._load_hooks(),
+            excluded_group_ids=set(payload.matcher_group_ids),
+        )
+        backups: list[_FileBackup] = []
+        for script in payload.scripts:
+            target = script_root / script.filename
+            if target.is_symlink():
+                raise HookManagementValidationError(
+                    "target script must not be a symbolic link",
+                )
+            if target.is_file():
+                existing = target.read_bytes()
+                if (
+                    existing != script.content
+                    and script.filename in retained_references
+                ):
+                    raise HookManagementConflict(
+                        "target retained matcher groups reference a conflicting "
+                        f"script: {script.filename}",
+                    )
+                if existing == script.content:
+                    continue
+                backups.append(
+                    _FileBackup(
+                        path=target,
+                        content=existing,
+                        mode=target.stat().st_mode,
+                    ),
+                )
+            elif target.exists():
+                raise HookManagementValidationError(
+                    "target script must be a regular file",
+                )
+            else:
+                backups.append(_FileBackup(target, None, None))
+        return tuple(backups)
+
+    @staticmethod
+    def _script_references(
+        hooks: dict[str, Any],
+        *,
+        excluded_group_ids: set[str],
+    ) -> set[str]:
+        references: set[str] = set()
+        for groups in hooks.get("events", {}).values():
+            for group in groups:
+                if group["id"] in excluded_group_ids:
+                    continue
+                for handler in group.get("hooks", []):
+                    if handler.get("type") != "command":
+                        continue
+                    for argument in handler.get("argv", []):
+                        path = Path(str(argument))
+                        if path.parts[:2] == ("hooks", "scripts"):
+                            references.add(path.name)
+        return references
+
+    def _write_distribution_scripts(
+        self,
+        payload: HookDistributionPayload,
+    ) -> None:
+        script_root = self._ensure_script_root()
+        for script in payload.scripts:
+            target = script_root / script.filename
+            if not target.exists() or target.read_bytes() != script.content:
+                self._atomic_write(target, script.content)
+
+    async def _rollback_distribution(
+        self,
+        agent_backup: _FileBackup,
+        script_backups: tuple[_FileBackup, ...],
+        activate: Callable[[], Awaitable[None]],
+    ) -> str | None:
+        try:
+            for backup in reversed(script_backups):
+                if backup.content is None:
+                    backup.path.unlink(missing_ok=True)
+                else:
+                    self._atomic_write(backup.path, backup.content)
+                    if backup.mode is not None:
+                        os.chmod(backup.path, backup.mode)
+            if agent_backup.content is not None:
+                self._atomic_write(agent_backup.path, agent_backup.content)
+                if agent_backup.mode is not None:
+                    os.chmod(agent_backup.path, agent_backup.mode)
+            await activate()
+        except Exception as exc:
+            return str(exc)
+        return None
 
     def _load_agent_config(self) -> dict[str, Any]:
         try:
@@ -425,10 +778,7 @@ class HookManagementService:
                         Path(value).parts[:2] == ("hooks", "scripts")
                         for value in normalized_argv
                     )
-                    if (
-                        has_controlled_script
-                        and str(handler.get("cwd", "")).strip()
-                    ):
+                    if has_controlled_script and str(handler.get("cwd", "")).strip():
                         raise HookManagementValidationError(
                             "script handlers must not set cwd",
                         )
@@ -631,9 +981,7 @@ class HookManagementService:
             for groups in hooks.get("events", {}).values():
                 for group in groups:
                     group_ids.add(group["id"])
-                    handler_ids.update(
-                        handler["id"] for handler in group["hooks"]
-                    )
+                    handler_ids.update(handler["id"] for handler in group["hooks"])
             return group_ids, handler_ids
 
         before_groups, before_handlers = collect(before)
@@ -677,9 +1025,7 @@ class HookManagementService:
                     },
                 )
             logger.info("agent_hook.audit", extra=extra)
-        except (
-            Exception
-        ):  # pragma: no cover - logging failures are best effort
+        except Exception:  # pragma: no cover - logging failures are best effort
             pass
 
     @staticmethod

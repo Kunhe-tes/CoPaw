@@ -3,7 +3,7 @@
 
 import json
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock
 
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
@@ -162,3 +162,64 @@ def test_script_upload_reads_overwrite_names_from_multipart_form(
 
     assert response.status_code == 200
     assert service.overwrite_names == {"guard.py"}
+
+
+def test_distribution_returns_per_target_result_and_reloads_target_agent(
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(monkeypatch)
+    target_service = object()
+    source = Mock()
+    source.prepare_distribution.return_value = SimpleNamespace(revision="rev-1")
+    source.distribute_payload_to_target = AsyncMock(
+        return_value=SimpleNamespace(
+            matcher_group_ids=("tool-guards",),
+            script_names=("guard.py",),
+        ),
+    )
+    reload_agent = AsyncMock()
+    manager = SimpleNamespace(reload_agent=reload_agent)
+    monkeypatch.setattr(
+        hook_management,
+        "_service_for_request",
+        lambda request: source,
+    )
+    monkeypatch.setattr(
+        hook_management,
+        "_ensure_target_hook_service",
+        AsyncMock(return_value=(target_service, "target-a", True)),
+    )
+    monkeypatch.setattr(
+        hook_management,
+        "_get_multi_agent_manager",
+        lambda request: manager,
+    )
+
+    response = client.post(
+        "/hook-management/distribute/default-agents",
+        json={
+            "matcherGroupIds": ["tool-guards"],
+            "targetTenantIds": ["target-a"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "source_revision": "rev-1",
+        "results": [
+            {
+                "tenant_id": "target-a",
+                "success": True,
+                "bootstrapped": True,
+                "matcher_group_ids": ["tool-guards"],
+                "script_names": ["guard.py"],
+                "error": "",
+            },
+        ],
+    }
+    source.distribute_payload_to_target.assert_awaited_once()
+    activate = source.distribute_payload_to_target.call_args.kwargs["activate"]
+    import asyncio
+
+    asyncio.run(activate())
+    reload_agent.assert_awaited_once_with("default", tenant_id="target-a")

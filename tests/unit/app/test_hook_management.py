@@ -415,9 +415,7 @@ def test_uploaded_shell_script_is_executable(
         actor=_actor(),
     )
 
-    assert (
-        workspace_dir / "hooks" / "scripts" / "direct.sh"
-    ).stat().st_mode & 0o100
+    assert (workspace_dir / "hooks" / "scripts" / "direct.sh").stat().st_mode & 0o100
 
 
 def test_list_scripts_returns_controlled_library_metadata(
@@ -490,3 +488,201 @@ async def test_manual_test_runs_one_draft_handler_without_persisting_config(
     assert (workspace_dir / "agent.json").read_text(
         encoding="utf-8",
     ) == original_config
+
+
+@pytest.mark.asyncio
+async def test_distribution_merges_selected_groups_and_copies_scripts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        hook_management,
+        "scan_skill_directory",
+        lambda *args, **kwargs: None,
+    )
+    source_workspace = tmp_path / "source" / "workspaces" / "default"
+    target_workspace = tmp_path / "target" / "workspaces" / "default"
+    _write_default_agent(source_workspace)
+    _write_default_agent(target_workspace)
+    source = HookManagementService(source_workspace, tenant_id="source")
+    target = HookManagementService(target_workspace, tenant_id="target")
+    source.upload_scripts(
+        files=[UploadFilePayload("guard.py", b"print('source')")],
+        overwrite_names=set(),
+        actor=_actor(),
+    )
+    source.save_configuration(
+        hooks={
+            "enabled": True,
+            "events": {
+                "PreToolUse": [
+                    {
+                        "id": "replace-group",
+                        "matcher": {"tools": ["shell"]},
+                        "hooks": [
+                            {
+                                "id": "source-handler",
+                                "type": "command",
+                                "argv": ["python", "hooks/scripts/guard.py"],
+                            },
+                        ],
+                    },
+                    {
+                        "id": "new-group",
+                        "hooks": [
+                            {
+                                "id": "new-handler",
+                                "type": "command",
+                                "argv": ["echo", "new"],
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        expected_revision=source.get_configuration().revision,
+        actor=_actor(),
+    )
+    target.save_configuration(
+        hooks={
+            "enabled": False,
+            "events": {
+                "PreToolUse": [
+                    {
+                        "id": "replace-group",
+                        "matcher": {"tools": ["old"]},
+                        "hooks": [
+                            {
+                                "id": "old-handler",
+                                "type": "command",
+                                "argv": ["echo", "old"],
+                            },
+                        ],
+                    },
+                    {
+                        "id": "preserved-group",
+                        "hooks": [
+                            {
+                                "id": "preserved-handler",
+                                "type": "command",
+                                "argv": ["echo", "preserved"],
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        expected_revision=target.get_configuration().revision,
+        actor=_actor(),
+    )
+    activate = AsyncMock()
+
+    result = await source.distribute_to_target(
+        target=target,
+        matcher_group_ids=["replace-group", "new-group"],
+        actor=_actor(),
+        activate=activate,
+    )
+
+    target_hooks = target.get_configuration().hooks
+    groups = target_hooks["events"]["PreToolUse"]
+    assert target_hooks["enabled"] is False
+    assert [group["id"] for group in groups] == [
+        "preserved-group",
+        "replace-group",
+        "new-group",
+    ]
+    assert groups[1]["matcher"] == {"tools": ["shell"]}
+    assert groups[1]["hooks"][0]["id"] == "source-handler"
+    assert (target_workspace / "hooks" / "scripts" / "guard.py").read_bytes() == (
+        b"print('source')"
+    )
+    assert result.matcher_group_ids == ("replace-group", "new-group")
+    activate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_distribution_rejects_conflicting_script_used_by_preserved_group(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        hook_management,
+        "scan_skill_directory",
+        lambda *args, **kwargs: None,
+    )
+    source_workspace = tmp_path / "source" / "workspaces" / "default"
+    target_workspace = tmp_path / "target" / "workspaces" / "default"
+    _write_default_agent(source_workspace)
+    _write_default_agent(target_workspace)
+    source = HookManagementService(source_workspace, tenant_id="source")
+    target = HookManagementService(target_workspace, tenant_id="target")
+    source.upload_scripts(
+        files=[UploadFilePayload("shared.py", b"print('source')")],
+        overwrite_names=set(),
+        actor=_actor(),
+    )
+    source.save_configuration(
+        hooks={
+            "enabled": True,
+            "events": {
+                "PreToolUse": [
+                    {
+                        "id": "source-group",
+                        "hooks": [
+                            {
+                                "id": "source-handler",
+                                "type": "command",
+                                "argv": ["python", "hooks/scripts/shared.py"],
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        expected_revision=source.get_configuration().revision,
+        actor=_actor(),
+    )
+    target.upload_scripts(
+        files=[UploadFilePayload("shared.py", b"print('target')")],
+        overwrite_names=set(),
+        actor=_actor(),
+    )
+    target.save_configuration(
+        hooks={
+            "enabled": True,
+            "events": {
+                "PreToolUse": [
+                    {
+                        "id": "preserved-group",
+                        "hooks": [
+                            {
+                                "id": "preserved-handler",
+                                "type": "command",
+                                "argv": ["python", "hooks/scripts/shared.py"],
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        expected_revision=target.get_configuration().revision,
+        actor=_actor(),
+    )
+    activate = AsyncMock()
+
+    with pytest.raises(HookManagementConflict, match="conflicting script"):
+        await source.distribute_to_target(
+            target=target,
+            matcher_group_ids=["source-group"],
+            actor=_actor(),
+            activate=activate,
+        )
+
+    assert target.get_configuration().hooks["events"]["PreToolUse"][0]["id"] == (
+        "preserved-group"
+    )
+    assert (target_workspace / "hooks" / "scripts" / "shared.py").read_bytes() == (
+        b"print('target')"
+    )
+    activate.assert_not_awaited()
