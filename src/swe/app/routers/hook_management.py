@@ -21,7 +21,11 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...agents.hook_runtime.models import HookContext
 from ...config.config import AgentProfileRef
-from ...config.context import resolve_request_effective_tenant_id
+from ...config.context import (
+    decode_scope_id,
+    is_valid_identity_value,
+    resolve_request_effective_tenant_id,
+)
 from ...config.utils import (
     get_tenant_config_path_strict,
     get_tenant_request_working_dir,
@@ -126,16 +130,15 @@ def _request_source_id(request: Request) -> str | None:
 
 def _validate_target_tenant_id(tenant_id: str) -> str:
     normalized = str(tenant_id or "").strip()
-    has_invalid_component = any(
-        (
-            len(normalized) > 256,
-            ".." in normalized,
-            "/" in normalized,
-            "\\" in normalized,
-            any(ord(character) < 32 for character in normalized),
-        ),
-    )
-    if not normalized or has_invalid_component:
+    if normalized.startswith(("default_", "scope.v1.")):
+        raise ValueError(f"invalid target tenant id: {tenant_id}")
+    try:
+        decode_scope_id(normalized)
+    except ValueError:
+        pass
+    else:
+        raise ValueError(f"invalid target tenant id: {tenant_id}")
+    if not is_valid_identity_value(normalized):
         raise ValueError(f"invalid target tenant id: {tenant_id}")
     return normalized
 
@@ -345,6 +348,11 @@ async def distribute_to_default_agents(
         ]
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if len(set(target_tenant_ids)) != len(target_tenant_ids):
+        raise HTTPException(
+            status_code=422,
+            detail="target tenant ids must be unique",
+        )
     if source_tenant_id in target_tenant_ids:
         raise HTTPException(
             status_code=400,
@@ -356,6 +364,8 @@ async def distribute_to_default_agents(
         distribution = source_service.prepare_distribution(
             payload.matcher_group_ids,
         )
+    except HookManagementConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except HookManagementValidationError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -363,6 +373,8 @@ async def distribute_to_default_agents(
     manager = _get_multi_agent_manager(request)
     results: list[HookDistributionTenantResult] = []
     for target_tenant_id in target_tenant_ids:
+        bootstrapped = False
+        target_service: HookManagementService | None = None
         try:
             target_service, effective_target_tenant_id, bootstrapped = (
                 await _ensure_target_hook_service(request, target_tenant_id)
@@ -377,6 +389,8 @@ async def distribute_to_default_agents(
                     manager,
                     effective_target_tenant_id,
                 ),
+                target_tenant_id=target_tenant_id,
+                bootstrapped=bootstrapped,
             )
             results.append(
                 HookDistributionTenantResult(
@@ -388,10 +402,19 @@ async def distribute_to_default_agents(
                 ),
             )
         except Exception as exc:
+            if target_service is None:
+                source_service.emit_distribution_failure(
+                    payload=distribution,
+                    actor=actor,
+                    target_tenant_id=target_tenant_id,
+                    bootstrapped=bootstrapped,
+                    error=str(exc),
+                )
             results.append(
                 HookDistributionTenantResult(
                     tenant_id=target_tenant_id,
                     success=False,
+                    bootstrapped=bootstrapped,
                     error=str(exc),
                 ),
             )

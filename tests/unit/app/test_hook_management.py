@@ -80,6 +80,31 @@ def test_save_rejects_stale_revision(tmp_path: Path) -> None:
         )
 
 
+def test_configuration_lock_returns_conflict_when_file_lock_is_busy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+
+    class _BusyFcntl:
+        LOCK_EX = 1
+        LOCK_NB = 2
+        LOCK_UN = 4
+
+        @staticmethod
+        def flock(_fd: int, flags: int) -> None:
+            if flags & _BusyFcntl.LOCK_NB:
+                raise BlockingIOError()
+
+    monkeypatch.setattr(hook_management, "fcntl", _BusyFcntl)
+
+    with pytest.raises(HookManagementConflict, match="busy"):
+        with service._configuration_lock():
+            pass
+
+
 def test_save_rejects_duplicate_handler_ids_across_matcher_groups(
     tmp_path: Path,
 ) -> None:
@@ -588,12 +613,12 @@ async def test_distribution_merges_selected_groups_and_copies_scripts(
     groups = target_hooks["events"]["PreToolUse"]
     assert target_hooks["enabled"] is False
     assert [group["id"] for group in groups] == [
-        "preserved-group",
         "replace-group",
+        "preserved-group",
         "new-group",
     ]
-    assert groups[1]["matcher"] == {"tools": ["shell"]}
-    assert groups[1]["hooks"][0]["id"] == "source-handler"
+    assert groups[0]["matcher"] == {"tools": ["shell"]}
+    assert groups[0]["hooks"][0]["id"] == "source-handler"
     assert (target_workspace / "hooks" / "scripts" / "guard.py").read_bytes() == (
         b"print('source')"
     )
@@ -686,3 +711,45 @@ async def test_distribution_rejects_conflicting_script_used_by_preserved_group(
         b"print('target')"
     )
     activate.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_distribution_does_not_create_script_library_without_scripts(
+    tmp_path: Path,
+) -> None:
+    source_workspace = tmp_path / "source" / "workspaces" / "default"
+    target_workspace = tmp_path / "target" / "workspaces" / "default"
+    _write_default_agent(source_workspace)
+    _write_default_agent(target_workspace)
+    source = HookManagementService(source_workspace, tenant_id="source")
+    target = HookManagementService(target_workspace, tenant_id="target")
+    source.save_configuration(
+        hooks={
+            "enabled": True,
+            "events": {
+                "PreToolUse": [
+                    {
+                        "id": "source-group",
+                        "hooks": [
+                            {
+                                "id": "source-handler",
+                                "type": "command",
+                                "argv": ["echo", "source"],
+                            },
+                        ],
+                    },
+                ],
+            },
+        },
+        expected_revision=source.get_configuration().revision,
+        actor=_actor(),
+    )
+
+    await source.distribute_to_target(
+        target=target,
+        matcher_group_ids=["source-group"],
+        actor=_actor(),
+        activate=AsyncMock(),
+    )
+
+    assert not (target_workspace / "hooks").exists()

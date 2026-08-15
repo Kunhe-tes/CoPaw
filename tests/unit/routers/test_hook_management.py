@@ -223,3 +223,95 @@ def test_distribution_returns_per_target_result_and_reloads_target_agent(
 
     asyncio.run(activate())
     reload_agent.assert_awaited_once_with("default", tenant_id="target-a")
+
+
+def test_distribution_rejects_duplicate_or_scoped_target_ids(monkeypatch) -> None:
+    client, _, _ = _client(monkeypatch)
+
+    duplicate_response = client.post(
+        "/hook-management/distribute/default-agents",
+        json={
+            "matcherGroupIds": ["tool-guards"],
+            "targetTenantIds": ["target-a", "target-a"],
+        },
+    )
+    scoped_response = client.post(
+        "/hook-management/distribute/default-agents",
+        json={
+            "matcherGroupIds": ["tool-guards"],
+            "targetTenantIds": [encode_scope_id("target-b", "source-b")],
+        },
+    )
+
+    assert duplicate_response.status_code == 422
+    assert scoped_response.status_code == 422
+
+
+def test_distribution_preserves_bootstrap_result_when_target_apply_fails(
+    monkeypatch,
+) -> None:
+    client, _, _ = _client(monkeypatch)
+    source = Mock()
+    source.prepare_distribution.return_value = SimpleNamespace(revision="rev-1")
+    source.distribute_payload_to_target = AsyncMock(
+        side_effect=RuntimeError("target reload failed"),
+    )
+    monkeypatch.setattr(
+        hook_management,
+        "_service_for_request",
+        lambda request: source,
+    )
+    monkeypatch.setattr(
+        hook_management,
+        "_ensure_target_hook_service",
+        AsyncMock(return_value=(object(), "target-a", True)),
+    )
+    monkeypatch.setattr(
+        hook_management,
+        "_get_multi_agent_manager",
+        lambda request: SimpleNamespace(reload_agent=AsyncMock()),
+    )
+
+    response = client.post(
+        "/hook-management/distribute/default-agents",
+        json={
+            "matcherGroupIds": ["tool-guards"],
+            "targetTenantIds": ["target-a"],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["results"][0]["bootstrapped"] is True
+
+
+def test_distribution_audits_target_bootstrap_failure(monkeypatch) -> None:
+    client, _, _ = _client(monkeypatch)
+    source = Mock()
+    source.prepare_distribution.return_value = SimpleNamespace(revision="rev-1")
+    monkeypatch.setattr(
+        hook_management,
+        "_service_for_request",
+        lambda request: source,
+    )
+    monkeypatch.setattr(
+        hook_management,
+        "_ensure_target_hook_service",
+        AsyncMock(side_effect=RuntimeError("bootstrap failed")),
+    )
+    monkeypatch.setattr(
+        hook_management,
+        "_get_multi_agent_manager",
+        lambda request: SimpleNamespace(reload_agent=AsyncMock()),
+    )
+
+    response = client.post(
+        "/hook-management/distribute/default-agents",
+        json={
+            "matcherGroupIds": ["tool-guards"],
+            "targetTenantIds": ["target-a"],
+        },
+    )
+
+    assert response.status_code == 200
+    source.emit_distribution_failure.assert_called_once()
+    assert response.json()["results"][0]["success"] is False
