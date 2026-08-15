@@ -408,6 +408,58 @@ _Avoid_: audit database table, hook execution log, full script archive, hook pay
 A lifecycle-hook configuration owned by exactly one **Agent Profile**. It applies only while that Agent Profile runs, rather than across a tenant or through a reusable Skill.
 _Avoid_: agent-level hook, tenant hook, skill hook
 
+**Agent Profile Hook Distribution**:
+The explicit one-time copying of a source tenant's complete executable **Agent Profile Hook** unit to selected target tenants' Default Agent Profiles. The unit contains the Hook configuration and every referenced **Agent Profile Hook Script**; each target receives its own independent copy.
+_Avoid_: shared Hook, configuration-only distribution, cross-tenant Hook ownership
+
+**Agent Profile Hook Distribution Merge**:
+The target-specific application of an **Agent Profile Hook Distribution**, where a source Matcher Group replaces a target Matcher Group with the same **Agent Profile Hook Matcher Group Identifier**, including its matcher and ordered Handlers. Source-only Matcher Groups are added and target-only Matcher Groups remain unchanged.
+_Avoid_: Handler-ID merge, full configuration replacement, implicit group matching
+
+**Agent Profile Hook Distribution Transaction**:
+The independent all-or-nothing application of one **Agent Profile Hook Distribution** to one target tenant. Its referenced scripts, configuration merge, and activation either all complete or leave that target unchanged; outcomes for other target tenants remain independent.
+_Avoid_: cross-tenant transaction, partial target update, configuration-only success
+
+**Agent Profile Hook Distribution Selection**:
+One or more source **Agent Profile Hook Matcher Groups** explicitly selected for an **Agent Profile Hook Distribution**. Each selected Matcher Group and its referenced scripts form the distribution payload.
+_Avoid_: single-Handler distribution, implicit full-profile distribution, event-name selection
+
+**Agent Profile Hook Distribution Source Snapshot**:
+The saved configuration revision and controlled script artifacts from which an **Agent Profile Hook Distribution** is made. An unsaved Hook configuration draft cannot be a distribution source.
+_Avoid_: draft distribution, live mutable source, inferred source revision
+
+**Agent Profile Hook Distribution Confirmation Freshness**:
+The rule that confirming an **Agent Profile Hook Distribution** does not require its source revision or script digests to match the values observed when the distribution dialog opened. The distribution uses the latest saved source configuration and script artifacts available when it executes.
+_Avoid_: confirmation snapshot lock, stale-source conflict, draft source
+
+**Missing Agent Profile Hook Distribution Selection**:
+A source validation failure where a Matcher Group selected for an **Agent Profile Hook Distribution** no longer exists when the request executes. It rejects the entire distribution before any target tenant is changed.
+_Avoid_: silently skipped group, per-target missing-group result, partial source payload
+
+**Agent Profile Hook Distribution Audit Record**:
+A best-effort structured application-log record for one attempt to apply an **Agent Profile Hook Distribution** to one target tenant. It identifies the actor, source and target tenants, source revision, selected Matcher Groups, script digests and transfer outcomes without retaining script content or Hook runtime payloads.
+_Avoid_: batch-only audit record, script-content archive, Hook execution log
+
+**Agent Profile Hook Distribution Access**:
+The source-scoped authorization boundary for initiating an **Agent Profile Hook Distribution**. An authorized caller may target only tenants in its current source scope, and may not target its own current tenant.
+_Avoid_: cross-source distribution, self-distribution, manager-only Hook distribution
+
+**Agent Profile Hook Distribution Target Bootstrap**:
+The initialization of a manually specified target tenant's Default Agent Profile in the current source scope before applying an **Agent Profile Hook Distribution**. The per-target result identifies whether this Bootstrap occurred during the distribution.
+_Avoid_: discovered-target-only distribution, uninitialized target write, cross-source bootstrap
+
+**Agent Profile Hook Distribution Credential Boundary**:
+The rule that an **Agent Profile Hook Distribution** never reads or copies values from a tenant runtime environment or secret store. It copies selected Hook configuration verbatim, including literal command environment and HTTP header values, while each target resolves configuration references against its own runtime values.
+_Avoid_: runtime-secret distribution, shared tenant credential, target-secret preflight
+
+**Agent Profile Hook Distribution Script Conflict**:
+A target-specific conflict where a selected source script has the same name but different content from a script referenced by a target Matcher Group retained outside the distribution. The target distribution fails unless the scripts have the same digest or every target reference belongs to a Matcher Group replaced by the distribution.
+_Avoid_: silent script replacement, automatic script renaming, retained-group mutation
+
+**Agent Profile Hook Distribution Script Transfer**:
+The copying of selected source **Agent Profile Hook Scripts** into a target's controlled script library as part of an **Agent Profile Hook Distribution**. It preserves the source script artifact without running a target-side script safety scan.
+_Avoid_: target-side scan, unverified arbitrary-file copy, script upload
+
 **Agent Profile Hook Handler**:
 One configured action within an **Agent Profile Hook**. It is either a command handler, an HTTP handler, or a prompt handler; only a command handler may reference one or more **Agent Profile Hook Scripts**.
 _Avoid_: shell hook, script hook configuration
