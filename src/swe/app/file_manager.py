@@ -46,6 +46,7 @@ _FILE_READ_CHUNK_BYTES = 64 * 1024
 _FILE_MANAGER_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _LARGE_PREVIEW_PROBE_BYTES = 4
 _WORKING_HIDDEN_TOP_LEVEL = frozenset({"sessions", "governance"})
+_WORKING_BACKING_TOP_LEVEL = frozenset({"media", "static"})
 _NATURAL_PARTS = re.compile(r"(\d+)")
 _CURSOR_SECRET_ENV_VAR = "SWE_FILE_MANAGER_CURSOR_SECRET"
 _CURSOR_SECRET_FILE_NAME = "file-manager-cursor-secret"
@@ -1017,6 +1018,12 @@ class FileManagerService:
                 "Directory deletion is not available for this root",
             )
         parts = tuple(filter(None, normalised_path.split("/")))
+        if (
+            resolved_root is FileManagerRoot.WORKING
+            and len(parts) == 1
+            and parts[0] in _WORKING_BACKING_TOP_LEVEL
+        ):
+            raise FileManagerPathError("Directory is managed by file manager")
         parent_fd = self._open_directory_fd(
             resolved_root,
             "/".join(parts[:-1]),

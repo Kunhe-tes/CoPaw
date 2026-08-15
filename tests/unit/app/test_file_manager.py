@@ -173,6 +173,21 @@ def test_delete_directory_rejects_root_protected_and_read_only_paths(
         _service(tmp_path).delete_directory(root, path)
 
 
+@pytest.mark.parametrize("path", ["media", "static"])
+def test_delete_directory_rejects_top_level_file_manager_backing_dirs(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    backing_dir = tmp_path / path
+    backing_dir.mkdir()
+    (backing_dir / "existing.txt").write_text("kept", encoding="utf-8")
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).delete_directory("working", path)
+
+    assert (backing_dir / "existing.txt").read_text(encoding="utf-8") == "kept"
+
+
 def test_source_scope_upload_archives_and_restores_to_tenant_root(
     tmp_path: Path,
 ) -> None:
