@@ -40,13 +40,37 @@ _Avoid_: custom subagent, subagent template, agent config
 A temporary **SubAgent Definition** supplied by the Main Agent for one **SubAgent Run**. It is validated like other SubAgent Definitions but is not stored for reuse, versioned as a reusable profile, or visible as a long-lived registry entry.
 _Avoid_: persistent custom subagent, saved worker profile
 
-**Run-scoped Definition Source**:
-The definition source value `run_scoped`, used to identify a **Run-scoped SubAgent Definition** in runtime records and audit data.
-_Avoid_: builtin, user, stored
+**SubAgent Definition Source**:
+The audit and launch-snapshot origin of a **SubAgent Definition**. Its values are `builtin`, `agent_owned`, `skill_owned`, and `run_scoped`; they distinguish lifecycle ownership without changing exact-name selection.
+_Avoid_: generic stored source, user source, customized source
 
 **Stored SubAgent Definition**:
 A reusable **SubAgent Definition** available through the definition registry across more than one **SubAgent Run**. Stored definitions may be built-in or user-owned, but user-owned persistence and CRUD are separate from run-scoped delegation.
 _Avoid_: temporary subagent, inline worker profile
+
+**Built-in SubAgent Definition**:
+A fixed reusable **Stored SubAgent Definition** supplied by the application. It remains available independently of the expert configuration center and cannot be created, edited, enabled, disabled, or deleted there.
+_Avoid_: Agent-owned Definition, Skill-owned Definition, configurable default expert
+
+**Agent-owned Stored SubAgent Definition**:
+A reusable **Stored SubAgent Definition** configured in one Agent Profile's expert catalog. It is available only to that Agent Profile while enabled and is independent of any Skill lifecycle.
+_Avoid_: Skill subagent, tenant-shared definition, temporary subagent
+
+**Agent-owned Definition Package**:
+One `agents/<definition-id>.toml` file in an Agent Profile's workspace expert catalog. Its stable filename-derived **Agent-owned Definition ID** is independent of the editable unqualified `name`; it declares one **Agent-owned Stored SubAgent Definition** and is not packaged, distributed, or enabled as a Skill.
+_Avoid_: Skill-owned Definition Package, definition-store JSON record, tenant-shared configuration
+
+**Agent-owned Definition ID**:
+The stable opaque identifier represented by an Agent-owned Definition Package's filename. It is used for management, optimistic concurrency, and audit linkage; the Main Agent selects the Definition by its editable `name`, never by this ID.
+_Avoid_: runtime SubAgent Name, filename-derived display name, mutable name alias
+
+**Agent-owned SubAgent Name**:
+The unqualified, Agent-unique `name` of an **Agent-owned Stored SubAgent Definition**. It cannot use a Skill qualifier or shadow a built-in Definition, while a Skill-owned Definition may share its local name through its distinct **Skill-qualified SubAgent Name**.
+_Avoid_: Skill-qualified name, filename-derived fallback, built-in override
+
+**Agent-owned Definition Lifecycle**:
+The separate creation, enablement, disablement, and deletion states of an **Agent-owned Stored SubAgent Definition**. Creation produces a disabled Definition; only an enabled Definition is loaded for a later Main Agent turn, and changing the catalog does not interrupt an already launched SubAgent Run.
+_Avoid_: file-exists-is-enabled, hot-reload lifecycle, run cancellation
 
 **Skill-owned Stored SubAgent Definition**:
 A reusable **SubAgent Definition** packaged by one Skill and available for new **SubAgent Runs** only while its owning Skill is enabled in the target Agent's Skill Runtime View. Disabling or deleting that Skill prevents new runs without interrupting runs that already captured the definition; updates apply to subsequent Main Agent runs.
@@ -84,6 +108,10 @@ _Avoid_: live parent-client reuse, inherited workspace Skills, mutable MCP confi
 The result when a Background SubAgent tool call requires human approval: the Tool Guard rejects the call and returns that rejection to the worker. A Background SubAgent Run neither starts an interactive approval request nor waits for a later human decision; only already preapproved or automatically allowed operations execute.
 _Avoid_: background approval dialog, paused-for-approval worker, approval bypass
 
+**Agent-owned Definition Selection**:
+The Main Agent's explicit selection of an enabled **Agent-owned Stored SubAgent Definition** from the directory exposed by `start_subagent`. It chooses by the Definition's description and trigger keywords, then calls the exact unqualified name; the runtime does not automatically route to it.
+_Avoid_: automatic matching, description short-circuit, implicit expert launch
+
 **Skill-owned Definition Selection**:
 The Main Agent's choice of a **Skill-owned Stored SubAgent Definition** by comparing the Definition's `description` and declared trigger keywords with the delegated need, then starting it by exact `name`. It does not accept caller-supplied role instructions.
 _Avoid_: task-type labels, caller-authored subagent instruction, automatic delegation
@@ -120,44 +148,36 @@ _Avoid_: globally unique local name, implicit alternative identifier, display ni
 An `agents/<agent-name>.toml` file that cannot be parsed or validated as a safe **Skill-owned Stored SubAgent Definition**. It is omitted while its owning Skill and sibling Definition Packages remain available, and it does not alter the Skill package's ordinary security scan.
 _Avoid_: whole-skill load failure, unsafe best-effort definition, skipped package scan
 
-**SubAgent Definition Store**:
-The tenant-and-agent scoped store for **Stored SubAgent Definitions**. The first implementation stores one definition per JSON file and does not provide cross-pod registry consistency.
-_Avoid_: tenant-global registry, distributed definition database
+**Invalid Agent-owned Definition Package**:
+An `agents/<definition-id>.toml` file in an Agent Profile workspace that cannot be parsed or validated as a safe **Agent-owned Stored SubAgent Definition**. The Main Agent omits it without affecting other Definitions, while the expert configuration center reports the validation error for repair; it is distinct from a valid disabled Definition.
+_Avoid_: disabled Definition, whole-agent load failure, implicit repair
 
-**Stored Definition Source**:
-The definition source value `stored`, used for reusable non-built-in **Stored SubAgent Definitions** regardless of whether they were created by a user, tenant admin, system import, or another registration flow.
-_Avoid_: user source, customized source
+**SubAgent Definition Store**:
+The Agent-Profile-scoped catalog of **Agent-owned Stored SubAgent Definitions**, represented by their **Agent-owned Definition Packages**. It is separate from fixed built-in Definitions and from Skill-owned Definition Packages.
+_Avoid_: tenant-global registry, definition-store JSON record, built-in catalog
 
 **Definition Resolution Precedence**:
-The name-reservation rule for loaded Definitions: a Skill-qualified SubAgent Name is exclusively owned by its Skill, and an inner local name is isolated by that qualification. Stored Definitions may not use any loaded Skill-qualified name, and no custom Definition may use a built-in name, so name resolution has one owner rather than a runtime precedence tie-breaker.
-_Avoid_: name-collision priority, stored-over-skill resolution, custom builtin override, nondeterministic collision handling
+The name-reservation rule for loaded Definitions: a Skill-qualified SubAgent Name is exclusively owned by its Skill, and an inner local name is isolated by that qualification. An Agent-owned Definition cannot use a built-in name, so exact selection has one owner rather than a runtime precedence tie-breaker.
+_Avoid_: name-collision priority, Agent-owned-over-skill resolution, custom builtin override, nondeterministic collision handling
 
 **SubAgent Start Request**:
-The compact Main Agent tool request for starting one **SubAgent Run**. It always includes a **SubAgent Name** and objective; its optional **Instruction** is considered only when no loaded Definition resolves by name, in which case it creates a **Run-scoped SubAgent Definition**. A resolved built-in, Stored, or Skill-owned Definition ignores caller-supplied Instruction and uses its own.
+The compact Main Agent tool request for starting one **SubAgent Run**. It always includes a **SubAgent Name** and objective; its optional **Instruction** is considered only when no loaded Definition resolves by exact name, in which case it creates a **Run-scoped SubAgent Definition**. A resolved built-in, Agent-owned, or Skill-owned Definition ignores caller-supplied Instruction and uses its own.
 _Avoid_: required instruction for every start, instruction override, registration payload, full definition schema
 
-**SubAgent Definition Short-circuit Match**:
-The start-time decision to use an existing **Stored SubAgent Definition** or built-in definition instead of the **Run-scoped SubAgent Definition** described by a **SubAgent Start Request**. The request's **Instruction** may inform matching and audit records, but the matched definition's own **Instruction** controls execution.
-_Avoid_: instruction override, silent definition rewrite
+**SubAgent Definition Resolution**:
+The exact-name decision to use a loaded built-in, Agent-owned, or Skill-owned Definition instead of the **Run-scoped SubAgent Definition** described by a **SubAgent Start Request**. A Definition's own instruction controls execution.
+_Avoid_: instruction override, automatic matching, silent definition rewrite
 
 **Definition Match Metadata**:
-The audit data written to a **SubAgent Run** and returned by start/status tools to show whether a **SubAgent Definition Short-circuit Match** occurred, which definition was used, and why.
+The audit data written to a **SubAgent Run** and returned by start/status tools to show which **SubAgent Definition Resolution** supplied the worker.
 _Avoid_: hidden routing decision, implicit reuse
 
 **Unknown SubAgent**:
-An error condition for registry-facing operations that require an existing **Stored SubAgent Definition** or built-in definition by name. It is not part of the compact **SubAgent Start Request**, which falls back to a **Run-scoped SubAgent Definition** when no short-circuit match is used.
+An error condition for catalog-facing operations that require an existing reusable Definition by name. It is not part of the compact **SubAgent Start Request**, which falls back to a **Run-scoped SubAgent Definition** when no exact-name resolution occurs.
 _Avoid_: start_subagent fallback failure, missing temporary worker
 
-**SubAgent Definition Registration Request**:
-The full request for creating or updating a **Stored SubAgent Definition** through a registry-facing entry point. It may include routing metadata, trigger keywords, execution budgets, tool policy, and other reusable profile fields.
-_Avoid_: start request, one-off delegation payload
-
-**SubAgent Definition Upsert**:
-The registration behavior that creates a new **Stored SubAgent Definition** or replaces the existing same-name definition in the same tenant-and-agent scope as a whole object. It does not patch-merge partial fields and cannot shadow a built-in definition name.
-_Avoid_: partial update, builtin override
-
 **Instruction**:
-The role and operating instructions for a **SubAgent Definition**. It is the canonical SubAgent term across user-facing requests, registration contracts, and runtime records, because it describes the delegated worker contract rather than a raw model-message implementation detail.
+The role and operating instructions for a **SubAgent Definition**. It is the canonical SubAgent term across Definition Packages and runtime records, because it describes the delegated worker contract rather than a raw model-message implementation detail.
 _Avoid_: system_prompt, prompt text, hidden prompt, prompt.system
 
 **Instruction Size Limit**:
@@ -1314,10 +1334,10 @@ _Avoid_: shared daily dialog file, chat transcript, session state
 ## Flagged Ambiguities
 
 **"Create SubAgent"**:
-Resolved to distinguish two cases: starting work creates a **SubAgent Run**, while a Main Agent may also supply a **Run-scoped SubAgent Definition** for that single run. Creating a **Stored SubAgent Definition** with reusable persistence remains outside the next stage.
+Resolved to distinguish two cases: starting work creates a **SubAgent Run**, while a Main Agent may also supply a **Run-scoped SubAgent Definition** for that single run. Creating an **Agent-owned Stored SubAgent Definition** occurs only through the expert configuration center.
 
 **"Start Built-in SubAgent By Name"**:
-Resolved as outside the compact **SubAgent Start Request**. The Main Agent must provide a **SubAgent Name**, **Instruction**, and objective when calling the start tool; built-in or stored definition matching belongs to a separate registry-facing entry point.
+Resolved as ordinary exact-name selection through the compact **SubAgent Start Request**. The Main Agent provides a **SubAgent Name** and objective; a caller-supplied instruction is used only for an unresolved name's Run-scoped Definition.
 
 **"Async SubAgent Creation"**:
 Resolved to mean starting a **Background SubAgent Run** that can be queried, completed, or cancelled by run id.

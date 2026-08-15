@@ -1,5 +1,7 @@
 # Run-scoped SubAgent Definitions And Stored Definition Routing
 
+**Status:** Superseded by ADR 0024.
+
 SubAgent start requests will use a compact Main Agent tool contract with `name`, `instruction`, `objective`, and optional `background`; this request creates a Run-scoped SubAgent Definition unless deterministic matching can short-circuit to an enabled stored or built-in definition. The start request does not accept `nickname`, registration-only routing metadata, budgets, tools, permissions, or output contracts; those belong to the Stored SubAgent Definition registration surface.
 
 SubAgent Definition terminology and runtime records use `instruction` and `name` as canonical fields, not `system_prompt`, `prompt.system`, or `agent_name`. The internal definition sources are `builtin`, `stored`, and `run_scoped`; no backward compatibility is kept for the old field names because preserving both vocabularies would keep the Main Agent producing unstable payloads.

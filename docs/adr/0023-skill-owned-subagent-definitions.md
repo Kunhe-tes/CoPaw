@@ -4,14 +4,14 @@ Background SubAgent Definitions may be packaged by an enabled workspace Skill
 as `agents/<agent-name>.toml`. A package uses a local name, while the runtime
 publishes the Definition under the Skill-qualified name
 `<skill-name>:<local-name>`. That qualified name is exclusively owned by its
-Skill; Stored Definitions cannot claim it, and custom Definitions cannot claim
-an existing built-in name.
+Skill; Agent-owned Definitions cannot claim it, and Agent-owned Definitions
+cannot claim an existing built-in name.
 
 Only a Main Agent turn whose user message explicitly requests a SubAgent
 receives Background SubAgent tools. When that gate is open, the
-`start_subagent` tool describes available Skill-owned Definitions using their
-qualified names, descriptions, and trigger keywords. The Main Agent selects an
-exact name. Its `objective` and optional `background` are combined with the
+`start_subagent` tool describes all available Definitions using their exact
+names, descriptions, and trigger keywords. The Main Agent selects an exact
+name. Its `objective` and optional `background` are combined with the
 Definition instruction for the worker prompt. The Definition instruction and
 fixed runtime safety rules are trusted system content; `background` is bounded
 as explicitly untrusted task material in that system message, while `objective`
@@ -38,11 +38,11 @@ interactive approval flow: an operation requiring approval is rejected unless
 it is already preapproved or automatically allowed. SubAgents cannot delegate
 further.
 
-Only Skill-owned Definitions may optionally select a configured tenant model by
-provider and model identifier, including an eligible local model. An unavailable
-reference silently falls back to the parent model; built-in, Stored, and
-run-scoped Definitions always inherit the parent model. Optional Skill-owned
-budgets may only remain within platform limits.
+Skill-owned and Agent-owned Definitions may optionally select a configured
+tenant model by provider and model identifier, including an eligible local
+model. An unavailable reference silently falls back to the parent model;
+built-in and run-scoped Definitions always inherit the parent model. Optional
+Definition budgets may only remain within platform limits.
 
 At run start, the runtime persists an immutable launch snapshot containing the
 resolved Definition, dependencies, MCP configuration, and model selection.
