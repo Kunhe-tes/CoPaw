@@ -2396,6 +2396,13 @@ class FileManagerService:
             capabilities = capabilities.model_copy(
                 update={"browse": False, "upload": False},
             )
+        elif (
+            kind is FileManagerItemKind.DIRECTORY
+            and root is FileManagerRoot.WORKING
+            and not parent_path
+            and name in _WORKING_BACKING_TOP_LEVEL
+        ):
+            capabilities = capabilities.model_copy(update={"archive": False})
         elif kind is FileManagerItemKind.SPECIAL:
             capabilities = FileManagerCapabilities()
         return FileManagerItem(

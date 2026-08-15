@@ -188,6 +188,19 @@ def test_delete_directory_rejects_top_level_file_manager_backing_dirs(
     assert (backing_dir / "existing.txt").read_text(encoding="utf-8") == "kept"
 
 
+@pytest.mark.parametrize("path", ["media", "static"])
+def test_working_listing_disables_archive_for_top_level_backing_dirs(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    (tmp_path / path).mkdir()
+
+    item = _service(tmp_path).list_directory("working").items[0]
+
+    assert item.name == path
+    assert item.capabilities.archive is False
+
+
 def test_source_scope_upload_archives_and_restores_to_tenant_root(
     tmp_path: Path,
 ) -> None:
