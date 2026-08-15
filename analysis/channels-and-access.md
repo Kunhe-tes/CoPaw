@@ -69,6 +69,7 @@
 | 组件 | 路径 | 说明 |
 |------|------|------|
 | ConversationQuickNav | `console/src/components/ConversationQuickNav/` | 会话快速导航，显示用户问题列表的侧边导航点，支持点击跳转和滚动追踪 |
+| SKILL 配置 | `console/src/pages/Settings/SkillConfig/` | 系统设置下的 SKILL 主从配置页，复用定时任务列表作为名称选项，通过 `skillConfig.ts` 对接 list/detail/create/update 接口，并以占位数据呈现待接入的回检指标 |
 
 #### ConversationQuickNav 组件结构
 

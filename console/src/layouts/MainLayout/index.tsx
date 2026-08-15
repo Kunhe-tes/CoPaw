@@ -33,6 +33,7 @@ import SecurityPage from "../../pages/Settings/Security";
 import TokenUsagePage from "../../pages/Settings/TokenUsage";
 import VoiceTranscriptionPage from "../../pages/Settings/VoiceTranscription";
 import AgentsPage from "../../pages/Settings/Agents";
+import SkillConfigPage from "../../pages/Settings/SkillConfig";
 import AnalyticsPage from "../../pages/Analytics";
 import InstancePage from "../../pages/Instance";
 import MonitorPage from "../../pages/Monitor";
@@ -73,6 +74,7 @@ const pathToKey: Record<string, string> = {
   "/security": "security",
   "/token-usage": "token-usage",
   "/voice-transcription": "voice-transcription",
+  "/skill-config": "skill-config",
   "/analytics/users": "analytics-users",
   "/analytics/sessions": "analytics-sessions",
   "/analytics/messages": "analytics-messages",
@@ -184,6 +186,7 @@ export default function MainLayout() {
                 path="/voice-transcription"
                 element={<VoiceTranscriptionPage />}
               />
+              <Route path="/skill-config" element={<SkillConfigPage />} />
               <Route path="/analytics/*" element={<AnalyticsPage />} />
               <Route path="/monitor/*" element={<MonitorPage />} />
               <Route path="/instance/*" element={<InstancePage />} />

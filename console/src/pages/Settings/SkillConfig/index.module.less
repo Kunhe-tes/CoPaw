@@ -1,0 +1,500 @@
+.page {
+  min-height: 100%;
+  background: var(--console-management-canvas, #fff);
+  color: var(--console-management-text, #111827);
+  font-family: var(
+    --console-font-ui,
+    "Microsoft YaHei",
+    "PingFang SC",
+    sans-serif
+  );
+
+  :global(.swe-btn) {
+    border-radius: 8px;
+    font-weight: 600;
+    box-shadow: none;
+    transition:
+      border-color 160ms ease,
+      background-color 160ms ease,
+      color 160ms ease;
+  }
+
+  :global(.swe-btn-sm) {
+    min-height: 30px;
+    height: 30px;
+    padding-inline: 12px;
+  }
+
+  :global(.swe-btn-primary) {
+    border-color: var(--console-management-primary, #3769fc);
+    background: var(--console-management-primary, #3769fc);
+
+    &:hover,
+    &:focus-visible {
+      border-color: var(--console-management-primary-hover, #2957dc) !important;
+      background: var(--console-management-primary-hover, #2957dc) !important;
+    }
+  }
+
+  :global(.swe-btn-default:focus-visible),
+  :global(.swe-btn-primary:focus-visible) {
+    outline: 2px solid var(--console-management-primary, #3769fc);
+    outline-offset: 2px;
+  }
+
+  :global(.swe-switch.swe-switch-checked) {
+    background: var(--console-management-primary, #3769fc);
+
+    &:hover:not(.swe-switch-disabled) {
+      background: var(--console-management-primary-hover, #2957dc);
+    }
+  }
+}
+
+.loadingState {
+  padding: 40px;
+}
+
+.emptyState,
+.errorState {
+  min-height: 620px;
+  display: grid;
+  place-items: center;
+  padding: 40px 20px;
+}
+
+.emptyState {
+  :global(.swe-empty-image) {
+    height: auto;
+    margin-bottom: 18px;
+    color: var(--console-management-primary, #3769fc);
+  }
+}
+
+.errorResult {
+  padding: 28px 24px;
+
+  :global(.swe-result-icon) {
+    margin-bottom: 12px;
+  }
+
+  :global(.swe-result-title) {
+    color: var(--console-management-text, #111827);
+    font-size: 20px;
+    line-height: 28px;
+    font-weight: 600;
+  }
+
+  :global(.swe-result-subtitle) {
+    margin-top: 6px;
+    color: var(--console-management-text-muted, #8a94a6);
+    font-size: 13px;
+    line-height: 20px;
+  }
+
+  :global(.swe-result-extra) {
+    margin-top: 20px;
+  }
+}
+
+.errorIcon {
+  display: block;
+  margin: 0 auto;
+  color: var(--console-management-error, #b94a4f);
+}
+
+.emptyCopy {
+  display: grid;
+  gap: 7px;
+  color: var(--console-management-text-secondary, #4b5563);
+
+  strong {
+    color: var(--console-management-text, #111827);
+    font-size: 17px;
+  }
+}
+
+.workspace {
+  display: grid;
+  grid-template-columns: minmax(210px, 240px) minmax(300px, 0.82fr) minmax(
+      390px,
+      1.5fr
+    );
+  min-height: 680px;
+  border-bottom: 1px solid var(--console-management-border, #e5e7eb);
+}
+
+.skillListPanel,
+.rulePanel,
+.inspectionPanel {
+  min-width: 0;
+  padding: 28px 24px;
+}
+
+.skillListPanel,
+.rulePanel {
+  border-right: 1px solid var(--console-management-border, #e5e7eb);
+}
+
+.panelHeader,
+.rulePanelHeader {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 18px;
+
+  h2 {
+    margin: 0;
+    color: var(--console-management-text, #111827);
+    font-size: 17px;
+    font-weight: 600;
+  }
+}
+
+.skillList {
+  display: grid;
+  gap: 5px;
+}
+
+.skillRow {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: 7px;
+  transition:
+    background-color 180ms ease,
+    color 180ms ease;
+
+  &:hover {
+    background: var(--console-management-primary-soft, #eef4ff);
+  }
+}
+
+.skillRowSelected {
+  background: var(--console-management-primary-soft, #eef4ff);
+  color: var(--console-management-primary, #3769fc);
+}
+
+.skillSelectButton,
+.editIconButton {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+
+  &:focus-visible {
+    outline: 2px solid var(--console-management-primary, #3769fc);
+    outline-offset: 1px;
+  }
+}
+
+.skillSelectButton {
+  min-width: 0;
+  min-height: 38px;
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+  text-align: left;
+}
+
+.editIconButton {
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  color: var(--console-management-text-muted, #8a94a6);
+
+  &:hover {
+    color: var(--console-management-primary-hover, #2957dc);
+    background: var(--console-management-primary-soft, #eef4ff);
+  }
+}
+
+.statusDot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--console-management-text-muted, #8a94a6);
+  box-shadow: 0 0 0 2px var(--console-management-surface, #fff);
+}
+
+.statusDotEnabled {
+  background: var(--console-management-success, #2f7d5b);
+}
+
+.skillName {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.sectionHeading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+
+  h2,
+  h3 {
+    margin: 0;
+    color: var(--console-management-text, #111827);
+    font-size: 17px;
+    font-weight: 600;
+  }
+
+  h3 {
+    font-size: 15px;
+  }
+}
+
+.sectionMarker {
+  width: 4px;
+  height: 20px;
+  border-radius: 3px;
+  background: var(--console-management-primary, #3769fc);
+}
+
+.formActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ruleForm {
+  :global(.swe-form-item) {
+    margin-bottom: 15px;
+  }
+
+  :global(.swe-form-item-label > label) {
+    color: var(--console-management-text-secondary, #4b5563);
+    font-weight: 600;
+  }
+}
+
+.skillIdInput {
+  font-family: var(--console-font-mono, SFMono-Regular, Consolas, monospace);
+}
+
+.sortRow {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+
+  :global(.swe-input-number) {
+    width: 88px;
+  }
+
+  > span {
+    margin-bottom: 22px;
+    color: var(--console-management-text-muted, #8a94a6);
+    font-size: 12px;
+  }
+}
+
+.ruleDivider {
+  height: 1px;
+  margin: 2px 0 16px;
+  background: var(--console-management-border, #e5e7eb);
+}
+
+.switchField {
+  min-height: 48px;
+  margin-bottom: 4px !important;
+  padding: 4px 0;
+
+  :global(.swe-form-item-row) {
+    display: flex;
+    flex-flow: row nowrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  :global(.swe-form-item-label) {
+    flex: 1 1 auto;
+    padding: 0;
+  }
+
+  :global(.swe-form-item-label > label) {
+    height: auto;
+  }
+
+  :global(.swe-form-item-control) {
+    flex: 0 0 auto;
+    width: auto;
+  }
+
+  :global(.swe-form-item-control-input) {
+    min-height: 32px;
+  }
+}
+
+.groupField {
+  margin: 4px 0 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  background: var(--console-management-surface-subtle, #f7f9fc);
+
+  :global(.swe-form-item) {
+    margin: 0;
+  }
+}
+
+.inspectionPanel {
+  padding-bottom: 32px;
+}
+
+.inspectionSection {
+  margin-top: 19px;
+}
+
+.inspectionSectionTitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  color: var(--console-management-text, #111827);
+
+  > span:last-child {
+    color: var(--console-management-text-muted, #8a94a6);
+    font-size: 12px;
+  }
+}
+
+.stepBadge {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--console-management-primary, #3769fc);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.metricGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.metricCard {
+  min-height: 104px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  padding: 15px 17px;
+  border-radius: 8px;
+  background: var(--console-management-surface-subtle, #f7f9fc);
+}
+
+.metricLabel,
+.metricDescription {
+  color: var(--console-management-text-muted, #8a94a6);
+  font-size: 12px;
+}
+
+.metricValue {
+  margin: 4px 0 3px;
+  color: var(--console-management-text, #111827);
+  font-size: 28px;
+  line-height: 1.15;
+  font-weight: 600;
+
+  small {
+    margin-left: 3px;
+    color: var(--console-management-text-secondary, #4b5563);
+    font-size: 11px;
+  }
+}
+
+.depthSection {
+  margin-top: 22px;
+}
+
+.depthList {
+  margin-top: 12px;
+  border-top: 1px solid var(--console-management-border, #e5e7eb);
+}
+
+.depthRow {
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: 22px minmax(110px, 1fr) 36px minmax(72px, 140px);
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--console-management-border, #e5e7eb);
+  font-size: 12px;
+}
+
+.depthIndex,
+.depthLabel {
+  color: var(--console-management-text-secondary, #4b5563);
+}
+
+.depthRow strong {
+  text-align: right;
+  font-weight: 600;
+}
+
+.depthTrack {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--console-management-border, #e5e7eb);
+}
+
+.placeholderHint {
+  margin: 10px 0 0;
+  color: var(--console-management-text-muted, #8a94a6);
+  font-size: 12px;
+}
+
+@media (max-width: 1180px) {
+  .workspace {
+    grid-template-columns: 220px minmax(0, 1fr);
+  }
+
+  .rulePanel {
+    border-right: 0;
+  }
+
+  .inspectionPanel {
+    grid-column: 1 / -1;
+    border-top: 1px solid var(--console-management-border, #e5e7eb);
+  }
+}
+
+@media (max-width: 760px) {
+  .workspace {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .skillListPanel,
+  .rulePanel {
+    border-right: 0;
+    border-bottom: 1px solid var(--console-management-border, #e5e7eb);
+  }
+
+  .inspectionPanel {
+    grid-column: auto;
+  }
+
+  .metricGrid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skillRow {
+    transition: none;
+  }
+}
