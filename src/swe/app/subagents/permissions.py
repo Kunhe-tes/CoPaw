@@ -21,7 +21,7 @@ def build_definition_policy(
     parent: PermissionPolicy,
 ) -> PermissionPolicy:
     """Derive a Definition policy that can only narrow the parent policy."""
-    metadata = definition.skill_owned
+    metadata = definition.skill_owned or definition.agent_owned
     if metadata is None:
         return parent.model_copy(deep=True)
     tool_config = metadata.tools
@@ -80,21 +80,13 @@ def compose_effective_policy(
             allow_file_write=all(
                 policy.mutation.allow_file_write for policy in policies
             ),
-            allow_patch=all(
-                policy.mutation.allow_patch for policy in policies
-            ),
-            allow_delete=all(
-                policy.mutation.allow_delete for policy in policies
-            ),
+            allow_patch=all(policy.mutation.allow_patch for policy in policies),
+            allow_delete=all(policy.mutation.allow_delete for policy in policies),
             allow_format_write=all(
                 policy.mutation.allow_format_write for policy in policies
             ),
-            allow_migration=all(
-                policy.mutation.allow_migration for policy in policies
-            ),
-            allow_deploy=all(
-                policy.mutation.allow_deploy for policy in policies
-            ),
+            allow_migration=all(policy.mutation.allow_migration for policy in policies),
+            allow_deploy=all(policy.mutation.allow_deploy for policy in policies),
         ),
     )
 
@@ -254,14 +246,12 @@ def _uses_sed_in_place(command: str) -> bool:
         and (
             any(part.startswith("-i") for part in parts[1:])
             or any(
-                lower_part == "--in-place"
-                or lower_part.startswith("--in-place=")
+                lower_part == "--in-place" or lower_part.startswith("--in-place=")
                 for lower_part in (part.lower() for part in parts[1:])
             )
             or _uses_sed_script_file(parts)
             or any(
-                _sed_script_uses_write_or_exec(script)
-                for script in _sed_scripts(parts)
+                _sed_script_uses_write_or_exec(script) for script in _sed_scripts(parts)
             )
         ),
     )
@@ -363,9 +353,7 @@ def _sed_script_has_write_or_exec_command(script: str) -> bool:
 
 def _skip_sed_command_boundaries(script: str, index: int) -> int:
     """Skip whitespace and command separators before a sed command."""
-    while index < len(script) and (
-        script[index].isspace() or script[index] in ";{}"
-    ):
+    while index < len(script) and (script[index].isspace() or script[index] in ";{}"):
         index += 1
     return index
 

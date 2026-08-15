@@ -2,6 +2,11 @@
 """SubAgent runtime primitives for bounded internal delegation."""
 
 from .builtins import builtin_definition_provider
+from .agent_definitions import (
+    AgentOwnedDefinitionConflict,
+    AgentOwnedDefinitionPackage,
+    AgentOwnedDefinitionRepository,
+)
 from .definition_service import SubAgentDefinitionService
 from .definition_store import DefinitionUpsertResult, SubAgentDefinitionStore
 from .manager import DelegationManager
@@ -70,6 +75,9 @@ from .runtime import SubAgentRuntime
 
 __all__ = [
     "AgentRegistry",
+    "AgentOwnedDefinitionConflict",
+    "AgentOwnedDefinitionPackage",
+    "AgentOwnedDefinitionRepository",
     "AgentResult",
     "BackgroundRunStatus",
     "BackgroundSubAgentNotManageable",

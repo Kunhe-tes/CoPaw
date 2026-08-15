@@ -45,6 +45,7 @@ import ReportViewPage from "../../pages/ReportView";
 import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
 import MyMCPPage from "../../pages/MyMCP";
+import ExpertsPage from "../../pages/Experts";
 
 import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
 
@@ -91,6 +92,7 @@ const pathToKey: Record<string, string> = {
   "/market": "market",
   "/my-skills": "my-skills",
   "/my-mcp": "my-mcp",
+  "/experts": "experts",
 };
 
 export default function MainLayout() {
@@ -205,6 +207,7 @@ export default function MainLayout() {
               <Route path="/market" element={<MarketPage />} />
               <Route path="/my-skills" element={<MySkillsPage />} />
               <Route path="/my-mcp" element={<MyMCPPage />} />
+              <Route path="/experts" element={<ExpertsPage />} />
             </Routes>
           </div>
         </Content>

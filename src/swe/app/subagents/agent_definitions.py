@@ -108,6 +108,12 @@ class AgentOwnedDefinitionRepository:
             self._write(package)
             return self.get(definition_id)  # type: ignore[return-value]
 
+    def preview(self, payload: dict[str, Any]) -> AgentOwnedDefinitionPackage:
+        """Validate and render an unsaved disabled package for the editor."""
+        normalized = dict(payload)
+        normalized.setdefault("enabled", False)
+        return self._package_from_payload(str(uuid4()), normalized)
+
     def update(
         self,
         definition_id: str,
@@ -289,9 +295,7 @@ class AgentOwnedDefinitionRepository:
             definition_id=definition_id,
             declared_skills=_string_list(payload.get("skills"), "skills"),
             declared_mcps=(
-                _string_list(payload.get("mcps"), "mcps")
-                if "mcps" in payload
-                else None
+                _string_list(payload.get("mcps"), "mcps") if "mcps" in payload else None
             ),
             tools=_parse_tools(payload.get("tools")),
             model=_parse_model(payload.get("model")),
@@ -458,9 +462,7 @@ def _string(value: Any, field: str) -> str:
 def _string_list(value: Any, field: str) -> list[str]:
     if value is None:
         return []
-    if not isinstance(value, list) or not all(
-        isinstance(item, str) for item in value
-    ):
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{field} must be an array of strings")
     cleaned = [item.strip() for item in value]
     if not all(cleaned) or len(cleaned) != len(set(cleaned)):
@@ -492,14 +494,10 @@ def _revision(toml: str | bytes) -> str:
 
 def _render_toml(payload: dict[str, Any]) -> str:
     scalar_items = [
-        (key, value)
-        for key, value in payload.items()
-        if not isinstance(value, dict)
+        (key, value) for key, value in payload.items() if not isinstance(value, dict)
     ]
     table_items = [
-        (key, value)
-        for key, value in payload.items()
-        if isinstance(value, dict)
+        (key, value) for key, value in payload.items() if isinstance(value, dict)
     ]
     lines = [_render_assignment(key, value) for key, value in scalar_items]
     for key, value in table_items:
@@ -517,9 +515,7 @@ def _render_assignment(key: str, value: Any) -> str:
 
 def _render_key(key: str) -> str:
     return (
-        key
-        if _BARE_KEY_PATTERN.fullmatch(key)
-        else json.dumps(key, ensure_ascii=False)
+        key if _BARE_KEY_PATTERN.fullmatch(key) else json.dumps(key, ensure_ascii=False)
     )
 
 

@@ -60,22 +60,29 @@ class SkillDefinitionLoadResult:
 
 
 class SubAgentDefinitionCatalog:
-    """Resolve Skill-owned definitions without changing legacy matching."""
+    """Resolve the enabled reusable definitions for one Main Agent turn."""
 
     def __init__(
         self,
         *,
         skill_definitions: list[SubAgentDefinition],
+        agent_owned_definitions: list[SubAgentDefinition],
         legacy_registry: AgentRegistry,
     ) -> None:
         self._skill_definitions = {
             definition.name: definition for definition in skill_definitions
         }
+        self._agent_owned_definitions = {
+            definition.name: definition for definition in agent_owned_definitions
+        }
         self._legacy_registry = legacy_registry
 
     def resolve_exact(self, name: str) -> SubAgentDefinition | None:
-        """Resolve a qualified Skill name, then an enabled legacy name."""
+        """Resolve one exact enabled Definition name."""
         definition = self._skill_definitions.get(name)
+        if definition is not None:
+            return definition if definition.enabled else None
+        definition = self._agent_owned_definitions.get(name)
         if definition is not None:
             return definition if definition.enabled else None
         try:
@@ -90,6 +97,21 @@ class SubAgentDefinitionCatalog:
             for definition in self._skill_definitions.values()
             if definition.enabled
         ]
+
+    def list_definitions(self) -> list[SubAgentDefinition]:
+        """List enabled definitions without exposing their source to the LLM."""
+        return sorted(
+            [
+                *self.list_skill_definitions(),
+                *(
+                    definition
+                    for definition in self._agent_owned_definitions.values()
+                    if definition.enabled
+                ),
+                *self.list_legacy_definitions(),
+            ],
+            key=lambda definition: definition.name,
+        )
 
     def list_legacy_definitions(self) -> list[SubAgentDefinition]:
         """List enabled Stored and built-in definitions for legacy matching."""
@@ -127,6 +149,7 @@ def build_definition_catalog(
     skill_definitions: list[SubAgentDefinition],
     stored_definitions: list[SubAgentDefinition],
     builtin_definitions: list[SubAgentDefinition],
+    agent_owned_definitions: list[SubAgentDefinition] | None = None,
 ) -> SubAgentDefinitionCatalog:
     """Build a collision-free catalog for one Main Agent runtime view."""
     seen_skill_names: set[str] = set()
@@ -137,7 +160,8 @@ def build_definition_catalog(
         )
 
     builtin_names = {definition.name for definition in builtin_definitions}
-    for definition in stored_definitions:
+    agent_owned_definitions = agent_owned_definitions or []
+    for definition in [*stored_definitions, *agent_owned_definitions]:
         if ":" in definition.name or definition.name in seen_skill_names:
             raise DefinitionValidationError(
                 "stored definition cannot claim reserved Skill-qualified "
@@ -151,6 +175,7 @@ def build_definition_catalog(
 
     return SubAgentDefinitionCatalog(
         skill_definitions=skill_definitions,
+        agent_owned_definitions=agent_owned_definitions,
         legacy_registry=AgentRegistry(
             [
                 InMemoryDefinitionProvider(builtin_definitions),
@@ -250,11 +275,7 @@ def _load_one(path: Path, skill_name: str) -> SubAgentDefinition:
     description = _string(payload.get("description"), "description")
     instruction = _string(payload.get("instruction"), "instruction")
     declared_skills = _string_list(payload.get("skills"), "skills")
-    declared_mcps = (
-        _string_list(payload["mcps"], "mcps")
-        if "mcps" in payload
-        else None
-    )
+    declared_mcps = _string_list(payload["mcps"], "mcps") if "mcps" in payload else None
     trigger_keywords = _string_list(
         payload.get("trigger_keywords"),
         "trigger_keywords",
@@ -272,7 +293,7 @@ def _load_one(path: Path, skill_name: str) -> SubAgentDefinition:
     )
     return SubAgentDefinition(
         name=f"{skill_name}:{local_name}",
-        source="stored",
+        source="skill_owned",
         owner_scope=f"skill:{skill_name}",
         description=description,
         instruction=instruction,

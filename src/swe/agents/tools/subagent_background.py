@@ -12,6 +12,7 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
 from ...app.subagents import (
+    AgentOwnedDefinitionRepository,
     AgentRegistry,
     BackgroundSubAgentNotManageable,
     BackgroundSubAgentScope,
@@ -21,6 +22,7 @@ from ...app.subagents import (
     DelegationSpec,
     DefinitionMatchMetadata,
     PermissionPolicy,
+    SubAgentDefinition,
     SubAgentDefinitionService,
     SubAgentDefinitionStore,
     SubAgentRegistrationRequest,
@@ -60,9 +62,7 @@ _START_SUBAGENT_DESCRIPTION = (
 )
 
 
-def get_default_background_subagent_supervisor() -> (
-    BackgroundSubAgentSupervisor
-):
+def get_default_background_subagent_supervisor() -> BackgroundSubAgentSupervisor:
     """Return the process-local default Background SubAgent supervisor."""
     return _DEFAULT_SUPERVISOR
 
@@ -86,8 +86,7 @@ def has_subagent_registration_intent(
 def has_explicit_subagent_run_id(request_context: dict[str, Any]) -> bool:
     """Return whether this request explicitly carries a Background Run id."""
     return any(
-        str(request_context.get(key) or "").strip()
-        for key in _RUN_ID_CONTEXT_KEYS
+        str(request_context.get(key) or "").strip() for key in _RUN_ID_CONTEXT_KEYS
     )
 
 
@@ -124,7 +123,6 @@ def create_background_subagent_tools(
     parent_agent_config: AgentProfileConfig,
     workspace_dir: Path,
     request_context: dict[str, Any],
-    include_registration_tool: bool = False,
     effective_skill_names: list[str] | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
@@ -137,7 +135,7 @@ def create_background_subagent_tools(
         tool_scope=tool_scope,
     )
     definition_catalog = _build_definition_catalog(
-        definition_service=definition_service,
+        tool_scope=tool_scope,
         workspace_dir=workspace_dir,
         effective_skill_names=effective_skill_names,
     )
@@ -173,15 +171,12 @@ def create_background_subagent_tools(
                 },
             )
         try:
-            match = (
-                definition_service.resolve_start_definition(
-                    start_request,
-                    definition_catalog,
-                )
+            definition = (
+                definition_catalog.resolve_exact(start_request.name)
                 if definition_catalog is not None
-                else definition_service.match_start_request(start_request)
+                else None
             )
-            if match is None:
+            if definition is None:
                 if start_request.instruction is None:
                     return _json_response(
                         {
@@ -190,16 +185,25 @@ def create_background_subagent_tools(
                             "name": start_request.name,
                         },
                     )
-                definition_match = DefinitionMatchMetadata(matched=False)
-                definition = definition_service.build_run_scoped_definition(
-                    start_request,
-                    owner_scope=(
-                        f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"
-                    ),
+                definition_match = DefinitionMatchMetadata(
+                    matched=False,
+                    reason="run_scoped",
+                )
+                definition = SubAgentDefinition(
+                    name=start_request.name,
+                    source="run_scoped",
+                    owner_scope=(f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"),
+                    description="Temporary caller-defined SubAgent.",
+                    instruction=start_request.instruction,
                 )
             else:
-                definition_match = match.metadata
-                definition = match.definition
+                definition_match = DefinitionMatchMetadata(
+                    matched=True,
+                    definition_name=definition.name,
+                    definition_source=definition.source,
+                    score=1.0,
+                    reason="exact_name",
+                )
             spec = DelegationSpec(
                 parent_thread_id=str(request_context.get("session_id") or ""),
                 name=start_request.name,
@@ -220,7 +224,10 @@ def create_background_subagent_tools(
                 definition_match=definition_match,
                 effective_skill_names=(
                     list(effective_skill_names or [])
-                    if definition.skill_owned is not None
+                    if (
+                        definition.skill_owned is not None
+                        or definition.agent_owned is not None
+                    )
                     else []
                 ),
             )
@@ -330,52 +337,47 @@ def create_background_subagent_tools(
         "get_subagent": get_subagent,
         "cancel_subagent": cancel_subagent,
     }
-    if include_registration_tool:
-        tools["register_subagent_definition"] = register_subagent_definition
     return tools
 
 
 def _build_definition_catalog(
     *,
-    definition_service: SubAgentDefinitionService,
+    tool_scope: BackgroundSubAgentScope,
     workspace_dir: Path,
     effective_skill_names: list[str] | None,
 ):
     """Build the catalog only for an explicit delegation-intent turn."""
-    if effective_skill_names is None:
-        return None
-    available = definition_service.list_available_definitions()
+    builtin_definitions = builtin_definition_provider().list_definitions()
+    agent_packages = AgentOwnedDefinitionRepository(
+        workspace_dir / "agents",
+        owner_scope=f"{tool_scope.tenant_id}/{tool_scope.agent_id}",
+        builtin_names={definition.name for definition in builtin_definitions},
+    ).list()
     return build_definition_catalog(
         skill_definitions=load_skill_owned_definitions(
             workspace_dir=workspace_dir,
-            effective_skill_names=effective_skill_names,
+            effective_skill_names=effective_skill_names or [],
         ).definitions,
-        stored_definitions=[
-            definition
-            for definition in available
-            if definition.source == "stored" and ":" not in definition.name
-        ],
-        builtin_definitions=[
-            definition
-            for definition in available
-            if definition.source == "builtin"
+        stored_definitions=[],
+        builtin_definitions=builtin_definitions,
+        agent_owned_definitions=[
+            package.definition
+            for package in agent_packages
+            if package.definition is not None
         ],
     )
 
 
 def _format_skill_definition_directory(catalog) -> str:
     """Build the bounded Definition directory included in tool metadata."""
-    definitions = (
-        catalog.list_skill_definitions() if catalog is not None else []
-    )
+    definitions = catalog.list_definitions() if catalog is not None else []
     if not definitions:
         return _START_SUBAGENT_DESCRIPTION
-    lines = [_START_SUBAGENT_DESCRIPTION, "Available Skill-owned definitions:"]
+    lines = [_START_SUBAGENT_DESCRIPTION, "Available definitions:"]
     for definition in definitions:
         keywords = ", ".join(definition.trigger_keywords) or "(none)"
         lines.append(
-            f"- {definition.name}: {definition.description} "
-            f"[keywords: {keywords}]",
+            f"- {definition.name}: {definition.description} " f"[keywords: {keywords}]",
         )
     return "\n".join(lines)
 
@@ -487,8 +489,7 @@ def _compact_agent_result(result: Any) -> dict[str, Any]:
     payload = {"summary": result.summary}
     errors = getattr(result, "errors", []) or []
     if any(
-        getattr(error, "code", "") == "text_finalization_failed"
-        for error in errors
+        getattr(error, "code", "") == "text_finalization_failed" for error in errors
     ):
         payload["error_code"] = "text_finalization_failed"
     return payload

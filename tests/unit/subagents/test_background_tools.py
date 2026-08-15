@@ -30,7 +30,12 @@ from swe.app.subagents import (
     SubAgentDefinitionStore,
     builtin_definition_provider,
 )
-from swe.config.config import AgentProfileConfig, ToolsConfig
+from swe.config.config import (
+    AgentProfileConfig,
+    MCPClientConfig,
+    MCPConfig,
+    ToolsConfig,
+)
 
 
 def _agent_config(tmp_path: Path) -> AgentProfileConfig:
@@ -508,6 +513,109 @@ async def test_start_subagent_resolves_skill_owned_definition_without_instructio
     assert "security, review" in tools["start_subagent"].__doc__
 
 
+@pytest.mark.asyncio
+async def test_skill_toml_subagent_launches_with_declared_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A Skill TOML definition reaches a worker with only declared inputs."""
+    from swe.app.subagents import supervisor as supervisor_module
+    from swe.app.subagents.worker import load_launch_spec
+    from swe.providers.models import ModelSlotConfig
+
+    monkeypatch.setattr(
+        supervisor_module,
+        "capture_model_launch_snapshot",
+        lambda **_kwargs: (
+            None,
+            ModelSlotConfig(provider_id="parent", model="parent-model"),
+        ),
+    )
+    skill_dir = tmp_path / "skills" / "quality"
+    agents_dir = skill_dir / "agents"
+    agents_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Quality\n", encoding="utf-8")
+    (agents_dir / "patch-editor.toml").write_text(
+        'name = "patch-editor"\n'
+        'description = "Edit a requested patch and report the result."\n'
+        'instruction = "Edit only files in the requested scope."\n'
+        'skills = ["quality"]\n'
+        'mcps = ["github"]\n'
+        'trigger_keywords = ["patch", "edit"]\n'
+        "\n"
+        "[model]\n"
+        'provider = "openai"\n'
+        'id = "gpt-5-mini"\n',
+        encoding="utf-8",
+    )
+    config = _agent_config(tmp_path)
+    config.tools = ToolsConfig()
+    config.mcp = MCPConfig(
+        clients={
+            "github": MCPClientConfig(name="github", command="github-mcp"),
+            "undeclared": MCPClientConfig(
+                name="undeclared",
+                command="undeclared-mcp",
+            ),
+        },
+    )
+    popen_factory = _FakePopenFactory()
+    supervisor = BackgroundSubAgentSupervisor(
+        popen_factory=popen_factory,
+    )
+    run_store_dir = tmp_path / "subagent_runs"
+    tools = create_background_subagent_tools(
+        supervisor=supervisor,
+        parent_agent_config=config,
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+            "session_id": "session-1",
+            "_subagent_run_store_dir": str(run_store_dir),
+            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
+        },
+        effective_skill_names=["quality"],
+    )
+
+    response = await tools["start_subagent"](
+        name="quality:patch-editor",
+        objective="Update the requested patch.",
+        background="Keep the change minimal.",
+    )
+    payload = json.loads(response.content[0]["text"])
+    record = await PerRunSubAgentRunStore(run_store_dir).get(
+        payload["run_id"],
+    )
+    launch_spec = load_launch_spec(
+        run_store_dir / f"{payload['run_id']}.launch.json",
+    )
+
+    assert payload["accepted"] is True
+    assert record is not None
+    assert record.definition_name == "quality:patch-editor"
+    assert record.definition_match.reason == "exact_name"
+    assert {"write_file", "edit_file"} <= set(
+        record.effective_policy.tools.allow,
+    )
+    assert launch_spec.definition.instruction == (
+        "Edit only files in the requested scope."
+    )
+    assert launch_spec.definition.skill_owned.model.id == "gpt-5-mini"
+    assert launch_spec.launch_snapshot.skill_snapshot_dirs == [
+        str(run_store_dir / f"{payload['run_id']}.skills" / "quality"),
+    ]
+    assert launch_spec.launch_diagnostics.loaded_skills == ["quality"]
+    assert launch_spec.launch_diagnostics.snapshotted_mcps == ["github"]
+    assert launch_spec.launch_snapshot.private_mcp_snapshot_path is not None
+    mcp_snapshot = json.loads(
+        Path(
+            launch_spec.launch_snapshot.private_mcp_snapshot_path,
+        ).read_text(),
+    )
+    assert set(mcp_snapshot) == {"github"}
+
+
 def test_catalog_ignores_legacy_reserved_stored_name(tmp_path: Path) -> None:
     store = SubAgentDefinitionStore(tmp_path / "definitions")
     store.upsert(
@@ -610,7 +718,7 @@ async def test_start_subagent_returns_not_found_without_instruction(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_register_subagent_definition_returns_registration_status(
+async def test_register_subagent_definition_is_not_exposed_to_main_agent(
     tmp_path,
 ):
     tools = create_background_subagent_tools(
@@ -622,17 +730,9 @@ async def test_register_subagent_definition_returns_registration_status(
             "agent_id": "agent-1",
             "_subagent_definition_store_dir": str(tmp_path / "definitions"),
         },
-        include_registration_tool=True,
     )
 
-    response = await tools["register_subagent_definition"](
-        name="aum-customer-analyst",
-        instruction="Act as a customer strategy analyst.",
-        description="Analyzes customer maintenance.",
-    )
-    payload = json.loads(response.content[0]["text"])
-
-    assert payload == {"status": "registered", "name": "aum-customer-analyst"}
+    assert "register_subagent_definition" not in tools
 
 
 @pytest.mark.asyncio
@@ -656,7 +756,7 @@ async def test_start_subagent_uses_matched_definition(tmp_path):
     )
 
     response = await tools["start_subagent"](
-        name="risk reviewer",
+        name="risk-reviewer",
         instruction="This should not override the matched definition.",
         objective="Review risk in this plan.",
     )

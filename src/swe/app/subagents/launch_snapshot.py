@@ -34,7 +34,7 @@ def capture_launch_dependencies(
     effective_skill_names: list[str],
 ) -> tuple[list[str], str | None, SubAgentLaunchDiagnostics]:
     """Snapshot effective Skills and MCP configuration privately."""
-    metadata = definition.skill_owned
+    metadata = definition.skill_owned or definition.agent_owned
     snapshot_root = run_store_dir / f"{run_id}.skills"
     loaded_skills: list[str] = []
     skipped_skills: list[str] = []
@@ -192,8 +192,8 @@ def resolve_skill_owned_model_slot(
     tenant_id: str,
     definition: SubAgentDefinition,
 ) -> ModelSlotConfig | None:
-    """Resolve a validated model override for a Skill-owned Definition."""
-    metadata = definition.skill_owned
+    """Resolve a validated model override for a configured Definition."""
+    metadata = definition.skill_owned or definition.agent_owned
     reference = metadata.model if metadata is not None else None
     if reference is None:
         return None
@@ -414,9 +414,7 @@ def _copy_skill_directory(source_fd: int, target_fd: int) -> None:
                 os.mkdir(name, dir_fd=target_fd)
                 child_target_fd = os.open(
                     name,
-                    os.O_RDONLY
-                    | os.O_DIRECTORY
-                    | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
                     dir_fd=target_fd,
                 )
                 try:
@@ -440,10 +438,7 @@ def _copy_skill_directory(source_fd: int, target_fd: int) -> None:
                 )
             target_file_fd = os.open(
                 name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | getattr(os, "O_NOFOLLOW", 0),
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
                 dir_fd=target_fd,
             )

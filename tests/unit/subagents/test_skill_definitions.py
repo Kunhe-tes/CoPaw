@@ -89,7 +89,7 @@ timeout_ms = 120000
     assert loaded.errors == []
     definition = loaded.definitions[0]
     assert definition.name == "security:reviewer"
-    assert definition.source == "stored"
+    assert definition.source == "skill_owned"
     assert definition.skill_owned is not None
     assert definition.skill_owned.local_name == "reviewer"
     assert definition.skill_owned.declared_skills == ["security"]

@@ -70,7 +70,10 @@ async def run_worker(launch_spec_path: Path) -> int:
         selected_slot, selected_provider, parent_slot, parent_provider = (
             _load_snapshotted_model(launch_spec)
         )
-        if launch_spec.definition.skill_owned is None:
+        if (
+            launch_spec.definition.skill_owned is None
+            and launch_spec.definition.agent_owned is None
+        ):
             selected_slot = parent_slot
             selected_provider = parent_provider
         elif selected_slot is None or selected_provider is None:

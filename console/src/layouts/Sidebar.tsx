@@ -186,6 +186,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/my-mcp",
       label: t("nav.myMcp"),
     },
+    { key: "experts", icon: <SearchCheck size={18} />, path: "/experts", label: "专家" },
     // 应用市场
     {
       key: "market",
@@ -373,6 +374,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           label: collapsed ? null : t("nav.myMcp"),
           icon: <Puzzle size={16} />,
         },
+        { key: "experts", label: collapsed ? null : "专家", icon: <SearchCheck size={16} /> },
       ],
     },
     // 3. 应用市场（单独一级）
