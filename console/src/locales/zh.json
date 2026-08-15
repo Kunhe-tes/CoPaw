@@ -55,6 +55,7 @@
     "models": "模型管理",
     "environments": "环境变量配置",
     "security": "安全策略配置",
+    "skillConfig": "SKILL 配置",
     "tokenUsage": "Token 消耗",
     "voiceTranscription": "语音转写",
     "analytics": "分析",
