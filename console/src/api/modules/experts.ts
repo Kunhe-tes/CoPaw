@@ -30,6 +30,7 @@ const mutation = (method: "POST" | "PUT" | "DELETE", body?: unknown, revision?: 
 
 export const expertsApi = {
   listExperts: () => request<Expert[]>("/experts"),
+  previewExpert: (payload: ExpertPayload) => request<Expert>("/experts/preview", mutation("POST", payload)),
   createExpert: (payload: ExpertPayload) => request<Expert>("/experts", mutation("POST", payload)),
   updateExpert: (id: string, payload: ExpertPayload, revision: string) =>
     request<Expert>(`/experts/${encodeURIComponent(id)}`, mutation("PUT", payload, revision)),
