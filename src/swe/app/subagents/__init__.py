@@ -7,14 +7,7 @@ from .agent_definitions import (
     AgentOwnedDefinitionPackage,
     AgentOwnedDefinitionRepository,
 )
-from .definition_service import SubAgentDefinitionService
-from .definition_store import DefinitionUpsertResult, SubAgentDefinitionStore
 from .manager import DelegationManager
-from .matcher import (
-    DefinitionMatchResult,
-    SubAgentDefinitionMatcher,
-    normalize_name,
-)
 from .models import (
     AgentResult,
     BackgroundRunStatus,
@@ -24,7 +17,6 @@ from .models import (
     DefinitionValidationError,
     PermissionPolicy,
     SubAgentDefinition,
-    SubAgentRegistrationRequest,
     SubAgentRunRecord,
     SubAgentStartRequest,
     TERMINAL_BACKGROUND_RUN_STATUSES,
@@ -88,9 +80,7 @@ __all__ = [
     "BackgroundSubAgentWaitSnapshot",
     "DelegationManager",
     "DelegationSpec",
-    "DefinitionMatchResult",
     "DefinitionMatchMetadata",
-    "DefinitionUpsertResult",
     "DefinitionValidationError",
     "InMemoryDefinitionProvider",
     "InMemorySubAgentRunStore",
@@ -98,11 +88,7 @@ __all__ = [
     "PerRunSubAgentRunStore",
     "PermissionPolicy",
     "SubAgentDefinition",
-    "SubAgentDefinitionMatcher",
-    "SubAgentDefinitionService",
-    "SubAgentDefinitionStore",
     "SubAgentDefinitionProvider",
-    "SubAgentRegistrationRequest",
     "SubAgentRunRecord",
     "SubAgentRuntime",
     "SubAgentRunStore",
@@ -122,7 +108,6 @@ __all__ = [
     "build_definition_policy",
     "capture_launch_dependencies",
     "compose_effective_policy",
-    "normalize_name",
     "validate_tool_call",
     "load_skill_owned_definitions",
     "read_and_remove_private_mcp_snapshot",

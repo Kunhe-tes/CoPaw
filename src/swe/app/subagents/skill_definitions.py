@@ -20,7 +20,6 @@ from .models import (
     SkillOwnedToolConfig,
     SubAgentDefinition,
 )
-from .registry import AgentRegistry, InMemoryDefinitionProvider
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -67,7 +66,7 @@ class SubAgentDefinitionCatalog:
         *,
         skill_definitions: list[SubAgentDefinition],
         agent_owned_definitions: list[SubAgentDefinition],
-        legacy_registry: AgentRegistry,
+        builtin_definitions: list[SubAgentDefinition],
     ) -> None:
         self._skill_definitions = {
             definition.name: definition for definition in skill_definitions
@@ -75,7 +74,9 @@ class SubAgentDefinitionCatalog:
         self._agent_owned_definitions = {
             definition.name: definition for definition in agent_owned_definitions
         }
-        self._legacy_registry = legacy_registry
+        self._builtin_definitions = {
+            definition.name: definition for definition in builtin_definitions
+        }
 
     def resolve_exact(self, name: str) -> SubAgentDefinition | None:
         """Resolve one exact enabled Definition name."""
@@ -85,10 +86,8 @@ class SubAgentDefinitionCatalog:
         definition = self._agent_owned_definitions.get(name)
         if definition is not None:
             return definition if definition.enabled else None
-        try:
-            return self._legacy_registry.resolve(name)
-        except KeyError:
-            return None
+        definition = self._builtin_definitions.get(name)
+        return definition if definition is not None and definition.enabled else None
 
     def list_skill_definitions(self) -> list[SubAgentDefinition]:
         """List enabled Skill-owned definitions in catalog order."""
@@ -108,19 +107,14 @@ class SubAgentDefinitionCatalog:
                     for definition in self._agent_owned_definitions.values()
                     if definition.enabled
                 ),
-                *self.list_legacy_definitions(),
+                *(
+                    definition
+                    for definition in self._builtin_definitions.values()
+                    if definition.enabled
+                ),
             ],
             key=lambda definition: definition.name,
         )
-
-    def list_legacy_definitions(self) -> list[SubAgentDefinition]:
-        """List enabled Stored and built-in definitions for legacy matching."""
-        return [
-            definition
-            for definition in self._legacy_registry.list()
-            if definition.enabled
-        ]
-
 
 def _validate_skill_definition_ownership(
     definition: SubAgentDefinition,
@@ -147,9 +141,8 @@ def _validate_skill_definition_ownership(
 def build_definition_catalog(
     *,
     skill_definitions: list[SubAgentDefinition],
-    stored_definitions: list[SubAgentDefinition],
     builtin_definitions: list[SubAgentDefinition],
-    agent_owned_definitions: list[SubAgentDefinition] | None = None,
+    agent_owned_definitions: list[SubAgentDefinition],
 ) -> SubAgentDefinitionCatalog:
     """Build a collision-free catalog for one Main Agent runtime view."""
     seen_skill_names: set[str] = set()
@@ -160,28 +153,32 @@ def build_definition_catalog(
         )
 
     builtin_names = {definition.name for definition in builtin_definitions}
-    agent_owned_definitions = agent_owned_definitions or []
-    for definition in [*stored_definitions, *agent_owned_definitions]:
+    duplicate_names = {
+        definition.name
+        for definition in agent_owned_definitions
+        if sum(item.name == definition.name for item in agent_owned_definitions) > 1
+    }
+    agent_owned_definitions = [
+        definition
+        for definition in agent_owned_definitions
+        if definition.name not in duplicate_names
+    ]
+    for definition in agent_owned_definitions:
         if ":" in definition.name or definition.name in seen_skill_names:
             raise DefinitionValidationError(
-                "stored definition cannot claim reserved Skill-qualified "
+                "agent-owned definition cannot claim reserved Skill-qualified "
                 f"SubAgent name: {definition.name}",
             )
         if definition.name in builtin_names:
             raise DefinitionValidationError(
-                "stored definition cannot shadow builtin SubAgent definition: "
+                "agent-owned definition cannot shadow builtin SubAgent definition: "
                 f"{definition.name}",
             )
 
     return SubAgentDefinitionCatalog(
         skill_definitions=skill_definitions,
         agent_owned_definitions=agent_owned_definitions,
-        legacy_registry=AgentRegistry(
-            [
-                InMemoryDefinitionProvider(builtin_definitions),
-                InMemoryDefinitionProvider(stored_definitions),
-            ],
-        ),
+        builtin_definitions=builtin_definitions,
     )
 
 

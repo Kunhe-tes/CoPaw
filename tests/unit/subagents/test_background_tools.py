@@ -27,7 +27,6 @@ from swe.app.subagents import (
     PermissionPolicy,
     SubAgentStartRequest,
     SubAgentDefinition,
-    SubAgentDefinitionStore,
     builtin_definition_provider,
 )
 from swe.config.config import (
@@ -614,34 +613,6 @@ async def test_skill_toml_subagent_launches_with_declared_dependencies(
         ).read_text(),
     )
     assert set(mcp_snapshot) == {"github"}
-
-
-def test_catalog_ignores_legacy_reserved_stored_name(tmp_path: Path) -> None:
-    store = SubAgentDefinitionStore(tmp_path / "definitions")
-    store.upsert(
-        SubAgentDefinition.model_validate(
-            {
-                "name": "security:legacy",
-                "source": "stored",
-                "description": "Legacy definition.",
-                "instruction": "Inspect evidence.",
-            },
-        ),
-    )
-
-    tools = create_background_subagent_tools(
-        supervisor=SimpleNamespace(),
-        parent_agent_config=_agent_config(tmp_path),
-        workspace_dir=tmp_path,
-        request_context={
-            "tenant_id": "tenant-1",
-            "agent_id": "agent-1",
-            "_subagent_definition_store_dir": str(tmp_path / "definitions"),
-        },
-        effective_skill_names=[],
-    )
-
-    assert "start_subagent" in tools
 
 
 @pytest.mark.asyncio

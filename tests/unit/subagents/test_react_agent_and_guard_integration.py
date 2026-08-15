@@ -515,7 +515,7 @@ def test_start_subagent_description_lists_enabled_skill_definitions(
     assert "security, review" in description
 
 
-def test_register_subagent_definition_requires_registration_intent(
+def test_register_subagent_definition_is_never_exposed(
     tmp_path: Path,
 ) -> None:
     """Registration tool is not exposed for ordinary SubAgent intent."""
@@ -526,20 +526,10 @@ def test_register_subagent_definition_requires_registration_intent(
             "current_user_text": "请用子代理分析这个模块",
         },
     )
-    registration = _bare_agent(
-        tmp_path,
-        request_context={
-            "agent_role": "main",
-            "current_user_text": "注册一个可复用 SubAgent Definition",
-        },
-    )
-
     normal_tools = SWEAgent._create_toolkit(normal).tools
-    registration_tools = SWEAgent._create_toolkit(registration).tools
 
     assert "start_subagent" in normal_tools
     assert "register_subagent_definition" not in normal_tools
-    assert "register_subagent_definition" in registration_tools
 
 
 @pytest.mark.parametrize(

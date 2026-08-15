@@ -20,7 +20,6 @@ from swe.app.subagents import (
     SkillOwnedDefinitionMetadata,
     SkillOwnedToolConfig,
     SubAgentDefinition,
-    SubAgentRegistrationRequest,
     builtin_definition_provider,
     compose_effective_policy,
     build_definition_policy,
@@ -39,7 +38,7 @@ def test_definition_uses_instruction_and_top_level_routing_fields() -> None:
     definition = SubAgentDefinition.model_validate(
         {
             "name": "customer-aum-analyst",
-            "source": "stored",
+            "source": "agent_owned",
             "description": "Analyzes 1M AUM customer maintenance strategy.",
             "instruction": "Act as a customer strategy analyst.",
             "trigger_keywords": ["AUM", "客户维护"],
@@ -52,7 +51,7 @@ def test_definition_uses_instruction_and_top_level_routing_fields() -> None:
     assert "output_contract" not in definition.model_dump()
     assert definition.trigger_keywords == ["AUM", "客户维护"]
     assert definition.priority == 20
-    assert definition.source == "stored"
+    assert definition.source == "agent_owned"
 
 
 @pytest.mark.parametrize(
@@ -72,7 +71,7 @@ def test_definition_rejects_invalid_matching_lists(
         SubAgentDefinition.model_validate(
             {
                 "name": "invalid-match-list",
-                "source": "stored",
+                "source": "agent_owned",
                 "description": "Invalid match list.",
                 "instruction": "Act as an analyst.",
                 field_name: value,
@@ -85,19 +84,19 @@ def test_definition_rejects_invalid_matching_lists(
     [
         {
             "name": "legacy",
-            "source": "stored",
+            "source": "agent_owned",
             "description": "legacy",
             "system_prompt": "legacy",
         },
         {
             "name": "legacy",
-            "source": "stored",
+            "source": "agent_owned",
             "description": "legacy",
             "prompt": {"system": "legacy"},
         },
         {
             "agent_name": "legacy",
-            "source": "stored",
+            "source": "agent_owned",
             "description": "legacy",
             "instruction": "legacy",
         },
@@ -116,18 +115,9 @@ def test_definition_rejects_legacy_field_names(payload: dict) -> None:
             SubAgentDefinition,
             {
                 "name": "analyst",
-                "source": "stored",
+                "source": "agent_owned",
                 "description": "Analyzes repository evidence.",
                 "instruction": "Inspect repository evidence.",
-                "output_contract": "Return JSON.",
-            },
-        ),
-        (
-            SubAgentRegistrationRequest,
-            {
-                "name": "analyst",
-                "instruction": "Inspect repository evidence.",
-                "description": "Analyzes repository evidence.",
                 "output_contract": "Return JSON.",
             },
         ),
@@ -233,28 +223,6 @@ def test_start_request_allows_omitting_instruction_for_resolved_definition() -> 
     assert resolved.instruction is None
 
 
-def test_registration_request_accepts_full_definition_metadata() -> None:
-    """Registration requests carry reusable definition metadata."""
-    from swe.app.subagents.models import SubAgentRegistrationRequest
-
-    request = SubAgentRegistrationRequest.model_validate(
-        {
-            "name": "aum-analyst",
-            "instruction": "Act as an AUM analyst.",
-            "description": "Analyzes customer maintenance.",
-            "trigger_keywords": ["AUM"],
-            "priority": 20,
-            "budget": {"max_turns": 4, "max_tool_calls": 20},
-            "enabled": False,
-        },
-    )
-
-    assert request.name == "aum-analyst"
-    assert request.trigger_keywords == ["AUM"]
-    assert request.priority == 20
-    assert request.enabled is False
-
-
 def test_definition_match_metadata_defaults_to_unmatched() -> None:
     """Run records can persist deterministic match metadata."""
     from swe.app.subagents.models import DefinitionMatchMetadata
@@ -305,7 +273,7 @@ def test_definition_validation_rejects_unsupported_mvp_capabilities() -> None:
                 "version": "1.0.0",
                 "description": "Unsafe worker",
                 "instruction": "Inspect code",
-                "source": "stored",
+                "source": "agent_owned",
                 "owner_scope": "tenant/source/workspace",
                 "tools": {
                     "allow": ["read_file", "write_file", "mcp:server.tool"],
@@ -337,7 +305,7 @@ def test_definition_validation_rejects_unsafe_permission_overrides() -> None:
                 "version": "1.0.0",
                 "description": "Unsafe permission worker",
                 "instruction": "Inspect code",
-                "source": "stored",
+                "source": "agent_owned",
                 "owner_scope": "tenant/source/workspace",
                 "permission": {
                     "tools": {
@@ -370,7 +338,7 @@ def test_definition_validation_rejects_unknown_permission_tools() -> None:
                 "version": "1.0.0",
                 "description": "Invalid permission worker",
                 "instruction": "Inspect code",
-                "source": "stored",
+                "source": "agent_owned",
                 "owner_scope": "tenant/source/workspace",
                 "permission": {
                     "tools": {
@@ -395,7 +363,7 @@ def test_definition_validation_rejects_unknown_permission_deny_ask_tools(
                 "version": "1.0.0",
                 "description": "Invalid permission worker",
                 "instruction": "Inspect code",
-                "source": "stored",
+                "source": "agent_owned",
                 "owner_scope": "tenant/source/workspace",
                 "permission": {
                     "tools": {
@@ -412,7 +380,7 @@ def test_definition_validation_rejects_unknown_permission_deny_ask_tools(
 def test_registry_rejects_duplicate_and_builtin_shadowing() -> None:
     """A stored provider cannot silently replace a built-in definition."""
     builtin = builtin_definition_provider().list_definitions()[0]
-    stored_shadow = builtin.model_copy(update={"source": "stored"})
+    stored_shadow = builtin.model_copy(update={"source": "agent_owned"})
 
     with pytest.raises(DefinitionValidationError) as exc_info:
         AgentRegistry(
@@ -430,7 +398,7 @@ def test_registry_rejects_stored_definition_shadowing_builtin_name() -> None:
     """A stored provider cannot supersede a built-in with another version."""
     builtin = builtin_definition_provider().list_definitions()[0]
     stored_shadow = builtin.model_copy(
-        update={"source": "stored", "version": "9.0.0"},
+        update={"source": "agent_owned", "version": "9.0.0"},
     )
 
     with pytest.raises(DefinitionValidationError) as exc_info:
@@ -490,7 +458,7 @@ def test_registry_supports_stored_provider_filtering_and_version_lookup() -> (
             "version": "1.0.0",
             "description": "Local readonly worker",
             "instruction": "Read files and summarize evidence.",
-            "source": "stored",
+            "source": "agent_owned",
             "owner_scope": "tenant-a/source-b/default",
             "tools": {"allow": ["read_file"]},
         },
@@ -506,7 +474,7 @@ def test_registry_supports_stored_provider_filtering_and_version_lookup() -> (
         "tenant-a/source-b/default"
     )
     assert registry.get("local-reader", "1.0.0") == stored_definition
-    assert registry.list(source="stored") == [stored_definition]
+    assert registry.list(source="agent_owned") == [stored_definition]
     assert registry.list(owner_scope="tenant-a/source-b/default") == [
         stored_definition,
     ]
@@ -520,7 +488,7 @@ def test_registry_resolve_uses_latest_semantic_version_by_default() -> None:
             "version": "2.0.0",
             "description": "Older readonly worker",
             "instruction": "Read files and summarize evidence.",
-            "source": "stored",
+            "source": "agent_owned",
             "owner_scope": "tenant-a/source-b/default",
             "tools": {"allow": ["read_file"]},
         },
@@ -601,7 +569,7 @@ def test_skill_owned_definition_can_narrow_parent_to_mutable_tools() -> None:
     definition = SubAgentDefinition.model_validate(
         {
             "name": "quality:editor",
-            "source": "stored",
+            "source": "skill_owned",
             "owner_scope": "skill:quality",
             "description": "Edit the requested file.",
             "instruction": "Make only requested edits.",
@@ -643,7 +611,7 @@ def test_run_scoped_definition_inherits_parent_enabled_tools() -> None:
     )
     definition = SubAgentDefinition.model_construct(
         name="legacy-writer",
-        source="stored",
+        source="skill_owned",
         description="Legacy definition.",
         instruction="Do not trust this policy.",
         permission=PermissionPolicy.bounded(
@@ -669,7 +637,7 @@ def test_skill_owned_definition_without_inheritance_uses_explicit_allow_list() -
     definition = SubAgentDefinition.model_validate(
         {
             "name": "quality:no-tools",
-            "source": "stored",
+            "source": "skill_owned",
             "owner_scope": "skill:quality",
             "description": "Do not use built-in tools.",
             "instruction": "Reason without tools.",
@@ -713,7 +681,7 @@ def test_skill_owned_definition_inherits_parent_enabled_tools_by_default() -> (
     definition = SubAgentDefinition.model_validate(
         {
             "name": "quality:editor",
-            "source": "stored",
+            "source": "skill_owned",
             "owner_scope": "skill:quality",
             "description": "Edit the requested files.",
             "instruction": "Keep the patch minimal.",

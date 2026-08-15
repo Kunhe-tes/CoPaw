@@ -19,7 +19,7 @@ from swe.app.subagents.models import (
 def _definition(
     name: str,
     *,
-    source: str = "stored",
+    source: str = "agent_owned",
     skill_name: str | None = None,
 ) -> SubAgentDefinition:
     metadata = None
@@ -365,15 +365,15 @@ def test_loader_skips_symlinked_definition_file(tmp_path: Path) -> None:
     assert loaded.errors == []
 
 
-def test_catalog_resolves_skill_owned_name_exactly_before_legacy_matching() -> (
+def test_catalog_resolves_skill_owned_and_agent_owned_names_exactly() -> (
     None
 ):
     catalog = build_definition_catalog(
         skill_definitions=[
             _definition("security:reviewer", skill_name="security"),
         ],
-        stored_definitions=[_definition("reviewer")],
         builtin_definitions=[_definition("risk-reviewer", source="builtin")],
+        agent_owned_definitions=[_definition("reviewer")],
     )
 
     assert (
@@ -383,14 +383,14 @@ def test_catalog_resolves_skill_owned_name_exactly_before_legacy_matching() -> (
     assert catalog.resolve_exact("security:missing") is None
 
 
-def test_catalog_rejects_stored_claim_of_skill_qualified_name() -> None:
+def test_catalog_rejects_agent_owned_claim_of_skill_qualified_name() -> None:
     with pytest.raises(DefinitionValidationError, match="reserved"):
         build_definition_catalog(
             skill_definitions=[
                 _definition("security:reviewer", skill_name="security"),
             ],
-            stored_definitions=[_definition("security:reviewer")],
             builtin_definitions=[],
+            agent_owned_definitions=[_definition("security:reviewer")],
         )
 
 
@@ -398,8 +398,22 @@ def test_catalog_rejects_custom_claim_of_builtin_name() -> None:
     with pytest.raises(DefinitionValidationError, match="builtin"):
         build_definition_catalog(
             skill_definitions=[],
-            stored_definitions=[_definition("risk-reviewer")],
             builtin_definitions=[
                 _definition("risk-reviewer", source="builtin"),
             ],
+            agent_owned_definitions=[_definition("risk-reviewer")],
         )
+
+
+def test_catalog_skips_all_duplicate_agent_owned_names() -> None:
+    catalog = build_definition_catalog(
+        skill_definitions=[],
+        builtin_definitions=[],
+        agent_owned_definitions=[
+            _definition("duplicate"),
+            _definition("duplicate"),
+        ],
+    )
+
+    assert catalog.resolve_exact("duplicate") is None
+    assert catalog.list_definitions() == []

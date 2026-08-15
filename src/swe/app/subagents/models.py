@@ -17,7 +17,6 @@ from pydantic import (
 
 DefinitionSource = Literal[
     "builtin",
-    "stored",
     "agent_owned",
     "skill_owned",
     "run_scoped",
@@ -612,55 +611,6 @@ class SubAgentStartRequest(BaseModel):
         if len(value.encode("utf-8")) > START_BACKGROUND_MAX_BYTES:
             raise ValueError("background exceeds 16384 bytes")
         return value
-
-
-class SubAgentRegistrationRequest(BaseModel):
-    """Full request used by management tools to register stored definitions."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    instruction: str
-    description: str
-    nickname: str | None = None
-    trigger_keywords: list[str] = Field(default_factory=list)
-    priority: int = 100
-    budget: BudgetConfig = Field(default_factory=BudgetConfig)
-    enabled: bool = True
-
-    @field_validator("name", "instruction", "description", mode="after")
-    @classmethod
-    def _non_empty_required_string(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("field must be non-empty")
-        return value
-
-    @field_validator("instruction")
-    @classmethod
-    def _instruction_size(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > 8192:
-            raise ValueError("instruction exceeds 8192 bytes")
-        return value
-
-    @field_validator("description")
-    @classmethod
-    def _description_size(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > 1024:
-            raise ValueError("description exceeds 1024 bytes")
-        return value
-
-    @field_validator("trigger_keywords")
-    @classmethod
-    def _validate_matching_lists(
-        cls,
-        value: list[str],
-        info: Any,
-    ) -> list[str]:
-        return _validate_limited_string_list(
-            value,
-            field_name=info.field_name,
-        )
 
 
 class DefinitionMatchMetadata(BaseModel):

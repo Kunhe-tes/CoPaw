@@ -13,7 +13,6 @@ from agentscope.tool import ToolResponse
 
 from ...app.subagents import (
     AgentOwnedDefinitionRepository,
-    AgentRegistry,
     BackgroundSubAgentNotManageable,
     BackgroundSubAgentScope,
     BackgroundSubAgentStartBlocked,
@@ -23,9 +22,6 @@ from ...app.subagents import (
     DefinitionMatchMetadata,
     PermissionPolicy,
     SubAgentDefinition,
-    SubAgentDefinitionService,
-    SubAgentDefinitionStore,
-    SubAgentRegistrationRequest,
     SubAgentStartRequest,
     builtin_definition_provider,
     build_definition_catalog,
@@ -42,13 +38,6 @@ _SUBAGENT_INTENT_TERMS = (
     "子 agent",
     "子Agent",
     "后台子代理",
-)
-_SUBAGENT_REGISTRATION_ACTION_TERMS = (
-    "register",
-    "registration",
-    "注册",
-    "登记",
-    "可复用",
 )
 _RUN_ID_CONTEXT_KEYS = (
     "subagent_run_id",
@@ -71,16 +60,6 @@ def has_subagent_intent(request_context: dict[str, Any]) -> bool:
     """Return whether the current turn explicitly asks for SubAgents."""
     text = str(request_context.get("current_user_text") or "")
     return any(term in text for term in _SUBAGENT_INTENT_TERMS)
-
-
-def has_subagent_registration_intent(
-    request_context: dict[str, Any],
-) -> bool:
-    """Return whether the current turn explicitly asks to register definitions."""
-    if not has_subagent_intent(request_context):
-        return False
-    text = str(request_context.get("current_user_text") or "")
-    return any(term in text for term in _SUBAGENT_REGISTRATION_ACTION_TERMS)
 
 
 def has_explicit_subagent_run_id(request_context: dict[str, Any]) -> bool:
@@ -129,10 +108,6 @@ def create_background_subagent_tools(
     tool_scope = build_background_subagent_scope(
         parent_agent_config=parent_agent_config,
         request_context=request_context,
-    )
-    definition_service = _definition_service_for_tool(
-        request_context=request_context,
-        tool_scope=tool_scope,
     )
     definition_catalog = _build_definition_catalog(
         tool_scope=tool_scope,
@@ -243,41 +218,6 @@ def create_background_subagent_tools(
 
     start_subagent.__doc__ = directory
 
-    async def register_subagent_definition(
-        name: str,
-        instruction: str,
-        description: str,
-        trigger_keywords: list[str] | None = None,
-        priority: int = 100,
-        budget: dict[str, Any] | None = None,
-        enabled: bool = True,
-        nickname: str | None = None,
-    ) -> ToolResponse:
-        """Register or update one stored SubAgent definition."""
-        try:
-            request = SubAgentRegistrationRequest.model_validate(
-                {
-                    "name": name,
-                    "instruction": instruction,
-                    "description": description,
-                    "nickname": nickname,
-                    "trigger_keywords": trigger_keywords or [],
-                    "priority": priority,
-                    "budget": budget or {},
-                    "enabled": enabled,
-                },
-            )
-            payload = definition_service.register(request)
-        except Exception as exc:
-            return _json_response(
-                {
-                    "status": "failed",
-                    "reason": "invalid_request",
-                    "message": str(exc),
-                },
-            )
-        return _json_response(payload)
-
     async def wait_subagent(timeout_ms: int = 3000) -> ToolResponse:
         """Wait briefly and return current Background SubAgent statuses."""
         snapshot = await supervisor.wait(
@@ -358,7 +298,6 @@ def _build_definition_catalog(
             workspace_dir=workspace_dir,
             effective_skill_names=effective_skill_names or [],
         ).definitions,
-        stored_definitions=[],
         builtin_definitions=builtin_definitions,
         agent_owned_definitions=[
             package.definition
@@ -380,26 +319,6 @@ def _format_skill_definition_directory(catalog) -> str:
             f"- {definition.name}: {definition.description} " f"[keywords: {keywords}]",
         )
     return "\n".join(lines)
-
-
-def _definition_service_for_tool(
-    *,
-    request_context: dict[str, Any],
-    tool_scope: BackgroundSubAgentScope,
-) -> SubAgentDefinitionService:
-    explicit_definition_store_dir = request_context.get(
-        "_subagent_definition_store_dir",
-    )
-    if explicit_definition_store_dir:
-        store_dir = Path(explicit_definition_store_dir)
-    else:
-        store_dir = tool_scope.run_store_dir.parent / "subagent_definitions"
-    owner_scope = f"{tool_scope.tenant_id}/{tool_scope.agent_id}"
-    return SubAgentDefinitionService(
-        store=SubAgentDefinitionStore(store_dir),
-        builtin_registry=AgentRegistry([builtin_definition_provider()]),
-        owner_scope=owner_scope,
-    )
 
 
 def _json_response(payload: dict[str, Any]) -> ToolResponse:
