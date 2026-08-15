@@ -32,7 +32,7 @@ from fastapi import (
     UploadFile,
 )
 from pydantic import BaseModel, Field
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from ..agent_context import (
@@ -1434,6 +1434,42 @@ async def delete_file_manager_file(
         "archive_item_id": archived.archive_item_id,
         "original_path": archived.original_path,
     }
+
+
+@router.delete(
+    "/file-manager/directories",
+    status_code=204,
+    summary="Permanently delete one controlled directory",
+)
+async def delete_file_manager_directory(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative directory path"),
+) -> Response:
+    """Permanently remove one controlled directory and its contents."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        await run_file_manager_mutation(
+            service.delete_directory,
+            root,
+            path,
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="delete_directory",
+            path=path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="delete_directory",
+        path=path,
+        outcome="success",
+    )
+    return Response(status_code=204)
 
 
 @router.post(

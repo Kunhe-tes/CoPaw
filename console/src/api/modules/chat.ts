@@ -342,6 +342,12 @@ export const chatApi = {
         { method: "DELETE" },
       ),
 
+    deleteDirectory: (params: FileManagerPathParams) =>
+      request<void>(
+        `/console/file-manager/directories?${fileManagerQuery(params)}`,
+        { method: "DELETE" },
+      ),
+
     restore: (archiveItemId: string) =>
       request<FileManagerRecycleMutation>(
         `/console/file-manager/recycle/${encodeURIComponent(

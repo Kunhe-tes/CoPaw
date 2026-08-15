@@ -6,12 +6,14 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { App, Modal } from "antd";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FileColumn from "./FileColumn";
 import FileManager from "./index";
 import FileDetail from "./FileDetail";
 
-const { listDirectory, readFile } = vi.hoisted(() => ({
+const { deleteDirectory, listDirectory, readFile } = vi.hoisted(() => ({
+  deleteDirectory: vi.fn(),
   listDirectory: vi.fn(),
   readFile: vi.fn(),
 }));
@@ -32,6 +34,7 @@ vi.mock("@/api/modules/chat", () => ({
       downloadUrl: vi.fn(() => "/download"),
       downloadFile: vi.fn(),
       archive: vi.fn(),
+      deleteDirectory,
       restore: vi.fn(),
       purge: vi.fn(),
     },
@@ -80,7 +83,11 @@ const rootPage = {
 
 describe("FileManager", () => {
   afterEach(() => {
+    Modal.destroyAll();
     cleanup();
+    document.querySelectorAll(".ant-modal-root").forEach((element) => {
+      element.remove();
+    });
     document.querySelector("[data-chat-shell]")?.remove();
     document.querySelector("[data-chat-messages-area]")?.remove();
     vi.unstubAllGlobals();
@@ -89,11 +96,16 @@ describe("FileManager", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverMock);
     listDirectory.mockReset();
     listDirectory.mockResolvedValue(rootPage);
+    deleteDirectory.mockReset();
     readFile.mockReset();
   });
 
   it("opens the reference-style overlay with shortcut toolbar and three column roles", async () => {
-    render(<FileManager />);
+    render(
+      <App>
+        <FileManager />
+      </App>,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
 
@@ -124,6 +136,41 @@ describe("FileManager", () => {
     expect(screen.getByLabelText("文件列表第 1 栏")).toBeInTheDocument();
     expect(screen.getByLabelText("文件列表第 2 栏")).toBeInTheDocument();
     expect(screen.getByLabelText("文件列表第 3 栏")).toBeInTheDocument();
+  });
+
+  it("permanently deletes a directory after confirmation without opening it", async () => {
+    deleteDirectory.mockResolvedValue(undefined);
+    render(
+      <App>
+        <FileManager />
+      </App>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+    fireEvent.click(
+      await within(screen.getByLabelText("文件列表第 2 栏")).findByRole(
+        "button",
+        { name: "永久删除目录 docs" },
+      ),
+    );
+
+    expect(
+      await screen.findByText("目录及其全部内容将被永久删除，无法恢复。"),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "永久删除" }));
+
+    await waitFor(() =>
+      expect(deleteDirectory).toHaveBeenCalledWith({
+        root: "working",
+        path: "docs",
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "永久删除目录？" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(listDirectory).toHaveBeenCalledTimes(4);
   });
 
   it("loads the tenant source scope from the root shortcut", async () => {
@@ -179,6 +226,19 @@ describe("FileManager", () => {
     expect(
       within(right).getByRole("button", { name: "guides" }),
     ).toBeInTheDocument();
+  });
+
+  it("does not offer permanent deletion for the virtual root anchor", async () => {
+    render(<FileManager />);
+
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+
+    expect(
+      within(await screen.findByLabelText("文件列表第 1 栏")).queryByRole(
+        "button",
+        { name: "永久删除目录 工作目录" },
+      ),
+    ).not.toBeInTheDocument();
   });
 
   it("backfills the shortcut anchor when a folder is selected from the left column", async () => {

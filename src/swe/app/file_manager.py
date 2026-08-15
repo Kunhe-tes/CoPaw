@@ -998,6 +998,78 @@ class FileManagerService:
         assert archive_item_id is not None
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
+    @_serialized_mutation
+    def delete_directory(
+        self,
+        root: FileManagerRoot | str,
+        relative_path: str,
+    ) -> None:
+        """Permanently delete one controlled directory without following links."""
+
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
+            relative_path,
+        )
+        if not normalised_path:
+            raise FileManagerPathError("Path is not a directory")
+        if not root_capabilities(resolved_root).archive:
+            raise FileManagerPathError(
+                "Directory deletion is not available for this root",
+            )
+        parts = tuple(filter(None, normalised_path.split("/")))
+        parent_fd = self._open_directory_fd(
+            resolved_root,
+            "/".join(parts[:-1]),
+        )
+        assert parent_fd is not None
+        try:
+            directory_fd = os.open(
+                parts[-1],
+                self._directory_open_flags(),
+                dir_fd=parent_fd,
+            )
+            try:
+                self._delete_directory_contents(directory_fd)
+            finally:
+                os.close(directory_fd)
+            os.rmdir(parts[-1], dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileNotFoundError as exc:
+            raise FileManagerNotFoundError("Directory was not found") from exc
+        except OSError as exc:
+            raise FileManagerPathError("Unable to delete directory") from exc
+        finally:
+            os.close(parent_fd)
+
+    def _delete_directory_contents(self, directory_fd: int) -> None:
+        """Remove one opened directory's entries without traversing links."""
+
+        try:
+            with os.scandir(directory_fd) as entries:
+                names = [entry.name for entry in entries]
+            for name in names:
+                entry_stat = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if stat_module.S_ISDIR(entry_stat.st_mode):
+                    child_fd = os.open(
+                        name,
+                        self._directory_open_flags(),
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        self._delete_directory_contents(child_fd)
+                    finally:
+                        os.close(child_fd)
+                    os.rmdir(name, dir_fd=directory_fd)
+                else:
+                    os.unlink(name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise FileManagerPathError("Unable to delete directory") from exc
+
     # The staged archive transition intentionally keeps all rollback-free
     # boundaries in one auditable method.
     # pylint: disable=too-many-statements

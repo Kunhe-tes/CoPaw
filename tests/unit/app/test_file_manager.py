@@ -134,6 +134,45 @@ def test_working_listing_hides_only_sessions_and_governance(
     assert [item.name for item in listing.items] == ["notes", ".env"]
 
 
+def test_delete_directory_removes_nested_entries_without_following_symlinks(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "reports"
+    nested = directory / "weekly"
+    outside = tmp_path / "outside"
+    nested.mkdir(parents=True)
+    outside.mkdir()
+    (nested / "report.md").write_text("report", encoding="utf-8")
+    (directory / "outside-link").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    _service(tmp_path).delete_directory("working", "reports")
+
+    assert not directory.exists()
+    assert outside.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("root", "path"),
+    [
+        ("working", ""),
+        ("working", "sessions"),
+        ("conversation", "folder"),
+    ],
+)
+def test_delete_directory_rejects_root_protected_and_read_only_paths(
+    tmp_path: Path,
+    root: str,
+    path: str,
+) -> None:
+    (tmp_path / "sessions" / "folder").mkdir(parents=True)
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).delete_directory(root, path)
+
+
 def test_source_scope_upload_archives_and_restores_to_tenant_root(
     tmp_path: Path,
 ) -> None:
