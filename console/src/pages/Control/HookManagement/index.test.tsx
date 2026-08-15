@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   saveConfiguration: vi.fn(),
   uploadScripts: vi.fn(),
   manualTest: vi.fn(),
+  distributeToDefaultAgents: vi.fn(),
   message: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
 }));
 
@@ -24,6 +25,20 @@ vi.mock("@/api/modules/hookManagement", () => ({
 vi.mock("@/hooks/useAppMessage", () => ({
   useAppMessage: () => ({ message: mocks.message }),
 }));
+
+vi.mock("@/components/TenantSelector", () => ({
+  TenantSelector: ({
+    onChange,
+  }: {
+    onChange: (tenantIds: string[]) => void;
+  }) => (
+    <button type="button" onClick={() => onChange(["tenant-b"])}>
+      选择目标租户
+    </button>
+  ),
+}));
+
+vi.mock("@/utils/identity", () => ({ getUserId: () => "tenant-a" }));
 
 import HookManagementPage from ".";
 
@@ -81,6 +96,19 @@ describe("HookManagementPage", () => {
       failed: [],
     });
     mocks.manualTest.mockResolvedValue({ redacted_summary: { status: "ok" } });
+    mocks.distributeToDefaultAgents.mockResolvedValue({
+      source_revision: "rev-1",
+      results: [
+        {
+          tenant_id: "tenant-b",
+          success: true,
+          bootstrapped: false,
+          matcher_group_ids: ["tool-guards"],
+          script_names: ["guard.py"],
+          error: "",
+        },
+      ],
+    });
   });
 
   it("selects a Handler and exposes ordered argv fields", async () => {
@@ -282,12 +310,32 @@ describe("HookManagementPage", () => {
 
     fireEvent.click(await screen.findByRole("switch", { name: "启用 Hook" }));
     expect(screen.getByText("未保存更改")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "分发 Hook" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "保存并激活" }));
     await waitFor(() => expect(mocks.saveConfiguration).toHaveBeenCalled());
     await waitFor(() =>
       expect(screen.queryByText("未保存更改")).not.toBeInTheDocument(),
     );
+  });
+
+  it("distributes selected Matcher Groups to selected tenants", async () => {
+    render(<HookManagementPage />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "分发 Hook" }));
+    fireEvent.click(screen.getByLabelText("选择 tool-guards"));
+    fireEvent.click(screen.getByRole("button", { name: "选择目标租户" }));
+    fireEvent.click(screen.getByRole("button", { name: "开始分发" }));
+
+    await waitFor(() =>
+      expect(mocks.distributeToDefaultAgents).toHaveBeenCalledWith({
+        matcherGroupIds: ["tool-guards"],
+        targetTenantIds: ["tenant-b"],
+      }),
+    );
+    expect(
+      await screen.findByText("已成功分发到 1 个租户"),
+    ).toBeInTheDocument();
   });
 
   it("removes an event from the drawer after explicit confirmation", async () => {
