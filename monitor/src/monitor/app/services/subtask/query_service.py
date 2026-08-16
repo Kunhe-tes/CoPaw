@@ -499,6 +499,10 @@ class QueryService:
             WHERE trace_id = %s
               AND status = 'SUC'
               AND task_type IN ('list', 'plan')
+              AND template_id IS NOT NULL
+              AND template_id > 0
+              AND result_id IS NOT NULL
+              AND result_id <> ''
         """
         return await self.db.fetch_all(query, (trace_id,))
 

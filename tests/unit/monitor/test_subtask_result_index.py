@@ -1,9 +1,8 @@
 # -*- coding: utf-8 -*-
 """Tests for cron subtask result indexing."""
 
+import asyncio
 from datetime import datetime
-
-import pytest
 
 from monitor.app.services.subtask.query_service import QueryService
 
@@ -59,12 +58,11 @@ class FakeDb:
         return 1
 
 
-@pytest.mark.asyncio
-async def test_batch_update_indexes_success_execution_results():
+def test_batch_update_indexes_success_execution_results():
     db = FakeDb()
-    success_count, error_count, indexed_count = await QueryService(
-        db=db,
-    ).batch_update_execution_async_status()
+    success_count, error_count, indexed_count = asyncio.run(
+        QueryService(db=db).batch_update_execution_async_status(),
+    )
 
     assert success_count == 1
     assert error_count == 0
@@ -93,3 +91,9 @@ async def test_batch_update_indexes_success_execution_results():
 
     second_insert_params = insert_calls[1][1]
     assert second_insert_params[6] == "skill-b"
+
+    subtask_sql = db.fetch_all_calls[1][0]
+    assert "template_id IS NOT NULL" in subtask_sql
+    assert "template_id > 0" in subtask_sql
+    assert "result_id IS NOT NULL" in subtask_sql
+    assert "result_id <> ''" in subtask_sql
