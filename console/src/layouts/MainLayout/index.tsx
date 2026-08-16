@@ -121,6 +121,7 @@ export default function MainLayout() {
     (state) => state.loadEffectiveConfig,
   );
   const hideGlobalShell = hideMenu || showContentOnly;
+  const hideHeader = hideGlobalShell || activeSourceId === "ruice";
 
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);
@@ -133,7 +134,7 @@ export default function MainLayout() {
 
   return (
     <Layout className={styles.mainLayout}>
-      {!hideGlobalShell && <Header />}
+      {!hideHeader && <Header />}
       <Layout>
         {!hideGlobalShell && <Sidebar selectedKey={selectedKey} />}
         <Content
