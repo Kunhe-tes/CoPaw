@@ -311,9 +311,15 @@ class SyncService:
         (
             success_count,
             error_count,
+            indexed_count,
         ) = await self.query_service.batch_update_execution_async_status()
 
         total_updated = success_count + error_count
+        logger.info(
+            "Execution async_status sync completed: updated=%d indexed=%d",
+            total_updated,
+            indexed_count,
+        )
 
         return ExecutionAsyncStatusResponse(
             success=True,
