@@ -48,6 +48,7 @@ import {
   Store,
   Wrench,
   Puzzle,
+  SlidersHorizontal,
 } from "lucide-react";
 import { clearAuthToken } from "../api/config";
 import { authApi } from "../api/modules/auth";
@@ -242,6 +243,12 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       icon: <SparkBrowseLine size={18} />,
       path: "/security",
       label: t("nav.security"),
+    },
+    {
+      key: "skill-config",
+      icon: <SlidersHorizontal size={18} />,
+      path: "/skill-config",
+      label: t("nav.skillConfig", "SKILL 配置"),
     },
     ...(canManageCurrentSourceConfig
       ? [
@@ -441,6 +448,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           key: "security",
           label: collapsed ? null : t("nav.security"),
           icon: <SparkBrowseLine size={16} />,
+        },
+        {
+          key: "skill-config",
+          label: collapsed ? null : t("nav.skillConfig", "SKILL 配置"),
+          icon: <SlidersHorizontal size={16} />,
         },
         ...(canManageCurrentSourceConfig
           ? [

@@ -1,14 +1,27 @@
 # -*- coding: utf-8 -*-
-"""HTML 预览点击统计数据模型。"""
+"""HTML 预览行为事件与点击统计数据模型。"""
 
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
+
+HtmlPreviewEventType = Literal[
+    "button_click",
+    "preview_view",
+    "module_exposure",
+]
+HtmlPreviewEventTypeFilter = Literal[
+    "button_click",
+    "preview_view",
+    "module_exposure",
+    "all",
+]
+HtmlPreviewTemplateType = Literal["main", "sub"]
 
 
 class HtmlPreviewClickEventCreate(BaseModel):
-    """提交 HTML 预览按钮点击事件的请求体。"""
+    """提交 HTML 预览行为事件的请求体。"""
 
     source_id: Optional[str] = Field(default=None, max_length=64)
     user_id: Optional[str] = Field(default=None, max_length=128)
@@ -28,6 +41,49 @@ class HtmlPreviewClickEventCreate(BaseModel):
     customer_name: Optional[str] = Field(default=None, max_length=255)
     customer_info: Optional[dict[str, str]] = None
     clicked_at: Optional[datetime] = None
+    event_type: HtmlPreviewEventType = "button_click"
+    template_type: Optional[HtmlPreviewTemplateType] = None
+    template_id: Optional[int] = Field(default=None, ge=1)
+    result_id: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+    )
+    event_target_id: Optional[str] = Field(default=None, max_length=255)
+    event_target_name: Optional[str] = Field(default=None, max_length=512)
+    trace_id: Optional[str] = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_event_context(self):
+        """校验新事件的模板关联和具体曝光对象。"""
+        if (self.template_id is None) != (self.result_id is None):
+            raise ValueError(
+                "template_id and result_id must be provided together",
+            )
+        if self.template_type is not None and self.template_id is None:
+            raise ValueError(
+                "template_id and result_id are required with template_type",
+            )
+
+        template_events = {"preview_view", "module_exposure"}
+        if self.event_type in template_events and self.template_id is None:
+            raise ValueError(
+                f"template_id and result_id are required for {self.event_type}",
+            )
+
+        if self.template_id is not None and self.template_type is None:
+            raise ValueError(
+                f"template_type is required for {self.event_type}",
+            )
+
+        if self.event_type == "module_exposure" and not (
+            self.event_target_id or self.event_target_name
+        ):
+            raise ValueError(
+                "event_target_id or event_target_name is required for "
+                f"{self.event_type}",
+            )
+        return self
 
 
 class HtmlPreviewClickCreateResponse(BaseModel):
@@ -85,7 +141,7 @@ class HtmlPreviewCustomerClickSummaryResponse(BaseModel):
 
 
 class HtmlPreviewClickEventItem(BaseModel):
-    """HTML 预览点击明细。"""
+    """HTML 预览行为事件明细。"""
 
     id: int
     source_id: Optional[str] = None
@@ -106,6 +162,13 @@ class HtmlPreviewClickEventItem(BaseModel):
     customer_name: Optional[str] = None
     customer_info: Optional[dict[str, str]] = None
     clicked_at: Optional[datetime] = None
+    event_type: HtmlPreviewEventType = "button_click"
+    template_type: Optional[HtmlPreviewTemplateType] = None
+    template_id: Optional[int] = None
+    result_id: Optional[str] = None
+    event_target_id: Optional[str] = None
+    event_target_name: Optional[str] = None
+    trace_id: Optional[str] = None
 
 
 class HtmlPreviewClickEventListResponse(BaseModel):
