@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Button,
   Empty,
@@ -10,6 +10,7 @@ import {
   Skeleton,
   Switch,
   Tooltip,
+  type RefSelectProps,
 } from "antd";
 import { CircleX, Plus, Settings2, SquarePen } from "lucide-react";
 import { cronJobApi } from "@/api/modules/cronjob";
@@ -35,19 +36,34 @@ import styles from "./index.module.less";
 type EditorMode = "view" | "create" | "edit";
 
 interface SkillConfigEditorValues extends SkillConfigFormValues {
-  cronJobId: string;
+  cronJobId?: string;
 }
 
 const DEFAULT_FORM_VALUES: SkillConfigEditorValues = {
-  cronJobId: "",
+  cronJobId: undefined,
   skillId: "",
   name: "",
-  sort: 0,
+  sort: 1,
   groupId: undefined,
   businessCenterEnabled: false,
   customerInsightEnabled: false,
   outboundCallEnabled: false,
 };
+
+const EDITOR_MODE_META = {
+  view: {
+    label: "查看模式",
+    description: "当前内容仅供查看，点击左侧 SKILL 的编辑图标后可修改。",
+  },
+  create: {
+    label: "创建模式",
+    description: "请选择名称并完成触发规则配置，然后点击创建。",
+  },
+  edit: {
+    label: "编辑模式",
+    description: "SKILL名称不可修改，其余触发规则修改完成后请点击保存。",
+  },
+} as const;
 
 function getErrorStatus(error: unknown): number | undefined {
   return error instanceof Error
@@ -60,7 +76,7 @@ function toEditorValues(item: SkillConfigItem): SkillConfigEditorValues {
     cronJobId: item.skillId,
     skillId: item.skillId,
     name: item.name,
-    sort: item.sort,
+    sort: Math.max(1, item.sort || 1),
     groupId: item.groupId,
     businessCenterEnabled: item.businessCenterEnabled,
     customerInsightEnabled: item.customerInsightEnabled,
@@ -85,54 +101,63 @@ function SkillList({
     <aside className={styles.skillListPanel} aria-label="SKILL 列表">
       <div className={styles.panelHeader}>
         <h2>SKILL 列表</h2>
-        <Button
-          type="primary"
-          size="small"
-          icon={<Plus size={14} />}
-          onClick={onCreate}
-        >
-          新增
-        </Button>
+        {items.length ? (
+          <Button
+            type="primary"
+            size="small"
+            icon={<Plus size={14} />}
+            onClick={onCreate}
+          >
+            新增
+          </Button>
+        ) : null}
       </div>
       <div className={styles.skillList}>
-        {items.map((item) => {
-          const selected = selectedId === item.skillId;
-          return (
-            <div
-              key={item.skillId}
-              className={`${styles.skillRow}${
-                selected ? ` ${styles.skillRowSelected}` : ""
-              }`}
-            >
-              <button
-                type="button"
-                className={styles.skillSelectButton}
-                onClick={() => onSelect(item)}
-                aria-current={selected ? "page" : undefined}
+        {items.length ? (
+          items.map((item) => {
+            const selected = selectedId === item.skillId;
+            return (
+              <div
+                key={item.skillId}
+                className={`${styles.skillRow}${
+                  selected ? ` ${styles.skillRowSelected}` : ""
+                }`}
               >
-                <span
-                  className={`${styles.statusDot}${
-                    item.enabled ? ` ${styles.statusDotEnabled}` : ""
-                  }`}
-                  aria-hidden="true"
-                />
-                <span className={styles.skillName} title={item.name}>
-                  {item.name || item.skillId}
-                </span>
-              </button>
-              <Tooltip title={`编辑 ${item.name || item.skillId}`}>
                 <button
                   type="button"
-                  className={styles.editIconButton}
-                  onClick={() => onEdit(item)}
-                  aria-label={`编辑 ${item.name || item.skillId}`}
+                  className={styles.skillSelectButton}
+                  onClick={() => onSelect(item)}
+                  aria-current={selected ? "page" : undefined}
                 >
-                  <SquarePen size={15} />
+                  <span
+                    className={`${styles.statusDot}${
+                      item.enabled ? ` ${styles.statusDotEnabled}` : ""
+                    }`}
+                    aria-hidden="true"
+                  />
+                  <span className={styles.skillName} title={item.name}>
+                    {item.name || item.skillId}
+                  </span>
                 </button>
-              </Tooltip>
-            </div>
-          );
-        })}
+                <Tooltip title={`编辑 ${item.name || item.skillId}`}>
+                  <button
+                    type="button"
+                    className={styles.editIconButton}
+                    onClick={() => onEdit(item)}
+                    aria-label={`编辑 ${item.name || item.skillId}`}
+                  >
+                    <SquarePen size={15} />
+                  </button>
+                </Tooltip>
+              </div>
+            );
+          })
+        ) : (
+          <div className={styles.skillListEmpty} role="status">
+            <strong>暂无 SKILL 数据</strong>
+            <span>完成右侧配置并创建后，将显示在这里。</span>
+          </div>
+        )}
       </div>
     </aside>
   );
@@ -202,6 +227,7 @@ export default function SkillConfigPage() {
   const { message } = useAppMessage();
   const bbkId = useIframeStore((state) => state.bbk) || DEFAULT_BBK_ID;
   const [form] = Form.useForm<SkillConfigEditorValues>();
+  const nameSelectRef = useRef<RefSelectProps>(null);
   const [configs, setConfigs] = useState<SkillConfigItem[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJobSpecOutput[]>([]);
   const [activityClasses, setActivityClasses] = useState<ActivityClassItem[]>(
@@ -219,6 +245,13 @@ export default function SkillConfigPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
   const [saving, setSaving] = useState(false);
+  const modeMeta = EDITOR_MODE_META[mode];
+
+  useEffect(() => {
+    if (mode === "create") {
+      nameSelectRef.current?.focus();
+    }
+  }, [mode]);
 
   const cronOptions = useMemo(() => {
     const options = cronJobs.map((job) => ({ value: job.id, label: job.name }));
@@ -538,6 +571,13 @@ export default function SkillConfigPage() {
                 </div>
               ) : null}
             </div>
+            <div
+              className={`${styles.modeNotice} ${styles[`modeNotice${mode}`]}`}
+              role="status"
+            >
+              <span className={styles.modeBadge}>{modeMeta.label}</span>
+              <span>{modeMeta.description}</span>
+            </div>
             {detailLoading ? (
               <Skeleton active paragraph={{ rows: 8 }} />
             ) : (
@@ -550,21 +590,23 @@ export default function SkillConfigPage() {
               >
                 <Form.Item name="skillId" label="SKILL ID">
                   <Input
-                    readOnly
+                    disabled
                     className={styles.skillIdInput}
                     placeholder="选择名称后自动生成"
                   />
                 </Form.Item>
                 <Form.Item
                   name="cronJobId"
-                  label="名称"
-                  rules={[{ required: true, message: "请选择定时任务" }]}
+                  label="SKILL名称"
+                  rules={[{ required: true, message: "请选择SKILL名称" }]}
                 >
                   <Select
+                    ref={nameSelectRef}
+                    disabled={mode === "edit"}
                     showSearch
                     optionFilterProp="label"
                     options={cronOptions}
-                    placeholder="请选择定时任务"
+                    placeholder="请选择SKILL名称（定时任务）"
                     onChange={handleCronJobChange}
                   />
                 </Form.Item>
@@ -573,7 +615,7 @@ export default function SkillConfigPage() {
                 </Form.Item>
                 <div className={styles.sortRow}>
                   <Form.Item name="sort" label="排序">
-                    <InputNumber min={0} precision={0} />
+                    <InputNumber min={1} precision={0} />
                   </Form.Item>
                   <span>数值越小越优先</span>
                 </div>

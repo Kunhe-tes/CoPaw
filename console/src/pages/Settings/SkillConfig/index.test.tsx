@@ -72,6 +72,18 @@ describe("SkillConfigPage", () => {
     ).toBeTruthy();
     expect(screen.getByRole("heading", { name: "回检" })).toBeTruthy();
     expect(screen.getAllByText("--").length).toBeGreaterThan(5);
+    expect(screen.getByText("暂无 SKILL 数据")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /新\s*增/ })).toBeNull();
+    expect(screen.getByText("创建模式")).toBeTruthy();
+    expect(screen.getByText("请选择SKILL名称（定时任务）")).toBeTruthy();
+    expect(screen.getByRole("textbox", { name: "SKILL ID" })).toBeDisabled();
+    const sortInput = screen.getByRole("spinbutton", { name: "排序" });
+    expect(sortInput).toHaveValue("1");
+    fireEvent.keyDown(sortInput, { key: "ArrowDown" });
+    expect(sortInput).toHaveValue("1");
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "SKILL名称" })).toHaveFocus(),
+    );
   });
 
   it("loads details and exposes save only after clicking the edit icon", async () => {
@@ -95,11 +107,16 @@ describe("SkillConfigPage", () => {
     await waitFor(() =>
       expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
     );
+    expect(screen.getByText("查看模式")).toBeTruthy();
+    expect(screen.getByText(/点击左侧 SKILL 的编辑图标后可修改/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "编辑 存款到期续接" }));
 
     expect(await screen.findByRole("button", { name: /保\s*存/ })).toBeTruthy();
+    expect(screen.getByText("编辑模式")).toBeTruthy();
+    expect(screen.getByRole("combobox", { name: "SKILL名称" })).toBeDisabled();
+    expect(screen.getByText(/SKILL名称不可修改/)).toBeTruthy();
   });
 
   it("shows an explicit retry state when the SKILL list fails to load", async () => {
