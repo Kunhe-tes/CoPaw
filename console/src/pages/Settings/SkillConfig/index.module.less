@@ -158,6 +158,31 @@
   gap: 5px;
 }
 
+.skillListEmpty {
+  min-height: 132px;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 6px;
+  padding: 20px 12px;
+  border-radius: 8px;
+  background: var(--console-management-surface-subtle, #f7f9fc);
+  color: var(--console-management-text-muted, #8a94a6);
+  text-align: center;
+
+  strong {
+    color: var(--console-management-text-secondary, #4b5563);
+    font-size: 13px;
+    font-weight: 600;
+  }
+
+  span {
+    max-width: 16em;
+    font-size: 12px;
+    line-height: 18px;
+  }
+}
+
 .skillRow {
   display: flex;
   align-items: center;
@@ -266,6 +291,40 @@
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.modeNotice {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: -7px 0 18px;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: var(--console-management-surface-subtle, #f7f9fc);
+  color: var(--console-management-text-secondary, #4b5563);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+.modeBadge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: var(--console-management-border, #e5e7eb);
+  color: var(--console-management-text-secondary, #4b5563);
+  font-weight: 600;
+}
+
+.modeNoticecreate,
+.modeNoticeedit {
+  background: var(--console-management-primary-soft, #eef4ff);
+  color: var(--console-management-primary-hover, #2957dc);
+
+  .modeBadge {
+    background: var(--console-management-primary, #3769fc);
+    color: #fff;
+  }
 }
 
 .ruleForm {
