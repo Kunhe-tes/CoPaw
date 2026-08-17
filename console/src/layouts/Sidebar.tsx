@@ -490,7 +490,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: collapsed ? null : t("nav.insightCenter"),
       icon: <ChartColumn size={16} />,
       children: [
-        {
+        !hideChat && {
           key: "analytics-business-overview",
           label: collapsed
             ? null
