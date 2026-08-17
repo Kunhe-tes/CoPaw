@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from swe.app.file_governance.archive_maintenance import (
     ARCHIVE_FILES_DIR,
     ARCHIVE_INDEX_FILE,
+    KEEP_DIRS,
+    KEEP_FILES,
     PROTECTED_PATHS_FILE,
     archive_old_orphans_for_workspace,
 )
@@ -137,6 +139,35 @@ def test_archive_old_orphans_skips_hooks_and_agents_directories(
     assert result.archived_paths == []
     assert (tmp_path / "hooks" / "old.txt").exists()
     assert (tmp_path / "agents" / "old.txt").exists()
+
+
+def test_archive_whitelist_includes_bootstrap_marker_and_disabled_skills(
+    tmp_path,
+) -> None:
+    assert ".bootstrap_completed" in KEEP_FILES
+    assert ".disabled_skills" in KEEP_DIRS
+
+    bootstrap_marker = tmp_path / ".bootstrap_completed"
+    bootstrap_marker.write_text("done", encoding="utf-8")
+    disabled_skill = tmp_path / ".disabled_skills" / "skill.txt"
+    disabled_skill.parent.mkdir()
+    disabled_skill.write_text("disabled", encoding="utf-8")
+
+    old_timestamp = datetime(2026, 6, 25, tzinfo=timezone.utc).timestamp()
+    _touch_mtime(bootstrap_marker, old_timestamp)
+    _touch_mtime(disabled_skill, old_timestamp)
+    result = archive_old_orphans_for_workspace(
+        tmp_path,
+        old_orphan_days=3,
+        max_files=10,
+        remaining_files=10,
+        actor="source_archive_maintenance",
+        now=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+
+    assert result.archived_paths == []
+    assert bootstrap_marker.exists()
+    assert disabled_skill.exists()
 
 
 def test_archive_old_orphans_for_workspace_skips_index_write_when_no_candidates(

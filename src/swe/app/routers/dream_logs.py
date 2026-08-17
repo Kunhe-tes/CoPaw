@@ -558,6 +558,7 @@ class ArchiveReportResponse(BaseModel):
 
 # Keep list - files and directories that should NOT be listed as orphan
 KEEP_FILES = {
+    ".bootstrap_completed",
     "MEMORY.md",
     "AGENTS.md",
     "SOUL.md",
@@ -575,6 +576,7 @@ KEEP_FILES = {
 
 KEEP_DIRS = {
     "agents",
+    ".disabled_skills",
     "hooks",
     "memory",
     "sessions",

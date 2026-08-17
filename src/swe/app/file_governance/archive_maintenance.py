@@ -15,6 +15,7 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 KEEP_FILES = {
+    ".bootstrap_completed",
     "MEMORY.md",
     "AGENTS.md",
     "SOUL.md",
@@ -32,6 +33,7 @@ KEEP_FILES = {
 
 KEEP_DIRS = {
     "agents",
+    ".disabled_skills",
     "hooks",
     "memory",
     "sessions",
