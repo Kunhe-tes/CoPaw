@@ -10,6 +10,12 @@ const emptyPayload: ExpertPayload = {
   mcps: null, tools: {}, model: null, budget: {},
 };
 
+type ExpertFormValues = ExpertPayload & {
+  keywordsText?: string;
+  skillsText?: string[];
+  mcpsText?: string[];
+};
+
 const splitList = (value?: string) => value?.split(",").map((item) => item.trim()).filter(Boolean) || [];
 
 export default function ExpertsPage() {
@@ -21,11 +27,11 @@ export default function ExpertsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [previewToml, setPreviewToml] = useState("");
   const [selected, setSelected] = useState<Expert | null>(null);
-  const [form] = Form.useForm<ExpertPayload & { keywordsText?: string; skillsText?: string[]; mcpsText?: string[] }>();
+  const [form] = Form.useForm<ExpertFormValues>();
   const { message } = useAppMessage();
   const load = async () => { setLoading(true); try { setItems(await expertsApi.listExperts()); } catch (error) { message.error(error instanceof Error ? error.message : "加载专家失败"); } finally { setLoading(false); } };
   useEffect(() => { void load(); void api.listEffectiveSkills().then((items) => setSkillOptions(items.map((item) => ({ label: item.name, value: item.name })))).catch(() => {}); void api.listMCPClients().then((items) => setMcpOptions(items.filter((item) => item.enabled).map((item) => ({ label: item.name || item.key, value: item.key })))).catch(() => {}); }, []);
-  const open = (expert?: Expert) => { setSelected(expert || null); setPreviewToml(expert?.toml || ""); setDrawerOpen(true); form.setFieldsValue(expert ? { ...expert.definition as ExpertPayload, keywordsText: ((expert.definition?.trigger_keywords as string[]) || []).join(", "), skillsText: (expert.definition?.agent_owned?.declared_skills as string[]) || [], mcpsText: (expert.definition?.agent_owned?.declared_mcps as string[]) || [] } : emptyPayload); };
+  const open = (expert?: Expert) => { const definition = expert?.definition; setSelected(expert || null); setPreviewToml(expert?.toml || ""); setDrawerOpen(true); form.setFieldsValue(definition ? { ...emptyPayload, name: definition.name, description: definition.description, instruction: definition.instruction, trigger_keywords: definition.trigger_keywords, keywordsText: definition.trigger_keywords.join(", "), skillsText: definition.agent_owned?.declared_skills || [], mcpsText: definition.agent_owned?.declared_mcps || [] } : emptyPayload); };
   const payloadFromForm = async (): Promise<ExpertPayload> => { const values = await form.validateFields(); return { name: values.name, description: values.description, instruction: values.instruction, trigger_keywords: splitList(values.keywordsText), skills: values.skillsText || [], mcps: values.mcpsText?.length ? values.mcpsText : null, tools: {}, model: null, budget: {} }; };
   const save = async () => { const payload = await payloadFromForm(); setSaving(true); try { const saved = selected ? await expertsApi.updateExpert(selected.definition_id, payload, selected.revision) : await expertsApi.createExpert(payload); setSelected(saved); setPreviewToml(saved.toml); message.success("专家配置已保存；启停将在下一轮主 Agent 生效"); await load(); } catch (error) { message.error(error instanceof Error ? error.message : "保存失败"); } finally { setSaving(false); } };
   const preview = async () => { try { setPreviewToml((await expertsApi.previewExpert(await payloadFromForm())).toml); } catch (error) { message.error(error instanceof Error ? error.message : "配置校验失败"); } };
