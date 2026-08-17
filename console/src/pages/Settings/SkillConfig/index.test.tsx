@@ -90,7 +90,7 @@ describe("SkillConfigPage", () => {
 
     render(<SkillConfigPage />);
     await waitFor(() =>
-      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1"),
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
     );
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
 
@@ -155,7 +155,7 @@ describe("SkillConfigPage", () => {
 
     render(<SkillConfigPage />);
     await waitFor(() =>
-      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1"),
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
     );
     fireEvent.click(screen.getByRole("button", { name: "编辑 存款到期续接" }));
     fireEvent.click(await screen.findByRole("button", { name: /保\s*存/ }));
