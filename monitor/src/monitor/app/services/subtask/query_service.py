@@ -640,6 +640,48 @@ class QueryService:
         )
         await self.db.execute(query, params)
 
+    def _build_result_index_row(
+        self,
+        execution: dict,
+        subtask: dict,
+        skill_id: str,
+        execution_at: datetime,
+        expire_at: datetime,
+    ) -> dict:
+        """Build one query-index row for a successful subtask result."""
+        bbk_org_id = subtask.get("bbk_org_id") or ""
+        first_bbk_id = (
+            normalize_bbk_id_to_primary(bbk_org_id)
+            or execution.get("bbk_id")
+            or ""
+        )
+        return {
+            "source_id": execution.get("source_id") or "",
+            "tenant_id": execution.get("tenant_id") or "",
+            "first_bbk_id": first_bbk_id,
+            "bbk_org_id": bbk_org_id,
+            "custuid": subtask.get("custuid") or "",
+            "cust_nm": subtask.get("cust_nm"),
+            "skill_id": skill_id,
+            "job_id": execution.get("job_id") or "",
+            "execution_id": execution.get("execution_id"),
+            "trace_id": execution.get("trace_id") or "",
+            "subtask_id": subtask.get("subtask_id"),
+            "task_id": subtask.get("task_id") or "",
+            "result_type": subtask.get("task_type"),
+            "template_id": subtask.get("template_id"),
+            "result_id": subtask.get("result_id"),
+            "filename": subtask.get("filename"),
+            "status": subtask.get("status"),
+            "execution_at": execution_at,
+            "expire_at": expire_at,
+        }
+
+    async def _write_result_index_row(self, row: dict) -> None:
+        """Mark older rows stale, then upsert the latest result-index row."""
+        await self._mark_previous_result_index_stale(row)
+        await self._upsert_result_index_row(row)
+
     async def _index_success_execution_results(
         self,
         executions: list[dict],
@@ -662,37 +704,15 @@ class QueryService:
             expire_at = execution_at + timedelta(days=30)
 
             for subtask in subtasks:
-                result_type = subtask.get("task_type")
-                bbk_org_id = subtask.get("bbk_org_id") or ""
-                first_bbk_id = (
-                    normalize_bbk_id_to_primary(bbk_org_id)
-                    or execution.get("bbk_id")
-                    or ""
-                )
                 for skill_id in skill_ids:
-                    row = {
-                        "source_id": execution.get("source_id") or "",
-                        "tenant_id": execution.get("tenant_id") or "",
-                        "first_bbk_id": first_bbk_id,
-                        "bbk_org_id": bbk_org_id,
-                        "custuid": subtask.get("custuid") or "",
-                        "cust_nm": subtask.get("cust_nm"),
-                        "skill_id": skill_id,
-                        "job_id": execution.get("job_id") or "",
-                        "execution_id": execution.get("execution_id"),
-                        "trace_id": execution.get("trace_id") or "",
-                        "subtask_id": subtask.get("subtask_id"),
-                        "task_id": subtask.get("task_id") or "",
-                        "result_type": result_type,
-                        "template_id": subtask.get("template_id"),
-                        "result_id": subtask.get("result_id"),
-                        "filename": subtask.get("filename"),
-                        "status": subtask.get("status"),
-                        "execution_at": execution_at,
-                        "expire_at": expire_at,
-                    }
-                    await self._mark_previous_result_index_stale(row)
-                    await self._upsert_result_index_row(row)
+                    row = self._build_result_index_row(
+                        execution,
+                        subtask,
+                        skill_id,
+                        execution_at,
+                        expire_at,
+                    )
+                    await self._write_result_index_row(row)
                     indexed_count += 1
         return indexed_count
 
