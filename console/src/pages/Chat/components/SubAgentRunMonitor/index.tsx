@@ -175,12 +175,6 @@ export default function SubAgentRunMonitor(props: {
     [chatId],
   );
 
-  const activeCount = useMemo(
-    () =>
-      visibleRuns.filter((run) => !TERMINAL_STATUSES.has(run.status)).length,
-    [visibleRuns],
-  );
-
   const handleStop = useCallback(
     async (run: SubAgentRunSnapshotItem) => {
       if (!chatId || run.status !== "running") return;
@@ -313,9 +307,6 @@ export default function SubAgentRunMonitor(props: {
             <i />
             <i />
             <i />
-          </span>
-          <span>
-            {activeCount > 0 ? `${activeCount} 个助手运行中` : "查看助手状态"}
           </span>
         </button>
       )}

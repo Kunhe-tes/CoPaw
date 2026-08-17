@@ -105,7 +105,9 @@ describe("SubAgentRunMonitor", () => {
 
     render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
     await flushPromises();
-    screen.getByRole("button", { name: /助手/i });
+    const trigger = screen.getByRole("button", { name: "助手运行状态" });
+    expect(trigger).not.toHaveTextContent("个助手运行中");
+    expect(trigger).not.toHaveTextContent("查看助手状态");
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
@@ -122,7 +124,7 @@ describe("SubAgentRunMonitor", () => {
 
     render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
     await flushPromises();
-    screen.getByRole("button", { name: /助手/i });
+    screen.getByRole("button", { name: "助手运行状态" });
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(10_000);
@@ -135,7 +137,7 @@ describe("SubAgentRunMonitor", () => {
     mocks.getSubAgentRuns.mockResolvedValue(snapshot([run()]));
 
     render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
-    await screen.findByRole("button", { name: /助手/i });
+    await screen.findByRole("button", { name: "助手运行状态" });
 
     await act(async () => {
       document.dispatchEvent(new CustomEvent(SUBAGENT_RUNS_REFRESH_EVENT));
@@ -179,7 +181,7 @@ describe("SubAgentRunMonitor", () => {
       <SubAgentRunMonitor chatId="chat-1" resetKey={0} />,
     );
     await flushPromises();
-    screen.getByText("1 个助手运行中");
+    screen.getByRole("button", { name: "助手运行状态" });
 
     rerender(<SubAgentRunMonitor chatId="chat-1" resetKey={1} />);
     await flushPromises();
@@ -190,8 +192,10 @@ describe("SubAgentRunMonitor", () => {
       document.dispatchEvent(new CustomEvent(SUBAGENT_RUNS_REFRESH_EVENT));
     });
 
-    expect(await screen.findByText("1 个助手运行中")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /助手/i }));
+    expect(
+      await screen.findByRole("button", { name: "助手运行状态" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "助手运行状态" }));
     expect(screen.queryByText("old-agent")).toBeNull();
     expect(screen.getByText("new-agent")).toBeInTheDocument();
   });
@@ -215,7 +219,7 @@ describe("SubAgentRunMonitor", () => {
       <SubAgentRunMonitor chatId="chat-1" resetKey={0} />,
     );
     await flushPromises();
-    screen.getByText("1 个助手运行中");
+    screen.getByRole("button", { name: "助手运行状态" });
 
     await act(async () => {
       document.dispatchEvent(new CustomEvent(SUBAGENT_RUNS_REFRESH_EVENT));
@@ -232,8 +236,10 @@ describe("SubAgentRunMonitor", () => {
       document.dispatchEvent(new CustomEvent(SUBAGENT_RUNS_REFRESH_EVENT));
     });
 
-    expect(await screen.findByText("1 个助手运行中")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: /助手/i }));
+    expect(
+      await screen.findByRole("button", { name: "助手运行状态" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "助手运行状态" }));
     expect(screen.queryByText("old-agent")).toBeNull();
     expect(screen.getByText("new-agent")).toBeInTheDocument();
   });
@@ -252,7 +258,9 @@ describe("SubAgentRunMonitor", () => {
     );
 
     render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
-    fireEvent.click(await screen.findByRole("button", { name: /助手/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "助手运行状态" }),
+    );
 
     expect(screen.getByText("运行中")).toBeInTheDocument();
     expect(
@@ -268,7 +276,9 @@ describe("SubAgentRunMonitor", () => {
     );
 
     render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
-    fireEvent.click(await screen.findByRole("button", { name: /助手/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "助手运行状态" }),
+    );
 
     expect(screen.getByText("研究员")).toBeInTheDocument();
     expect(screen.queryByText("plan-researcher")).not.toBeInTheDocument();
@@ -331,7 +341,9 @@ describe("SubAgentRunMonitor", () => {
     });
 
     render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
-    fireEvent.click(await screen.findByRole("button", { name: /助手/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "助手运行状态" }),
+    );
 
     const stopButton = await screen.findByRole("button", {
       name: "停止 plan-researcher",
@@ -357,7 +369,9 @@ describe("SubAgentRunMonitor", () => {
     mocks.cancelSubAgentRun.mockRejectedValueOnce(new Error("network"));
 
     render(<SubAgentRunMonitor chatId="chat-1" resetKey={0} />);
-    fireEvent.click(await screen.findByRole("button", { name: /助手/i }));
+    fireEvent.click(
+      await screen.findByRole("button", { name: "助手运行状态" }),
+    );
     fireEvent.click(
       await screen.findByRole("button", { name: "停止 plan-researcher" }),
     );
