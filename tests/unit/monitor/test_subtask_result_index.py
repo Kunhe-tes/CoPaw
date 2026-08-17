@@ -4,6 +4,7 @@
 import asyncio
 from datetime import datetime
 
+from monitor.app.services.subtask import query_service as query_service_module
 from monitor.app.services.subtask.query_service import QueryService
 
 
@@ -85,6 +86,7 @@ def test_batch_update_indexes_success_execution_results():
     assert first_insert_params[2] == "771"
     assert first_insert_params[3] == "772"
     assert first_insert_params[4] == "cust-1"
+    assert first_insert_params[5] == "C******r"
     assert first_insert_params[6] == "skill-a"
     assert first_insert_params[13] == 11
     assert first_insert_params[14] == "doc-1"
@@ -97,3 +99,77 @@ def test_batch_update_indexes_success_execution_results():
     assert "template_id > 0" in subtask_sql
     assert "result_id IS NOT NULL" in subtask_sql
     assert "result_id <> ''" in subtask_sql
+
+
+class FakeCustomerNameResponse:
+    status_code = 200
+
+    def json(self):
+        return {
+            "data": [
+                {
+                    "row": "0000001015FICNP",
+                    "values": {
+                        "f": {
+                            "EAC_NM": "陆建校",
+                        },
+                    },
+                },
+            ],
+        }
+
+
+class FakeCustomerNameClient:
+    def __init__(self):
+        self.post_calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return None
+
+    async def post(self, url, headers=None, json=None):
+        self.post_calls.append((url, headers, json))
+        return FakeCustomerNameResponse()
+
+
+def test_batch_update_queries_and_masks_missing_customer_name(monkeypatch):
+    db = FakeDb()
+    db.fetch_all_results[1][0]["custuid"] = "PNCIF5101000000"
+    db.fetch_all_results[1][0]["cust_nm"] = ""
+
+    client = FakeCustomerNameClient()
+    monkeypatch.setattr(
+        query_service_module,
+        "CUSTOMER_NAME_QUERY_URL",
+        "https://example.test/customer-name",
+    )
+    monkeypatch.setattr(
+        query_service_module.httpx,
+        "AsyncClient",
+        lambda timeout: client,
+    )
+
+    success_count, error_count, indexed_count = asyncio.run(
+        QueryService(db=db).batch_update_execution_async_status(),
+    )
+
+    assert success_count == 1
+    assert error_count == 0
+    assert indexed_count == 2
+
+    assert client.post_calls == [
+        (
+            "https://example.test/customer-name",
+            {"Content-Type": "application/json"},
+            {"rows": ["0000001015FICNP"]},
+        ),
+    ]
+
+    insert_calls = [
+        call
+        for call in db.execute_calls
+        if "INSERT INTO swe_cron_result_index" in call[0]
+    ]
+    assert insert_calls[0][1][5] == "陆*校"
