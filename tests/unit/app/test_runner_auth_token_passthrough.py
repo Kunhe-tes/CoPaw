@@ -37,13 +37,17 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_clients(
+    def fake_build_clients(
         _mcp,
+        *,
+        tenant_id=None,
+        user_id=None,
         passthrough_headers=None,
         session_id=None,
         chat_id=None,
         trace_id=None,
     ):
+        del tenant_id, user_id
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
         captured["chat_id"] = chat_id
@@ -78,7 +82,7 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
         lambda *args, **kwargs: _fake_agent_config(),
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        "swe.app.runner.runner._build_lazy_mcp_clients",
         fake_build_clients,
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
@@ -217,13 +221,17 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_clients(
+    def fake_build_clients(
         _mcp,
+        *,
+        tenant_id=None,
+        user_id=None,
         passthrough_headers=None,
         session_id=None,
         chat_id=None,
         trace_id=None,
     ):
+        del tenant_id, user_id
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
         captured["chat_id"] = chat_id
@@ -258,7 +266,7 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         lambda *args, **kwargs: _fake_agent_config(),
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        "swe.app.runner.runner._build_lazy_mcp_clients",
         fake_build_clients,
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
@@ -338,13 +346,17 @@ async def test_query_handler_injects_identity_into_request_context(
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_clients(
+    def fake_build_clients(
         _mcp,
+        *,
+        tenant_id=None,
+        user_id=None,
         passthrough_headers=None,
         session_id=None,
         chat_id=None,
         trace_id=None,
     ):
+        del tenant_id, user_id
         del _mcp, passthrough_headers, session_id, chat_id, trace_id
         return []
 
@@ -376,7 +388,7 @@ async def test_query_handler_injects_identity_into_request_context(
         lambda *args, **kwargs: _fake_agent_config(),
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        "swe.app.runner.runner._build_lazy_mcp_clients",
         fake_build_clients,
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)

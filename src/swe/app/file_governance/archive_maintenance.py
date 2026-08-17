@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import json
@@ -14,6 +15,7 @@ from fastapi import HTTPException
 logger = logging.getLogger(__name__)
 
 KEEP_FILES = {
+    ".bootstrap_completed",
     "MEMORY.md",
     "AGENTS.md",
     "SOUL.md",
@@ -30,6 +32,9 @@ KEEP_FILES = {
 }
 
 KEEP_DIRS = {
+    "agents",
+    ".disabled_skills",
+    "hooks",
     "memory",
     "sessions",
     "backup",
@@ -338,8 +343,12 @@ def archive_old_orphans_for_workspace(
         actor=actor,
         reason=f"source_archive_maintenance_mtime_{old_orphan_days}_days",
     )
-    archived_paths = [str(item.get("original_path") or "") for item in archived_items]
-    archived_size_bytes = sum(int(item.get("size_bytes") or 0) for item in archived_items)
+    archived_paths = [
+        str(item.get("original_path") or "") for item in archived_items
+    ]
+    archived_size_bytes = sum(
+        int(item.get("size_bytes") or 0) for item in archived_items
+    )
     return WorkspaceArchiveMaintenanceResult(
         archived_items=archived_items,
         archived_paths=archived_paths,

@@ -612,6 +612,34 @@ def test_file_manager_upload_and_delete_enforce_root_and_name_contracts(
     assert not (tmp_path / "media" / "fresh.txt").exists()
 
 
+def test_file_manager_deletes_directory_and_audits_outcome(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    (tmp_path / "reports" / "weekly").mkdir(parents=True)
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    with caplog.at_level("INFO", logger="src.swe.app.routers.console"):
+        response = client.delete(
+            "/console/file-manager/directories",
+            params={"root": "working", "path": "reports"},
+        )
+
+    assert response.status_code == 204
+    assert not (tmp_path / "reports").exists()
+    audit = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "file_manager.audit"
+    )
+    assert (audit.action, audit.path, audit.outcome) == (
+        "delete_directory",
+        "reports",
+        "success",
+    )
+
+
 def test_file_manager_oversized_upload_audits_failure_without_content(
     tmp_path,
     monkeypatch,

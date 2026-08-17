@@ -12,7 +12,6 @@ def _builtin(
     name: str,
     description: str,
     instruction: str,
-    task_types: list[str],
     trigger_keywords: list[str] | None = None,
 ) -> SubAgentDefinition:
     return SubAgentDefinition.model_validate(
@@ -48,7 +47,6 @@ def _builtin(
                 "cancellable": True,
                 "allow_nested_delegation": False,
             },
-            "task_types": task_types,
             "trigger_keywords": trigger_keywords or [],
             "priority": 100,
         },
@@ -66,7 +64,6 @@ def builtin_definition_provider() -> InMemoryDefinitionProvider:
                     "You are a readonly planning researcher. Gather facts, "
                     "cite files or commands, and do not modify workspace state."
                 ),
-                task_types=["planning", "research"],
                 trigger_keywords=["plan", "planning", "research"],
             ),
             _builtin(
@@ -77,7 +74,6 @@ def builtin_definition_provider() -> InMemoryDefinitionProvider:
                     "question, gather available context, and return a concise "
                     "evidence-based final summary."
                 ),
-                task_types=["research", "analysis"],
                 trigger_keywords=["research", "analysis", "analyze"],
             ),
             _builtin(
@@ -87,7 +83,6 @@ def builtin_definition_provider() -> InMemoryDefinitionProvider:
                     "You are a readonly risk reviewer. Identify regressions, "
                     "security concerns, and missing safeguards with evidence."
                 ),
-                task_types=["risk", "review"],
                 trigger_keywords=["risk", "review", "regression"],
             ),
             _builtin(
@@ -97,7 +92,6 @@ def builtin_definition_provider() -> InMemoryDefinitionProvider:
                     "You are a readonly test-surface analyzer. Identify tests "
                     "to run or add, but do not execute test commands."
                 ),
-                task_types=["tests", "verification"],
                 trigger_keywords=["test", "tests", "verification"],
             ),
         ],

@@ -12,7 +12,7 @@ from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 
 from ...app.subagents import (
-    AgentRegistry,
+    AgentOwnedDefinitionRepository,
     BackgroundSubAgentNotManageable,
     BackgroundSubAgentScope,
     BackgroundSubAgentStartBlocked,
@@ -21,11 +21,11 @@ from ...app.subagents import (
     DelegationSpec,
     DefinitionMatchMetadata,
     PermissionPolicy,
-    SubAgentDefinitionService,
-    SubAgentDefinitionStore,
-    SubAgentRegistrationRequest,
+    SubAgentDefinition,
     SubAgentStartRequest,
     builtin_definition_provider,
+    build_definition_catalog,
+    load_skill_owned_definitions,
 )
 from ...config.config import AgentProfileConfig
 from ...config.utils import get_tenant_working_dir
@@ -39,77 +39,33 @@ _SUBAGENT_INTENT_TERMS = (
     "子Agent",
     "后台子代理",
 )
-_SUBAGENT_REGISTRATION_INTENT_TERMS = (
-    "register subagent",
-    "register_subagent",
-    "SubAgent Definition",
-    "subagent definition",
-    "subagent",
-    "SubAgent",
-    "subAgent",
-    "definition",
-    "Definition",
-    "子代理",
-    "子Agent",
-)
-_SUBAGENT_REGISTRATION_ACTION_TERMS = (
-    "register",
-    "registration",
-    "注册",
-    "登记",
-    "可复用",
-)
-_TEXT_CONTEXT_KEYS = (
-    "current_user_text",
-    "user_message",
-    "query",
-    "prompt",
-    "message_text",
-)
 _RUN_ID_CONTEXT_KEYS = (
     "subagent_run_id",
     "requested_subagent_run_id",
 )
 _FAILURE_SUMMARY_MAX_CHARS = 1024
 _DEFAULT_SUPERVISOR = BackgroundSubAgentSupervisor()
+_START_SUBAGENT_DESCRIPTION = (
+    "Start a Background SubAgent Run. Use an exact listed Skill-qualified "
+    "name when delegating to a Skill-owned definition."
+)
 
 
-def get_default_background_subagent_supervisor() -> (
-    BackgroundSubAgentSupervisor
-):
+def get_default_background_subagent_supervisor() -> BackgroundSubAgentSupervisor:
     """Return the process-local default Background SubAgent supervisor."""
     return _DEFAULT_SUPERVISOR
 
 
 def has_subagent_intent(request_context: dict[str, Any]) -> bool:
     """Return whether the current turn explicitly asks for SubAgents."""
-    if request_context.get("subagent_tools_requested") is True:
-        return True
-    text = "\n".join(
-        str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
-    )
+    text = str(request_context.get("current_user_text") or "")
     return any(term in text for term in _SUBAGENT_INTENT_TERMS)
-
-
-def has_subagent_registration_intent(
-    request_context: dict[str, Any],
-) -> bool:
-    """Return whether the current turn explicitly asks to register definitions."""
-    if request_context.get("subagent_registration_tools_requested") is True:
-        return True
-    text = "\n".join(
-        str(request_context.get(key) or "") for key in _TEXT_CONTEXT_KEYS
-    )
-    return any(
-        term in text for term in _SUBAGENT_REGISTRATION_INTENT_TERMS
-    ) and any(term in text for term in _SUBAGENT_REGISTRATION_ACTION_TERMS)
 
 
 def has_explicit_subagent_run_id(request_context: dict[str, Any]) -> bool:
     """Return whether this request explicitly carries a Background Run id."""
     return any(
-        str(request_context.get(key) or "").strip()
-        for key in _RUN_ID_CONTEXT_KEYS
+        str(request_context.get(key) or "").strip() for key in _RUN_ID_CONTEXT_KEYS
     )
 
 
@@ -146,17 +102,19 @@ def create_background_subagent_tools(
     parent_agent_config: AgentProfileConfig,
     workspace_dir: Path,
     request_context: dict[str, Any],
-    include_registration_tool: bool = False,
+    effective_skill_names: list[str] | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
     tool_scope = build_background_subagent_scope(
         parent_agent_config=parent_agent_config,
         request_context=request_context,
     )
-    definition_service = _definition_service_for_tool(
-        request_context=request_context,
+    definition_catalog = _build_definition_catalog(
         tool_scope=tool_scope,
+        workspace_dir=workspace_dir,
+        effective_skill_names=effective_skill_names,
     )
+    directory = _format_skill_definition_directory(definition_catalog)
 
     async def start_subagent(
         name: str | None = None,
@@ -188,18 +146,39 @@ def create_background_subagent_tools(
                 },
             )
         try:
-            match = definition_service.match_start_request(start_request)
-            if match is None:
-                definition_match = DefinitionMatchMetadata(matched=False)
-                definition = definition_service.build_run_scoped_definition(
-                    start_request,
-                    owner_scope=(
-                        f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"
-                    ),
+            definition = (
+                definition_catalog.resolve_exact(start_request.name)
+                if definition_catalog is not None
+                else None
+            )
+            if definition is None:
+                if start_request.instruction is None:
+                    return _json_response(
+                        {
+                            "status": "not_found",
+                            "reason": "subagent_definition_not_found",
+                            "name": start_request.name,
+                        },
+                    )
+                definition_match = DefinitionMatchMetadata(
+                    matched=False,
+                    reason="run_scoped",
+                )
+                definition = SubAgentDefinition(
+                    name=start_request.name,
+                    source="run_scoped",
+                    owner_scope=(f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"),
+                    description="Temporary caller-defined SubAgent.",
+                    instruction=start_request.instruction,
                 )
             else:
-                definition_match = match.metadata
-                definition = match.definition
+                definition_match = DefinitionMatchMetadata(
+                    matched=True,
+                    definition_name=definition.name,
+                    definition_source=definition.source,
+                    score=1.0,
+                    reason="exact_name",
+                )
             spec = DelegationSpec(
                 parent_thread_id=str(request_context.get("session_id") or ""),
                 name=start_request.name,
@@ -218,6 +197,14 @@ def create_background_subagent_tools(
                 definition=definition,
                 start_request=start_request,
                 definition_match=definition_match,
+                effective_skill_names=(
+                    list(effective_skill_names or [])
+                    if (
+                        definition.skill_owned is not None
+                        or definition.agent_owned is not None
+                    )
+                    else []
+                ),
             )
         except Exception as exc:
             return _json_response(
@@ -229,42 +216,7 @@ def create_background_subagent_tools(
             )
         return _json_response(_serialize_start_result(result))
 
-    async def register_subagent_definition(
-        name: str,
-        instruction: str,
-        description: str,
-        trigger_keywords: list[str] | None = None,
-        task_types: list[str] | None = None,
-        priority: int = 100,
-        budget: dict[str, Any] | None = None,
-        enabled: bool = True,
-        nickname: str | None = None,
-    ) -> ToolResponse:
-        """Register or update one stored SubAgent definition."""
-        try:
-            request = SubAgentRegistrationRequest.model_validate(
-                {
-                    "name": name,
-                    "instruction": instruction,
-                    "description": description,
-                    "nickname": nickname,
-                    "trigger_keywords": trigger_keywords or [],
-                    "task_types": task_types or [],
-                    "priority": priority,
-                    "budget": budget or {},
-                    "enabled": enabled,
-                },
-            )
-            payload = definition_service.register(request)
-        except Exception as exc:
-            return _json_response(
-                {
-                    "status": "failed",
-                    "reason": "invalid_request",
-                    "message": str(exc),
-                },
-            )
-        return _json_response(payload)
+    start_subagent.__doc__ = directory
 
     async def wait_subagent(timeout_ms: int = 3000) -> ToolResponse:
         """Wait briefly and return current Background SubAgent statuses."""
@@ -325,29 +277,48 @@ def create_background_subagent_tools(
         "get_subagent": get_subagent,
         "cancel_subagent": cancel_subagent,
     }
-    if include_registration_tool:
-        tools["register_subagent_definition"] = register_subagent_definition
     return tools
 
 
-def _definition_service_for_tool(
+def _build_definition_catalog(
     *,
-    request_context: dict[str, Any],
     tool_scope: BackgroundSubAgentScope,
-) -> SubAgentDefinitionService:
-    explicit_definition_store_dir = request_context.get(
-        "_subagent_definition_store_dir",
+    workspace_dir: Path,
+    effective_skill_names: list[str] | None,
+):
+    """Build the catalog only for an explicit delegation-intent turn."""
+    builtin_definitions = builtin_definition_provider().list_definitions()
+    agent_packages = AgentOwnedDefinitionRepository(
+        workspace_dir / "agents",
+        owner_scope=f"{tool_scope.tenant_id}/{tool_scope.agent_id}",
+        builtin_names={definition.name for definition in builtin_definitions},
+    ).list()
+    return build_definition_catalog(
+        skill_definitions=load_skill_owned_definitions(
+            workspace_dir=workspace_dir,
+            effective_skill_names=effective_skill_names or [],
+        ).definitions,
+        builtin_definitions=builtin_definitions,
+        agent_owned_definitions=[
+            package.definition
+            for package in agent_packages
+            if package.definition is not None
+        ],
     )
-    if explicit_definition_store_dir:
-        store_dir = Path(explicit_definition_store_dir)
-    else:
-        store_dir = tool_scope.run_store_dir.parent / "subagent_definitions"
-    owner_scope = f"{tool_scope.tenant_id}/{tool_scope.agent_id}"
-    return SubAgentDefinitionService(
-        store=SubAgentDefinitionStore(store_dir),
-        builtin_registry=AgentRegistry([builtin_definition_provider()]),
-        owner_scope=owner_scope,
-    )
+
+
+def _format_skill_definition_directory(catalog) -> str:
+    """Build the bounded Definition directory included in tool metadata."""
+    definitions = catalog.list_definitions() if catalog is not None else []
+    if not definitions:
+        return _START_SUBAGENT_DESCRIPTION
+    lines = [_START_SUBAGENT_DESCRIPTION, "Available definitions:"]
+    for definition in definitions:
+        keywords = ", ".join(definition.trigger_keywords) or "(none)"
+        lines.append(
+            f"- {definition.name}: {definition.description} " f"[keywords: {keywords}]",
+        )
+    return "\n".join(lines)
 
 
 def _json_response(payload: dict[str, Any]) -> ToolResponse:
@@ -437,8 +408,7 @@ def _compact_agent_result(result: Any) -> dict[str, Any]:
     payload = {"summary": result.summary}
     errors = getattr(result, "errors", []) or []
     if any(
-        getattr(error, "code", "") == "text_finalization_failed"
-        for error in errors
+        getattr(error, "code", "") == "text_finalization_failed" for error in errors
     ):
         payload["error_code"] = "text_finalization_failed"
     return payload
@@ -471,6 +441,9 @@ def _compact_record(
                 "worker": _compact_worker(
                     getattr(record, "worker", None),
                 ),
+                "launch_diagnostics": _safe_launch_diagnostics(
+                    getattr(record, "launch_diagnostics", {}),
+                ),
                 "manageable": manageable,
             },
         )
@@ -494,22 +467,48 @@ def _compact_worker(worker: Any) -> dict[str, Any] | None:
     }
 
 
+def _safe_launch_diagnostics(value: Any) -> dict[str, Any]:
+    """Return the allowlisted launch diagnostics for detailed inspection."""
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for field in (
+        "loaded_skills",
+        "skipped_skills",
+        "snapshotted_mcps",
+        "connected_mcps",
+        "skipped_mcps",
+        "resolved_model",
+    ):
+        if field in value and value[field] not in (None, [], {}):
+            result[field] = _dump_json_value(value[field])
+    return result
+
+
 def _parent_policy_from_config(parent_agent_config: Any) -> PermissionPolicy:
-    """Build parent readonly policy from enabled parent built-in tools."""
-    readonly = PermissionPolicy.readonly()
-    readonly_tools = set(readonly.tools.allow)
+    """Build a bounded parent policy from enabled parent built-in tools."""
+    from ...app.subagents.models import KNOWN_BUILTIN_TOOLS, MutationPolicy
+    from ...config.config import _default_builtin_tools
+
+    builtin_defaults = _default_builtin_tools()
     tools_config = getattr(parent_agent_config, "tools", None)
     builtin_tools = getattr(tools_config, "builtin_tools", None)
     if not isinstance(builtin_tools, dict):
-        return readonly
+        builtin_tools = builtin_defaults
     enabled = {
         name
         for name, config in builtin_tools.items()
-        if name in readonly_tools and getattr(config, "enabled", True)
+        if name in KNOWN_BUILTIN_TOOLS and getattr(config, "enabled", True)
     }
-    return PermissionPolicy.readonly(
+    return PermissionPolicy.bounded(
         allow_tools=sorted(enabled),
-        deny_tools=sorted(readonly_tools - enabled),
+        deny_tools=sorted(KNOWN_BUILTIN_TOOLS - enabled),
+        mutation=MutationPolicy(
+            allow_file_write="write_file" in enabled,
+            allow_patch="edit_file" in enabled,
+        ),
     )
 
 

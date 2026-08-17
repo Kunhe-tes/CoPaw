@@ -77,6 +77,7 @@ export const KEY_TO_PATH: Record<string, string> = {
   market: "/market",
   "my-skills": "/my-skills",
   "my-mcp": "/my-mcp",
+  experts: "/experts",
 };
 
 export const KEY_TO_LABEL: Record<string, string> = {

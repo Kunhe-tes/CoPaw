@@ -35,7 +35,7 @@
 
 | 区域 | 关键文件 | 说明 |
 |------|----------|------|
-| MCP | `src/swe/app/mcp/manager.py`, `src/swe/app/mcp/watcher.py` | MCP 客户端管理与配置监视 |
+| MCP | `src/swe/app/mcp/manager.py`, `src/swe/app/mcp/watcher.py`, `src/swe/app/mcp/lazy_client.py` | MCP 客户端管理、配置监视和请求级按需连接 |
 | 数据库 | `src/swe/database/config.py`, `src/swe/database/connection.py` | MySQL 连接配置与连接管理 |
 | 路由入口 | `src/swe/app/routers/providers.py`, `src/swe/app/routers/local_models.py`, `src/swe/app/routers/mcp.py` | 对外暴露 Provider / Local Model / MCP API |
 
@@ -48,6 +48,14 @@ Agent / Runner
   -> specific provider or local model backend
   -> token/tracing wrappers as needed
 ```
+
+## MCP 请求生命周期
+
+Query Runner 在请求启动时仅装配 MCP 工具 schema；schema 使用进程内短 TTL
+缓存，并按 tenant、user、MCP 配置和认证指纹隔离。缓存不持有连接或 session。
+缓存未命中时会使用当前请求 headers 作一次短生命周期 discovery；模型实际调用
+MCP 工具时才创建 transport client，并在调用结束后关闭。`session_id`、`chat_id`
+和 `trace_id` 始终在该次连接创建时注入。
 
 ## 关联功能域
 

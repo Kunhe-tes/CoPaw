@@ -134,6 +134,73 @@ def test_working_listing_hides_only_sessions_and_governance(
     assert [item.name for item in listing.items] == ["notes", ".env"]
 
 
+def test_delete_directory_removes_nested_entries_without_following_symlinks(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "reports"
+    nested = directory / "weekly"
+    outside = tmp_path / "outside"
+    nested.mkdir(parents=True)
+    outside.mkdir()
+    (nested / "report.md").write_text("report", encoding="utf-8")
+    (directory / "outside-link").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    _service(tmp_path).delete_directory("working", "reports")
+
+    assert not directory.exists()
+    assert outside.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("root", "path"),
+    [
+        ("working", ""),
+        ("working", "sessions"),
+        ("conversation", "folder"),
+    ],
+)
+def test_delete_directory_rejects_root_protected_and_read_only_paths(
+    tmp_path: Path,
+    root: str,
+    path: str,
+) -> None:
+    (tmp_path / "sessions" / "folder").mkdir(parents=True)
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).delete_directory(root, path)
+
+
+@pytest.mark.parametrize("path", ["media", "static"])
+def test_delete_directory_rejects_top_level_file_manager_backing_dirs(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    backing_dir = tmp_path / path
+    backing_dir.mkdir()
+    (backing_dir / "existing.txt").write_text("kept", encoding="utf-8")
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).delete_directory("working", path)
+
+    assert (backing_dir / "existing.txt").read_text(encoding="utf-8") == "kept"
+
+
+@pytest.mark.parametrize("path", ["media", "static"])
+def test_working_listing_disables_archive_for_top_level_backing_dirs(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    (tmp_path / path).mkdir()
+
+    item = _service(tmp_path).list_directory("working").items[0]
+
+    assert item.name == path
+    assert item.capabilities.archive is False
+
+
 def test_source_scope_upload_archives_and_restores_to_tenant_root(
     tmp_path: Path,
 ) -> None:
