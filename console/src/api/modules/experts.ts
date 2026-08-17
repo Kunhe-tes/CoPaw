@@ -12,13 +12,26 @@ export interface ExpertPayload {
   budget: Record<string, number>;
 }
 
-export interface Expert extends Omit<ExpertPayload, "mcps"> {
+export interface AgentOwnedExpertMetadata {
+  declared_skills: string[];
+  declared_mcps: string[] | null;
+}
+
+export interface ExpertDefinition {
+  name: string;
+  description: string;
+  instruction: string;
+  trigger_keywords: string[];
+  agent_owned: AgentOwnedExpertMetadata | null;
+}
+
+export interface Expert {
   definition_id: string;
   revision: string;
   valid: boolean;
   validation_error: string;
   enabled: boolean;
-  definition: Record<string, unknown> | null;
+  definition: ExpertDefinition | null;
   toml: string;
 }
 
