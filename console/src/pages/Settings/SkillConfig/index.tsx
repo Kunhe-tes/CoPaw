@@ -61,7 +61,7 @@ const EDITOR_MODE_META = {
   },
   edit: {
     label: "编辑模式",
-    description: "SKILL名称不可修改，其余触发规则修改完成后请点击保存。",
+    description: "当前触发规则可以修改，完成后请点击保存。",
   },
 } as const;
 
@@ -602,7 +602,7 @@ export default function SkillConfigPage() {
                 >
                   <Select
                     ref={nameSelectRef}
-                    disabled={mode === "edit"}
+                    disabled={mode === "view"}
                     showSearch
                     optionFilterProp="label"
                     options={cronOptions}

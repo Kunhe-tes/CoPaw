@@ -110,13 +110,15 @@ describe("SkillConfigPage", () => {
     expect(screen.getByText("查看模式")).toBeTruthy();
     expect(screen.getByText(/点击左侧 SKILL 的编辑图标后可修改/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
+    expect(screen.getByRole("combobox", { name: "SKILL名称" })).toBeDisabled();
 
     fireEvent.click(screen.getByRole("button", { name: "编辑 存款到期续接" }));
 
     expect(await screen.findByRole("button", { name: /保\s*存/ })).toBeTruthy();
     expect(screen.getByText("编辑模式")).toBeTruthy();
-    expect(screen.getByRole("combobox", { name: "SKILL名称" })).toBeDisabled();
-    expect(screen.getByText(/SKILL名称不可修改/)).toBeTruthy();
+    expect(
+      screen.getByRole("combobox", { name: "SKILL名称" }),
+    ).not.toBeDisabled();
   });
 
   it("shows an explicit retry state when the SKILL list fails to load", async () => {
