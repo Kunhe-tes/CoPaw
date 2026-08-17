@@ -11,6 +11,7 @@
 | [系统提示词注入](system-prompt-injections/README.md) | source 级和请求级 system prompt injection 如何配置、合并、进入 Agent system prompt |
 | [静态文件访问网络](network-aware-file-urls/README.md) | `copy_file_to_static` 如何按办公网/业务网生成可访问 URL |
 | [Hook](hook/README.md) | hook 运行机制和示例 |
+| [Chat API](api/README.md) | Console 流式对话和压缩历史分页接口 |
 | [Session 压缩](session-compaction/README.md) | 会话压缩相关行为 |
 | [Session 技能刷新](session-skill-refresh/README.md) | 会话内技能刷新相关行为 |
 | [用户环境变量配置](user-env-config/README.md) | tenant/source scope 下的运行时环境变量配置和使用 |
