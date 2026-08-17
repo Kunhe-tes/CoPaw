@@ -1,6 +1,7 @@
 import { request } from "../request";
 
 const SKILL_CONFIG_BASE_PATH = "/monitor/busiconfig/skill-config";
+const ACTIVITY_CLASS_LIST_PATH = "/monitor/busiconfig/actv-cls/list";
 
 export type SkillConfigSource = Record<string, unknown>;
 
@@ -59,6 +60,31 @@ export interface SkillConfigUpdatePayload {
 export interface SkillConfigCreatePayload extends SkillConfigUpdatePayload {
   skill_name: string;
   bbk_name: string;
+}
+
+export interface ActivityClassItem {
+  bbkOrgId: string;
+  activityClassId: string;
+  activityClassName: string;
+  description: string;
+  displayOrder: string;
+}
+
+interface ActivityClassListResponse {
+  code: number;
+  message: string;
+  data: {
+    code: string;
+    errMsg: string | null;
+    totalRows: string;
+    data: Array<{
+      bbkOrgId: string;
+      actvClsCd: string;
+      actvClsNm: string;
+      actvClsCmt: string;
+      disSeqNbr: string;
+    }>;
+  };
 }
 
 function firstDefined(source: SkillConfigSource, keys: string[]): unknown {
@@ -209,6 +235,33 @@ export function buildSkillConfigUpdatePayload(
 }
 
 export const skillConfigApi = {
+  async listActivityClasses(bbkId: string): Promise<ActivityClassItem[]> {
+    const response = await request<ActivityClassListResponse>(
+      ACTIVITY_CLASS_LIST_PATH,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          bbkOrgId: bbkId,
+          pageNum: 999,
+          startRow: 0,
+        }),
+      },
+    );
+    if (response.code !== 0) {
+      throw new Error(response.message || "所属分组列表加载失败");
+    }
+    if (response.data.code !== "success") {
+      throw new Error(response.data.errMsg || "所属分组列表加载失败");
+    }
+    return response.data.data.map((item) => ({
+      bbkOrgId: item.bbkOrgId,
+      activityClassId: item.actvClsCd,
+      activityClassName: item.actvClsNm,
+      description: item.actvClsCmt,
+      displayOrder: item.disSeqNbr,
+    }));
+  },
+
   async listSkillConfigs(bbkId: string): Promise<SkillConfigItem[]> {
     const response = await request<SkillConfigListResponse>(
       `${SKILL_CONFIG_BASE_PATH}/list`,

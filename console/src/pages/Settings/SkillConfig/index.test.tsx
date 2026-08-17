@@ -13,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   getSkillConfigDetail: vi.fn(),
   createSkillConfig: vi.fn(),
   updateSkillConfig: vi.fn(),
+  listActivityClasses: vi.fn(),
   listCronJobs: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
@@ -30,6 +31,7 @@ vi.mock("@/api/modules/skillConfig", async () => {
       getSkillConfigDetail: mocks.getSkillConfigDetail,
       createSkillConfig: mocks.createSkillConfig,
       updateSkillConfig: mocks.updateSkillConfig,
+      listActivityClasses: mocks.listActivityClasses,
     },
   };
 });
@@ -53,6 +55,7 @@ describe("SkillConfigPage", () => {
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset());
     mocks.listCronJobs.mockResolvedValue([]);
+    mocks.listActivityClasses.mockResolvedValue([]);
   });
 
   it("centers the create action when no SKILL exists and reveals the workspace", async () => {

@@ -17,6 +17,7 @@ import {
   buildSkillConfigCreatePayload,
   buildSkillConfigUpdatePayload,
   skillConfigApi,
+  type ActivityClassItem,
   type SkillConfigFormValues,
   type SkillConfigItem,
 } from "@/api/modules/skillConfig";
@@ -203,6 +204,9 @@ export default function SkillConfigPage() {
   const [form] = Form.useForm<SkillConfigEditorValues>();
   const [configs, setConfigs] = useState<SkillConfigItem[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJobSpecOutput[]>([]);
+  const [activityClasses, setActivityClasses] = useState<ActivityClassItem[]>(
+    [],
+  );
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedConfig, setSelectedConfig] = useState<SkillConfigItem | null>(
     null,
@@ -231,20 +235,26 @@ export default function SkillConfigPage() {
   }, [cronJobs, selectedConfig]);
 
   const groupOptions = useMemo(() => {
-    const groups = configs.flatMap((item) =>
-      item.groupId
-        ? [
-            {
-              value: item.groupId,
-              label: item.groupName || item.groupId,
-            },
-          ]
-        : [],
-    );
-    return Array.from(
-      new Map(groups.map((group) => [group.value, group])).values(),
-    );
-  }, [configs]);
+    const options = [...activityClasses]
+      .sort(
+        (left, right) =>
+          Number(left.displayOrder || 0) - Number(right.displayOrder || 0),
+      )
+      .map((item) => ({
+        value: item.activityClassId,
+        label: item.activityClassName || item.activityClassId,
+      }));
+    if (
+      selectedConfig?.groupId &&
+      !options.some((option) => option.value === selectedConfig.groupId)
+    ) {
+      options.unshift({
+        value: selectedConfig.groupId,
+        label: selectedConfig.groupName || selectedConfig.groupId,
+      });
+    }
+    return options;
+  }, [activityClasses, selectedConfig]);
 
   const loadConfigs = async () => {
     const nextConfigs = await skillConfigApi.listSkillConfigs(bbkId);
@@ -259,8 +269,9 @@ export default function SkillConfigPage() {
     Promise.allSettled([
       skillConfigApi.listSkillConfigs(bbkId),
       cronJobApi.listCronJobs(),
+      skillConfigApi.listActivityClasses(bbkId),
     ])
-      .then(([configResult, cronResult]) => {
+      .then(([configResult, cronResult, activityClassResult]) => {
         if (cancelled) return;
         if (configResult.status === "fulfilled") {
           setConfigs(configResult.value);
@@ -285,6 +296,16 @@ export default function SkillConfigPage() {
           setCronJobs(cronResult.value ?? []);
         } else {
           message.error("定时任务列表加载失败");
+        }
+        if (activityClassResult.status === "fulfilled") {
+          setActivityClasses(activityClassResult.value);
+        } else {
+          setActivityClasses([]);
+          message.error(
+            activityClassResult.reason instanceof Error
+              ? activityClassResult.reason.message
+              : "所属分组列表加载失败",
+          );
         }
       })
       .finally(() => {

@@ -14,6 +14,61 @@ describe("skillConfigApi", () => {
     mocks.request.mockReset();
   });
 
+  it("loads activity classes with the fixed paging parameters", async () => {
+    mocks.request.mockResolvedValue({
+      code: 0,
+      message: "success",
+      data: {
+        code: "success",
+        errMsg: null,
+        totalRows: "1",
+        data: [
+          {
+            bbkOrgId: "571",
+            actvClsCd: "group-1",
+            actvClsNm: "重点客群",
+            actvClsCmt: "重点客户活动分类",
+            disSeqNbr: "2",
+          },
+        ],
+      },
+    });
+
+    await expect(skillConfigApi.listActivityClasses("571")).resolves.toEqual([
+      {
+        bbkOrgId: "571",
+        activityClassId: "group-1",
+        activityClassName: "重点客群",
+        description: "重点客户活动分类",
+        displayOrder: "2",
+      },
+    ]);
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/monitor/busiconfig/actv-cls/list",
+      {
+        method: "POST",
+        body: JSON.stringify({ bbkOrgId: "571", pageNum: 999, startRow: 0 }),
+      },
+    );
+  });
+
+  it("rejects unsuccessful activity class gateway responses", async () => {
+    mocks.request.mockResolvedValue({
+      code: 0,
+      message: "success",
+      data: {
+        code: "failure",
+        errMsg: "网关查询失败",
+        totalRows: "0",
+        data: [],
+      },
+    });
+
+    await expect(skillConfigApi.listActivityClasses("571")).rejects.toThrow(
+      "网关查询失败",
+    );
+  });
+
   it("normalizes wrapped list responses with snake_case fields", async () => {
     mocks.request.mockResolvedValue({
       code: 0,
