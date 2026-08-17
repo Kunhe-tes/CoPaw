@@ -574,6 +574,8 @@ KEEP_FILES = {
 }
 
 KEEP_DIRS = {
+    "agents",
+    "hooks",
     "memory",
     "sessions",
     "backup",

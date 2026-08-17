@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import json
@@ -111,6 +112,31 @@ def test_archive_old_orphans_for_workspace_honors_limits(tmp_path) -> None:
     assert len(result.archived_paths) == 1
     assert result.candidates_count == 3
     assert result.skipped_files == 2
+
+
+def test_archive_old_orphans_skips_hooks_and_agents_directories(
+    tmp_path,
+) -> None:
+    old_timestamp = datetime(2026, 6, 25, tzinfo=timezone.utc).timestamp()
+    for directory_name in ("hooks", "agents"):
+        directory = tmp_path / directory_name
+        directory.mkdir()
+        file_path = directory / "old.txt"
+        file_path.write_text(directory_name, encoding="utf-8")
+        _touch_mtime(file_path, old_timestamp)
+
+    result = archive_old_orphans_for_workspace(
+        tmp_path,
+        old_orphan_days=3,
+        max_files=10,
+        remaining_files=10,
+        actor="source_archive_maintenance",
+        now=datetime(2026, 7, 2, tzinfo=timezone.utc),
+    )
+
+    assert result.archived_paths == []
+    assert (tmp_path / "hooks" / "old.txt").exists()
+    assert (tmp_path / "agents" / "old.txt").exists()
 
 
 def test_archive_old_orphans_for_workspace_skips_index_write_when_no_candidates(
