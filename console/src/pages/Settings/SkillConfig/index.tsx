@@ -14,13 +14,17 @@ import {
 import { CircleX, Plus, Settings2, SquarePen } from "lucide-react";
 import { cronJobApi } from "@/api/modules/cronjob";
 import {
-  buildSkillConfigPayload,
+  buildSkillConfigCreatePayload,
+  buildSkillConfigUpdatePayload,
   skillConfigApi,
   type SkillConfigFormValues,
   type SkillConfigItem,
 } from "@/api/modules/skillConfig";
 import type { CronJobSpecOutput } from "@/api/types";
+import { getBbkDisplayName } from "@/constants/bbk";
+import { DEFAULT_BBK_ID } from "@/constants/identity";
 import { useAppMessage } from "@/hooks/useAppMessage";
+import { useIframeStore } from "@/stores/iframeStore";
 import {
   getSkillInspectionMock,
   type SkillInspectionPlaceholder,
@@ -195,6 +199,7 @@ function InspectionPanel({
 
 export default function SkillConfigPage() {
   const { message } = useAppMessage();
+  const bbkId = useIframeStore((state) => state.bbk) || DEFAULT_BBK_ID;
   const [form] = Form.useForm<SkillConfigEditorValues>();
   const [configs, setConfigs] = useState<SkillConfigItem[]>([]);
   const [cronJobs, setCronJobs] = useState<CronJobSpecOutput[]>([]);
@@ -225,17 +230,24 @@ export default function SkillConfigPage() {
     return options;
   }, [cronJobs, selectedConfig]);
 
-  const groupOptions = useMemo(
-    () =>
-      configs.map((item) => ({
-        value: item.skillId,
-        label: item.name || item.skillId,
-      })),
-    [configs],
-  );
+  const groupOptions = useMemo(() => {
+    const groups = configs.flatMap((item) =>
+      item.groupId
+        ? [
+            {
+              value: item.groupId,
+              label: item.groupName || item.groupId,
+            },
+          ]
+        : [],
+    );
+    return Array.from(
+      new Map(groups.map((group) => [group.value, group])).values(),
+    );
+  }, [configs]);
 
   const loadConfigs = async () => {
-    const nextConfigs = await skillConfigApi.listSkillConfigs();
+    const nextConfigs = await skillConfigApi.listSkillConfigs(bbkId);
     setConfigs(nextConfigs);
     return nextConfigs;
   };
@@ -245,7 +257,7 @@ export default function SkillConfigPage() {
     setLoading(true);
     setListError(null);
     Promise.allSettled([
-      skillConfigApi.listSkillConfigs(),
+      skillConfigApi.listSkillConfigs(bbkId),
       cronJobApi.listCronJobs(),
     ])
       .then(([configResult, cronResult]) => {
@@ -281,14 +293,14 @@ export default function SkillConfigPage() {
     return () => {
       cancelled = true;
     };
-  }, [message, reloadKey]);
+  }, [bbkId, message, reloadKey]);
 
   useEffect(() => {
     if (!selectedId || mode === "create") return;
     let cancelled = false;
     setDetailLoading(true);
     Promise.all([
-      skillConfigApi.getSkillConfigDetail(selectedId),
+      skillConfigApi.getSkillConfigDetail(selectedId, bbkId),
       getSkillInspectionMock(selectedId),
     ])
       .then(([detail, inspectionData]) => {
@@ -310,7 +322,7 @@ export default function SkillConfigPage() {
     return () => {
       cancelled = true;
     };
-  }, [form, message, mode, selectedId]);
+  }, [bbkId, form, message, mode, selectedId]);
 
   const handleCreate = async () => {
     setMode("create");
@@ -356,15 +368,37 @@ export default function SkillConfigPage() {
     const values = await form.validateFields();
     setSaving(true);
     try {
-      const payload = buildSkillConfigPayload(
-        values,
-        selectedConfig ?? undefined,
-      );
+      const groupName = groupOptions.find(
+        (option) => option.value === values.groupId,
+      )?.label;
       if (mode === "create") {
-        await skillConfigApi.createSkillConfig(payload);
+        const bbkName =
+          configs.find((item) => item.bbkId === bbkId)?.bbkName ||
+          getBbkDisplayName(bbkId);
+        const createPayload = buildSkillConfigCreatePayload(
+          values,
+          bbkId,
+          bbkName,
+          groupName,
+        );
+        const createdConfig = await skillConfigApi.createSkillConfig(
+          createPayload,
+        );
+        setSelectedConfig(createdConfig);
+        form.setFieldsValue(toEditorValues(createdConfig));
         message.success("SKILL 触发规则创建成功");
       } else {
-        await skillConfigApi.updateSkillConfig(payload);
+        const updatePayload = buildSkillConfigUpdatePayload(
+          values,
+          selectedConfig ?? undefined,
+          bbkId,
+          groupName,
+        );
+        const updatedConfig = await skillConfigApi.updateSkillConfig(
+          updatePayload,
+        );
+        setSelectedConfig(updatedConfig);
+        form.setFieldsValue(toEditorValues(updatedConfig));
         message.success("SKILL 触发规则更新成功");
       }
     } catch (error) {
