@@ -1479,6 +1479,12 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             description="update task progress state",
             display_to_user=False,
         ),
+        "emit_wplus_sop_event": BuiltinToolConfig(
+            name="emit_wplus_sop_event",
+            enabled=True,
+            description="commit a typed W+ SOP workspace event",
+            display_to_user=False,
+        ),
     }
 
 
@@ -1613,7 +1619,7 @@ class ProcessLimitsConfig(BaseModel):
     shell: bool = True
     mcp_stdio: bool = False
     cpu_time_limit_seconds: int | None = Field(default=30, ge=1)
-    memory_max_mb: int | None = Field(default=150, ge=1)
+    memory_max_mb: int | None = Field(default=34000, ge=1)
     shell_max_concurrent: int | None = Field(default=5, ge=1)
     shell_acquire_timeout_seconds: float = Field(default=5, gt=0)
 

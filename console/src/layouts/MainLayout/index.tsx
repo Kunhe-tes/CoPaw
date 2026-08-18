@@ -46,6 +46,7 @@ import ReportViewPage from "../../pages/ReportView";
 import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
 import MyMCPPage from "../../pages/MyMCP";
+import WPlusSopWorkspace from "../../pages/WPlusSopWorkspace";
 import ExpertsPage from "../../pages/Experts";
 
 import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
@@ -159,6 +160,10 @@ export default function MainLayout() {
                 <Route path="/" element={<Navigate to="/chat" replace />} />
               )}
               <Route path="/chat/*" element={<Chat />} />
+              <Route
+                path="/wplus-sop/:sessionId"
+                element={<WPlusSopWorkspace />}
+              />
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
               <Route path="/cron-jobs" element={<CronJobsPage />} />

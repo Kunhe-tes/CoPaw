@@ -126,6 +126,8 @@ import RuntimeResponseCard, {
 } from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
+import WPlusSopActiveBar from "./components/WPlusSopActiveBar";
+import WPlusSopEntryCard from "./components/WPlusSopEntryCard";
 import {
   ActivePlanInteractionComposer,
 } from "./components/PlanInteractionCards";
@@ -155,6 +157,7 @@ import type {
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
 } from "./messageMeta";
+import type { WPlusSopEntryProposal } from "@/api/types/wplusSop";
 import {
   buildFeedbackLookup,
   collectFeedbackResponsesFromMessages,
@@ -227,6 +230,9 @@ const chatCardRenderers = {
       />
     );
   },
+  WPlusSopEntryProposal: (props: { data: WPlusSopEntryProposal }) => (
+    <WPlusSopEntryCard {...props} />
+  ),
   PlanInteraction: () => null,
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
@@ -619,6 +625,7 @@ export default function ChatPage() {
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
   const [isDragging, setIsDragging] = useState(false);
+  const [wPlusSopLocksChatInput, setWPlusSopLocksChatInput] = useState(false);
   const [selectedContextReferences, setSelectedContextReferences] = useState<
     SkillMentionItem[]
   >([]);
@@ -2343,7 +2350,21 @@ export default function ChatPage() {
                     value={planReviewRenderContextValue}
                   >
                     <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
-                      <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                      <WPlusSopActiveBar
+                        chatId={feedbackChatId || chatId}
+                        logicalSessionId={feedbackSessionId || undefined}
+                        onLocksChatInputChange={setWPlusSopLocksChatInput}
+                      />
+                      <div
+                        className={
+                          wPlusSopLocksChatInput
+                            ? styles.chatDisabledOverlay
+                            : undefined
+                        }
+                        style={{ height: "100%", width: "100%" }}
+                      >
+                        <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                      </div>
                     </GlobalVoiceRecorder>
                   </ChatPlanReviewRenderProvider>
                 </ChatContentOnlyProvider>
@@ -2358,8 +2379,8 @@ export default function ChatPage() {
                   />
                 )}
                 <ConversationQuickNav />
-              </div>
             </div>
+          </div>
           </AutoPreviewHtmlProvider>
         </HtmlPreviewTrackingProvider>
       </ChatFeedbackRenderProvider>
