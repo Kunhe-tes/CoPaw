@@ -645,6 +645,16 @@ def _extract_context_references(
     return request_data.get("context_references")
 
 
+def _extract_plan_mode(request_data: Union[AgentRequest, dict]) -> str | None:
+    """Keep supported Plan Mode requests in Console channel metadata."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        mode = getattr(request_data, "mode", None) or channel_meta.get("mode")
+    else:
+        mode = request_data.get("mode")
+    return mode if mode in {"plan", "normal"} else None
+
+
 def _local_path_from_console_attachment_url(url: object) -> Path | None:
     """Resolve the local path encoded in a Console attachment preview URL."""
     if not isinstance(url, str) or not url:
@@ -804,6 +814,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         native_payload["meta"]["file_url_network"] = file_url_network
     if selected_skill_names is not None:
         native_payload["meta"]["selected_skill_names"] = selected_skill_names
+    plan_mode = _extract_plan_mode(request_data)
+    if plan_mode is not None:
+        native_payload["meta"]["mode"] = plan_mode
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references
