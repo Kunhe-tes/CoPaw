@@ -51,12 +51,14 @@ from ...marketplace.service import (
     save_index,
 )
 from ...marketplace.version_service import SkillVersionService
+from ...security import SkillScanError
 from ..async_tasks import AsyncTaskStore
 from ..deps import decode_user_name, require_source_id
 from .skills_browse import (
     _decode_zip_filename,
     _extract_zip_skills,
     _read_validated_zip_upload,
+    _scan_found_skills_or_raise,
 )
 
 router = APIRouter()
@@ -794,12 +796,17 @@ async def publish_skill_upload(
     # 读取并验证 zip 文件
     data = await _read_validated_zip_upload(file)
 
-    # 解压 zip 文件
-    tmp_dir, found_skills = await asyncio.to_thread(
-        _extract_zip_skills,
-        data,
-        file.filename,
-    )
+    try:
+        tmp_dir, found_skills = await asyncio.to_thread(
+            _extract_zip_skills,
+            data,
+            file.filename,
+        )
+        _scan_found_skills_or_raise(found_skills)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except SkillScanError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if not found_skills:
         if tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)

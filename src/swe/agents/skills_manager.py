@@ -23,6 +23,7 @@ import frontmatter
 from pydantic import BaseModel, Field
 from ..constant import env_var_overrides
 from ..security.skill_scanner import scan_skill_directory
+from ..security.skill_scanner.safe_unpack import safe_unpack_skill_zip
 from .utils.file_handling import read_text_file_with_encoding_fallback
 from ..utils.fs_text import (
     log_sanitized_fs_text,
@@ -920,26 +921,17 @@ def _is_hidden(name: str) -> bool:
 
 
 def _extract_and_validate_zip(data: bytes, tmp_dir: Path) -> None:
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        total = sum(info.file_size for info in zf.infolist())
-        if total > _MAX_ZIP_BYTES:
-            raise ValueError("Uncompressed zip exceeds 200MB limit")
-
-        root_path = tmp_dir.resolve()
-        for info in zf.infolist():
-            member_name = _decode_zip_member_name(info)
-            target = (tmp_dir / member_name).resolve()
-            if not target.is_relative_to(root_path):
-                raise ValueError(f"Unsafe path in zip: {member_name}")
-            if info.external_attr >> 16 & 0o120000 == 0o120000:
-                raise ValueError(
-                    f"Symlink not allowed in zip: {member_name}",
-                )
-
-        for info in zf.infolist():
-            member_name = _decode_zip_member_name(info)
-            target = (tmp_dir / member_name).resolve()
-            _extract_zip_member(zf, info, target)
+    """复用统一安全解包边界，保持原 ZIP 导入入口行为稳定."""
+    try:
+        safe_unpack_skill_zip(
+            data,
+            tmp_dir,
+            max_uncompressed_bytes=_MAX_ZIP_BYTES,
+            decode_member_name=_decode_zip_member_name,
+        )
+    except Exception:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise
 
 
 def _safe_child_path(base_dir: Path, relative_name: str) -> Path:
@@ -1424,6 +1416,7 @@ def reconcile_pool_manifest(
         }
 
         for skill_name, skill_dir in sorted(discovered.items()):
+            _scan_skill_dir_or_raise(skill_dir, skill_name)
             existing = skills.get(skill_name, {})
             source, protected = _classify_pool_skill_source(
                 skill_name,
@@ -1970,7 +1963,7 @@ def _extract_zip_skills(data: bytes) -> tuple[Path, list[tuple[Path, str]]]:
 
 
 def _scan_skill_dir_or_raise(skill_dir: Path, skill_name: str) -> None:
-    scan_skill_directory(skill_dir, skill_name=skill_name)
+    scan_skill_directory(skill_dir, skill_name=skill_name, block=True)
 
 
 @contextmanager

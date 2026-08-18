@@ -1,0 +1,890 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Skill 安全扫描详细设计</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f9;
+      --panel: #ffffff;
+      --panel-2: #f1f4f8;
+      --ink: #18212f;
+      --muted: #5b6677;
+      --line: #d8dee8;
+      --accent: #0f6cbd;
+      --accent-2: #1f8b6b;
+      --warn: #b45309;
+      --danger: #b42318;
+      --soft-blue: #e7f1fb;
+      --soft-green: #e7f6ef;
+      --soft-amber: #fff2d9;
+      --soft-red: #fdecec;
+      --shadow: 0 10px 30px rgba(16, 24, 40, 0.08);
+      --radius: 14px;
+      --radius-sm: 10px;
+      --max: 1180px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink); }
+    body { font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .page {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 32px 24px 48px;
+    }
+
+    .hero {
+      background: linear-gradient(180deg, #ffffff 0%, #f8fbff 100%);
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 28px 28px 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--soft-blue);
+      color: var(--accent);
+      font-weight: 700;
+      letter-spacing: 0;
+      font-size: 12px;
+    }
+
+    h1 {
+      margin: 14px 0 8px;
+      font-size: 30px;
+      line-height: 1.15;
+      letter-spacing: 0;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      max-width: 920px;
+      font-size: 15px;
+    }
+
+    .meta {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 20px;
+    }
+
+    .meta-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--panel);
+      padding: 14px 16px;
+    }
+
+    .meta-label {
+      display: block;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 4px;
+    }
+
+    .meta-value {
+      font-weight: 700;
+      color: var(--ink);
+      line-height: 1.35;
+    }
+
+    .section {
+      margin-top: 22px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      padding: 22px 22px 18px;
+      box-shadow: var(--shadow);
+    }
+
+    .section h2 {
+      margin: 0 0 12px;
+      font-size: 21px;
+      line-height: 1.25;
+    }
+
+    .section h3 {
+      margin: 18px 0 8px;
+      font-size: 16px;
+      line-height: 1.3;
+    }
+
+    .section p {
+      margin: 0 0 10px;
+      color: var(--ink);
+    }
+
+    .muted { color: var(--muted); }
+
+    .diagram-wrap {
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      overflow: hidden;
+      background: #fbfdff;
+    }
+
+    .diagram-caption {
+      padding: 12px 16px;
+      border-top: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 16px;
+    }
+
+    .callout {
+      border-radius: 14px;
+      padding: 16px;
+      border: 1px solid var(--line);
+      background: #fbfcfe;
+    }
+
+    .callout strong {
+      display: block;
+      margin-bottom: 6px;
+      font-size: 14px;
+    }
+
+    .callout.good { background: var(--soft-green); border-color: #bfe5d2; }
+    .callout.warn { background: var(--soft-amber); border-color: #f2d19b; }
+    .callout.bad { background: var(--soft-red); border-color: #f0b9b4; }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+      margin-top: 12px;
+    }
+
+    .mini-card {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      padding: 14px 14px 12px;
+    }
+
+    .mini-card h4 {
+      margin: 0 0 6px;
+      font-size: 14px;
+    }
+
+    .mini-card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 10px;
+      margin-top: 10px;
+    }
+
+    .step {
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 12px;
+      align-items: start;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 14px 12px;
+      background: #fff;
+    }
+
+    .step .tag {
+      width: fit-content;
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: var(--soft-blue);
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .step strong {
+      display: block;
+      margin-bottom: 4px;
+    }
+
+    .columns-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    .list {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .list li { margin: 0 0 6px; }
+
+    .matrix {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 10px;
+      overflow: hidden;
+      border-radius: 14px;
+      border: 1px solid var(--line);
+      font-size: 14px;
+    }
+
+    .matrix th,
+    .matrix td {
+      padding: 12px 12px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+      text-align: left;
+    }
+
+    .matrix th {
+      background: #f3f6fa;
+      color: #2b3645;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .matrix tr:last-child td { border-bottom: 0; }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      white-space: nowrap;
+    }
+    .pill.blue { background: var(--soft-blue); color: var(--accent); }
+    .pill.green { background: var(--soft-green); color: var(--accent-2); }
+    .pill.amber { background: var(--soft-amber); color: var(--warn); }
+    .pill.red { background: var(--soft-red); color: var(--danger); }
+
+    .footer {
+      margin-top: 18px;
+      color: var(--muted);
+      font-size: 13px;
+      text-align: center;
+    }
+
+    .source-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+    }
+
+    .source-list li { margin-bottom: 5px; }
+
+    @media (max-width: 980px) {
+      .meta, .cards, .grid-2, .columns-2 { grid-template-columns: 1fr; }
+      .step { grid-template-columns: 1fr; }
+      .page { padding: 16px; }
+      h1 { font-size: 26px; }
+    }
+
+    @media print {
+      body { background: #fff; }
+      .page { max-width: none; padding: 0; }
+      .hero, .section { box-shadow: none; break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="hero">
+      <span class="eyebrow">Detailed Design</span>
+      <h1>Skill 安全扫描详细设计</h1>
+      <p class="subtitle">
+        本文档承接精炼版架构稿，展开技术选型、开源框架接入、准入策略、链路设计与实施优先级。
+        精炼版主文档见 <a href="./2026-08-06-skill-security-scan-architecture.html">2026-08-06-skill-security-scan-architecture.html</a>。
+      </p>
+
+      <div class="meta">
+        <div class="meta-card">
+          <span class="meta-label">定位</span>
+          <div class="meta-value">CoPaw 内部 Skill 安全扫描详细设计</div>
+        </div>
+        <div class="meta-card">
+          <span class="meta-label">核心原则</span>
+          <div class="meta-value">不只扫代码，要扫声明、权限、依赖、数据流与运行行为</div>
+        </div>
+        <div class="meta-card">
+          <span class="meta-label">落地点</span>
+          <div class="meta-value">SWE 创建链路 + Market 上架链路 + 运行时治理</div>
+        </div>
+      </div>
+    </header>
+
+    <section class="section">
+      <h2>总体架构图</h2>
+      <div class="diagram-wrap">
+        <svg viewBox="0 0 1360 560" width="100%" height="auto" role="img" aria-label="Skill 安全扫描总体架构图">
+          <defs>
+            <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"></path>
+            </marker>
+            <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+              <feDropShadow dx="0" dy="4" stdDeviation="7" flood-color="#162033" flood-opacity="0.10"/>
+            </filter>
+          </defs>
+
+          <rect x="24" y="24" width="1312" height="512" rx="22" fill="#f8fbff" stroke="#d8dee8"/>
+
+          <text x="52" y="62" fill="#18212f" font-size="22" font-weight="700">输入与入口</text>
+          <text x="340" y="62" fill="#18212f" font-size="22" font-weight="700">上下文构建</text>
+          <text x="580" y="62" fill="#18212f" font-size="22" font-weight="700">多引擎扫描</text>
+          <text x="930" y="62" fill="#18212f" font-size="22" font-weight="700">风险决策</text>
+          <text x="1130" y="62" fill="#18212f" font-size="22" font-weight="700">输出与治理</text>
+
+          <!-- lane backgrounds -->
+          <rect x="40" y="92" width="250" height="404" rx="18" fill="#ffffff" stroke="#d8dee8" filter="url(#shadow)"/>
+          <rect x="320" y="92" width="230" height="404" rx="18" fill="#ffffff" stroke="#d8dee8" filter="url(#shadow)"/>
+          <rect x="570" y="92" width="330" height="404" rx="18" fill="#ffffff" stroke="#d8dee8" filter="url(#shadow)"/>
+          <rect x="920" y="92" width="180" height="404" rx="18" fill="#ffffff" stroke="#d8dee8" filter="url(#shadow)"/>
+          <rect x="1120" y="92" width="200" height="404" rx="18" fill="#ffffff" stroke="#d8dee8" filter="url(#shadow)"/>
+
+          <!-- entry -->
+          <rect x="62" y="126" width="206" height="60" rx="14" fill="#e7f1fb" stroke="#b8d5f0"/>
+          <text x="165" y="152" text-anchor="middle" fill="#0f6cbd" font-size="16" font-weight="700">聊天创建 Skill</text>
+          <text x="165" y="171" text-anchor="middle" fill="#35526f" font-size="12">模型生成草稿</text>
+
+          <rect x="62" y="202" width="206" height="60" rx="14" fill="#e7f6ef" stroke="#bfe5d2"/>
+          <text x="165" y="228" text-anchor="middle" fill="#1f8b6b" font-size="16" font-weight="700">ZIP 上传 Skill</text>
+          <text x="165" y="247" text-anchor="middle" fill="#35526f" font-size="12">安全解包后进入隔离区</text>
+
+          <rect x="62" y="278" width="206" height="60" rx="14" fill="#fff2d9" stroke="#f2d19b"/>
+          <text x="165" y="304" text-anchor="middle" fill="#b45309" font-size="16" font-weight="700">Market 上架 / 分发</text>
+          <text x="165" y="323" text-anchor="middle" fill="#35526f" font-size="12">发布前强制扫描</text>
+
+          <rect x="62" y="354" width="206" height="60" rx="14" fill="#fdecec" stroke="#f0b9b4"/>
+          <text x="165" y="380" text-anchor="middle" fill="#b42318" font-size="16" font-weight="700">安装 / 运行回扫</text>
+          <text x="165" y="399" text-anchor="middle" fill="#35526f" font-size="12">存量技能与版本差分</text>
+
+          <!-- context -->
+          <rect x="342" y="126" width="186" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="435" y="153" text-anchor="middle" fill="#18212f" font-size="16" font-weight="700">统一扫描上下文</text>
+          <text x="435" y="173" text-anchor="middle" fill="#5b6677" font-size="12">文件、哈希、租户、版本</text>
+
+          <rect x="342" y="214" width="186" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="435" y="241" text-anchor="middle" fill="#18212f" font-size="16" font-weight="700">声明 / 权限 / MCP</text>
+          <text x="435" y="261" text-anchor="middle" fill="#5b6677" font-size="12">SKILL.md 与权限边界</text>
+
+          <rect x="342" y="302" width="186" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="435" y="329" text-anchor="middle" fill="#18212f" font-size="16" font-weight="700">依赖 / 资产 / 目录</text>
+          <text x="435" y="349" text-anchor="middle" fill="#5b6677" font-size="12">requirements / lock / manifest</text>
+
+          <rect x="342" y="390" width="186" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="435" y="417" text-anchor="middle" fill="#18212f" font-size="16" font-weight="700">客户字段 / 业务动作</text>
+          <text x="435" y="437" text-anchor="middle" fill="#5b6677" font-size="12">适用于高敏业务场景</text>
+
+          <!-- scan -->
+          <rect x="592" y="126" width="132" height="72" rx="14" fill="#e7f1fb" stroke="#b8d5f0"/>
+          <text x="658" y="154" text-anchor="middle" fill="#0f6cbd" font-size="15" font-weight="700">包体检测</text>
+          <text x="658" y="173" text-anchor="middle" fill="#35526f" font-size="12">Zip Slip / secrets</text>
+
+          <rect x="740" y="126" width="132" height="72" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="806" y="154" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">声明语义</text>
+          <text x="806" y="173" text-anchor="middle" fill="#5b6677" font-size="12">Prompt Injection</text>
+
+          <rect x="592" y="214" width="132" height="72" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="658" y="242" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">AST / SAST</text>
+          <text x="658" y="261" text-anchor="middle" fill="#5b6677" font-size="12">危险函数 / 后门</text>
+
+          <rect x="740" y="214" width="132" height="72" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="806" y="242" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">污点追踪</text>
+          <text x="806" y="261" text-anchor="middle" fill="#5b6677" font-size="12">source → sink</text>
+
+          <rect x="592" y="302" width="132" height="72" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="658" y="330" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">依赖 SCA</text>
+          <text x="658" y="349" text-anchor="middle" fill="#5b6677" font-size="12">CVE / 许可证</text>
+
+          <rect x="740" y="302" width="132" height="72" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="806" y="330" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">威胁情报</text>
+          <text x="806" y="349" text-anchor="middle" fill="#5b6677" font-size="12">哈希 / 域名 / 包</text>
+
+          <rect x="592" y="390" width="280" height="70" rx="14" fill="#fff2d9" stroke="#f2d19b"/>
+          <text x="732" y="417" text-anchor="middle" fill="#b45309" font-size="16" font-weight="700">LLM 语义复核 + 动态沙箱验证</text>
+          <text x="732" y="437" text-anchor="middle" fill="#7c5a13" font-size="12">处理自然语言风险与静态证据不足的样本</text>
+
+          <!-- decision -->
+          <rect x="942" y="126" width="136" height="70" rx="14" fill="#fdecec" stroke="#f0b9b4"/>
+          <text x="1010" y="154" text-anchor="middle" fill="#b42318" font-size="15" font-weight="700">直接阻断</text>
+          <text x="1010" y="173" text-anchor="middle" fill="#7f1d1d" font-size="12">恶意 / 高危</text>
+
+          <rect x="942" y="214" width="136" height="70" rx="14" fill="#fff2d9" stroke="#f2d19b"/>
+          <text x="1010" y="242" text-anchor="middle" fill="#b45309" font-size="15" font-weight="700">人工复核</text>
+          <text x="1010" y="261" text-anchor="middle" fill="#7c5a13" font-size="12">需要安全审批</text>
+
+          <rect x="942" y="302" width="136" height="70" rx="14" fill="#e7f6ef" stroke="#bfe5d2"/>
+          <text x="1010" y="330" text-anchor="middle" fill="#1f8b6b" font-size="15" font-weight="700">自动放行</text>
+          <text x="1010" y="349" text-anchor="middle" fill="#22543d" font-size="12">低风险 / 已修复</text>
+
+          <rect x="942" y="390" width="136" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="1010" y="418" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">策略回流</text>
+          <text x="1010" y="437" text-anchor="middle" fill="#5b6677" font-size="12">规则 / 白名单</text>
+
+          <!-- output -->
+          <rect x="1142" y="126" width="156" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="1220" y="154" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">JSON / SARIF</text>
+          <text x="1220" y="173" text-anchor="middle" fill="#5b6677" font-size="12">平台消费</text>
+
+          <rect x="1142" y="214" width="156" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="1220" y="242" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">用户风险卡片</text>
+          <text x="1220" y="261" text-anchor="middle" fill="#5b6677" font-size="12">可解释、可修改</text>
+
+          <rect x="1142" y="302" width="156" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="1220" y="330" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">审计留痕</text>
+          <text x="1220" y="349" text-anchor="middle" fill="#5b6677" font-size="12">版本 / 置信度 / 证据</text>
+
+          <rect x="1142" y="390" width="156" height="70" rx="14" fill="#f3f6fa" stroke="#d8dee8"/>
+          <text x="1220" y="418" text-anchor="middle" fill="#18212f" font-size="15" font-weight="700">运行时治理</text>
+          <text x="1220" y="437" text-anchor="middle" fill="#5b6677" font-size="12">Tool Guard / File Guard</text>
+
+          <!-- arrows -->
+          <line x1="268" y1="156" x2="342" y2="156" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="268" y1="232" x2="342" y2="232" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="528" y1="156" x2="592" y2="156" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="528" y1="244" x2="592" y2="244" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="528" y1="332" x2="592" y2="332" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="528" y1="424" x2="592" y2="424" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+
+          <line x1="724" y1="162" x2="740" y2="162" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+          <line x1="724" y1="250" x2="740" y2="250" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+          <line x1="724" y1="338" x2="740" y2="338" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+
+          <line x1="872" y1="161" x2="942" y2="161" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="872" y1="249" x2="942" y2="249" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="872" y1="337" x2="942" y2="337" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="1080" y1="161" x2="1142" y2="161" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="1080" y1="249" x2="1142" y2="249" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="1080" y1="337" x2="1142" y2="337" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+          <line x1="1080" y1="425" x2="1142" y2="425" stroke="#94a3b8" stroke-width="2.5" marker-end="url(#arrow)"/>
+        </svg>
+        <div class="diagram-caption">
+          这张图展示 CoPaw 的 Skill 安全链路主干：入口收口、上下文构建、多引擎扫描、风险决策和输出治理。工程设计上再向下拆成七个层次，分别承担接入、解析、检测、决策、执行和运营职责。
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>设计结论</h2>
+      <div class="grid-2">
+        <div>
+          <p>
+            这套方案不是单纯增强一个 regex 扫描器，而是把 Skill 当作供应链包来处理。
+            它的最小闭环应该覆盖五类对象：包体、声明、代码、依赖、运行行为。
+          </p>
+          <p>
+            对 CoPaw 来说，现有 `scan_skill_directory()` 可以继续做统一入口，但它必须升级为一个编排层：
+            先做安全解包和上下文归一化，再按分析器并行执行，最后把结果汇总到统一的风险决策中心。
+          </p>
+          <div class="callout good">
+            <strong>推荐方向</strong>
+            先把“高置信阻断 + 人工复核 + 可解释输出”做实，再逐步加入污点追踪、语义分析和动态沙箱。
+          </div>
+        </div>
+        <div class="callout warn">
+          <strong>不要一开始就做的事</strong>
+          不建议把外部开源扫描器直接塞进主安装链路里当唯一判定来源。更稳的方式是把它们作为可插拔引擎，统一收敛到同一份 Finding Schema 和准入策略。
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>分层架构设计</h2>
+      <p class="muted">
+        Skill 安全扫描按七层设计，每层只解决一类问题，并以目标态的 `ScanContext`、`Finding`、`Decision`
+        三类对象衔接。MVP 阶段可先复用现有 `SkillFile` 与同步扫描入口，在不改变调用方契约的前提下补齐安全解包、包体检测和 AST 检测；后续再收敛到完整 `ScanContext`。
+      </p>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>层级</th>
+            <th>核心职责</th>
+            <th>输入 / 输出</th>
+            <th>CoPaw 落点</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="pill blue">L1 入口接入层</span></td>
+            <td>收口所有 Skill 来源，确保任何创建、上传、分发、安装动作都不能绕过扫描。</td>
+            <td>输入：聊天生成草稿、ZIP 包、Market 包、租户技能目录。输出：扫描任务与隔离区 artifact。</td>
+            <td>SWE `skills_manager`、Market `marketplace/service.py`、Console 创建与上传入口。</td>
+          </tr>
+          <tr>
+            <td><span class="pill blue">L2 包体解析与上下文层</span></td>
+            <td>安全解包并逐步建立统一扫描上下文，解决 Zip Slip、Zip Bomb、符号链接逃逸和文件清单可信性问题。</td>
+            <td>输入：原始包或草稿目录。MVP 输出隔离区目录、安全文件清单和现有 `SkillFile`；目标态输出 `ScanContext`、文件清单、哈希、manifest、权限、依赖、租户与版本元数据。</td>
+            <td>新增 package normalizer / safe unpack helper，复用现有 `SkillFile` 与内容 hash 能力。</td>
+          </tr>
+          <tr>
+            <td><span class="pill green">L3 基础静态检测层</span></td>
+            <td>用高置信、低成本规则拦截明确风险，包括 Prompt Injection、命令注入、密钥、敏感路径、外联和混淆。</td>
+            <td>输入：MVP 为现有 `SkillFile` 列表，目标态为 `ScanContext.files`。输出：规则类 `Finding`，包含文件、行号、证据、修复建议。</td>
+            <td>现有 `PatternAnalyzer`、YAML 规则、`ScanPolicy`，新增包体规则和 AST 行为 analyzer。</td>
+          </tr>
+          <tr>
+            <td><span class="pill amber">L4 语义与行为分析层</span></td>
+            <td>处理 Skill 特有风险：自然语言隐藏指令、权限与功能不一致、客户/租户数据 source 到网络、日志、文件、记忆、触达工具的 sink 链路。</td>
+            <td>输入：声明、代码行为摘要、权限声明、工具/MCP 能力。输出：语义风险、污点链路、权限一致性结论。</td>
+            <td>新增 `semantic_analyzer.py`、`taint_flow_analyzer.py`；SkillSpector 可作为 strict profile 二级引擎。</td>
+          </tr>
+          <tr>
+            <td><span class="pill amber">L5 供应链与情报层</span></td>
+            <td>识别依赖漏洞、恶意包、typosquatting、许可证风险、可疑域名/IP、包哈希和作者信誉。</td>
+            <td>输入：依赖文件、lock、外联目标、包哈希、SBOM/AI-BOM。输出：供应链 Finding、回扫索引、资产清单。</td>
+            <td>`DependencyAnalyzer` + pip-audit / npm audit / OSV 可选后端；AI BOM / SBOM 用于运营回扫。</td>
+          </tr>
+          <tr>
+            <td><span class="pill red">L6 风险决策与准入层</span></td>
+            <td>聚合多引擎发现，结合严重级别、置信度、租户策略、Skill 来源和运行权限，做阻断、复核、修复、警告或放行。</td>
+            <td>输入：多类 `Finding`。输出：`Decision`、风险评分、用户风险卡片、审核任务、白名单/例外记录。</td>
+            <td>扩展现有 block/warn/off、白名单、数据库历史和 Console 安全页。</td>
+          </tr>
+          <tr>
+            <td><span class="pill green">L7 运行时与运营闭环层</span></td>
+            <td>补齐静态扫描无法覆盖的风险，执行前后通过 Tool Guard、File Guard、process limits、路径边界、出网策略和审计持续约束。</td>
+            <td>输入：已发布 Skill、运行调用、工具链路、版本变更、情报更新。输出：运行审计、版本差分、存量回扫、高危下架和影响面排查。</td>
+            <td>`tool_guard_mixin.py`、tenant path boundary、process limits、Market 回扫任务、审计与复核后台。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="columns-2" style="margin-top: 16px;">
+        <div class="callout good">
+          <strong>层间契约</strong>
+          L1/L2 只负责生成可信输入，目标态形成统一扫描上下文；L3/L4/L5 只产出证据；L6 才做准入决策；L7 负责发布后的持续治理。
+        </div>
+        <div class="callout warn">
+          <strong>关键边界</strong>
+          扫描器不能在真实租户运行目录中直接解包和执行外来内容；动态验证只能在隔离沙箱中使用模拟凭证、模拟客户数据和受控网络。
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>模块边界</h2>
+      <div class="cards">
+        <div class="mini-card">
+          <h4>1. 安全解包器</h4>
+          <p>目标态处理 ZIP/TAR 等外来包；MVP 先收敛现有 ZIP 导入链路，负责 Zip Slip、Zip Bomb、符号链接、文件数、单成员体积和总解压体积阈值控制。</p>
+        </div>
+        <div class="mini-card">
+          <h4>2. 上下文构建器</h4>
+          <p>把文件、声明、权限、依赖和业务语义整理成统一扫描上下文，供所有引擎复用。</p>
+        </div>
+        <div class="mini-card">
+          <h4>3. 多引擎扫描层</h4>
+          <p>规则、AST、污点、SCA、语义、情报并行跑，避免把所有判断压在单一正则上。</p>
+        </div>
+      </div>
+      <div class="cards">
+        <div class="mini-card">
+          <h4>4. 风险决策中心</h4>
+          <p>把技术发现转换成阻断、复核、修复或放行，不直接把原始扫描结果暴露给用户。</p>
+        </div>
+        <div class="mini-card">
+          <h4>5. 发布与安装闸口</h4>
+          <p>覆盖 SWE 创建、Market 上架和租户安装，任何入口都不能绕过扫描结果。</p>
+        </div>
+        <div class="mini-card">
+          <h4>6. 运行时治理</h4>
+          <p>Tool Guard、File Guard、process limits、路径边界和审计一起兜住静态扫描之外的风险。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>技术选型</h2>
+      <p class="muted">
+        技术选型分为两层：CoPaw 内部主链路优先复用现有 Python / FastAPI / Market / Console 栈；
+        参考文档中的开源框架作为可插拔扫描引擎、交叉验证工具或运行时治理参考接入。
+      </p>
+      <h3>CoPaw 内核选型</h3>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>能力域</th>
+            <th>推荐技术</th>
+            <th>选择理由</th>
+            <th>落地位置</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>扫描编排</td>
+            <td>Python + 现有 `SkillScanner` / `scan_skill_directory()`</td>
+            <td>当前 SWE 与 Market 已经在 Skill 创建、导入、上架路径调用扫描入口，继续增强可减少接入面变化。</td>
+            <td>`src/swe/security/skill_scanner/`，后续抽出 SWE 与 Market 共享内核</td>
+          </tr>
+          <tr>
+            <td>规则扫描</td>
+            <td>YAML 规则 + Python regex + 策略覆盖</td>
+            <td>仓库已有 `PatternAnalyzer`、规则目录和 `ScanPolicy`，适合高置信、低成本地拦截 Prompt Injection、命令注入、密钥和外联风险。</td>
+            <td>`rules/signatures/*.yaml`、`scan_policy.py`</td>
+          </tr>
+          <tr>
+            <td>包体安全</td>
+            <td>Python `zipfile` / `tarfile` 安全解包 + MIME/文件头识别</td>
+            <td>上传包必须先防“解析即受害”，重点处理 Zip Slip、Zip Bomb、符号链接逃逸、可执行二进制和隐藏文件。</td>
+            <td>新增 `package_analyzer.py` 与安全解包 helper</td>
+          </tr>
+          <tr>
+            <td>代码行为分析</td>
+            <td>Python `ast` + Shell/JS 轻量模式扫描</td>
+            <td>首版优先覆盖 Python 技能中的 `eval`、`exec`、`subprocess`、敏感路径、容器逃逸和网络发送，避免一开始引入重型 SAST。</td>
+            <td>新增 `ast_behavior_analyzer.py`</td>
+          </tr>
+          <tr>
+            <td>污点追踪</td>
+            <td>轻量 source/sink 图谱 + 规则化数据流</td>
+            <td>SkillSpector 和 Agent-Scan 的共同经验是要看数据从哪里来、流向哪里；CoPaw 可先做函数级启发式追踪，再演进到跨文件流。</td>
+            <td>新增 `taint_flow_analyzer.py`</td>
+          </tr>
+          <tr>
+            <td>依赖与供应链</td>
+            <td>自研依赖清单解析 + 可选 pip-audit / npm audit / OSV</td>
+            <td>首版先解析 `requirements.txt`、`package.json`、lock 文件并生成 SBOM 雏形；联网漏洞库查询作为可配置增强项。</td>
+            <td>新增 `dependency_analyzer.py`，扫描结果写入统一 Finding</td>
+          </tr>
+          <tr>
+            <td>语义安全</td>
+            <td>LLM-as-a-judge 可插拔引擎</td>
+            <td>自然语言恶意意图无法靠正则覆盖；LLM 分析器只做复核和解释，不单独决定阻断，避免模型误判直接影响发布。</td>
+            <td>新增 `semantic_analyzer.py`，默认可关闭或仅 strict profile 启用</td>
+          </tr>
+          <tr>
+            <td>动态沙箱</td>
+            <td>Kubernetes Job / 容器隔离 + 受控网络代理</td>
+            <td>项目部署环境是 Kubernetes，多实例场景下用一次性 Job 跑高风险样本更贴近生产；本地开发可降级为禁网临时目录执行。</td>
+            <td>后续新增 sandbox service，与 scan task 异步编排</td>
+          </tr>
+          <tr>
+            <td>任务与历史</td>
+            <td>FastAPI 异步任务 + MySQL 扫描历史</td>
+            <td>仓库已有数据库化 `swe_skill_scan_history` 设计，继续扩展为扫描任务、版本指纹、决策和人工复核记录。</td>
+            <td>`src/swe/app/routers/config.py` 与扫描 history store</td>
+          </tr>
+          <tr>
+            <td>Console 展示</td>
+            <td>现有 React / TypeScript 安全配置页扩展</td>
+            <td>复用已有 `securityApi`、block/warn/off、白名单和历史列表，新增风险卡片、引擎详情、复核状态和版本差分。</td>
+            <td>`console/src/api/modules/security.ts` 与 Security 页面</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="columns-2" style="margin-top: 16px;">
+        <div class="callout good">
+          <strong>首版必选</strong>
+          Python 扫描编排、YAML 规则、包体安全解包、AST 行为分析、统一 Finding Schema、数据库历史与复用现有 Console 安全页的最小风险可见性。
+        </div>
+        <div class="callout warn">
+          <strong>增强可选</strong>
+          LLM 语义复核、OSV/pip-audit/npm audit、SkillSpector/Agent-Scan/MCP-Scan、Kubernetes 动态沙箱、SARIF 导出。
+        </div>
+      </div>
+
+      <h3>参考文档中的开源框架选型</h3>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>开源框架 / 工具</th>
+            <th>定位</th>
+            <th>建议接入方式</th>
+            <th>不直接作为唯一主链路的原因</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>NVIDIA SkillSpector</td>
+            <td>Skill 包语义安全、权限一致性、AST 行为、污点链路与风险评分的交叉验证引擎</td>
+            <td>作为 strict profile 的二级扫描器接入，重点用于 Market 上架、高风险权限、外部来源 ZIP 和人工复核前预判。</td>
+            <td>适合作为强校验引擎，但需要把输出映射到 CoPaw Finding Schema，并处理模型依赖、误报复核和性能开销。</td>
+          </tr>
+          <tr>
+            <td>Snyk Agent-Scan</td>
+            <td>本机 Agent / MCP / Skill 资产盘点与 Toxic Flow 风险巡检工具</td>
+            <td>用于运维巡检、企业终端治理、运行环境基线检查，发现已安装 MCP Server、工具投毒和有毒流组合。</td>
+            <td>它更偏终端资产发现和远端分析，不适合作为 CoPaw 聊天创建或 ZIP 上传的同步准入主引擎。</td>
+          </tr>
+          <tr>
+            <td>Invariant MCP-Scan</td>
+            <td>MCP Server 工具描述投毒、Prompt Injection、Toxic Flow 专项扫描</td>
+            <td>当 Skill 绑定 MCP 工具、上传 MCP 配置或 Market 分发 MCP Server 时触发专项扫描。</td>
+            <td>扫描对象聚焦 MCP，不覆盖完整 Skill 包体、依赖、租户目录和 CoPaw 业务权限。</td>
+          </tr>
+          <tr>
+            <td>Cisco Skill Scanner</td>
+            <td>Skill 包规则、YARA、行为数据流、LLM-as-a-judge、SARIF/JSON 报告生成</td>
+            <td>作为中长期主扫描引擎候选之一，以 CLI/服务插件方式接入静态扫描编排器，先在离线批量回扫中验证效果。</td>
+            <td>需要确认部署成本、规则可控性和输出稳定性；接入前仍需 CoPaw 自己完成安全解包、租户上下文和准入决策。</td>
+          </tr>
+          <tr>
+            <td>Cisco MCP Scanner</td>
+            <td>远程或托管 MCP Server 的认证、instructions、prompt/resource、依赖漏洞和 YARA 检测</td>
+            <td>用于 MCP 市场、远程 MCP 接入和托管 MCP 复检，与 MCP-Scan 形成互补。</td>
+            <td>同样是 MCP 专项工具，不能替代 Skill 生命周期扫描和运行时 Tool Guard。</td>
+          </tr>
+          <tr>
+            <td>Cisco DefenseClaw</td>
+            <td>Agent 运行时策略网关与人工确认机制参考</td>
+            <td>作为 CoPaw 运行时治理设计参考，对齐 Tool Guard、File Guard、外联控制、审批和审计链路。</td>
+            <td>更适合借鉴架构模式，不建议直接替换现有 `tool_guard_mixin.py` 与审批体系。</td>
+          </tr>
+          <tr>
+            <td>Cisco AI BOM / SBOM 工具链</td>
+            <td>Skill、Agent、MCP、模型、依赖、外部 API 的资产清单与持续回扫基础</td>
+            <td>用于生成 CoPaw Skill AI-BOM，支撑版本差分、依赖漏洞回扫、威胁情报命中和审计报表。</td>
+            <td>资产清单能支撑运营，但本身不是阻断引擎；仍要接入风险决策中心。</td>
+          </tr>
+          <tr>
+            <td>pip-audit / npm audit / OSV</td>
+            <td>Python / Node 依赖漏洞检测</td>
+            <td>作为 `DependencyAnalyzer` 的可选后端，standard profile 做离线解析，strict profile 联网查询漏洞库。</td>
+            <td>依赖扫描只覆盖供应链 CVE，不覆盖 Prompt Injection、恶意语义、权限越界和运行行为。</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="callout" style="margin-top: 16px;">
+        <strong>选型结论</strong>
+        首版主链路采用 CoPaw 自有 `SkillScanner` 增强，保证准入路径、租户隔离、历史记录和 Console 体验可控；
+        SkillSpector 与 Cisco Skill Scanner 作为高风险样本二级扫描器候选；
+        Agent-Scan、MCP-Scan、Cisco MCP Scanner 用于运行环境与 MCP 专项巡检；
+        AI BOM / SBOM 工具链服务于长期运营回扫。
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>准入策略</h2>
+      <table class="matrix">
+        <thead>
+          <tr>
+            <th>级别</th>
+            <th>建议决策</th>
+            <th>典型触发</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="pill red">Critical</span></td>
+            <td>阻断</td>
+            <td>恶意代码、反向 shell、C2、凭证窃取、Zip Slip、容器逃逸、客户数据外发</td>
+          </tr>
+          <tr>
+            <td><span class="pill amber">High</span></td>
+            <td>默认阻断，必要时人工审批</td>
+            <td>Prompt Injection、高风险权限、动态库、混淆、未知外联、敏感路径访问</td>
+          </tr>
+          <tr>
+            <td><span class="pill blue">Medium</span></td>
+            <td>要求修复或复核</td>
+            <td>硬编码密钥、过宽依赖、低中危 CVE、权限说明不完整</td>
+          </tr>
+          <tr>
+            <td><span class="pill green">Low / Info</span></td>
+            <td>记录后放行</td>
+            <td>低风险提示、文档质量问题、可解释但不影响准入的轻微告警</td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section class="section">
+      <h2>链路设计</h2>
+      <div class="timeline">
+        <div class="step">
+          <div class="tag">入口</div>
+          <div>
+            <strong>创建 / 上传 / 上架 / 安装都先落到草稿或隔离目录</strong>
+            先归一化再扫描，不允许把未审的内容直接进入可执行区或可分发区。
+          </div>
+        </div>
+        <div class="step">
+          <div class="tag">扫描</div>
+          <div>
+            <strong>规则、AST、污点、SCA、语义分析并行执行</strong>
+            让不同分析器各做一件事，最后再由决策层合并结论，减少单点误判。
+          </div>
+        </div>
+        <div class="step">
+          <div class="tag">决策</div>
+          <div>
+            <strong>把结果转成可解释的风险卡片和状态机</strong>
+            用户看到的是“为什么被挡”和“怎么改”，平台看到的是证据、严重度和审批状态。
+          </div>
+        </div>
+        <div class="step">
+          <div class="tag">运营</div>
+          <div>
+            <strong>版本差分、威胁情报回扫和审计留痕长期保留</strong>
+            让后来新增的规则、CVE、恶意包情报可以回头重新审旧版本。
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>实现优先级</h2>
+      <div class="columns-2">
+        <div class="callout">
+          <strong>第一阶段</strong>
+          在现有 `scan_skill_directory()` 上补齐包体安全解包、声明层扫描、AST 扫描和统一风险输出。
+        </div>
+        <div class="callout">
+          <strong>第二阶段</strong>
+          加入污点追踪、依赖 SCA、语义复核与动态沙箱，把高风险样本的复核效率做上去。
+        </div>
+        <div class="callout">
+          <strong>第三阶段</strong>
+          打通 SWE、Market、Console 的统一策略、版本差分和运营回扫，形成持续治理闭环。
+        </div>
+        <div class="callout">
+          <strong>最终状态</strong>
+          Skill 不再是一个普通文件，而是一个被扫描、被解释、被审计、被运行时约束的高权限资产。
+        </div>
+      </div>
+    </section>
+
+    <section class="section">
+      <h2>参考来源</h2>
+      <ul class="source-list">
+        <li>《一文了解｜SkillScan 智能体技能安全扫描最佳实践》</li>
+        <li>《SkillScan 智能体技能安全风险 — 深度展开与实例分析》</li>
+        <li>《Agent-Scan：开源 AI Agent 安全扫描工具推荐》</li>
+        <li>《SkillSpector 给 skills 加门禁》</li>
+        <li>调研报告：Skill 安全扫描技术架构调研报告</li>
+      </ul>
+    </section>
+
+    <div class="footer">
+      生成目标：让评审可以直接打开 HTML 看懂架构，而不是先读一堆零散笔记。
+    </div>
+  </main>
+</body>
+</html>
