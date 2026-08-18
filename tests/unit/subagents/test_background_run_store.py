@@ -157,3 +157,47 @@ async def test_background_run_record_persists_start_request_match_and_nickname(
     assert reloaded.start_request is not None
     assert reloaded.start_request.name == "aum-customer-analyst"
     assert reloaded.definition_match.matched is False
+
+
+@pytest.mark.asyncio
+async def test_background_run_record_persists_safe_launch_diagnostics(
+    tmp_path,
+):
+    store = PerRunSubAgentRunStore(tmp_path)
+
+    record = await store.create(
+        _spec(),
+        _definition(),
+        PermissionPolicy.readonly(),
+        launch_diagnostics={
+            "loaded_skills": ["quality"],
+            "skipped_skills": ["disabled"],
+            "snapshotted_mcps": ["github"],
+            "connected_mcps": ["github"],
+            "skipped_mcps": ["offline"],
+            "resolved_model": {
+                "provider_id": "openai",
+                "model": "gpt-5-mini",
+            },
+        },
+    )
+
+    reloaded = await PerRunSubAgentRunStore(tmp_path).get(record.run_id)
+
+    assert reloaded is not None
+    assert reloaded.launch_diagnostics.loaded_skills == ["quality"]
+
+
+def test_launch_diagnostics_rejects_provider_secrets_in_resolved_model():
+    from swe.app.subagents.models import SubAgentLaunchDiagnostics
+
+    with pytest.raises(ValueError, match="provider_id"):
+        SubAgentLaunchDiagnostics.model_validate(
+            {
+                "resolved_model": {
+                    "provider_id": "openai",
+                    "model": "gpt-5-mini",
+                    "api_key": "secret",
+                },
+            },
+        )

@@ -71,7 +71,14 @@ function directoryAnchor(
   return {
     root,
     path: anchorPath,
-    items: [{ name: label, path: anchorPath, kind: "directory", capabilities }],
+    items: [
+      {
+        name: label,
+        path: anchorPath,
+        kind: "directory",
+        capabilities: { ...capabilities, archive: false },
+      },
+    ],
     next_cursor: null,
     has_child_directory: true,
     first_child_directory: null,
@@ -130,10 +137,18 @@ function requestError(error: unknown) {
   return error instanceof Error ? error.message : "请求失败，请重试";
 }
 
+type RequestError = Error & { status?: number };
+
+function isListingConflict(error: unknown): error is RequestError {
+  return error instanceof Error && (error as RequestError).status === 409;
+}
+
 export default function FileManager() {
   const { message } = App.useApp();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const detailRef = useRef<FileDetailHandle>(null);
+  const loadingPageKeys = useRef<Set<string>>(new Set());
+  const navigationVersionRef = useRef(0);
   const [open, setOpen] = useState(false);
   const [root, setRoot] = useState<FileManagerRoot>("working");
   const [columns, setColumns] = useState<Columns>([null, null, null]);
@@ -168,6 +183,7 @@ export default function FileManager() {
 
   const currentDirectory = columns[1] || columns[0];
   const uploadReason = uploadDisabledReason(root);
+  const canDeleteDirectories = root !== "conversation" && root !== "recycle";
 
   const revokeBinaryPreview = useCallback(() => {
     setBinaryPreviewUrl((url) => {
@@ -414,27 +430,61 @@ export default function FileManager() {
   const loadMore = useCallback(
     async (index: 0 | 1 | 2) => {
       const page = columns[index];
-      if (!page?.next_cursor || loadingColumns[index]) return;
+      const cursor = page?.next_cursor;
+      const query = columnQueries[index] || undefined;
+      if (!page || !cursor || loadingColumns[index]) return;
+      const pageKey = JSON.stringify([index, root, page.path, query, cursor]);
+      if (loadingPageKeys.current.has(pageKey)) return;
+      loadingPageKeys.current.add(pageKey);
+      const navigationVersion = navigationVersionRef.current;
+      const isCurrentNavigation = () =>
+        navigationVersionRef.current === navigationVersion;
       setColumnLoading(index, true);
       try {
-        const next = await loadDirectory(
-          root,
-          page.path,
-          page.next_cursor,
-          columnQueries[index] || undefined,
-        );
+        const next = await loadDirectory(root, page.path, cursor, query);
+        if (!isCurrentNavigation()) return;
         setColumns(
           (previous) =>
             previous.map((item, position) =>
-              position === index && item
+              position === index &&
+              item &&
+              item.root === page.root &&
+              item.path === page.path &&
+              item.next_cursor === cursor
                 ? { ...next, items: [...item.items, ...next.items] }
                 : item,
             ) as Columns,
         );
       } catch (error) {
+        if (!isCurrentNavigation()) return;
+        if (isListingConflict(error)) {
+          try {
+            const refreshed = await loadDirectory(root, page.path, null, query);
+            if (!isCurrentNavigation()) return;
+            setColumns(
+              (previous) =>
+                previous.map((item, position) =>
+                  position === index &&
+                  item &&
+                  item.root === page.root &&
+                  item.path === page.path &&
+                  item.next_cursor === cursor
+                    ? refreshed
+                    : item,
+                ) as Columns,
+            );
+            setColumnError(index, null);
+            message.success?.("目录已更新，已重新加载");
+          } catch (refreshError) {
+            if (!isCurrentNavigation()) return;
+            setColumnError(index, requestError(refreshError));
+          }
+          return;
+        }
         setColumnError(index, requestError(error));
       } finally {
-        setColumnLoading(index, false);
+        loadingPageKeys.current.delete(pageKey);
+        if (isCurrentNavigation()) setColumnLoading(index, false);
       }
     },
     [
@@ -442,6 +492,7 @@ export default function FileManager() {
       columns,
       loadDirectory,
       loadingColumns,
+      message,
       root,
       setColumnError,
       setColumnLoading,
@@ -522,11 +573,12 @@ export default function FileManager() {
   const switchRoot = useCallback(
     (nextRoot: FileManagerRoot) => {
       executeOrGuard(() => {
+        if (nextRoot !== root) navigationVersionRef.current += 1;
         setRoot(nextRoot);
         setSearch("");
       });
     },
-    [executeOrGuard],
+    [executeOrGuard, root],
   );
 
   const anchorPath = useCallback(
@@ -567,6 +619,40 @@ export default function FileManager() {
       }
     },
     [loadDirectory, loadInitial, revokeBinaryPreview, root],
+  );
+
+  const confirmDeleteDirectory = useCallback(
+    (entry: FileManagerItem) => {
+      executeOrGuard(() => {
+        Modal.confirm({
+          title: "永久删除目录？",
+          content: (
+            <>
+              <strong>{entry.path}</strong>
+              <br />
+              目录及其全部内容将被永久删除，无法恢复。
+            </>
+          ),
+          okText: "永久删除",
+          okButtonProps: { danger: true },
+          cancelText: "取消",
+          onOk: async () => {
+            try {
+              await chatApi.fileManager.deleteDirectory({
+                root,
+                path: entry.path,
+              });
+              await anchorPath(parentPath(entry.path));
+              message.success("目录已永久删除");
+            } catch (error) {
+              message.error(`删除失败：${requestError(error)}`);
+              throw error;
+            }
+          },
+        });
+      });
+    },
+    [anchorPath, executeOrGuard, message, root],
   );
 
   const saveText = useCallback(
@@ -813,6 +899,9 @@ export default function FileManager() {
                 error={columnErrors[index]}
                 onRetry={() => void retryColumn(index as 0 | 1)}
                 onSelect={(entry) => void selectEntry(index as 0 | 1, entry)}
+                onDeleteDirectory={
+                  canDeleteDirectories ? confirmDeleteDirectory : undefined
+                }
                 onLoadMore={() => void loadMore(index as 0 | 1)}
               />
             ))}
@@ -826,6 +915,9 @@ export default function FileManager() {
                   error={columnErrors[2]}
                   onRetry={() => void retryColumn(2)}
                   onSelect={(entry) => void selectEntry(2, entry)}
+                  onDeleteDirectory={
+                    canDeleteDirectories ? confirmDeleteDirectory : undefined
+                  }
                   onLoadMore={() => void loadMore(2)}
                 />
               ) : (

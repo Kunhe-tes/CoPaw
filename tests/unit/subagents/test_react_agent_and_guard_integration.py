@@ -13,8 +13,18 @@ from agentscope.tool import ToolResponse
 from swe.agents import react_agent as react_agent_module
 from swe.agents.hook_runtime.models import MergedHookResult
 from swe.agents.react_agent import SWEAgent
+from swe.agents.skill_tool_registry import (
+    get_skill_tool_registry,
+    reset_skill_tool_registry,
+)
 from swe.agents.tool_guard_mixin import ToolGuardMixin
 from swe.app.subagents import PermissionPolicy
+from swe.security.tool_guard.models import (
+    GuardFinding,
+    GuardSeverity,
+    GuardThreatCategory,
+    ToolGuardResult,
+)
 from swe.app.source_system_config.models import (
     EffectiveSourceSystemConfig,
     SourceSystemConfig,
@@ -108,6 +118,9 @@ class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
         self._tool_guard_lock = asyncio.Lock()
         self._emit_tool_hook_called = False
         self._acting_with_approval_called = False
+
+    def _resolve_mcp_server(self, tool_name: str) -> str | None:
+        return getattr(self, "mcp_servers", {}).get(tool_name)
 
     def _ensure_tool_guard(self) -> None:
         self._tool_guard_engine = SimpleNamespace(enabled=False)
@@ -293,6 +306,89 @@ def test_disable_workspace_skills_leaves_no_effective_skills(
     assert agent.get_effective_skills() == []
 
 
+def test_explicit_snapshot_skills_build_tool_attribution_from_copied_roots(
+    tmp_path: Path,
+) -> None:
+    """Worker attribution reads its copied Skill, never the live workspace."""
+
+    class _Toolkit:
+        def __init__(self) -> None:
+            self.skills: dict[str, dict[str, str]] = {}
+
+        def register_agent_skill(self, skill_dir: str) -> None:
+            self.skills[Path(skill_dir).name] = {"dir": skill_dir}
+
+    reset_skill_tool_registry()
+    workspace_skill = tmp_path / "skills" / "quality"
+    workspace_skill.mkdir(parents=True)
+    (workspace_skill / "SKILL.md").write_text(
+        "---\nmetadata:\n  swe:\n    uses_tools:\n      - write_file\n---\n",
+        encoding="utf-8",
+    )
+    copied_skill = tmp_path / "subagent-runs" / "run-1.skills" / "quality"
+    copied_skill.mkdir(parents=True)
+    (copied_skill / "SKILL.md").write_text(
+        "---\nmetadata:\n  swe:\n    uses_tools:\n      - read_file\n---\n",
+        encoding="utf-8",
+    )
+    agent = _bare_agent(tmp_path)
+
+    SWEAgent._register_explicit_workspace_skills(
+        agent,
+        _Toolkit(),
+        {"quality": copied_skill},
+    )
+
+    registry = get_skill_tool_registry()
+    assert registry.get_skills_for_tool("read_file") == ["quality"]
+    assert registry.get_skills_for_tool("write_file") == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_skill_agent_does_not_setup_workspace_detector(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Detector setup is disabled when it would inspect mutable workspace Skills."""
+    from swe.tracing import manager as trace_manager_module
+
+    copied_skill = tmp_path / "subagent-runs" / "run-1.skills" / "quality"
+    copied_skill.mkdir(parents=True)
+    (copied_skill / "SKILL.md").write_text("# Quality", encoding="utf-8")
+    agent = _bare_agent(tmp_path)
+    agent._workspace_skill_dirs = {"quality": copied_skill}
+    agent._runtime_skills = ["quality"]
+    agent._skill_runtime_profiles = {}
+    setup_calls: list[dict[str, object]] = []
+
+    async def setup_skill_detector(**kwargs: object) -> None:
+        setup_calls.append(kwargs)
+
+    manager = SimpleNamespace(
+        enabled=True,
+        setup_skill_detector=setup_skill_detector,
+    )
+    monkeypatch.setattr(
+        trace_manager_module,
+        "has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        trace_manager_module,
+        "get_trace_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        trace_manager_module,
+        "get_current_trace",
+        lambda: SimpleNamespace(skill_detector=None),
+    )
+
+    await SWEAgent.setup_skill_detector(agent, "trace-1")
+
+    assert setup_calls == []
+
+
 def test_subagent_toolkit_filters_builtins_and_excludes_delegate(
     tmp_path: Path,
 ) -> None:
@@ -340,12 +436,16 @@ def test_main_agent_registers_plan_interaction_tools_by_mode_and_source_config(
         request_context={"agent_role": "subagent", "plan_mode_enabled": True},
     )
 
-    with bind_source_system_config(_source_config_with_plan_interaction_tools(False)):
+    with bind_source_system_config(
+        _source_config_with_plan_interaction_tools(False),
+    ):
         normal_tools = SWEAgent._create_toolkit(disabled).tools
         plan_mode_tools = SWEAgent._create_toolkit(plan_mode).tools
         subagent_tools = SWEAgent._create_toolkit(subagent).tools
 
-    with bind_source_system_config(_source_config_with_plan_interaction_tools(True)):
+    with bind_source_system_config(
+        _source_config_with_plan_interaction_tools(True),
+    ):
         enabled_normal_tools = SWEAgent._create_toolkit(disabled).tools
 
     for tool_name in ("ask_plan_clarification", "submit_proposed_plan"):
@@ -383,7 +483,39 @@ def test_background_subagent_tools_require_explicit_intent(
     assert "delegate_to_subagent" not in visible_tools
 
 
-def test_register_subagent_definition_requires_registration_intent(
+def test_start_subagent_description_lists_enabled_skill_definitions(
+    tmp_path: Path,
+) -> None:
+    agents_dir = tmp_path / "skills" / "security" / "agents"
+    agents_dir.mkdir(parents=True)
+    (agents_dir / "reviewer.toml").write_text(
+        'name = "reviewer"\n'
+        'description = "Review code for security regressions."\n'
+        'instruction = "Inspect evidence."\n'
+        'trigger_keywords = ["security", "review"]\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "skill.json").write_text(
+        '{"layout_version":2,"skills":{"security":{"enabled":true,"channels":["all"]}}}',
+        encoding="utf-8",
+    )
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": "请使用子代理检查变更",
+        },
+    )
+
+    tool = SWEAgent._create_toolkit(agent).tools["start_subagent"]
+    description = tool.json_schema["function"]["description"]
+
+    assert "security:reviewer" in description
+    assert "Review code for security regressions." in description
+    assert "security, review" in description
+
+
+def test_register_subagent_definition_is_never_exposed(
     tmp_path: Path,
 ) -> None:
     """Registration tool is not exposed for ordinary SubAgent intent."""
@@ -394,20 +526,10 @@ def test_register_subagent_definition_requires_registration_intent(
             "current_user_text": "请用子代理分析这个模块",
         },
     )
-    registration = _bare_agent(
-        tmp_path,
-        request_context={
-            "agent_role": "main",
-            "current_user_text": "注册一个可复用 SubAgent Definition",
-        },
-    )
-
     normal_tools = SWEAgent._create_toolkit(normal).tools
-    registration_tools = SWEAgent._create_toolkit(registration).tools
 
     assert "start_subagent" in normal_tools
     assert "register_subagent_definition" not in normal_tools
-    assert "register_subagent_definition" in registration_tools
 
 
 @pytest.mark.parametrize(
@@ -415,6 +537,7 @@ def test_register_subagent_definition_requires_registration_intent(
     [
         "帮我注册一个账号",
         "讨论一下可复用代码结构",
+        "注册一个可复用 Definition",
     ],
 )
 def test_register_subagent_definition_ignores_unrelated_registration_terms(
@@ -435,10 +558,56 @@ def test_register_subagent_definition_ignores_unrelated_registration_terms(
     assert "register_subagent_definition" not in tools
 
 
+@pytest.mark.parametrize(
+    "requested_key",
+    ["subagent_tools_requested", "subagent_registration_tools_requested"],
+)
+def test_subagent_tool_request_flags_do_not_bypass_text_intent_gate(
+    tmp_path: Path,
+    requested_key: str,
+) -> None:
+    """Only the current user message can open SubAgent tools."""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            requested_key: True,
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "start_subagent" not in tools
+    assert "register_subagent_definition" not in tools
+
+
+@pytest.mark.parametrize(
+    "context_key",
+    ["user_message", "query", "prompt", "message_text"],
+)
+def test_only_current_user_text_can_open_subagent_tools(
+    tmp_path: Path,
+    context_key: str,
+) -> None:
+    """Other request context text is not the current user message."""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            context_key: "请使用子代理注册一个可复用定义",
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "start_subagent" not in tools
+    assert "register_subagent_definition" not in tools
+
+
 def test_background_subagent_observe_tools_visible_with_active_runs(
     tmp_path: Path,
 ) -> None:
-    """Active scope runs expose wait/get/cancel without fresh start intent."""
+    """Active runs do not bypass the explicit SubAgent intent gate."""
 
     class _Supervisor:
         def has_active_runs(self, scope):
@@ -456,6 +625,26 @@ def test_background_subagent_observe_tools_visible_with_active_runs(
     tools = SWEAgent._create_toolkit(agent).tools
 
     assert "start_subagent" not in tools
+    assert "wait_subagent" not in tools
+    assert "get_subagent" not in tools
+    assert "cancel_subagent" not in tools
+
+
+def test_background_subagent_management_tools_require_fresh_intent(
+    tmp_path: Path,
+) -> None:
+    """A new explicit SubAgent turn exposes all management tools."""
+    agent = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": "请继续管理这个子代理任务",
+        },
+    )
+
+    tools = SWEAgent._create_toolkit(agent).tools
+
+    assert "start_subagent" in tools
     assert "wait_subagent" in tools
     assert "get_subagent" in tools
     assert "cancel_subagent" in tools
@@ -736,6 +925,45 @@ async def test_subagent_hard_policy_allows_readonly_shell(
 
 
 @pytest.mark.asyncio
+async def test_subagent_mcp_policy_maps_client_name_to_declared_key(
+    tmp_path: Path,
+) -> None:
+    """MCP tools use their declared config key, not display name, for scope."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent.mcp_servers = {"search": "tavily_mcp"}
+    agent._request_context.update(
+        {
+            "subagent_allowed_mcp_servers": ["tavily_search"],
+            "subagent_mcp_server_keys": {"tavily_mcp": "tavily_search"},
+        },
+    )
+
+    result = await agent._acting(
+        {"id": "tool-1", "name": "search", "input": {"query": "x"}},
+    )
+
+    assert result == {"content": {"query": "x"}}
+
+
+@pytest.mark.asyncio
+async def test_subagent_mcp_policy_denies_unsnapshotted_server(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent.mcp_servers = {"search": "unlisted"}
+    agent._request_context["subagent_allowed_mcp_servers"] = ["github"]
+
+    result = await agent._acting(
+        {"id": "tool-1", "name": "search", "input": {"query": "x"}},
+    )
+
+    assert result is None
+    assert "MCP server `unlisted` is not allowed" in str(
+        agent.printed[0].content,
+    )
+
+
+@pytest.mark.asyncio
 async def test_subagent_hard_policy_rechecks_hook_updated_input(
     tmp_path: Path,
 ) -> None:
@@ -763,6 +991,78 @@ async def test_subagent_hard_policy_rechecks_hook_updated_input(
     assert result is None
     assert agent._emit_tool_hook_called is True
     assert "blocked by SubAgent policy" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+async def test_subagent_hook_ask_is_rejected_without_interactive_approval(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+
+    async def _request_approval(*args, **kwargs):
+        return MergedHookResult(
+            decision="ask",
+            reason="review shell",
+        )
+
+    agent._emit_tool_hook = _request_approval
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+
+    assert result is None
+    assert agent._acting_with_approval_called is False
+    assert "cannot await interactive approval" in str(agent.printed[0].content)
+
+
+@pytest.mark.asyncio
+async def test_subagent_guard_approval_is_rejected_without_interactive_approval(
+    tmp_path: Path,
+) -> None:
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    finding = GuardFinding(
+        id="guard-1",
+        rule_id="test",
+        category=GuardThreatCategory.CODE_EXECUTION,
+        severity=GuardSeverity.HIGH,
+        title="Needs approval",
+        description="A test finding.",
+        tool_name="execute_shell_command",
+    )
+    guard_result = ToolGuardResult(
+        tool_name="execute_shell_command",
+        params={"command": "git status --short"},
+        findings=[finding],
+    )
+    agent._tool_guard_engine = SimpleNamespace(
+        enabled=True,
+        is_denied=lambda _name: False,
+        is_guarded=lambda _name: True,
+        guard=lambda *_args, **_kwargs: guard_result,
+    )
+    agent._ensure_tool_guard = lambda: None
+
+    async def _no_preapproval(*args, **kwargs):
+        return False
+
+    agent._consume_preapproval = _no_preapproval
+
+    result = await agent._acting(
+        {
+            "id": "tool-1",
+            "name": "execute_shell_command",
+            "input": {"command": "git status --short"},
+        },
+    )
+
+    assert result is None
+    assert agent._acting_with_approval_called is False
+    assert "cannot be approved" in str(agent.printed[0].content)
 
 
 @pytest.mark.asyncio

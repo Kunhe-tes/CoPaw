@@ -43,7 +43,7 @@
     "heartbeat": "心跳",
     "casesManagement": "案例管理",
     "agent": "工作区",
-    "workspace": "文件",
+    "workspace": "个性化",
     "skills": "技能",
     "skillPool": "技能池",
     "tools": "内置工具",
@@ -55,6 +55,7 @@
     "models": "模型管理",
     "environments": "环境变量配置",
     "security": "安全策略配置",
+    "skillConfig": "SKILL 配置",
     "tokenUsage": "Token 消耗",
     "voiceTranscription": "语音转写",
     "analytics": "分析",
@@ -82,6 +83,7 @@
     "market": "应用市场",
     "mySkills": "我的技能",
     "myMcp": "我的 MCP",
+    "myExperts": "我的专家",
     "systemCheck": "系统自检"
   },
   "systemCheck": {

@@ -34,12 +34,15 @@
 .detailColumn { overflow: hidden; border-right: 0; background: color-mix(in srgb, var(--console-bg-color, #fff) 96%, #f6f9fc); }
 .columnHeader { display: flex; align-items: center; min-height: 40px; padding: 12px 20px 8px; color: var(--console-text-secondary-color, #7b879b); font-size: 12px; line-height: 18px; }
 .fileRows { padding: 2px 10px 12px; }
-.fileRow { display: flex; width: 100%; min-height: 58px; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 8px; color: inherit; text-align: left; background: transparent; cursor: pointer; &:hover { background: #f5f9ff; } &:focus-visible { outline: 2px solid #1677ff; outline-offset: -2px; } }
+.fileRow { display: flex; width: 100%; min-height: 58px; align-items: center; gap: 4px; padding: 8px 10px; border-radius: 8px; color: inherit; background: transparent; &:hover { background: #f5f9ff; } }
 .selected { background: #eaf3ff; &:hover { background: #eaf3ff; } }
+.entrySelect { display: flex; min-width: 0; flex: 1; align-items: center; gap: 10px; border: 0; padding: 0; color: inherit; text-align: left; background: transparent; cursor: pointer; &:focus-visible { outline: 2px solid #1677ff; outline-offset: 2px; } }
 .entryIcon { display: grid; width: 25px; height: 25px; place-items: center; color: #1677ff; overflow: hidden; :global(img) { width: 22px; height: 22px; } }
 .entryBody { min-width: 0; flex: 1; }
 .entryName { display: block; color: var(--console-text-color, #19243a); font-size: 14px; line-height: 19px; }
 .entryMeta { display: block; margin-top: 2px; color: var(--console-text-secondary-color, #7b879b); font-size: 12px; line-height: 17px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.deleteDirectoryButton { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; border: 0; border-radius: 6px; color: #b94a4f; background: transparent; cursor: pointer; opacity: 0; pointer-events: none; &:hover { background: #fff0f0; } &:focus-visible { outline: 2px solid #b94a4f; outline-offset: 2px; opacity: 1; pointer-events: auto; } }
+.fileRow:hover .deleteDirectoryButton, .fileRow:focus-within .deleteDirectoryButton, .selected .deleteDirectoryButton { opacity: 1; pointer-events: auto; }
 .statePanel { display: grid; min-height: 150px; place-items: center; gap: 10px; padding: 24px; color: var(--console-text-secondary-color, #7b879b); text-align: center; }
 .textButton { color: #1677ff; border: 0; background: transparent; cursor: pointer; }
 .empty { margin-top: 80px; }
@@ -70,5 +73,6 @@
   .columns .detailColumn { background: #151b25; }
   .shortcut[aria-pressed="true"], .selected { background: rgb(22 104 220 / 20%); }
   .fileRow:hover { background: rgb(255 255 255 / 5%); }
+  .deleteDirectoryButton:hover { background: rgb(185 74 79 / 20%); }
   .htmlPreview { background: #fff; }
 }

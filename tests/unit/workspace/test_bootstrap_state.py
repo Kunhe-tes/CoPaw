@@ -125,6 +125,22 @@ def test_readiness_allows_a_non_default_active_agent(
     assert readiness.ready
 
 
+def test_readiness_ignores_skill_manifests_and_directories(
+    good_tenant: Path,
+) -> None:
+    workspace_dir = good_tenant / "workspaces" / "default"
+    (good_tenant / "skill_pool" / "skill.json").write_text(
+        "{broken",
+        encoding="utf-8",
+    )
+    (workspace_dir / "skill.json").write_text("{broken", encoding="utf-8")
+    (workspace_dir / "skills").rmdir()
+
+    readiness = inspect_bootstrap_readiness(good_tenant)
+
+    assert readiness.ready
+
+
 def test_ready_marker_does_not_hide_damaged_agent(good_tenant: Path) -> None:
     agent_path = good_tenant / "workspaces" / "default" / "agent.json"
     agent_path.write_text("{broken", encoding="utf-8")

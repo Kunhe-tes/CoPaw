@@ -1020,6 +1020,11 @@ def _wrap_model_with_tracing(
 def create_model_and_formatter(
     agent_id: Optional[str] = None,
     trace_context: Optional[dict[str, Any]] = None,
+    model_slot_override: Any | None = None,
+    model_provider_override: Any | None = None,
+    fallback_model_slot: Any | None = None,
+    fallback_model_provider: Any | None = None,
+    resolved_model_info: dict[str, str] | None = None,
 ) -> Tuple[ChatModelBase, FormatterBase]:
     """Factory method to create model and formatter instances.
 
@@ -1051,12 +1056,18 @@ def create_model_and_formatter(
             tenant_id,
         )
 
-        # Ensure tenant provider storage exists before accessing ProviderManager
-        ProviderManager.ensure_tenant_provider_storage(tenant_id)
-        manager = ProviderManager.get_instance(tenant_id)
-
-        # Get model slot from active model configuration
-        model_slot = _get_model_slot(manager)
+        # Snapshot workers supply both a frozen slot and provider. Avoid the
+        # tenant manager so later provider changes cannot affect that run.
+        manager = None
+        if (
+            model_slot_override is not None
+            and model_provider_override is not None
+        ):
+            model_slot = model_slot_override
+        else:
+            ProviderManager.ensure_tenant_provider_storage(tenant_id)
+            manager = ProviderManager.get_instance(tenant_id)
+            model_slot = model_slot_override or _get_model_slot(manager)
         if (
             not model_slot
             or not model_slot.provider_id
@@ -1070,12 +1081,38 @@ def create_model_and_formatter(
             )
 
         # Get provider and create model instance
-        provider = manager.get_provider(model_slot.provider_id)
+        provider = model_provider_override
+        if provider is None and manager is not None:
+            provider = manager.get_provider(model_slot.provider_id)
         if provider is None:
             raise ValueError(f"Provider '{model_slot.provider_id}' not found.")
 
-        model = provider.get_chat_model_instance(model_slot.model)
-        provider_id = model_slot.provider_id
+        try:
+            model = provider.get_chat_model_instance(model_slot.model)
+            provider_id = model_slot.provider_id
+            resolved_slot = model_slot
+        except Exception:
+            if (
+                fallback_model_slot is None
+                or fallback_model_provider is None
+                or not fallback_model_slot.provider_id
+                or not fallback_model_slot.model
+            ):
+                raise
+            model = fallback_model_provider.get_chat_model_instance(
+                fallback_model_slot.model,
+            )
+            provider_id = fallback_model_slot.provider_id
+            resolved_slot = fallback_model_slot
+
+        if resolved_model_info is not None:
+            resolved_model_info.clear()
+            resolved_model_info.update(
+                {
+                    "provider_id": provider_id,
+                    "model": resolved_slot.model,
+                },
+            )
 
         # Create the formatter based on the real model class
         formatter = _create_formatter_instance(model.__class__)

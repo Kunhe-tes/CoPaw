@@ -10,9 +10,10 @@ export const ModelCallFailedStyle = createGlobalStyle`
   background: ${({ theme }) => theme.colorErrorBg};
   color: ${({ theme }) => theme.colorText};
   box-shadow: 0 2px 8px rgba(35, 31, 27, 0.05);
+  margin-top: 4px;
 
   &-main {
-    padding: 16px 18px 14px;
+    padding: 14px 18px;
   }
 
   &-header,
@@ -41,7 +42,7 @@ export const ModelCallFailedStyle = createGlobalStyle`
     justify-content: center;
     width: 30px;
     height: 30px;
-    flex: 0 0 30px;
+    flex: 0 0 20px;
     border-radius: 50%;
     background: ${({ theme }) => theme.colorErrorBgHover};
     color: ${({ theme }) => theme.colorError};

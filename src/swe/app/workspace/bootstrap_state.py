@@ -21,13 +21,12 @@ _REQUIRED_WORKSPACE_FILES = (
     "PROFILE.md",
     "SOUL.md",
 )
-_REQUIRED_WORKSPACE_DIRECTORIES = ("sessions", "memory", "skills")
+_REQUIRED_WORKSPACE_DIRECTORIES = ("sessions", "memory")
 _REQUIRED_WORKSPACE_JSON_FILES = (
     "chats.json",
     "jobs.json",
     "token_usage.json",
 )
-_SKILL_MANIFEST_NAME = "skill.json"
 
 
 class TenantBootstrapUnavailable(RuntimeError):
@@ -123,30 +122,6 @@ def inspect_bootstrap_readiness(
             invalid_json_paths,
         )
 
-    pool_manifest = tenant_dir / "skill_pool" / _SKILL_MANIFEST_NAME
-    workspace_manifest = workspace_dir / _SKILL_MANIFEST_NAME
-    pool_skills = _read_skill_manifest(
-        pool_manifest,
-        missing_paths,
-        invalid_json_paths,
-    )
-    workspace_skills = _read_skill_manifest(
-        workspace_manifest,
-        missing_paths,
-        invalid_json_paths,
-        allow_absent=True,
-    )
-    _validate_pool_skill_directories(
-        tenant_dir / "skill_pool",
-        pool_skills,
-        missing_paths,
-    )
-    _validate_workspace_skill_directories(
-        workspace_dir,
-        workspace_skills,
-        missing_paths,
-    )
-
     missing = tuple(dict.fromkeys(missing_paths))
     invalid = tuple(dict.fromkeys(invalid_json_paths))
     if invalid:
@@ -225,55 +200,6 @@ def _read_json_object(
         invalid_json_paths.append(path)
         return None
     return payload
-
-
-def _read_skill_manifest(
-    path: Path,
-    missing_paths: list[Path],
-    invalid_json_paths: list[Path],
-    *,
-    allow_absent: bool = False,
-) -> dict[str, Any] | None:
-    if allow_absent and not path.exists():
-        return {}
-    payload = _read_json_object(path, missing_paths, invalid_json_paths)
-    if payload is None:
-        return None
-    if not isinstance(payload.get("skills"), dict):
-        invalid_json_paths.append(path)
-        return None
-    return payload["skills"]
-
-
-def _validate_pool_skill_directories(
-    skill_pool_dir: Path,
-    skills: dict[str, Any] | None,
-    missing_paths: list[Path],
-) -> None:
-    if skills is None:
-        return
-    for skill_name in skills:
-        _require_file(skill_pool_dir / skill_name / "SKILL.md", missing_paths)
-
-
-def _validate_workspace_skill_directories(
-    workspace_dir: Path,
-    skills: dict[str, Any] | None,
-    missing_paths: list[Path],
-) -> None:
-    if skills is None:
-        return
-    for skill_name, entry in skills.items():
-        enabled = (
-            bool(entry.get("enabled", False))
-            if isinstance(entry, dict)
-            else False
-        )
-        parent = "skills" if enabled else ".disabled_skills"
-        _require_file(
-            workspace_dir / parent / skill_name / "SKILL.md",
-            missing_paths,
-        )
 
 
 def _require_file(path: Path, missing_paths: list[Path]) -> None:

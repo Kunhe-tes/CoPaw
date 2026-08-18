@@ -137,8 +137,8 @@ async def _fake_stream_printing_messages(*, agents, coroutine_task):
 
 def _patch_normal_agent_path(monkeypatch):
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
-        AsyncMock(return_value=[]),
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", _FakeAgent)
     monkeypatch.setattr(
@@ -224,8 +224,8 @@ async def test_selected_skill_hooks_load_after_session_start_without_detector_us
         AsyncMock(return_value=SimpleNamespace(id="chat-1")),
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
-        AsyncMock(return_value=[]),
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
         runner,
@@ -1126,8 +1126,8 @@ async def test_query_handler_session_start_block_yields_before_cleanup(
         await cleanup_release.wait()
 
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
-        AsyncMock(return_value=["mcp-client"]),
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: ["mcp-client"],
     )
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",
@@ -1284,6 +1284,67 @@ async def test_build_and_connect_mcp_clients_passes_explicit_connect_timeout(
 
 
 @pytest.mark.asyncio
+async def test_build_lazy_mcp_clients_defers_client_creation_until_discovery(
+    monkeypatch,
+) -> None:
+    import swe.app.runner.runner as runner_module
+
+    tool = SimpleNamespace(
+        name="weather",
+        description="Return weather.",
+        inputSchema={"type": "object", "properties": {}},
+    )
+    created_client = SimpleNamespace(
+        connect=AsyncMock(),
+        list_tools=AsyncMock(return_value=[tool]),
+        close=AsyncMock(),
+    )
+    create_client = AsyncMock(return_value=created_client)
+    monkeypatch.setattr(
+        runner_module,
+        "_create_mcp_client_with_headers",
+        create_client,
+    )
+
+    clients = runner_module._build_lazy_mcp_clients(
+        SimpleNamespace(
+            clients={
+                "weather": SimpleNamespace(
+                    name="weather-mcp",
+                    enabled=True,
+                    model_dump=lambda **_kwargs: {"name": "weather-mcp"},
+                ),
+            },
+        ),
+        tenant_id="tenant-a",
+        user_id="user-a",
+        passthrough_headers={"Authorization": "Bearer secret"},
+        session_id="session-a",
+        chat_id="chat-a",
+        trace_id="trace-a",
+    )
+
+    assert len(clients) == 1
+    assert create_client.await_count == 0
+
+    assert [tool.name for tool in await clients[0].list_tools()] == ["weather"]
+
+    create_client.assert_awaited_once()
+    assert create_client.await_args.args[1] == {
+        "Authorization": "Bearer secret",
+    }
+    assert create_client.await_args.kwargs == {
+        "session_id": "session-a",
+        "chat_id": "chat-a",
+        "trace_id": "trace-a",
+    }
+    created_client.connect.assert_awaited_once_with(
+        timeout=runner_module._MCP_CONNECT_TIMEOUT_SECONDS,
+    )
+    created_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_prepare_query_runtime_logs_agent_build_duration(
     monkeypatch,
     tmp_path,
@@ -1376,13 +1437,13 @@ async def test_prepare_query_runtime_resolves_chat_before_connecting_mcp(
     )
     _patch_normal_agent_path(monkeypatch)
 
-    async def build_clients(*args, **kwargs):
+    def build_clients(*args, **kwargs):
         del args
         events.append(("mcp", kwargs.get("chat_id")))
         return []
 
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        "swe.app.runner.runner._build_lazy_mcp_clients",
         build_clients,
     )
     monkeypatch.setattr(

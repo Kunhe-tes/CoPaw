@@ -12,13 +12,17 @@ import {
   Tabs,
   Tag,
 } from "antd";
+import { SendOutlined } from "@ant-design/icons";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
   hookManagementApi,
+  type HookDistributionResponse,
   type HookScript,
 } from "@/api/modules/hookManagement";
+import { TenantSelector } from "@/components/TenantSelector";
 import { useAppMessage } from "@/hooks/useAppMessage";
+import { getUserId } from "@/utils/identity";
 
 import {
   addHandler,
@@ -237,6 +241,16 @@ function HookManagementPage() {
     warned: string[];
     failed: Array<{ filename: string; reason: string }>;
   } | null>(null);
+  const [distributionOpen, setDistributionOpen] = useState(false);
+  const [distributing, setDistributing] = useState(false);
+  const [distributionGroupIds, setDistributionGroupIds] = useState<string[]>(
+    [],
+  );
+  const [distributionTenantIds, setDistributionTenantIds] = useState<string[]>(
+    [],
+  );
+  const [distributionResult, setDistributionResult] =
+    useState<HookDistributionResponse | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -271,6 +285,54 @@ function HookManagementPage() {
     [draft, selected],
   );
   const dirty = Boolean(draft) && serializeDraft(draft) !== savedDraft;
+  const distributionGroups = useMemo(
+    () =>
+      Object.entries(draft?.events ?? {}).flatMap(([event, groups]) =>
+        (groups ?? []).map((group) => ({
+          event,
+          group,
+          scriptNames: group.hooks.flatMap((handler) =>
+            handler.type === "command" && Array.isArray(handler.argv)
+              ? handler.argv
+                  .map(String)
+                  .filter(isScriptReference)
+                  .map((reference) =>
+                    reference.slice(reference.lastIndexOf("/") + 1),
+                  )
+              : [],
+          ),
+        })),
+      ),
+    [draft],
+  );
+
+  const openDistribution = () => {
+    if (dirty || !draft) return;
+    setDistributionGroupIds(selected.kind === "root" ? [] : [selected.groupId]);
+    setDistributionTenantIds([]);
+    setDistributionResult(null);
+    setDistributionOpen(true);
+  };
+
+  const distribute = async () => {
+    if (!distributionGroupIds.length || !distributionTenantIds.length) return;
+    setDistributing(true);
+    try {
+      const result = await hookManagementApi.distributeToDefaultAgents({
+        matcherGroupIds: distributionGroupIds,
+        targetTenantIds: distributionTenantIds,
+      });
+      setDistributionResult(result);
+      const successful = result.results.filter((item) => item.success).length;
+      const failed = result.results.length - successful;
+      if (successful) message.success(`已成功分发到 ${successful} 个租户`);
+      if (failed) message.warning(`${failed} 个租户分发失败，请查看结果`);
+    } catch (cause) {
+      message.error(cause instanceof Error ? cause.message : "Hook 分发失败");
+    } finally {
+      setDistributing(false);
+    }
+  };
 
   const save = async () => {
     if (!draft) return;
@@ -753,9 +815,18 @@ function HookManagementPage() {
           </h1>
           <p>配置草稿保存后才会激活；脚本上传立即保存到受控脚本库。</p>
         </div>
-        <Button type="primary" loading={saving} onClick={() => void save()}>
-          保存并激活
-        </Button>
+        <div className={styles.headerActions}>
+          <Button
+            aria-label="分发 Hook"
+            disabled={dirty || distributionGroups.length === 0}
+            icon={<SendOutlined />}
+            title={dirty ? "请先保存 Hook 配置" : "分发 Hook"}
+            onClick={openDistribution}
+          />
+          <Button type="primary" loading={saving} onClick={() => void save()}>
+            保存并激活
+          </Button>
+        </div>
       </header>
       {formError && <p className={styles.formError}>{formError}</p>}
       <Tabs
@@ -1008,6 +1079,76 @@ function HookManagementPage() {
         }
       >
         <p>其他用户已保存新的 Hook 配置。重新加载会丢弃当前草稿。</p>
+      </Modal>
+      <Modal
+        title="分发 Hook"
+        open={distributionOpen}
+        onCancel={() => {
+          if (!distributing) setDistributionOpen(false);
+        }}
+        onOk={() => void distribute()}
+        okText="开始分发"
+        okButtonProps={{
+          disabled:
+            distributionGroupIds.length === 0 ||
+            distributionTenantIds.length === 0,
+          loading: distributing,
+        }}
+        closable={!distributing}
+        maskClosable={!distributing}
+        width={760}
+      >
+        <div className={styles.distributionContent}>
+          <section className={styles.distributionSection}>
+            <h3>选择 Matcher Group</h3>
+            <div className={styles.distributionGroupList}>
+              {distributionGroups.map(({ event, group, scriptNames }) => (
+                <Checkbox
+                  key={group.id}
+                  aria-label={`选择 ${group.id}`}
+                  checked={distributionGroupIds.includes(group.id)}
+                  onChange={(change) =>
+                    setDistributionGroupIds((current) =>
+                      change.target.checked
+                        ? [...current, group.id]
+                        : current.filter((id) => id !== group.id),
+                    )
+                  }
+                >
+                  <span className={styles.distributionGroupName}>
+                    {event} · {group.id}
+                  </span>
+                  <span className={styles.distributionGroupMeta}>
+                    {group.hooks.length} 个 Handler
+                    {scriptNames.length > 0
+                      ? ` · 脚本：${scriptNames.join("、")}`
+                      : ""}
+                  </span>
+                </Checkbox>
+              ))}
+            </div>
+          </section>
+          <section className={styles.distributionSection}>
+            <h3>选择目标租户</h3>
+            <TenantSelector
+              selectedTenantIds={distributionTenantIds}
+              excludeTenantId={getUserId()}
+              onChange={setDistributionTenantIds}
+            />
+          </section>
+          {distributionResult && (
+            <section className={styles.distributionResults}>
+              <h3>本次结果</h3>
+              {distributionResult.results.map((item) => (
+                <p key={item.tenant_id}>
+                  {item.tenant_id}：{item.success ? "成功" : "失败"}
+                  {item.bootstrapped ? "（已初始化）" : ""}
+                  {!item.success && item.error ? ` · ${item.error}` : ""}
+                </p>
+              ))}
+            </section>
+          )}
+        </div>
       </Modal>
       <Modal
         title="确认覆盖脚本"

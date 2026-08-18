@@ -24,7 +24,6 @@ from ...config.context import (
     is_valid_identity_value,
     resolve_runtime_tenant_id,
     resolve_scope_id,
-    resolve_storage_tenant_id,
 )
 from ...config.scope_conversion import (
     decode_canonical_scope_id,
@@ -37,7 +36,6 @@ from ..crons.manager import (
     dispatch_intents_runtime_enabled,
     is_batch_dispatch_managed_broadcast_child,
 )
-from ..workspace.tenant_initializer import TenantInitializer
 from ..workspace.bootstrap_state import SourceTemplateUnavailable
 from ..workspace.source_template_provisioner import SourceTemplateProvisioner
 
@@ -600,27 +598,6 @@ def _parse_batch_tenant_ids(raw_tenant_ids: str) -> list[str]:
     return tenant_ids
 
 
-async def _is_tenant_already_bootstrapped(
-    pool: Any,
-    tenant_id: str,
-    source_id: str,
-) -> bool:
-    """判断租户目录是否已经完成 bootstrap。"""
-    base_working_dir = getattr(pool, "_base_working_dir", None)
-    if base_working_dir is None:
-        return False
-
-    try:
-        initializer = TenantInitializer(
-            base_working_dir,
-            tenant_id,
-            source_id=source_id,
-        )
-        return initializer.has_seeded_bootstrap()
-    except Exception:
-        return False
-
-
 async def _request_db_connection(request: Request):
     """读取或懒加载当前请求绑定的数据库连接。"""
     return await get_or_create_async_task_db(request)
@@ -831,46 +808,28 @@ async def _run_internal_batch_initialize_task(
                     break
                 continue
 
-            if await _is_tenant_already_bootstrapped(
-                pool,
-                tenant_id,
-                payload.source_id,
-            ):
-                success_count += 1
-                await store.record_item_result(
-                    task_id=task_id,
-                    target_id=tenant_id,
-                    success=True,
-                    item_status="skipped",
-                    result={
-                        "tenant_id": tenant_id,
-                        "tenant_name": resolved_identity.user_name,
-                        "bbk_id": resolved_identity.bbk_id,
-                        "status": "skipped",
-                        "message": "skipped",
-                    },
-                )
-                continue
-
-            await pool.ensure_bootstrap(
+            outcome = await pool.ensure_bootstrap(
                 tenant_id,
                 source_id=payload.source_id,
                 tenant_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 enable_bootstrap_chat=payload.enable_bootstrap_chat,
             )
+            item_status = (
+                "skipped" if outcome.status == "already_ready" else "created"
+            )
             success_count += 1
             await store.record_item_result(
                 task_id=task_id,
                 target_id=tenant_id,
                 success=True,
-                item_status="created",
+                item_status=item_status,
                 result={
                     "tenant_id": tenant_id,
                     "tenant_name": resolved_identity.user_name,
                     "bbk_id": resolved_identity.bbk_id,
-                    "status": "created",
-                    "message": "created",
+                    "status": item_status,
+                    "message": item_status,
                 },
             )
         except Exception as exc:  # pylint: disable=broad-except

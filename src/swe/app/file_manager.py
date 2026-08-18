@@ -46,6 +46,7 @@ _FILE_READ_CHUNK_BYTES = 64 * 1024
 _FILE_MANAGER_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _LARGE_PREVIEW_PROBE_BYTES = 4
 _WORKING_HIDDEN_TOP_LEVEL = frozenset({"sessions", "governance"})
+_WORKING_BACKING_TOP_LEVEL = frozenset({"media", "static"})
 _NATURAL_PARTS = re.compile(r"(\d+)")
 _CURSOR_SECRET_ENV_VAR = "SWE_FILE_MANAGER_CURSOR_SECRET"
 _CURSOR_SECRET_FILE_NAME = "file-manager-cursor-secret"
@@ -173,9 +174,9 @@ class _DirectorySnapshot:
     expires_at: float
 
 
-_DIRECTORY_SNAPSHOT_TTL_SECONDS = 10.0
+_DIRECTORY_SNAPSHOT_TTL_SECONDS = 30.0
 _DIRECTORY_SNAPSHOT_CAPACITY = 128
-_DIRECTORY_SNAPSHOT_WORKSPACE_CAPACITY = 8
+_DIRECTORY_SNAPSHOT_WORKSPACE_CAPACITY = 16
 _DIRECTORY_SNAPSHOTS: OrderedDict[
     tuple[str, str, str, str],
     _DirectorySnapshot,
@@ -997,6 +998,84 @@ class FileManagerService:
                 os.close(archive_directory_fd)
         assert archive_item_id is not None
         return FileManagerRecycleMutation(archive_item_id, original_path)
+
+    @_serialized_mutation
+    def delete_directory(
+        self,
+        root: FileManagerRoot | str,
+        relative_path: str,
+    ) -> None:
+        """Permanently delete one controlled directory without following links."""
+
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
+            relative_path,
+        )
+        if not normalised_path:
+            raise FileManagerPathError("Path is not a directory")
+        if not root_capabilities(resolved_root).archive:
+            raise FileManagerPathError(
+                "Directory deletion is not available for this root",
+            )
+        parts = tuple(filter(None, normalised_path.split("/")))
+        if (
+            resolved_root is FileManagerRoot.WORKING
+            and len(parts) == 1
+            and parts[0] in _WORKING_BACKING_TOP_LEVEL
+        ):
+            raise FileManagerPathError("Directory is managed by file manager")
+        parent_fd = self._open_directory_fd(
+            resolved_root,
+            "/".join(parts[:-1]),
+        )
+        assert parent_fd is not None
+        try:
+            directory_fd = os.open(
+                parts[-1],
+                self._directory_open_flags(),
+                dir_fd=parent_fd,
+            )
+            try:
+                self._delete_directory_contents(directory_fd)
+            finally:
+                os.close(directory_fd)
+            os.rmdir(parts[-1], dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileNotFoundError as exc:
+            raise FileManagerNotFoundError("Directory was not found") from exc
+        except OSError as exc:
+            raise FileManagerPathError("Unable to delete directory") from exc
+        finally:
+            os.close(parent_fd)
+
+    def _delete_directory_contents(self, directory_fd: int) -> None:
+        """Remove one opened directory's entries without traversing links."""
+
+        try:
+            with os.scandir(directory_fd) as entries:
+                names = [entry.name for entry in entries]
+            for name in names:
+                entry_stat = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if stat_module.S_ISDIR(entry_stat.st_mode):
+                    child_fd = os.open(
+                        name,
+                        self._directory_open_flags(),
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        self._delete_directory_contents(child_fd)
+                    finally:
+                        os.close(child_fd)
+                    os.rmdir(name, dir_fd=directory_fd)
+                else:
+                    os.unlink(name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise FileManagerPathError("Unable to delete directory") from exc
 
     # The staged archive transition intentionally keeps all rollback-free
     # boundaries in one auditable method.
@@ -2317,6 +2396,13 @@ class FileManagerService:
             capabilities = capabilities.model_copy(
                 update={"browse": False, "upload": False},
             )
+        elif (
+            kind is FileManagerItemKind.DIRECTORY
+            and root is FileManagerRoot.WORKING
+            and not parent_path
+            and name in _WORKING_BACKING_TOP_LEVEL
+        ):
+            capabilities = capabilities.model_copy(update={"archive": False})
         elif kind is FileManagerItemKind.SPECIAL:
             capabilities = FileManagerCapabilities()
         return FileManagerItem(

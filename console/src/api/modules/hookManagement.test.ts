@@ -61,4 +61,22 @@ describe("hookManagementApi", () => {
       }),
     });
   });
+
+  it("distributes selected matcher groups to target tenants", async () => {
+    await hookManagementApi.distributeToDefaultAgents({
+      matcherGroupIds: ["tool-guards"],
+      targetTenantIds: ["tenant-b"],
+    });
+
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/hook-management/distribute/default-agents",
+      {
+        method: "POST",
+        body: JSON.stringify({
+          matcherGroupIds: ["tool-guards"],
+          targetTenantIds: ["tenant-b"],
+        }),
+      },
+    );
+  });
 });

@@ -7,12 +7,37 @@ import re
 import shlex
 
 from .models import (
-    MVP_READONLY_TOOLS,
+    MUTATING_TOOLS,
+    MutationPolicy,
     PermissionPolicy,
     PermissionTools,
     ShellPolicy,
     ToolAuthorizationDecision,
 )
+
+
+def build_definition_policy(
+    definition,
+    parent: PermissionPolicy,
+) -> PermissionPolicy:
+    """Derive a Definition policy that can only narrow the parent policy."""
+    metadata = definition.skill_owned or definition.agent_owned
+    if metadata is None:
+        return parent.model_copy(deep=True)
+    tool_config = metadata.tools
+    if tool_config.inherit:
+        allowed = set(parent.tools.allow)
+    else:
+        allowed = set(tool_config.allow) & set(parent.tools.allow)
+    if tool_config.inherit and tool_config.allow:
+        allowed &= set(tool_config.allow)
+    denied = set(parent.tools.deny) | set(tool_config.deny)
+    allowed -= denied
+    return PermissionPolicy.bounded(
+        allow_tools=sorted(allowed),
+        deny_tools=sorted(denied),
+        mutation=parent.mutation,
+    )
 
 
 def compose_effective_policy(
@@ -39,12 +64,29 @@ def compose_effective_policy(
         else "allowlist"
     )
     return PermissionPolicy(
+        mode=(
+            "readonly"
+            if all(policy.mode == "readonly" for policy in policies)
+            else "bounded"
+        ),
         tools=PermissionTools(allow=sorted(allow), deny=sorted(deny)),
         shell=ShellPolicy(
             enabled=all(policy.shell.enabled for policy in policies),
             strategy=shell_strategy,
             allowed_commands=sorted(allowed_commands),
             denied_patterns=sorted(denied_patterns),
+        ),
+        mutation=MutationPolicy(
+            allow_file_write=all(
+                policy.mutation.allow_file_write for policy in policies
+            ),
+            allow_patch=all(policy.mutation.allow_patch for policy in policies),
+            allow_delete=all(policy.mutation.allow_delete for policy in policies),
+            allow_format_write=all(
+                policy.mutation.allow_format_write for policy in policies
+            ),
+            allow_migration=all(policy.mutation.allow_migration for policy in policies),
+            allow_deploy=all(policy.mutation.allow_deploy for policy in policies),
         ),
     )
 
@@ -53,8 +95,19 @@ def validate_tool_call(
     policy: PermissionPolicy,
     tool_name: str,
     tool_input: dict,
+    *,
+    mcp_server: str | None = None,
+    allowed_mcp_servers: set[str] | None = None,
 ) -> ToolAuthorizationDecision:
     """Authorize one tool call against an effective SubAgent policy."""
+    if mcp_server is not None:
+        allowed_servers = allowed_mcp_servers or set()
+        if mcp_server not in allowed_servers:
+            return ToolAuthorizationDecision(
+                allowed=False,
+                reason=f"MCP server `{mcp_server}` is not allowed",
+            )
+        return ToolAuthorizationDecision(allowed=True)
     if tool_name not in set(policy.tools.allow):
         return ToolAuthorizationDecision(
             allowed=False,
@@ -67,12 +120,23 @@ def validate_tool_call(
         )
     if tool_name == "execute_shell_command":
         return _validate_shell(policy, tool_input)
-    if tool_name not in MVP_READONLY_TOOLS:
+    if tool_name in MUTATING_TOOLS and not _mutation_allowed(
+        policy,
+        tool_name,
+    ):
         return ToolAuthorizationDecision(
             allowed=False,
-            reason=f"tool `{tool_name}` is outside readonly MVP allowlist",
+            reason=f"tool `{tool_name}` is blocked by the mutation policy",
         )
     return ToolAuthorizationDecision(allowed=True)
+
+
+def _mutation_allowed(policy: PermissionPolicy, tool_name: str) -> bool:
+    if tool_name == "write_file":
+        return policy.mutation.allow_file_write
+    if tool_name == "edit_file":
+        return policy.mutation.allow_file_write and policy.mutation.allow_patch
+    return False
 
 
 def _extract_command(tool_input: dict) -> str:
@@ -182,14 +246,12 @@ def _uses_sed_in_place(command: str) -> bool:
         and (
             any(part.startswith("-i") for part in parts[1:])
             or any(
-                lower_part == "--in-place"
-                or lower_part.startswith("--in-place=")
+                lower_part == "--in-place" or lower_part.startswith("--in-place=")
                 for lower_part in (part.lower() for part in parts[1:])
             )
             or _uses_sed_script_file(parts)
             or any(
-                _sed_script_uses_write_or_exec(script)
-                for script in _sed_scripts(parts)
+                _sed_script_uses_write_or_exec(script) for script in _sed_scripts(parts)
             )
         ),
     )
@@ -291,9 +353,7 @@ def _sed_script_has_write_or_exec_command(script: str) -> bool:
 
 def _skip_sed_command_boundaries(script: str, index: int) -> int:
     """Skip whitespace and command separators before a sed command."""
-    while index < len(script) and (
-        script[index].isspace() or script[index] in ";{}"
-    ):
+    while index < len(script) and (script[index].isspace() or script[index] in ";{}"):
         index += 1
     return index
 

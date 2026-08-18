@@ -2,6 +2,26 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## MCP 报 mcp_transport_error
+
+### 症状
+
+- Agent 工具调用返回 `mcp_transport_error`
+- 高并发时间段更容易出现连接中断、服务端关闭连接或连接建立超时
+
+### 第一落点
+
+- [src/swe/app/mcp/lazy_client.py](../../src/swe/app/mcp/lazy_client.py)
+- [src/swe/app/runner/runner.py](../../src/swe/app/runner/runner.py)
+- [src/swe/app/mcp/stateful_client.py](../../src/swe/app/mcp/stateful_client.py)
+
+### 排查与处理
+
+- 区分 schema discovery 和真实工具调用：schema cache 只缓存工具定义，不能作为活跃 session 的证据
+- 核对同一时间段的 MCP 服务端连接上限、反向代理超时、连接池耗尽和实例重启
+- 核对调用期的 `session_id`、`chat_id`、`trace_id` 与认证 header 是否符合上游要求
+- 首期按需连接会减少未被调用 MCP 的握手和空闲连接；它不替代 endpoint 限流或后续 session pool
+
 ## submit_proposed_plan 报 items must not be empty
 
 ### 症状

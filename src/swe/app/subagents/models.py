@@ -15,7 +15,12 @@ from pydantic import (
     model_validator,
 )
 
-DefinitionSource = Literal["builtin", "stored", "run_scoped"]
+DefinitionSource = Literal[
+    "builtin",
+    "agent_owned",
+    "skill_owned",
+    "run_scoped",
+]
 AgentResultStatus = Literal[
     "completed",
     "partial",
@@ -233,7 +238,7 @@ class PermissionTools(BaseModel):
 class PermissionPolicy(BaseModel):
     """Effective or source permission policy for SubAgent execution."""
 
-    mode: Literal["readonly"] = "readonly"
+    mode: Literal["readonly", "bounded"] = "readonly"
     tools: PermissionTools = Field(default_factory=PermissionTools)
     shell: ShellPolicy = Field(default_factory=ShellPolicy)
     mutation: MutationPolicy = Field(default_factory=MutationPolicy)
@@ -252,6 +257,24 @@ class PermissionPolicy(BaseModel):
                 allow=list(allow_tools or sorted(MVP_READONLY_TOOLS)),
                 deny=list(deny_tools or []),
             ),
+        )
+
+    @classmethod
+    def bounded(
+        cls,
+        *,
+        allow_tools: list[str],
+        deny_tools: list[str] | None = None,
+        mutation: MutationPolicy | None = None,
+    ) -> "PermissionPolicy":
+        """Create a parent-bounded policy for Skill-owned Definitions."""
+        return cls(
+            mode="bounded",
+            tools=PermissionTools(
+                allow=list(allow_tools),
+                deny=list(deny_tools or []),
+            ),
+            mutation=mutation or MutationPolicy(),
         )
 
 
@@ -279,6 +302,50 @@ class BudgetConfig(BaseModel):
     max_turns: int = 50
     max_tool_calls: int = 30
     timeout_ms: int = 600000
+
+
+class SkillOwnedToolConfig(BaseModel):
+    """Built-in tool policy declared by a Skill-owned definition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    inherit: bool = True
+    allow: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+
+
+class SkillOwnedModelReference(BaseModel):
+    """Optional tenant model reference declared by a Skill-owned definition."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    id: str
+
+
+class SkillOwnedDefinitionMetadata(BaseModel):
+    """Metadata retained for a definition packaged by a Skill."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_name: str
+    local_name: str
+    declared_skills: list[str] = Field(default_factory=list)
+    declared_mcps: list[str] | None = None
+    tools: SkillOwnedToolConfig = Field(default_factory=SkillOwnedToolConfig)
+    model: SkillOwnedModelReference | None = None
+
+
+class AgentOwnedDefinitionMetadata(BaseModel):
+    """Metadata retained for a definition configured by one Agent Profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    definition_id: str
+    declared_skills: list[str] = Field(default_factory=list)
+    declared_mcps: list[str] | None = None
+    tools: SkillOwnedToolConfig = Field(default_factory=SkillOwnedToolConfig)
+    model: SkillOwnedModelReference | None = None
 
 
 class LifecycleConfig(BaseModel):
@@ -312,10 +379,11 @@ class SubAgentDefinition(BaseModel):
     permission: PermissionPolicy = Field(default_factory=PermissionPolicy)
     isolation: IsolationConfig = Field(default_factory=IsolationConfig)
     budget: BudgetConfig = Field(default_factory=BudgetConfig)
-    task_types: list[str] = Field(default_factory=list)
     trigger_keywords: list[str] = Field(default_factory=list)
     priority: int = 100
     lifecycle: LifecycleConfig = Field(default_factory=LifecycleConfig)
+    skill_owned: SkillOwnedDefinitionMetadata | None = None
+    agent_owned: AgentOwnedDefinitionMetadata | None = None
 
     @field_validator("name", "description", "instruction", mode="after")
     @classmethod
@@ -339,7 +407,7 @@ class SubAgentDefinition(BaseModel):
             raise ValueError("description exceeds 1024 bytes")
         return value
 
-    @field_validator("task_types", "trigger_keywords")
+    @field_validator("trigger_keywords")
     @classmethod
     def _validate_matching_lists(
         cls,
@@ -506,11 +574,11 @@ class SubAgentStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
-    instruction: str
+    instruction: str | None = None
     objective: str
     background: str = ""
 
-    @field_validator("name", "instruction", "objective", mode="after")
+    @field_validator("name", "objective", mode="after")
     @classmethod
     def _non_empty_required_string(cls, value: str) -> str:
         value = value.strip()
@@ -520,7 +588,12 @@ class SubAgentStartRequest(BaseModel):
 
     @field_validator("instruction")
     @classmethod
-    def _instruction_size(cls, value: str) -> str:
+    def _instruction_size(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("field must be non-empty")
         if len(value.encode("utf-8")) > 8192:
             raise ValueError("instruction exceeds 8192 bytes")
         return value
@@ -538,56 +611,6 @@ class SubAgentStartRequest(BaseModel):
         if len(value.encode("utf-8")) > START_BACKGROUND_MAX_BYTES:
             raise ValueError("background exceeds 16384 bytes")
         return value
-
-
-class SubAgentRegistrationRequest(BaseModel):
-    """Full request used by management tools to register stored definitions."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    instruction: str
-    description: str
-    nickname: str | None = None
-    trigger_keywords: list[str] = Field(default_factory=list)
-    task_types: list[str] = Field(default_factory=list)
-    priority: int = 100
-    budget: BudgetConfig = Field(default_factory=BudgetConfig)
-    enabled: bool = True
-
-    @field_validator("name", "instruction", "description", mode="after")
-    @classmethod
-    def _non_empty_required_string(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("field must be non-empty")
-        return value
-
-    @field_validator("instruction")
-    @classmethod
-    def _instruction_size(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > 8192:
-            raise ValueError("instruction exceeds 8192 bytes")
-        return value
-
-    @field_validator("description")
-    @classmethod
-    def _description_size(cls, value: str) -> str:
-        if len(value.encode("utf-8")) > 1024:
-            raise ValueError("description exceeds 1024 bytes")
-        return value
-
-    @field_validator("task_types", "trigger_keywords")
-    @classmethod
-    def _validate_matching_lists(
-        cls,
-        value: list[str],
-        info: Any,
-    ) -> list[str]:
-        return _validate_limited_string_list(
-            value,
-            field_name=info.field_name,
-        )
 
 
 class DefinitionMatchMetadata(BaseModel):
@@ -670,6 +693,44 @@ class WorkerProcessInfo(BaseModel):
     stderr_log_path: str | None = None
 
 
+class SubAgentLaunchDiagnostics(BaseModel):
+    """Safe, reproducible dependency selection facts for one launch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    loaded_skills: list[str] = Field(default_factory=list)
+    skipped_skills: list[str] = Field(default_factory=list)
+    skill_freshness_tokens: dict[str, str] = Field(default_factory=dict)
+    snapshotted_mcps: list[str] = Field(default_factory=list)
+    connected_mcps: list[str] = Field(default_factory=list)
+    skipped_mcps: list[str] = Field(default_factory=list)
+    resolved_model: dict[str, str] | None = None
+
+    @field_validator("resolved_model")
+    @classmethod
+    def keep_only_model_identity(
+        cls,
+        value: dict[str, str] | None,
+    ) -> dict[str, str] | None:
+        if value is None:
+            return None
+        if set(value) != {"provider_id", "model"}:
+            raise ValueError(
+                "resolved_model must contain only provider_id and model",
+            )
+        return value
+
+
+class SubAgentLaunchSnapshot(BaseModel):
+    """Worker-only immutable launch inputs; private data stays out of records."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_snapshot_dirs: list[str] = Field(default_factory=list)
+    private_mcp_snapshot_path: str | None = None
+    private_model_snapshot_path: str | None = None
+
+
 class WorkerLaunchSpec(BaseModel):
     """Minimal JSON contract used to launch a SubAgent worker process."""
 
@@ -689,12 +750,39 @@ class WorkerLaunchSpec(BaseModel):
     nickname: str | None = None
     request_context: dict[str, Any] = Field(default_factory=dict)
     stderr_log_path: str | None = None
+    launch_snapshot: SubAgentLaunchSnapshot = Field(
+        default_factory=SubAgentLaunchSnapshot,
+    )
+    launch_diagnostics: SubAgentLaunchDiagnostics = Field(
+        default_factory=SubAgentLaunchDiagnostics,
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_flat_launch_snapshot(cls, value: Any) -> Any:
+        """Accept pre-snapshot launch JSON while workers roll forward."""
+        if not isinstance(value, dict):
+            return value
+        payload = dict(value)
+        legacy = {
+            key: payload.pop(key)
+            for key in (
+                "skill_snapshot_dirs",
+                "private_mcp_snapshot_path",
+                "private_model_snapshot_path",
+            )
+            if key in payload
+        }
+        if legacy and "launch_snapshot" not in payload:
+            payload["launch_snapshot"] = legacy
+        return payload
 
     @model_validator(mode="after")
     def keep_only_safe_request_context(self) -> "WorkerLaunchSpec":
         self.parent_agent_config = _drop_secret_like_fields(
             self.parent_agent_config,
         )
+        self.parent_agent_config.pop("mcp", None)
         self.request_context = {
             key: value
             for key, value in self.request_context.items()
@@ -720,6 +808,9 @@ class BackgroundSubAgentRunRecord(BaseModel):
     start_request: SubAgentStartRequest | None = None
     definition_match: DefinitionMatchMetadata = Field(
         default_factory=DefinitionMatchMetadata,
+    )
+    launch_diagnostics: SubAgentLaunchDiagnostics = Field(
+        default_factory=SubAgentLaunchDiagnostics,
     )
     worker: WorkerProcessInfo | None = None
     result: AgentResult | None = None
