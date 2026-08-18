@@ -81,6 +81,29 @@ const rootPage = {
   },
 };
 
+function requestError(status: number, detail: string) {
+  const error = new Error(detail) as Error & { status?: number };
+  error.status = status;
+  return error;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((complete) => {
+    resolve = complete;
+  });
+  return { promise, resolve };
+}
+
+function scrollToBottom(element: HTMLElement) {
+  Object.defineProperties(element, {
+    clientHeight: { configurable: true, value: 100 },
+    scrollHeight: { configurable: true, value: 200 },
+    scrollTop: { configurable: true, value: 100 },
+  });
+  fireEvent.scroll(element);
+}
+
 describe("FileManager", () => {
   afterEach(() => {
     Modal.destroyAll();
@@ -192,6 +215,206 @@ describe("FileManager", () => {
         expect.objectContaining({ root: "source_scope", path: "" }),
       ),
     );
+  });
+
+  it("refreshes a column from its first page after a pagination conflict", async () => {
+    const pagedRoot = {
+      ...rootPage,
+      items: [
+        ...rootPage.items,
+        {
+          name: "old.txt",
+          path: "old.txt",
+          kind: "file" as const,
+          capabilities: rootPage.capabilities,
+        },
+      ],
+      next_cursor: "cursor-1",
+    };
+    const docsPage = { ...rootPage, path: "docs", items: [] };
+    const refreshedRoot = {
+      ...rootPage,
+      items: [
+        {
+          name: "fresh.txt",
+          path: "fresh.txt",
+          kind: "file" as const,
+          capabilities: rootPage.capabilities,
+        },
+      ],
+      next_cursor: "cursor-new",
+    };
+    listDirectory.mockImplementation(
+      ({ path, cursor }: { path: string; cursor?: string }) => {
+        if (path === "" && cursor === "cursor-1") {
+          return Promise.reject(
+            requestError(409, "Directory listing changed; refresh and retry"),
+          );
+        }
+        if (path === "" && listDirectory.mock.calls.length > 2) {
+          return Promise.resolve(refreshedRoot);
+        }
+        return Promise.resolve(path === "docs" ? docsPage : pagedRoot);
+      },
+    );
+    render(
+      <App>
+        <FileManager />
+      </App>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+    const middle = await screen.findByLabelText("文件列表第 2 栏");
+    scrollToBottom(middle);
+
+    await waitFor(() =>
+      expect(listDirectory).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({ path: "", cursor: "cursor-1" }),
+      ),
+    );
+    await waitFor(() =>
+      expect(listDirectory).toHaveBeenNthCalledWith(
+        4,
+        expect.objectContaining({ path: "", cursor: null }),
+      ),
+    );
+    expect(
+      await within(middle).findByRole("button", { name: "fresh.txt" }),
+    ).toBeInTheDocument();
+    expect(
+      within(middle).queryByRole("button", { name: "old.txt" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the error panel for a non-conflict pagination failure", async () => {
+    const pagedRoot = { ...rootPage, next_cursor: "cursor-1" };
+    listDirectory.mockImplementation(
+      ({ path, cursor }: { path: string; cursor?: string }) => {
+        if (path === "" && cursor === "cursor-1") {
+          return Promise.reject(requestError(500, "server unavailable"));
+        }
+        return Promise.resolve(
+          path === "docs"
+            ? { ...rootPage, path: "docs", items: [] }
+            : pagedRoot,
+        );
+      },
+    );
+    render(<FileManager />);
+
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+    const middle = await screen.findByLabelText("文件列表第 2 栏");
+    scrollToBottom(middle);
+
+    expect(
+      await within(middle).findByText("server unavailable"),
+    ).toBeInTheDocument();
+    expect(listDirectory).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not apply a recovery response after the root changes", async () => {
+    const recovery = deferred<typeof rootPage>();
+    const pagedRoot = { ...rootPage, next_cursor: "cursor-1" };
+    const sourceScopePage = {
+      ...rootPage,
+      root: "source_scope" as const,
+      items: [
+        {
+          name: "source.txt",
+          path: "source.txt",
+          kind: "file" as const,
+          capabilities: rootPage.capabilities,
+        },
+      ],
+    };
+    let replacementRequested = false;
+    listDirectory.mockImplementation(
+      ({
+        root,
+        path,
+        cursor,
+      }: {
+        root: string;
+        path: string;
+        cursor?: string;
+      }) => {
+        if (root === "working" && path === "" && cursor === "cursor-1") {
+          return Promise.reject(
+            requestError(409, "Directory listing changed; refresh and retry"),
+          );
+        }
+        if (root === "working" && path === "" && replacementRequested) {
+          return recovery.promise;
+        }
+        if (
+          root === "working" &&
+          path === "" &&
+          listDirectory.mock.calls.length > 2
+        ) {
+          replacementRequested = true;
+          return recovery.promise;
+        }
+        if (root === "source_scope") return Promise.resolve(sourceScopePage);
+        return Promise.resolve(
+          path === "docs"
+            ? { ...rootPage, path: "docs", items: [] }
+            : pagedRoot,
+        );
+      },
+    );
+    render(<FileManager />);
+
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+    const middle = await screen.findByLabelText("文件列表第 2 栏");
+    scrollToBottom(middle);
+    await waitFor(() => expect(listDirectory).toHaveBeenCalledTimes(4));
+
+    fireEvent.click(screen.getByRole("button", { name: "根目录" }));
+    expect(
+      await within(middle).findByRole("button", { name: "source.txt" }),
+    ).toBeInTheDocument();
+    recovery.resolve({
+      ...rootPage,
+      items: [{ ...rootPage.items[0], name: "stale.txt", path: "stale.txt" }],
+    });
+
+    await waitFor(() =>
+      expect(
+        within(middle).queryByRole("button", { name: "stale.txt" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      within(middle).getByRole("button", { name: "source.txt" }),
+    ).toBeInTheDocument();
+  });
+
+  it("does not issue duplicate cursor requests for rapid bottom scroll events", async () => {
+    const nextPage = deferred<typeof rootPage>();
+    const pagedRoot = { ...rootPage, next_cursor: "cursor-1" };
+    listDirectory.mockImplementation(
+      ({ path, cursor }: { path: string; cursor?: string }) => {
+        if (path === "" && cursor === "cursor-1") return nextPage.promise;
+        return Promise.resolve(
+          path === "docs"
+            ? { ...rootPage, path: "docs", items: [] }
+            : pagedRoot,
+        );
+      },
+    );
+    render(<FileManager />);
+
+    fireEvent.click(screen.getByRole("button", { name: "文件管理器" }));
+    const middle = await screen.findByLabelText("文件列表第 2 栏");
+    scrollToBottom(middle);
+    scrollToBottom(middle);
+
+    expect(
+      listDirectory.mock.calls.filter(
+        ([params]) => params.cursor === "cursor-1",
+      ),
+    ).toHaveLength(1);
+    nextPage.resolve({ ...rootPage, next_cursor: null });
   });
 
   it("anchors a shortcut root in the left column before listing its contents in the middle column", async () => {

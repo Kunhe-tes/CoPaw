@@ -351,6 +351,72 @@ def test_directory_cursor_reuses_snapshot_and_rejects_changed_directory(
         service.list_directory("working", cursor=first.next_cursor)
 
 
+def test_directory_cursor_uses_the_30_second_snapshot_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(FILE_MANAGER_PAGE_SIZE + 1):
+        (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+    file_manager._DIRECTORY_SNAPSHOTS.clear()
+    clock = [0.0]
+    monkeypatch.setattr(file_manager.time, "monotonic", lambda: clock[0])
+    try:
+        service = _service(tmp_path)
+        first = service.list_directory("working")
+        assert first.next_cursor is not None
+
+        clock[0] = 29.9
+        second = service.list_directory("working", cursor=first.next_cursor)
+        assert [item.name for item in second.items] == ["item100.txt"]
+
+        clock[0] = 30.0
+        with pytest.raises(
+            FileManagerConflictError,
+            match="refresh and retry",
+        ):
+            service.list_directory("working", cursor=first.next_cursor)
+    finally:
+        file_manager._DIRECTORY_SNAPSHOTS.clear()
+
+
+def test_snapshot_workspace_quota_retains_sixteen_directories(
+    tmp_path: Path,
+) -> None:
+    file_manager._DIRECTORY_SNAPSHOTS.clear()
+    try:
+        service = _service(tmp_path)
+        cursors: dict[str, str] = {}
+        for directory_index in range(17):
+            directory = tmp_path / f"dir{directory_index:02d}"
+            directory.mkdir()
+            for item_index in range(FILE_MANAGER_PAGE_SIZE + 1):
+                (directory / f"item{item_index:03d}.txt").write_text(
+                    "x",
+                    encoding="utf-8",
+                )
+            listing = service.list_directory(
+                "working",
+                directory.name,
+            )
+            assert listing.next_cursor is not None
+            cursors[directory.name] = listing.next_cursor
+
+        with pytest.raises(
+            FileManagerConflictError,
+            match="refresh and retry",
+        ):
+            service.list_directory("working", "dir00", cursor=cursors["dir00"])
+        for directory_index in range(1, 17):
+            listing = service.list_directory(
+                "working",
+                f"dir{directory_index:02d}",
+                cursor=cursors[f"dir{directory_index:02d}"],
+            )
+            assert [item.name for item in listing.items] == ["item100.txt"]
+    finally:
+        file_manager._DIRECTORY_SNAPSHOTS.clear()
+
+
 def test_directory_cursor_rejects_deleted_directory(
     tmp_path: Path,
 ) -> None:
