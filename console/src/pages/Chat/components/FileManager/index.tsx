@@ -148,6 +148,7 @@ export default function FileManager() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const detailRef = useRef<FileDetailHandle>(null);
   const loadingPageKeys = useRef<Set<string>>(new Set());
+  const navigationVersionRef = useRef(0);
   const [open, setOpen] = useState(false);
   const [root, setRoot] = useState<FileManagerRoot>("working");
   const [columns, setColumns] = useState<Columns>([null, null, null]);
@@ -435,9 +436,13 @@ export default function FileManager() {
       const pageKey = JSON.stringify([index, root, page.path, query, cursor]);
       if (loadingPageKeys.current.has(pageKey)) return;
       loadingPageKeys.current.add(pageKey);
+      const navigationVersion = navigationVersionRef.current;
+      const isCurrentNavigation = () =>
+        navigationVersionRef.current === navigationVersion;
       setColumnLoading(index, true);
       try {
         const next = await loadDirectory(root, page.path, cursor, query);
+        if (!isCurrentNavigation()) return;
         setColumns(
           (previous) =>
             previous.map((item, position) =>
@@ -451,9 +456,11 @@ export default function FileManager() {
             ) as Columns,
         );
       } catch (error) {
+        if (!isCurrentNavigation()) return;
         if (isListingConflict(error)) {
           try {
             const refreshed = await loadDirectory(root, page.path, null, query);
+            if (!isCurrentNavigation()) return;
             setColumns(
               (previous) =>
                 previous.map((item, position) =>
@@ -469,6 +476,7 @@ export default function FileManager() {
             setColumnError(index, null);
             message.success?.("目录已更新，已重新加载");
           } catch (refreshError) {
+            if (!isCurrentNavigation()) return;
             setColumnError(index, requestError(refreshError));
           }
           return;
@@ -476,7 +484,7 @@ export default function FileManager() {
         setColumnError(index, requestError(error));
       } finally {
         loadingPageKeys.current.delete(pageKey);
-        setColumnLoading(index, false);
+        if (isCurrentNavigation()) setColumnLoading(index, false);
       }
     },
     [
@@ -565,11 +573,12 @@ export default function FileManager() {
   const switchRoot = useCallback(
     (nextRoot: FileManagerRoot) => {
       executeOrGuard(() => {
+        if (nextRoot !== root) navigationVersionRef.current += 1;
         setRoot(nextRoot);
         setSearch("");
       });
     },
-    [executeOrGuard],
+    [executeOrGuard, root],
   );
 
   const anchorPath = useCallback(

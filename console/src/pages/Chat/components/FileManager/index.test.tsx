@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -313,22 +314,11 @@ describe("FileManager", () => {
     expect(listDirectory).toHaveBeenCalledTimes(3);
   });
 
-  it("does not apply a recovery response after the root changes", async () => {
+  it("does not apply a recovery response while the new root is loading", async () => {
     const recovery = deferred<typeof rootPage>();
+    const sourceScopeRoot = deferred<typeof rootPage>();
     const pagedRoot = { ...rootPage, next_cursor: "cursor-1" };
-    const sourceScopePage = {
-      ...rootPage,
-      root: "source_scope" as const,
-      items: [
-        {
-          name: "source.txt",
-          path: "source.txt",
-          kind: "file" as const,
-          capabilities: rootPage.capabilities,
-        },
-      ],
-    };
-    let replacementRequested = false;
+    let workingRootRequests = 0;
     listDirectory.mockImplementation(
       ({
         root,
@@ -344,18 +334,13 @@ describe("FileManager", () => {
             requestError(409, "Directory listing changed; refresh and retry"),
           );
         }
-        if (root === "working" && path === "" && replacementRequested) {
-          return recovery.promise;
+        if (root === "working" && path === "") {
+          workingRootRequests += 1;
+          return workingRootRequests === 1
+            ? Promise.resolve(pagedRoot)
+            : recovery.promise;
         }
-        if (
-          root === "working" &&
-          path === "" &&
-          listDirectory.mock.calls.length > 2
-        ) {
-          replacementRequested = true;
-          return recovery.promise;
-        }
-        if (root === "source_scope") return Promise.resolve(sourceScopePage);
+        if (root === "source_scope") return sourceScopeRoot.promise;
         return Promise.resolve(
           path === "docs"
             ? { ...rootPage, path: "docs", items: [] }
@@ -371,22 +356,28 @@ describe("FileManager", () => {
     await waitFor(() => expect(listDirectory).toHaveBeenCalledTimes(4));
 
     fireEvent.click(screen.getByRole("button", { name: "根目录" }));
-    expect(
-      await within(middle).findByRole("button", { name: "source.txt" }),
-    ).toBeInTheDocument();
-    recovery.resolve({
-      ...rootPage,
-      items: [{ ...rootPage.items[0], name: "stale.txt", path: "stale.txt" }],
+    await waitFor(() =>
+      expect(listDirectory).toHaveBeenCalledWith(
+        expect.objectContaining({ root: "source_scope", path: "" }),
+      ),
+    );
+    await act(async () => {
+      recovery.resolve({
+        ...rootPage,
+        items: [
+          { ...rootPage.items[0], name: "stale.txt", path: "stale.txt" },
+        ],
+      });
+      await recovery.promise;
     });
 
-    await waitFor(() =>
-      expect(
-        within(middle).queryByRole("button", { name: "stale.txt" }),
-      ).not.toBeInTheDocument(),
-    );
     expect(
-      within(middle).getByRole("button", { name: "source.txt" }),
-    ).toBeInTheDocument();
+      within(middle).queryByRole("button", { name: "stale.txt" }),
+    ).not.toBeInTheDocument();
+    await act(async () => {
+      sourceScopeRoot.resolve({ ...rootPage, root: "source_scope", items: [] });
+      await sourceScopeRoot.promise;
+    });
   });
 
   it("does not issue duplicate cursor requests for rapid bottom scroll events", async () => {
