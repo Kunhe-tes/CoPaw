@@ -1,0 +1,257 @@
+.anchor {
+  position: fixed;
+  right: 24px;
+  bottom: 92px;
+  z-index: 40;
+  width: min(360px, calc(100vw - 32px));
+  pointer-events: none;
+}
+
+.trigger,
+.panel {
+  pointer-events: auto;
+  border: 1px solid rgba(208, 215, 226, 0.92);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 14px 36px rgba(35, 31, 27, 0.12);
+  backdrop-filter: blur(18px);
+}
+
+.trigger {
+  display: inline-flex;
+  float: right;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  max-width: 100%;
+  padding: 0 15px;
+  border-radius: 999px;
+  color: #111827;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.panel {
+  overflow: hidden;
+  border-radius: 12px;
+}
+
+.header {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 1px solid #e5e7eb;
+  background: #fff;
+  color: #111827;
+  cursor: pointer;
+}
+
+.activityDots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+
+  i {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #3769fc;
+  }
+
+  i:nth-child(2) {
+    background: #2f7d5b;
+  }
+
+  i:nth-child(3) {
+    background: #a56a24;
+  }
+}
+
+.title {
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.count {
+  min-width: 24px;
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: #eef4ff;
+  color: #3769fc;
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+}
+
+.list {
+  display: grid;
+  gap: 3px;
+  max-height: 360px;
+  margin: 0;
+  padding: 8px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.row {
+  position: relative;
+  min-width: 0;
+  padding: 10px 10px 11px;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.row:hover,
+.row:focus-within {
+  background: #f7f9fc;
+}
+
+.rowMain {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.name {
+  min-width: 0;
+  overflow: hidden;
+  color: #3769fc;
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.status {
+  min-height: 22px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #f1f4f8;
+  color: #4b5563;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.row[data-status="completed"] .status {
+  background: #edf8f2;
+  color: #2f7d5b;
+}
+
+.row[data-status="partial"] .status {
+  background: #fff7ed;
+  color: #a56a24;
+}
+
+.row[data-status="failed"] .status {
+  background: #fff0f0;
+  color: #b94a4f;
+}
+
+.row[data-status="cancelled"],
+.row[data-status="expired"] {
+  .status {
+    background: #f1f3f5;
+    color: #8a94a6;
+  }
+}
+
+.row[data-status="stopping"] .status {
+  background: #eef4ff;
+  color: #3769fc;
+}
+
+.stopButton {
+  display: inline-grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: #4b5563;
+  cursor: pointer;
+}
+
+.stopButton:hover,
+.stopButton:focus-visible {
+  background: #e5e7eb;
+  color: #111827;
+}
+
+.stopButton:disabled {
+  cursor: progress;
+  opacity: 0.45;
+}
+
+.objective {
+  min-width: 0;
+  margin-top: 5px;
+  overflow: hidden;
+  color: #4b5563;
+  font-size: 12px;
+  line-height: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  margin-top: 6px;
+  color: #8a94a6;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.progress {
+  height: 2px;
+  margin-top: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: #edf0f4;
+}
+
+.progressFill {
+  height: 100%;
+  border-radius: inherit;
+  background: #3769fc;
+  transition: width 180ms ease;
+}
+
+.error {
+  margin: 7px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  word-break: break-word;
+}
+
+.error {
+  color: #b94a4f;
+}
+
+@media (max-width: 760px) {
+  .anchor {
+    right: 16px;
+    bottom: 84px;
+    left: 16px;
+    width: auto;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progressFill {
+    transition: none;
+  }
+}

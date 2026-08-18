@@ -4,8 +4,13 @@
 import logging
 from typing import Optional
 
-from .models import FeaturedCase, FeaturedCaseCreate, FeaturedCaseUpdate
-from .store import FeaturedCaseStore
+from .models import (
+    FeaturedCase,
+    FeaturedCaseCreate,
+    FeaturedCaseReorderResult,
+    FeaturedCaseUpdate,
+)
+from .store import FeaturedCaseStore, normalize_featured_case_bbk_id
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +85,7 @@ class FeaturedCaseService:
     async def create_case(
         self,
         source_id: str,
+        bbk_id: Optional[str],
         request: FeaturedCaseCreate,
     ) -> FeaturedCase:
         """Create case with source_id from context.
@@ -93,20 +99,22 @@ class FeaturedCaseService:
         """
         case = FeaturedCase(
             source_id=source_id,
-            bbk_id=request.bbk_id,
+            bbk_id=normalize_featured_case_bbk_id(bbk_id),
             label=request.label,
             value=request.value,
             image_url=request.image_url,
             iframe_url=request.iframe_url,
             iframe_title=request.iframe_title,
             steps=request.steps,
-            is_active=True,
+            is_active=request.is_active,
         )
         return await self.store.create_case(case)
 
     async def update_case(
         self,
         case_id: int,
+        source_id: str,
+        bbk_id: Optional[str],
         request: FeaturedCaseUpdate,
     ) -> FeaturedCase:
         """Update case.
@@ -123,21 +131,44 @@ class FeaturedCaseService:
         """
         updated = await self.store.update_case(
             case_id=case_id,
-            bbk_id=request.bbk_id,
+            source_id=source_id,
+            bbk_id=bbk_id,
             label=request.label,
             value=request.value,
             image_url=request.image_url,
             iframe_url=request.iframe_url,
             iframe_title=request.iframe_title,
             steps=request.steps,
-            sort_order=request.sort_order,
             is_active=request.is_active,
         )
         if not updated:
-            raise ValueError("案例不存在")
+            raise ValueError("案例不存在或无权操作")
         return updated
 
-    async def delete_case(self, case_id: int) -> None:
+    async def reorder_case(
+        self,
+        case_id: int,
+        source_id: str,
+        bbk_id: Optional[str],
+        sort_order: int,
+    ) -> FeaturedCaseReorderResult:
+        """Move a case within its exact source and BBK queue."""
+        result = await self.store.reorder_case(
+            case_id=case_id,
+            source_id=source_id,
+            bbk_id=bbk_id,
+            sort_order=sort_order,
+        )
+        if result is None:
+            raise ValueError("案例不存在或无权操作")
+        return result
+
+    async def delete_case(
+        self,
+        case_id: int,
+        source_id: str,
+        bbk_id: Optional[str],
+    ) -> None:
         """Delete case.
 
         Args:
@@ -146,6 +177,6 @@ class FeaturedCaseService:
         Raises:
             ValueError: If case not found
         """
-        deleted = await self.store.delete_case(case_id)
+        deleted = await self.store.delete_case(case_id, source_id, bbk_id)
         if not deleted:
-            raise ValueError("案例不存在")
+            raise ValueError("案例不存在或无权操作")

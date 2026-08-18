@@ -14,16 +14,19 @@ import os
 from pathlib import Path
 import time
 from typing import Any, List, Literal, Optional, Type, TYPE_CHECKING
+from uuid import uuid4
 
 from agentscope.agent import ReActAgent
+from agentscope.agent._react_agent import _MemoryMark
 from agentscope.memory import InMemoryMemory
-from agentscope.message import Msg
+from agentscope.message import Msg, ToolResultBlock, ToolUseBlock
 from agentscope.mcp._mcp_function import MCPToolFunction
 from agentscope.tool import Toolkit
 from anyio import ClosedResourceError
 from pydantic import BaseModel
 
 from ..app.mcp.http_headers import build_mcp_http_headers
+from ..app.mcp.lazy_client import LazyMCPClient, mcp_tool_json_schema
 from ..app.mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_handler import CommandHandler
 from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
@@ -41,7 +44,10 @@ from .skills_manager import (
     resolve_effective_skills,
 )
 from .tool_failure import normalize_tool_function_errors
-from .tool_guard_mixin import ToolGuardMixin
+from .tool_guard_mixin import (
+    PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY,
+    ToolGuardMixin,
+)
 from .tool_output_budget_mixin import ToolOutputBudgetMixin
 from .tools import (
     edit_file,
@@ -60,6 +66,11 @@ from .tools import (
     copy_file_to_static,
     update_task_progress,
     emit_wplus_sop_event,
+    ask_plan_clarification,
+    create_submit_proposed_plan_tool,
+    create_background_subagent_tools,
+    get_default_background_subagent_supervisor,
+    has_subagent_intent,
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
@@ -74,9 +85,253 @@ if TYPE_CHECKING:
     from ..config.config import AgentProfileConfig
 
 logger = logging.getLogger(__name__)
+_ACCEPTED_PLAN_TEXT_LIMIT = 1200
+_ACCEPTED_PLAN_LIST_LIMIT = 20
+_ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
+_ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
+_INTERNAL_ACCEPTED_PLAN_TOOL_NAME = "accepted_plan_context"
+_INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY = "_accepted_plan_tool_call_id"
+_PLAN_MODE_CLARIFICATION_INSTRUCTION = """[Plan Mode]
+You are now in Plan Mode. Your job is to turn the user's request into a concrete, reviewable plan **without executing it**.
+
+## Core Rules
+
+- Do not implement the plan, modify files, create resources, or take any action with execution side effects.
+- Model the work as a decision tree. Each decision may introduce dependencies, constraints, risks, acceptance criteria, and implementation details.
+- Never silently assume an unresolved decision. Material assumptions must be confirmed by the user or verified with available tools.
+- The user makes product and trade-off decisions. You investigate verifiable facts, identify risks, and organize the plan.
+
+## Clarify in Rounds
+
+Work in rounds rather than guessing everything at once:
+
+1. Identify all unresolved decisions.
+2. Find the current frontier: decisions whose prerequisites are already settled and can be answered now.
+3. You MUST use ask_plan_clarification to ask the complete frontier.
+   Ask a question series when several related decisions can be collected
+   together; prefer a form for that series.
+4. Wait for the user's answer.
+5. Update the decision tree, mark resolved decisions, and calculate the next frontier.
+
+Do not ask questions that depend on other unresolved questions. If a fact can be checked in repositories, documentation, the environment, or available tools, investigate it instead of asking the user to provide it.
+
+## What Must Be Resolved
+
+Use `ask_plan_clarification` for every material unresolved item unless the user has already specified it or it has been verified:
+
+- Scope and non-goals
+- Priorities, trade-offs, and acceptable risks
+- Technical approach and implementation constraints
+- Dependencies, ownership, and collaboration boundaries
+- Acceptance criteria, testing, and verification
+- Deployment, migration, compatibility, and rollback requirements
+
+Make the decision being requested explicit. Provide concrete options when useful.
+- single_choice and multi_choice clarifications must not include recommended answers.
+- Choice controls include a system-owned custom-answer path. Provide only concrete
+  business options and do not generate an "other" or custom-answer option.
+- text clarifications may include a recommended answer only when it helps the user evaluate a concrete default.
+- After the user answers one question series, review remaining dependencies and continue with the next question series when needed.
+- Continue until all decision-tree branches relevant to the requested plan have been clarified well enough to produce a concrete, reviewable plan.
+
+## Submit the Plan
+
+Do not call `submit_proposed_plan` until every relevant branch has an empty frontier.
+
+Before calling `submit_proposed_plan`, each material decision must be one of
+the following. In particular, before calling submit_proposed_plan, confirm
+every relevant decision tree branch is resolved:
+
+- Explicitly decided by the user
+- Explicitly accepted by the user as an assumption
+- Verified through available tools or reliable sources
+- Explicitly recorded as out of scope
+
+`submit_proposed_plan` must include:
+
+- Goals and scope
+- Explicit non-goals
+- Implementation steps and dependencies
+- Risks and mitigations
+- Verification and acceptance criteria
+- Confirmed assumptions and boundaries
+
+Keep using `ask_plan_clarification` until all material open questions are resolved. Never call `submit_proposed_plan` merely to finish quickly.
+    """
+_PLAN_MODE_ALLOWED_TOOLS = frozenset(
+    {
+        "execute_shell_command",
+        "read_file",
+        "grep_search",
+        "glob_search",
+        "get_current_time",
+        "memory_search",
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+    },
+)
 
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
+
+
+def _plan_interaction_tools_enabled(plan_mode_enabled: bool) -> bool:
+    if plan_mode_enabled:
+        return True
+
+    from ..app.source_system_config.registry import (
+        is_normal_mode_plan_interaction_tools_enabled,
+    )
+    from ..app.source_system_config.runtime import (
+        get_current_source_system_config,
+    )
+
+    return is_normal_mode_plan_interaction_tools_enabled(
+        get_current_source_system_config(),
+    )
+
+
+def _add_main_agent_tools(
+    tool_functions: dict[str, Any],
+    *,
+    request_context: dict[str, Any],
+    workspace_dir: Path | None,
+    plan_mode_enabled: bool,
+) -> None:
+    if not _plan_interaction_tools_enabled(plan_mode_enabled):
+        return
+    tool_functions.update(
+        {
+            "ask_plan_clarification": ask_plan_clarification,
+            "submit_proposed_plan": create_submit_proposed_plan_tool(
+                request_context=request_context,
+                workspace_dir=workspace_dir,
+            ),
+        },
+    )
+
+
+def _stringify_accepted_plan_value(value: Any) -> str:
+    """限制计划字段长度，避免异常持久化内容撑爆系统提示词。"""
+    text = str(value).strip()
+    if len(text) <= _ACCEPTED_PLAN_TEXT_LIMIT:
+        return text
+    return text[: _ACCEPTED_PLAN_TEXT_LIMIT - 3] + "..."
+
+
+def _format_accepted_plan_items(value: Any) -> list[str]:
+    """把计划列表字段转成稳定文本，忽略非预期结构。"""
+    if not isinstance(value, list):
+        return []
+    return [
+        _stringify_accepted_plan_value(item)
+        for item in value[:_ACCEPTED_PLAN_LIST_LIMIT]
+        if str(item).strip()
+    ]
+
+
+def _get_server_accepted_plan(
+    request_context: dict[str, Any],
+) -> dict[str, Any] | None:
+    """仅接受来自后端计划存储的 accepted plan。"""
+    accepted_plan = request_context.get("accepted_plan")
+    if not isinstance(accepted_plan, dict):
+        return None
+    if (
+        request_context.get(_ACCEPTED_PLAN_SOURCE_META_KEY)
+        != _ACCEPTED_PLAN_SERVER_SOURCE
+    ):
+        return None
+    if request_context.get("plan_mode_enabled"):
+        return None
+    return accepted_plan
+
+
+def _build_accepted_plan_tool_result_text(
+    accepted_plan: dict[str, Any],
+) -> str:
+    """构造 accepted plan 的内部 tool result 文本。"""
+
+    lines = [
+        "[Accepted Plan Execution Context]",
+        "The backend persisted this plan after the user selected Execute.",
+        "Treat it as the source of truth for this execution turn.",
+        "Do not regenerate the plan or rely on the front-end query text.",
+        "If the plan conflicts with the current repository state, report the "
+        "conflict before changing files.",
+    ]
+    for field in ("plan_id", "title", "summary"):
+        value = accepted_plan.get(field)
+        if value is not None:
+            lines.append(f"- {field}: {_stringify_accepted_plan_value(value)}")
+
+    for field in ("steps", "risks", "verification"):
+        items = _format_accepted_plan_items(accepted_plan.get(field))
+        if not items:
+            continue
+        lines.append(f"- {field}:")
+        lines.extend(f"  {index}. {item}" for index, item in enumerate(items, 1))
+
+    return "\n".join(lines)
+
+
+def _get_internal_accepted_plan_tool_call_id(
+    request_context: dict[str, Any],
+) -> str:
+    """为当前执行轮次返回稳定的内部 tool call id。"""
+    existing = request_context.get(_INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY)
+    if isinstance(existing, str) and existing:
+        return existing
+
+    turn_id = str(request_context.get("turn_id") or "").strip()
+    suffix = "".join(
+        ch if ch.isalnum() or ch in {"-", "_"} else "-" for ch in turn_id
+    ).strip("-_")
+    if not suffix:
+        suffix = uuid4().hex
+
+    call_id = f"accepted-plan-{suffix}"
+    request_context[_INTERNAL_ACCEPTED_PLAN_TOOL_ID_KEY] = call_id
+    return call_id
+
+
+def _build_accepted_plan_tool_exchange(
+    request_context: dict[str, Any],
+) -> list[Msg]:
+    """构造当前执行轮次使用的内部 accepted plan tool exchange。"""
+    accepted_plan = _get_server_accepted_plan(request_context)
+    if accepted_plan is None:
+        return []
+
+    call_id = _get_internal_accepted_plan_tool_call_id(request_context)
+    tool_name = _INTERNAL_ACCEPTED_PLAN_TOOL_NAME
+    result_text = _build_accepted_plan_tool_result_text(accepted_plan)
+    return [
+        Msg(
+            "assistant",
+            [
+                ToolUseBlock(
+                    type="tool_use",
+                    id=call_id,
+                    name=tool_name,
+                    input={},
+                ),
+            ],
+            "assistant",
+        ),
+        Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=call_id,
+                    name=tool_name,
+                    output=[{"type": "text", "text": result_text}],
+                ),
+            ],
+            "system",
+        ),
+    ]
 
 
 class AgentPhase(str, Enum):
@@ -104,6 +359,16 @@ class AgentPhaseState:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class ResearchPhaseResult:
+    """Outcome of a bounded SubAgent research ReAct loop."""
+
+    status: Literal["completed", "turn_limit_reached"]
+    reply: Msg | None
+    turns_used: int
+    messages: tuple[Msg, ...] = ()
+
+
 class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     """SWE Agent with integrated tools, skills, and memory management.
 
@@ -125,6 +390,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     so the guard interception remains active.
     """
 
+    _reply_task: asyncio.Task[Any] | None
+
     def __init__(
         self,
         agent_config: "AgentProfileConfig",
@@ -136,6 +403,13 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         namesake_strategy: NamesakeStrategy = "skip",
         workspace_dir: Path | None = None,
         task_tracker: Any | None = None,
+        enable_workspace_skills: bool = True,
+        workspace_skill_dirs: dict[str, Path] | None = None,
+        model_slot_override: Any | None = None,
+        model_provider_override: Any | None = None,
+        fallback_model_slot: Any | None = None,
+        fallback_model_provider: Any | None = None,
+        system_prompt_override: str | None = None,
         source_tool_versions: tuple[Any, ...] = (),
     ):
         """Initialize SWEAgent.
@@ -165,6 +439,14 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._namesake_strategy = namesake_strategy
         self._workspace_dir = workspace_dir
         self._task_tracker = task_tracker
+        self._enable_workspace_skills = enable_workspace_skills
+        self._workspace_skill_dirs = dict(workspace_skill_dirs or {})
+        self._model_slot_override = model_slot_override
+        self._model_provider_override = model_provider_override
+        self._fallback_model_slot = fallback_model_slot
+        self._fallback_model_provider = fallback_model_provider
+        self._resolved_model_slot: dict[str, str] = {}
+        self._system_prompt_override = system_prompt_override
         self._source_tool_versions = tuple(source_tool_versions)
         self._init_agent_phase_state()
 
@@ -185,6 +467,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         # Create model and formatter using factory method
         model, formatter = create_model_and_formatter(
             agent_id=agent_config.id,
+            model_slot_override=self._model_slot_override,
+            model_provider_override=self._model_provider_override,
+            fallback_model_slot=self._fallback_model_slot,
+            fallback_model_provider=self._fallback_model_provider,
+            resolved_model_info=self._resolved_model_slot,
             trace_context={
                 "trace_id": self._request_context.get("trace_id"),
                 "user_id": self._request_context.get("user_id"),
@@ -258,9 +545,46 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Returns:
             Configured toolkit instance
         """
+        request_context = getattr(self, "_request_context", {}) or {}
+        plan_mode_enabled = bool(request_context.get("plan_mode_enabled"))
+        enabled_tools, async_execution_tools = self._tool_settings(
+            request_context,
+            plan_mode_enabled,
+        )
+        tool_functions = self._tool_functions(
+            request_context,
+            plan_mode_enabled,
+        )
         toolkit = Toolkit()
+        self._register_enabled_tools(
+            toolkit,
+            tool_functions,
+            enabled_tools,
+            async_execution_tools,
+            plan_mode_enabled,
+            namesake_strategy,
+        )
+        self._register_background_task_tools(
+            toolkit,
+            tool_functions,
+            enabled_tools,
+            async_execution_tools,
+            namesake_strategy,
+        )
 
-        # Check which tools are enabled from agent config
+        self._register_background_subagent_tools(
+            toolkit,
+            namesake_strategy,
+            request_context,
+        )
+
+        return toolkit
+
+    def _tool_settings(
+        self,
+        request_context: dict[str, Any],
+        plan_mode_enabled: bool,
+    ) -> tuple[dict[str, bool], dict[str, bool]]:
         from ..config.config import _default_builtin_tools
 
         builtin_tool_defaults = _default_builtin_tools()
@@ -273,35 +597,75 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             ].async_execution,
         }
         try:
-            if hasattr(self._agent_config, "tools") and hasattr(
-                self._agent_config.tools,
+            builtin_tools = getattr(
+                getattr(self._agent_config, "tools", None),
                 "builtin_tools",
-            ):
-                builtin_tools = self._agent_config.tools.builtin_tools
+                None,
+            )
+            if builtin_tools is not None:
                 enabled_tools.update(
-                    {
-                        name: tool.enabled
-                        for name, tool in builtin_tools.items()
-                    },
+                    {name: tool.enabled for name, tool in builtin_tools.items()},
                 )
-                # Only execute_shell_command supports async_execution
                 if "execute_shell_command" in builtin_tools:
-                    async_execution_tools["execute_shell_command"] = (
-                        builtin_tools["execute_shell_command"].async_execution
-                    )
-        except Exception as e:
+                    async_execution_tools["execute_shell_command"] = builtin_tools[
+                        "execute_shell_command"
+                    ].async_execution
+        except Exception as exc:
             logger.warning(
-                f"Failed to load agent tools config: {e}, "
+                f"Failed to load agent tools config: {exc}, "
                 "canonical tool defaults will be used",
             )
+        if request_context.get("agent_role") == "subagent":
+            return (
+                self._subagent_tool_settings(request_context),
+                async_execution_tools,
+            )
+        if plan_mode_enabled:
+            enabled_tools = {
+                name: enabled and name in _PLAN_MODE_ALLOWED_TOOLS
+                for name, enabled in enabled_tools.items()
+            }
+        return enabled_tools, async_execution_tools
 
-        # Map of tool functions
+    @staticmethod
+    def _subagent_tool_settings(
+        request_context: dict[str, Any],
+    ) -> dict[str, bool]:
+        policy = request_context.get("subagent_policy") or {}
+        tools_policy = policy.get("tools") if isinstance(policy, dict) else {}
+        allowed = (
+            set(tools_policy.get("allow") or [])
+            if isinstance(tools_policy, dict)
+            else set()
+        )
+        return {
+            name: name in allowed
+            for name in (
+                "execute_shell_command",
+                "start_background_process",
+                "list_background_processes",
+                "get_process_output",
+                "stop_background_process",
+                "read_file",
+                "write_file",
+                "edit_file",
+                "grep_search",
+                "glob_search",
+                "get_current_time",
+                "set_user_timezone",
+                "get_token_usage",
+                "copy_file_to_static",
+                "update_task_progress",
+            )
+        }
+
+    def _tool_functions(
+        self,
+        request_context: dict[str, Any],
+        plan_mode_enabled: bool,
+    ) -> dict[str, Any]:
         tool_functions = {
             "execute_shell_command": execute_shell_command,
-            # "start_background_process": start_background_process,
-            # "list_background_processes": list_background_processes,
-            # "get_process_output": get_process_output,
-            # "stop_background_process": stop_background_process,
             "read_file": read_file,
             "write_file": write_file,
             "edit_file": edit_file,
@@ -312,18 +676,32 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             "update_task_progress": update_task_progress,
             "emit_wplus_sop_event": emit_wplus_sop_event,
         }
+        if request_context.get("agent_role", "main") != "subagent":
+            _add_main_agent_tools(
+                tool_functions,
+                request_context=request_context,
+                workspace_dir=self._workspace_dir,
+                plan_mode_enabled=plan_mode_enabled,
+            )
+        return tool_functions
 
-        # Register only enabled tools
+    def _register_enabled_tools(
+        self,
+        toolkit: Toolkit,
+        tool_functions: dict[str, Any],
+        enabled_tools: dict[str, bool],
+        async_execution_tools: dict[str, bool],
+        plan_mode_enabled: bool,
+        namesake_strategy: NamesakeStrategy,
+    ) -> None:
         for tool_name, tool_func in tool_functions.items():
-            # Use the canonical default unless the agent config overrides it.
+            if plan_mode_enabled and tool_name not in _PLAN_MODE_ALLOWED_TOOLS:
+                logger.debug("Skipped Plan Mode forbidden tool: %s", tool_name)
+                continue
             if not enabled_tools.get(tool_name, True):
                 logger.debug("Skipped disabled tool: %s", tool_name)
                 continue
-
-            # Get async_execution setting (default to False for backward
-            # compatibility)
             async_exec = async_execution_tools.get(tool_name, False)
-
             toolkit.register_tool_function(
                 tool_func,
                 namesake_strategy=namesake_strategy,
@@ -336,37 +714,101 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             self._normalize_registered_tool_functions(toolkit, [tool_name])
 
-        # Auto-register background task management tools if any *enabled*
-        # tool has async_execution set
+    @staticmethod
+    def _register_background_task_tools(
+        toolkit: Toolkit,
+        tool_functions: dict[str, Any],
+        enabled_tools: dict[str, bool],
+        async_execution_tools: dict[str, bool],
+        namesake_strategy: NamesakeStrategy,
+    ) -> None:
         has_async_tools = any(
             async_execution_tools.get(name, False)
             for name in tool_functions
             if enabled_tools.get(name, True)
         )
-        if has_async_tools:
-            try:
+        if not has_async_tools:
+            return
+        try:
+            for task_tool in (
+                toolkit.view_task,
+                toolkit.wait_task,
+                toolkit.cancel_task,
+            ):
                 toolkit.register_tool_function(
-                    toolkit.view_task,
+                    task_tool,
                     namesake_strategy=namesake_strategy,
                 )
-                toolkit.register_tool_function(
-                    toolkit.wait_task,
-                    namesake_strategy=namesake_strategy,
-                )
-                toolkit.register_tool_function(
-                    toolkit.cancel_task,
-                    namesake_strategy=namesake_strategy,
-                )
-                logger.debug(
-                    "Registered background task management tools "
-                    "(view_task, wait_task, cancel_task)",
-                )
-            except Exception as e:
-                logger.warning(
-                    f"Failed to register task management tools: {e}",
-                )
+            logger.debug(
+                "Registered background task management tools "
+                "(view_task, wait_task, cancel_task)",
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to register task management tools: {exc}")
 
-        return toolkit
+    def _register_background_subagent_tools(
+        self,
+        toolkit: Toolkit,
+        namesake_strategy: NamesakeStrategy,
+        request_context: dict[str, Any],
+    ) -> None:
+        if self._background_subagent_registration_blocked(request_context):
+            return
+        supervisor = (
+            request_context.get(
+                "_subagent_supervisor",
+            )
+            or get_default_background_subagent_supervisor()
+        )
+        intent = has_subagent_intent(request_context)
+        if not intent:
+            return
+        workspace_dir = self._workspace_dir or Path(
+            self._agent_config.workspace_dir or ".",
+        )
+        effective_skill_names = (
+            resolve_effective_skills(
+                workspace_dir,
+                request_context.get("channel", "console"),
+            )
+            if intent
+            else []
+        )
+        tools = create_background_subagent_tools(
+            supervisor=supervisor,
+            parent_agent_config=self._agent_config,
+            workspace_dir=workspace_dir,
+            request_context=request_context,
+            effective_skill_names=effective_skill_names,
+        )
+        names = self._background_subagent_tool_names(intent)
+        for name in names:
+            toolkit.register_tool_function(
+                tools[name],
+                namesake_strategy=namesake_strategy,
+            )
+        self._normalize_registered_tool_functions(toolkit, names)
+
+    def _background_subagent_registration_blocked(
+        self,
+        request_context: dict[str, Any],
+    ) -> bool:
+        return request_context.get("agent_role", "main") == "subagent" or not (
+            request_context.get("agent_id") or getattr(self._agent_config, "id", None)
+        )
+
+    @staticmethod
+    def _background_subagent_tool_names(
+        intent: bool,
+    ) -> list[str]:
+        names = []
+        if intent:
+            names.append("start_subagent")
+        if intent:
+            names.append("wait_subagent")
+        if intent:
+            names.extend(["get_subagent", "cancel_subagent"])
+        return names
 
     def _register_source_tools(self, toolkit: Toolkit) -> None:
         """Register the Agent-start source-tool snapshot after skills are known."""
@@ -377,9 +819,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         builtin_names = set(_default_builtin_tools())
         runtime = self._source_tool_runtime()
         configured_tools = self._configured_builtin_tools()
-        enabled_tools = {
-            name: tool.enabled for name, tool in configured_tools.items()
-        }
+        enabled_tools = {name: tool.enabled for name, tool in configured_tools.items()}
         for version in self._source_tool_versions:
             self._register_source_tool_version(
                 toolkit,
@@ -458,8 +898,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """Reject source tools that cannot safely replace a registered tool."""
         if not is_builtin_override and version.name in toolkit.tools:
             raise RuntimeError(
-                "source tool collides with a skill or managed tool: "
-                f"{version.name}",
+                "source tool collides with a skill or managed tool: " f"{version.name}",
             )
         if not is_builtin_override:
             return
@@ -515,7 +954,19 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Args:
             toolkit: Toolkit to register skills to
         """
+        if not getattr(self, "_enable_workspace_skills", True):
+            self._effective_skills = []
+            return
+
         workspace_dir = self._workspace_dir or WORKING_DIR
+
+        snapshot_skill_dirs = getattr(self, "_workspace_skill_dirs", {})
+        if snapshot_skill_dirs:
+            self._register_explicit_workspace_skills(
+                toolkit,
+                snapshot_skill_dirs,
+            )
+            return
 
         ensure_skills_initialized(workspace_dir)
 
@@ -561,6 +1012,53 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._effective_skills = effective_skills
         self._skill_runtime_profiles = skill_runtime_profiles
 
+    def _register_explicit_workspace_skills(
+        self,
+        toolkit: Toolkit,
+        skill_dirs: dict[str, Path],
+    ) -> None:
+        """Register only immutable Skill roots supplied by a worker launch."""
+        from .skill_runtime_profile import build_skill_runtime_profile
+
+        effective_skills: list[str] = []
+        profiles: dict[str, object] = {}
+        for skill_name, skill_dir in skill_dirs.items():
+            path = Path(skill_dir)
+            if not path.is_dir() or not (path / "SKILL.md").is_file():
+                continue
+            try:
+                toolkit.register_agent_skill(str(path))
+                effective_skills.append(skill_name)
+                profiles[skill_name] = build_skill_runtime_profile(
+                    path,
+                    skill_name,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Failed to register explicit skill '%s': %s",
+                    skill_name,
+                    exc,
+                )
+        self._sanitize_registered_skill_dirs(toolkit)
+        self._build_explicit_skill_tool_registry(profiles)
+        self._runtime_skills = effective_skills
+        self._effective_skills = effective_skills
+        self._skill_runtime_profiles = profiles
+
+    @staticmethod
+    def _build_explicit_skill_tool_registry(
+        profiles: dict[str, object],
+    ) -> None:
+        """Register copied Skill declarations without consulting a workspace."""
+        from .skill_tool_registry import get_skill_tool_registry
+
+        registry = get_skill_tool_registry()
+        registry.clear()
+        for skill_name, profile in profiles.items():
+            declared_tools = getattr(profile, "declared_tools", [])
+            if declared_tools:
+                registry.register_skill_tools(skill_name, declared_tools)
+
     def get_effective_skills(self) -> list[str]:
         """Get the list of effective skills for this agent.
 
@@ -604,6 +1102,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Args:
             trace_id: The trace ID to setup detector for
         """
+        if getattr(self, "_workspace_skill_dirs", {}):
+            # The detector resolves manifests and asset paths relative to a
+            # workspace. Snapshot workers must never consult the mutable
+            # parent workspace after launch.
+            return
+
         try:
             from ..tracing.manager import (
                 get_trace_manager,
@@ -650,11 +1154,13 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Returns:
             Complete system prompt string
         """
+        system_prompt_override = getattr(self, "_system_prompt_override", None)
+        if system_prompt_override is not None:
+            return system_prompt_override
+
         # Get agent_id from request_context
         agent_id = (
-            self._request_context.get("agent_id")
-            if self._request_context
-            else None
+            self._request_context.get("agent_id") if self._request_context else None
         )
 
         # Check if heartbeat is enabled in agent config
@@ -687,7 +1193,16 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             get_current_source_system_config,
         )
 
-        if is_chat_task_progress_enabled(get_current_source_system_config()):
+        plan_mode_enabled = bool(
+            (getattr(self, "_request_context", {}) or {}).get(
+                "plan_mode_enabled",
+            ),
+        )
+        if plan_mode_enabled:
+            sys_prompt = sys_prompt + "\n\n" + _PLAN_MODE_CLARIFICATION_INSTRUCTION
+        if not plan_mode_enabled and is_chat_task_progress_enabled(
+            get_current_source_system_config(),
+        ):
             # 这里按 source 开关注入要求，避免关闭后仍提示模型强制调用。
             sys_prompt += (
                 "\n\n[Task Progress Requirement]\n"
@@ -777,9 +1292,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """Register pre-reasoning and pre-acting hooks."""
         # Bootstrap hook - checks BOOTSTRAP.md on first interaction
         # Use workspace_dir if available, else fallback to WORKING_DIR
-        working_dir = (
-            self._workspace_dir if self._workspace_dir else WORKING_DIR
-        )
+        working_dir = self._workspace_dir if self._workspace_dir else WORKING_DIR
         bootstrap_hook = BootstrapHook(
             working_dir=working_dir,
             language=self._language,
@@ -838,6 +1351,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 (default: "skip")
         """
         for i, client in enumerate(self._mcp_clients):
+            if isinstance(client, LazyMCPClient):
+                await self._register_lazy_mcp_client(
+                    client,
+                    namesake_strategy=namesake_strategy,
+                )
+                continue
             client_name = getattr(client, "name", repr(client))
             configured_tools = getattr(
                 self._agent_config.tools,
@@ -857,9 +1376,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     client_tools = client_tools.tools
                 collisions = sorted(
                     source_tool_names
-                    & {
-                        str(getattr(tool, "name", "")) for tool in client_tools
-                    },
+                    & {str(getattr(tool, "name", "")) for tool in client_tools},
                 )
                 if not collisions:
                     # Set progress callback so MCP notifications reset the
@@ -890,9 +1407,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 if recovered_client is not None:
                     self._mcp_clients[i] = recovered_client
                     if hasattr(recovered_client, "on_progress_callback"):
-                        recovered_client.on_progress_callback = (
-                            self._reset_watchdog
-                        )
+                        recovered_client.on_progress_callback = self._reset_watchdog
                     try:
                         existing_tool_names = set(self.toolkit.tools)
                         await self.toolkit.register_mcp_client(
@@ -942,6 +1457,81 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     + ", ".join(collisions),
                 )
 
+    async def _register_lazy_mcp_client(
+        self,
+        client: LazyMCPClient,
+        *,
+        namesake_strategy: NamesakeStrategy,
+    ) -> None:
+        """Register cached schemas whose calls create short-lived clients."""
+        configured_tools = getattr(
+            self._agent_config.tools,
+            "builtin_tools",
+            {},
+        )
+        source_tool_names = {
+            version.name
+            for version in self._source_tool_versions
+            if configured_tools.get(version.name, None) is None
+            or configured_tools[version.name].enabled
+        }
+        try:
+            client_tools = await client.list_tools()
+        except asyncio.CancelledError as error:
+            if self._should_propagate_cancelled_error(error):
+                raise
+            logger.warning(
+                "Lazy MCP client '%s' discovery cancelled, skipping",
+                client.name,
+            )
+            return
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to discover lazy MCP client '%s', skipping: %s",
+                client.name,
+                error,
+                exc_info=True,
+            )
+            return
+
+        collisions = sorted(
+            source_tool_names
+            & {str(getattr(tool, "name", "")) for tool in client_tools},
+        )
+        if collisions:
+            raise RuntimeError(
+                "MCP tool collides with an active source tool: "
+                + ", ".join(collisions),
+            )
+
+        try:
+            client.on_progress_callback = self._reset_watchdog
+            existing_tool_names = set(self.toolkit.tools)
+            for tool in client_tools:
+                self.toolkit.register_tool_function(
+                    client.get_tool_function(tool),
+                    func_name=tool.name,
+                    func_description=getattr(tool, "description", "") or "",
+                    json_schema=mcp_tool_json_schema(tool),
+                    namesake_strategy=namesake_strategy,
+                )
+            registered_names = sorted(
+                set(self.toolkit.tools) - existing_tool_names,
+            )
+            for tool_name in registered_names:
+                self.toolkit.tools[tool_name].mcp_name = client.name
+            self._normalize_registered_tool_functions(
+                self.toolkit,
+                registered_names,
+            )
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to register lazy MCP client '%s', skipping: %s",
+                client.name,
+                error,
+                exc_info=True,
+            )
+
     def _wire_mcp_progress_callbacks(self, client: Any) -> None:
         """Set on_progress_callback on MCPToolFunction instances registered
         by *client* so that MCP progress notifications reset the watchdog.
@@ -955,10 +1545,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             # original_func stores tool_func.__call__ (a bound method);
             # extract the MCPToolFunction instance via __self__.
             mcp_func = getattr(func, "__self__", None) or func
-            if (
-                isinstance(mcp_func, MCPToolFunction)
-                and mcp_func.mcp_name == mcp_name
-            ):
+            if isinstance(mcp_func, MCPToolFunction) and mcp_func.mcp_name == mcp_name:
                 mcp_func.on_progress_callback = cb  # type: ignore[attr-defined]
 
     async def _recover_mcp_client(self, client: Any) -> Any | None:
@@ -1085,6 +1672,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 passthrough_headers=rebuild_info.get(
                     "passthrough_headers",
                 ),
+                url=rebuild_info.get("url"),
                 session_id=rebuild_info.get("session_id"),
                 chat_id=rebuild_info.get("chat_id"),
                 trace_id=rebuild_info.get("trace_id"),
@@ -1336,6 +1924,25 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """
         return self._strip_media_blocks_from_memory()
 
+    async def _run_reasoning_with_internal_context(
+        self,
+        tool_choice: Literal["auto", "none", "required"] | None = None,
+    ) -> Msg:
+        """把 accepted plan 内部上下文只注入当前推理轮次。"""
+        request_context = getattr(self, "_request_context", {}) or {}
+        internal_msgs = _build_accepted_plan_tool_exchange(request_context)
+        if not internal_msgs:
+            return await super()._reasoning(tool_choice=tool_choice)
+
+        # 复用 AgentScope 的 HINT 标记，把内部上下文仅注入当前推理轮次，
+        # 避免进入会话持久化、工具执行和前端工具卡片路径。
+        for internal_msg in internal_msgs:
+            await self.memory.add(internal_msg, marks=_MemoryMark.HINT)
+        try:
+            return await super()._reasoning(tool_choice=tool_choice)
+        finally:
+            await self.memory.delete_by_mark(mark=_MemoryMark.HINT)
+
     async def _reasoning(
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,
@@ -1365,7 +1972,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
             # --- Passive fallback layer (existing logic) ---
             try:
-                return await super()._reasoning(tool_choice=tool_choice)
+                return await self._run_reasoning_with_internal_context(
+                    tool_choice=tool_choice,
+                )
             except Exception as e:
                 if not self._is_bad_request_or_media_error(e):
                     raise
@@ -1389,7 +1998,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     e,
                     n_stripped,
                 )
-                return await super()._reasoning(tool_choice=tool_choice)
+                return await self._run_reasoning_with_internal_context(
+                    tool_choice=tool_choice,
+                )
 
     async def _summarizing(self) -> Msg:
         """Override summarizing with proactive media filtering,
@@ -1447,6 +2058,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             finally:
                 self._in_summarizing = False
 
+            metadata = getattr(msg, "metadata", None)
+            if isinstance(metadata, dict) and metadata.pop(
+                PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY,
+                False,
+            ):
+                return msg
             return self._strip_tool_use_from_msg(msg)
 
     async def print(
@@ -1523,9 +2140,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         filtered = [
             block
             for block in msg.content
-            if not (
-                isinstance(block, dict) and block.get("type") == "tool_use"
-            )
+            if not (isinstance(block, dict) and block.get("type") == "tool_use")
         ]
 
         n_removed = len(msg.content) - len(filtered)
@@ -1586,10 +2201,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
             new_content = []
             for block in msg.content:
-                if (
-                    isinstance(block, dict)
-                    and block.get("type") in media_types
-                ):
+                if isinstance(block, dict) and block.get("type") in media_types:
                     total_stripped += 1
                     continue
 
@@ -1603,8 +2215,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                         item
                         for item in block["output"]
                         if not (
-                            isinstance(item, dict)
-                            and item.get("type") in media_types
+                            isinstance(item, dict) and item.get("type") in media_types
                         )
                     ]
                     stripped_count = original_len - len(block["output"])
@@ -1622,6 +2233,89 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             msg.content = new_content
 
         return total_stripped
+
+    async def run_research_phase(
+        self,
+        msg: Msg | list[Msg] | None,
+    ) -> ResearchPhaseResult:
+        """Run a bounded tool-enabled ReAct loop for a SubAgent research phase.
+
+        Unlike :meth:`reply`, reaching ``max_iters`` is reported explicitly
+        instead of invoking AgentScope's free-form summarization fallback.
+        """
+        from ..config.context import (
+            set_current_task_progress_chat_id,
+            set_current_task_progress_tracker,
+            set_current_task_progress_turn_id,
+            set_current_workspace_dir,
+            set_current_recent_max_bytes,
+        )
+        from ..app.source_system_config import (
+            resolve_tool_result_compact_config,
+        )
+
+        set_current_workspace_dir(self._workspace_dir)
+        tool_result_compact = resolve_tool_result_compact_config(
+            self._agent_config.running.tool_result_compact,
+        )
+        set_current_recent_max_bytes(tool_result_compact.recent_max_bytes)
+        set_current_task_progress_tracker(self._task_tracker)
+        set_current_task_progress_chat_id(
+            self._request_context.get("chat_id"),
+        )
+        set_current_task_progress_turn_id(
+            self._request_context.get("turn_id"),
+        )
+        if msg is not None:
+            await process_file_and_media_blocks_in_message(msg)
+        await self.memory.add(msg)
+        await self._retrieve_from_long_term_memory(msg)
+        await self._retrieve_from_knowledge(msg)
+
+        last_reply: Msg | None = None
+        previous_reply_task = self._reply_task
+        self._reply_task = asyncio.current_task()
+        self._required_structured_model = None
+        self.toolkit.remove_tool_function(self.finish_function_name)
+        self._start_watchdog()
+        turn_callback = getattr(self, "_subagent_turn_callback", None)
+        try:
+            with self.agent_phase(AgentPhase.REASONING, reason="research"):
+                for turn in range(1, self.max_iters + 1):
+                    await self._compress_memory_if_needed()
+                    reply = await self._reasoning()
+                    last_reply = reply
+                    if turn_callback is not None:
+                        await turn_callback(turn)
+                    tool_calls = reply.get_content_blocks("tool_use")
+                    if not tool_calls:
+                        return ResearchPhaseResult(
+                            status="completed",
+                            reply=reply,
+                            turns_used=turn,
+                            messages=await self._research_messages(),
+                        )
+
+                    futures = [self._acting(tool_call) for tool_call in tool_calls]
+                    if self.parallel_tool_calls:
+                        await asyncio.gather(*futures)
+                    else:
+                        for future in futures:
+                            await future
+
+            return ResearchPhaseResult(
+                status="turn_limit_reached",
+                reply=last_reply,
+                turns_used=self.max_iters,
+                messages=await self._research_messages(),
+            )
+        finally:
+            self._stop_watchdog()
+            self._reply_task = previous_reply_task
+
+    async def _research_messages(self) -> tuple[Msg, ...]:
+        """Snapshot research memory for a bounded terminal handoff."""
+        return tuple(await self.memory.get_memory())
 
     # pylint: disable=protected-access
     async def reply(
@@ -1669,9 +2363,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         # Check if message is a system command
         last_msg = msg[-1] if isinstance(msg, list) else msg
-        query = (
-            last_msg.get_text_content() if isinstance(last_msg, Msg) else None
-        )
+        query = last_msg.get_text_content() if isinstance(last_msg, Msg) else None
 
         if self.command_handler.is_command(query):
             logger.info(f"Received command: {query}")
@@ -1685,11 +2377,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         if hasattr(self.memory, "_long_term_memory"):
             running = self._agent_config.running
             ms = running.memory_summary
-            if (
-                ms.force_memory_search
-                and self.memory_manager is not None
-                and query
-            ):
+            if ms.force_memory_search and self.memory_manager is not None and query:
                 try:
                     result = await asyncio.wait_for(
                         self.memory_manager.memory_search(
@@ -1706,8 +2394,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     )
                 except Exception as e:
                     logger.warning(
-                        "force_memory_search failed or timed out,"
-                        f" skipping e={e}",
+                        "force_memory_search failed or timed out," f" skipping e={e}",
                     )
                     self.memory._long_term_memory = ""
             else:

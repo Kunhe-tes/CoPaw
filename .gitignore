@@ -43,6 +43,11 @@ __pycache__/
 *.egg-info/
 *.zip
 config.json
+review
+skills-lock.json
+.playwright-cli/
+.pnpm-store/
+.superpowers/
 
 # IDEs and editors
 .idea/

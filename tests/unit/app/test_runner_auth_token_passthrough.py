@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from swe.agents.hook_runtime.models import HookSessionOverlay
 from swe.app.runner.runner import AgentRunner
 
 
@@ -36,20 +37,27 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_clients(
+    def fake_build_clients(
         _mcp,
+        *,
+        tenant_id=None,
+        user_id=None,
         passthrough_headers=None,
         session_id=None,
+        chat_id=None,
         trace_id=None,
     ):
+        del tenant_id, user_id
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
+        captured["chat_id"] = chat_id
         captured["trace_id"] = trace_id
         return []
 
     class FakeAgent:
         def __init__(self, **kwargs):
             captured["request_context"] = kwargs["request_context"]
+            self.memory = SimpleNamespace(content=[])
 
         async def register_mcp_clients(self):
             return
@@ -74,7 +82,7 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
         lambda *args, **kwargs: _fake_agent_config(),
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        "swe.app.runner.runner._build_lazy_mcp_clients",
         fake_build_clients,
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
@@ -89,6 +97,14 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",
         AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.skill_selection.build_skill_use_directives",
+        lambda **kwargs: [],
     )
 
     request = SimpleNamespace(
@@ -114,6 +130,85 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
     assert captured["request_context"]["auth_token"] == "token-123"
 
 
+def test_create_agent_for_query_keeps_subagents_disabled_by_default(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Real chat runner contexts keep delegation disabled unless opted in."""
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.tenant_id = "tenant-1"
+    runner.session = SimpleNamespace(
+        _get_save_path=lambda session_id, user_id: (
+            f"/tmp/{session_id}-{user_id}.json"
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["request_context"] = kwargs["request_context"]
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+
+    runner._create_agent_for_query(
+        agent_config=_fake_agent_config(),
+        env_context="",
+        mcp_clients=[],
+        request=SimpleNamespace(),
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        chat=SimpleNamespace(id="chat-1"),
+        turn_id="turn-1",
+        hook_overlay=HookSessionOverlay(),
+        auth_token=None,
+        approved_tool_call=None,
+    )
+
+    assert captured["request_context"]["agent_role"] == "main"
+    assert captured["request_context"]["enable_subagents"] is False
+
+
+def test_create_agent_for_query_enables_subagents_when_request_opts_in(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Delegation is exposed only when the incoming request opts in."""
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.tenant_id = "tenant-1"
+    runner.session = SimpleNamespace(
+        _get_save_path=lambda session_id, user_id: (
+            f"/tmp/{session_id}-{user_id}.json"
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["request_context"] = kwargs["request_context"]
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+
+    runner._create_agent_for_query(
+        agent_config=_fake_agent_config(),
+        env_context="",
+        mcp_clients=[],
+        request=SimpleNamespace(enable_subagents=True),
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        chat=SimpleNamespace(id="chat-1"),
+        turn_id="turn-1",
+        hook_overlay=HookSessionOverlay(),
+        auth_token=None,
+        approved_tool_call=None,
+        current_user_text="请用子代理分析",
+    )
+
+    assert captured["request_context"]["enable_subagents"] is True
+    assert captured["request_context"]["current_user_text"] == "请用子代理分析"
+
+
 @pytest.mark.asyncio
 async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
     runner = AgentRunner(agent_id="test-agent")
@@ -126,20 +221,27 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_clients(
+    def fake_build_clients(
         _mcp,
+        *,
+        tenant_id=None,
+        user_id=None,
         passthrough_headers=None,
         session_id=None,
+        chat_id=None,
         trace_id=None,
     ):
+        del tenant_id, user_id
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
+        captured["chat_id"] = chat_id
         captured["trace_id"] = trace_id
         return []
 
     class FakeAgent:
         def __init__(self, **kwargs):
             captured["request_context"] = kwargs["request_context"]
+            self.memory = SimpleNamespace(content=[])
 
         async def register_mcp_clients(self):
             return
@@ -164,7 +266,7 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         lambda *args, **kwargs: _fake_agent_config(),
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        "swe.app.runner.runner._build_lazy_mcp_clients",
         fake_build_clients,
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
@@ -179,6 +281,14 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",
         AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.skill_selection.build_skill_use_directives",
+        lambda **kwargs: [],
     )
     monkeypatch.setattr(
         "swe.app.runner.runner.get_current_passthrough_headers",
@@ -236,18 +346,24 @@ async def test_query_handler_injects_identity_into_request_context(
 
     captured: dict[str, Any] = {}
 
-    async def fake_build_clients(
+    def fake_build_clients(
         _mcp,
+        *,
+        tenant_id=None,
+        user_id=None,
         passthrough_headers=None,
         session_id=None,
+        chat_id=None,
         trace_id=None,
     ):
-        del _mcp, passthrough_headers, session_id, trace_id
+        del tenant_id, user_id
+        del _mcp, passthrough_headers, session_id, chat_id, trace_id
         return []
 
     class FakeAgent:
         def __init__(self, **kwargs):
             captured["request_context"] = kwargs["request_context"]
+            self.memory = SimpleNamespace(content=[])
 
         async def register_mcp_clients(self):
             return
@@ -272,7 +388,7 @@ async def test_query_handler_injects_identity_into_request_context(
         lambda *args, **kwargs: _fake_agent_config(),
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        "swe.app.runner.runner._build_lazy_mcp_clients",
         fake_build_clients,
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
@@ -287,6 +403,14 @@ async def test_query_handler_injects_identity_into_request_context(
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",
         AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.skill_selection.build_skill_use_directives",
+        lambda **kwargs: [],
     )
 
     request = SimpleNamespace(

@@ -56,7 +56,12 @@ describe("createWelcomeSkillMentions", () => {
     expect(initial.skillMentions.selected).toEqual([]);
     expect(updated.skillMentions.selected).toEqual(items);
 
-    await expect(updated.beforeSubmit()).resolves.toBe(true);
+    const inputData = {
+      query: "Use the browser skill",
+      fileList: [],
+    };
+
+    await expect(updated.beforeSubmit(inputData)).resolves.toEqual(inputData);
     expect(pendingContextReferencesRef.current).toEqual(items);
     expect(setSelectedContextReferences).toHaveBeenCalledWith([]);
   });

@@ -60,5 +60,56 @@ export interface ChatDeleteResponse {
   chat_id: string;
 }
 
+export type SubAgentRunStatus =
+  | "pending"
+  | "running"
+  | "paused"
+  | "completed"
+  | "partial"
+  | "failed"
+  | "cancelled"
+  | "expired";
+
+export interface SubAgentBudgetConsumption {
+  elapsed_ms: number;
+  timeout_ms: number;
+  turns_used: number;
+  max_turns: number;
+  ratio: number;
+}
+
+export interface SubAgentRunSnapshotItem {
+  run_id: string;
+  agent_name: string;
+  nickname?: string | null;
+  objective: string;
+  status: SubAgentRunStatus;
+  stoppable: boolean;
+  definition_match?: {
+    matched: boolean;
+    definition_name?: string | null;
+    definition_source?: string | null;
+    score?: number | null;
+    reason?: string | null;
+  };
+  budget_consumption: SubAgentBudgetConsumption;
+  created_at?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  summary_preview?: string | null;
+  error_preview?: string | null;
+}
+
+export interface SubAgentRunSnapshot {
+  chat_id: string;
+  session_id: string;
+  runs: SubAgentRunSnapshotItem[];
+}
+
+export interface SubAgentRunCancelResponse {
+  run: SubAgentRunSnapshotItem;
+}
+
 // Legacy Session type alias for backward compatibility
 export type Session = ChatSpec;

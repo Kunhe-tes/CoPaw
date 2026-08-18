@@ -13,6 +13,7 @@ import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentSco
 import ConversationCompactionBoundary from "./components/ConversationCompactionBoundary";
 // ==================== 组件引入方式变更结束 ====================
 import {
+  Children,
   useCallback,
   useEffect,
   useMemo,
@@ -21,10 +22,14 @@ import {
   useTransition,
 } from "react";
 import { flushSync } from "react-dom";
-import { Button, Modal, Result, Tooltip } from "antd";
+import { Button, Modal, Result } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
-import { ExclamationCircleOutlined, SettingOutlined } from "@ant-design/icons";
-import { SparkCopyLine, SparkAttachmentLine } from "@agentscope-ai/icons";
+import {
+  ControlOutlined,
+  ExclamationCircleOutlined,
+  SettingOutlined,
+} from "@ant-design/icons";
+import { SparkCopyLine } from "@agentscope-ai/icons";
 import { useTranslation } from "react-i18next";
 import { useLocation, useNavigate } from "react-router-dom";
 import sessionApi from "./sessionApi";
@@ -63,10 +68,11 @@ import { useIframeStore } from "../../stores/iframeStore";
 import { useChatPresentationStore } from "../../stores/chatPresentationStore";
 // ==================== URL 导航参数结束 ====================
 import styles from "./index.module.less";
-import { Form, IconButton } from "@agentscope-ai/design";
+import { Form } from "@agentscope-ai/design";
 // import ChatActionGroup from "./components/ChatActionGroup";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
+import SubAgentRunMonitor from "./components/SubAgentRunMonitor";
 import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
@@ -107,6 +113,7 @@ import {
   CHAT_ATTACHMENT_ACCEPT_HINT,
   uploadChatAttachment,
 } from "./attachmentUploadPolicy";
+import { ComposerQuickMenuSubmenu } from "@/components/agentscope-chat/ComposerQuickMenu";
 
 import RuntimeRequestCard from "./components/RuntimeRequestCard";
 import { FOLLOW_UP_SUBMIT_FAILED_EVENT } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
@@ -114,19 +121,38 @@ import {
   createChatStreamAbortReason,
   shouldStopBackendForFetchAbort,
 } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/abortReasons";
-import RuntimeResponseCard from "./components/RuntimeResponseCard";
+import RuntimeResponseCard, {
+  RuntimeResponseFeedbackCard,
+} from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import WPlusSopActiveBar from "./components/WPlusSopActiveBar";
 import WPlusSopEntryCard from "./components/WPlusSopEntryCard";
+import {
+  ActivePlanInteractionComposer,
+} from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
+import {
+  ActivePlanModeButton,
+  PlanModeMenuItem,
+  getPlanModeEnabled,
+  getPlanModeForRequest,
+  getScopedPlanModeEnabled,
+  persistPlanModeState,
+  preparePlanModeSubmit,
+  resolveActivePlanModeSession,
+  isPlanModeSubmitCancelled,
+  type PlanModeLocalState,
+  type PlanModeSessionLike,
+} from "./planMode";
 import FileManager from "./components/FileManager";
 import { AutoPreviewHtmlProvider } from "@/components/agentscope-chat/AutoPreviewHtmlContext";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import { ChatContentOnlyProvider } from "@/components/agentscope-chat/ChatContentOnlyContext";
 import type {
   ChatApprovalActionCardData,
+  ChatPlanReviewCardData,
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
   ChatTaskRunGroupCardData,
@@ -143,6 +169,10 @@ import {
   useChatFeedbackRenderContext,
   type ChatFeedbackRenderContextValue,
 } from "./feedbackRenderContext";
+import {
+  ChatPlanReviewRenderProvider,
+  type ChatPlanReviewRenderContextValue,
+} from "./planReviewRenderContext";
 import {
   CHAT_TASK_PROGRESS_UPDATE_EVENT,
   isTaskProgressUpdateForActiveSession,
@@ -172,10 +202,11 @@ const chatCardRenderers = {
   AgentScopeRuntimeResponseCard: (props: {
     data: ChatRuntimeResponseCardData;
     isLast?: boolean;
-  }) => {
+  }) => <RuntimeResponseCard {...props} />,
+  ResponseFeedback: (props: { data: ChatRuntimeResponseCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     return (
-      <RuntimeResponseCard
+      <RuntimeResponseFeedbackCard
         {...props}
         chatId={feedback.feedbackChatId}
         existingFeedback={
@@ -202,6 +233,7 @@ const chatCardRenderers = {
   WPlusSopEntryProposal: (props: { data: WPlusSopEntryProposal }) => (
     <WPlusSopEntryCard {...props} />
   ),
+  PlanInteraction: () => null,
   TaskRunGroupCard: (props: { data: ChatTaskRunGroupCardData }) => {
     const feedback = useChatFeedbackRenderContext();
     const onExternalApprovalResolved = useExternalApprovalResolvedRefresh();
@@ -287,6 +319,16 @@ interface ChatRequestTarget {
   chat_id?: string | null;
 }
 
+interface PlanModeSession extends PlanModeSessionLike {
+  id?: string;
+  realId?: string;
+  sessionId?: string;
+  session_id?: string;
+  userId?: string;
+  channel?: string;
+  name?: string;
+}
+
 interface CustomWindow extends Window {
   currentSessionId?: string;
   currentUserId?: string;
@@ -306,8 +348,8 @@ type InputMessage = {
   content?: unknown;
 };
 
-type AttachmentTriggerProps = {
-  disabled?: boolean;
+type PendingPlanRevision = {
+  planId: string;
 };
 
 function renderSuggestionLabel(command: string, description: string) {
@@ -511,6 +553,47 @@ function RuntimeLoadingBridge({
   return null;
 }
 
+function ActivePlanModeControl({
+  enabled,
+  label,
+  displayLabel,
+  onDisable,
+}: {
+  enabled: boolean;
+  label: string;
+  displayLabel?: string;
+  onDisable: () => void;
+}) {
+  const inputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+  const disabled = Boolean(inputState.disabled);
+
+  return (
+    <ActivePlanModeButton
+      enabled={enabled}
+      disabled={disabled}
+      label={label}
+      displayLabel={displayLabel}
+      onDisable={onDisable}
+    />
+  );
+}
+
+const addPlanModeScopeAlias = (
+  state: PlanModeLocalState,
+  alias: string | null | undefined,
+): PlanModeLocalState => {
+  if (!alias || alias === state.scopeKey || state.aliases?.includes(alias)) {
+    return state;
+  }
+
+  return {
+    ...state,
+    aliases: [...(state.aliases || []), alias],
+  };
+};
+
 export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
@@ -536,6 +619,7 @@ export default function ChatPage() {
   const [taskProgress, setTaskProgress] = useState<ChatTaskProgressData | null>(
     null,
   );
+  const [subAgentMonitorResetKey, setSubAgentMonitorResetKey] = useState(0);
   const { selectedAgent } = useAgentStore();
   const [modelRefreshKey, setModelRefreshKey] = useState(0);
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
@@ -556,6 +640,10 @@ export default function ChatPage() {
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
+  const composerInputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+  const composerDisabled = Boolean(composerInputState.disabled);
   const [taskEditForm] = Form.useForm<CronJobSpecOutput>();
   const [editingTask, setEditingTask] = useState<CronJobSpecOutput | null>(
     null,
@@ -563,6 +651,7 @@ export default function ChatPage() {
   const [taskEditSaving, setTaskEditSaving] = useState(false);
   const {
     sessions,
+    setSessions,
     setSessionLoading,
     currentSessionId: activeSessionId,
   } = useChatAnywhereSessionsState();
@@ -709,8 +798,22 @@ export default function ChatPage() {
   // Register session API event callbacks for URL synchronization
 
   useEffect(() => {
-    sessionApi.onSessionIdResolved = (_tempId, realId) => {
+    sessionApi.onSessionIdResolved = (tempId, realId) => {
       if (!isChatActiveRef.current) return;
+      if (pendingPlanModePersistScopesRef.current.delete(tempId)) {
+        pendingPlanModePersistScopesRef.current.add(realId);
+        resolvedPlanModePersistScopesRef.current.set(tempId, realId);
+      }
+      setPlanModeLocalState((current) => {
+        const isResolvedPlanModeScope =
+          current.scopeKey === tempId || current.aliases?.includes(tempId);
+
+        if (!current.enabled && !isResolvedPlanModeScope) {
+          return current;
+        }
+
+        return addPlanModeScopeAlias(current, realId);
+      });
       // Update URL when realId is resolved, regardless of current chatId
       // (chatId may be undefined if URL was cleared in onSessionCreated)
       lastSessionIdRef.current = realId;
@@ -786,8 +889,14 @@ export default function ChatPage() {
       }
     };
 
-    sessionApi.onSessionCreated = () => {
+    sessionApi.onSessionCreated = (sessionId) => {
       if (!isChatActiveRef.current) return;
+      setPlanModeLocalState((current) =>
+        current.enabled ||
+        pendingPlanModePersistScopesRef.current.has(current.scopeKey)
+          ? addPlanModeScopeAlias(current, sessionId)
+          : current,
+      );
       // Clear URL when creating new session, wait for realId resolution to update
       lastSessionIdRef.current = null;
       navigateRef.current("/chat", { replace: true });
@@ -954,6 +1063,250 @@ export default function ChatPage() {
       feedbackSessionId &&
       (feedbackLoading ||
         feedbackSessionId !== lastFeedbackSessionIdRef.current),
+  );
+  const activePlanModeSessionIds = useMemo(
+    () => (chatId ? [chatId] : [activeSessionId]),
+    [activeSessionId, chatId],
+  );
+  const activePlanModeSession = useMemo<PlanModeSession | null>(() => {
+    return resolveActivePlanModeSession(
+      sessions,
+      activePlanModeSessionIds,
+    ) as PlanModeSession | null;
+  }, [activePlanModeSessionIds, sessions]);
+  const activePlanModeMetadataEnabled = getPlanModeEnabled(
+    activePlanModeSession,
+  );
+  const activePlanModeScopeKey = chatId || activeSessionId || "";
+  const [planModeLocalState, setPlanModeLocalState] =
+    useState<PlanModeLocalState>({
+      scopeKey: activePlanModeScopeKey,
+      enabled: activePlanModeMetadataEnabled,
+    });
+  const activePlanModeSessionRef = useRef<PlanModeSession | null>(null);
+  const activePlanModeScopeKeyRef = useRef(activePlanModeScopeKey);
+  const pendingPlanModePersistScopesRef = useRef(new Set<string>());
+  const resolvedPlanModePersistScopesRef = useRef(new Map<string, string>());
+  const planModeLocalStateForActiveScope =
+    planModeLocalState.scopeKey === "" &&
+    activePlanModeScopeKey &&
+    planModeLocalState.enabled &&
+    pendingPlanModePersistScopesRef.current.has("")
+      ? addPlanModeScopeAlias(planModeLocalState, activePlanModeScopeKey)
+      : planModeLocalState;
+  const planModeEnabled = getScopedPlanModeEnabled({
+    metadataEnabled: activePlanModeMetadataEnabled,
+    localState: planModeLocalStateForActiveScope,
+    scopeKey: activePlanModeScopeKey,
+  });
+  const [pendingPlanRevision, setPendingPlanRevision] =
+    useState<PendingPlanRevision | null>(null);
+  activePlanModeSessionRef.current = activePlanModeSession;
+  activePlanModeScopeKeyRef.current = activePlanModeScopeKey;
+
+  useEffect(() => {
+    setPlanModeLocalState((current) => {
+      if (
+        current.scopeKey === activePlanModeScopeKey &&
+        pendingPlanModePersistScopesRef.current.has(activePlanModeScopeKey)
+      ) {
+        return current;
+      }
+      if (
+        current.enabled &&
+        current.aliases?.includes(activePlanModeScopeKey)
+      ) {
+        return {
+          ...current,
+          scopeKey: activePlanModeScopeKey,
+        };
+      }
+      if (
+        current.scopeKey === "" &&
+        activePlanModeScopeKey &&
+        pendingPlanModePersistScopesRef.current.has(current.scopeKey)
+      ) {
+        pendingPlanModePersistScopesRef.current.delete(current.scopeKey);
+        pendingPlanModePersistScopesRef.current.add(activePlanModeScopeKey);
+        resolvedPlanModePersistScopesRef.current.set(
+          current.scopeKey,
+          activePlanModeScopeKey,
+        );
+        return {
+          scopeKey: activePlanModeScopeKey,
+          enabled: current.enabled,
+          aliases: current.aliases,
+        };
+      }
+      return {
+        scopeKey: activePlanModeScopeKey,
+        enabled: activePlanModeMetadataEnabled,
+      };
+    });
+  }, [activePlanModeMetadataEnabled, activePlanModeScopeKey]);
+
+  const setPlanModeEnabledForScope = useCallback(
+    (scopeKey: string, enabled: boolean) => {
+      setPlanModeLocalState((current) => {
+        const resolvedScopeKey =
+          resolvedPlanModePersistScopesRef.current.get(scopeKey) || scopeKey;
+        if (activePlanModeScopeKeyRef.current !== resolvedScopeKey) {
+          return current;
+        }
+        return { scopeKey: resolvedScopeKey, enabled };
+      });
+    },
+    [],
+  );
+
+  const setPlanModeEnabledForActiveScope = useCallback(
+    (enabled: boolean) => {
+      setPlanModeEnabledForScope(activePlanModeScopeKeyRef.current, enabled);
+    },
+    [setPlanModeEnabledForScope],
+  );
+
+  const activePlanRevisionScopeKey =
+    activePlanModeSession?.id ||
+    chatId ||
+    activeSessionId ||
+    window.currentSessionId ||
+    "";
+
+  useEffect(() => {
+    setPendingPlanRevision(null);
+  }, [activePlanRevisionScopeKey]);
+
+  const ensurePlanModeChatId = useCallback(
+    async (
+      session: PlanModeSession | null,
+      meta: Record<string, unknown>,
+    ): Promise<string | null> => {
+      const candidateSessionId =
+        chatId ||
+        session?.id ||
+        activeSessionId ||
+        window.currentSessionId ||
+        "";
+      const existingChatId =
+        (chatId ? sessionApi.getChatIdForSession(chatId) : null) ||
+        (chatId && !/^\d+$/.test(chatId) ? chatId : null) ||
+        sessionApi.getChatIdForSession(candidateSessionId) ||
+        session?.realId ||
+        (session?.id && !/^\d+$/.test(session.id) ? session.id : null);
+
+      if (existingChatId) {
+        return existingChatId;
+      }
+
+      const logicalSessionId =
+        session?.sessionId ||
+        session?.session_id ||
+        sessionApi.getLogicalSessionId(candidateSessionId) ||
+        candidateSessionId ||
+        `${getChannel()}:${getUserId()}`;
+      const created = await chatApi.createChat({
+        session_id: logicalSessionId,
+        user_id: getUserId(session?.userId),
+        channel: getChannel(session?.channel),
+        name: session?.name || "新会话",
+        meta,
+      });
+      await sessionApi.getSessionList();
+      return created.id;
+    },
+    [activeSessionId, chatId],
+  );
+
+  const persistPlanMode = useCallback(
+    async (enabled: boolean) => {
+      const scopeKey = activePlanModeScopeKeyRef.current;
+      const retainBlankScope =
+        enabled && scopeKey === "" && !activePlanModeMetadataEnabled;
+      pendingPlanModePersistScopesRef.current.add(scopeKey);
+      let persistSucceeded = false;
+      try {
+        await persistPlanModeState({
+          enabled,
+          session: activePlanModeSessionRef.current,
+          ensureChatId: ensurePlanModeChatId,
+          updateChat: chatApi.updateChat,
+          updateSession: async (session) => {
+            const nextSessions = await sessionApi.updateSession(
+              session as Parameters<typeof sessionApi.updateSession>[0] & {
+                meta: Record<string, unknown>;
+              },
+              { refreshList: false },
+            );
+            setSessions(nextSessions);
+          },
+          setPlanModeEnabled: (nextEnabled) => {
+            setPlanModeEnabledForScope(scopeKey, nextEnabled);
+          },
+          onPersistError: () => {
+            message.error(
+              t("chat.planMode.persistFailed", "Plan Mode 保存失败"),
+            );
+          },
+        });
+        persistSucceeded = true;
+      } finally {
+        const resolvedScopeKey =
+          resolvedPlanModePersistScopesRef.current.get(scopeKey);
+        if (!(persistSucceeded && retainBlankScope)) {
+          pendingPlanModePersistScopesRef.current.delete(scopeKey);
+        }
+        if (resolvedScopeKey) {
+          pendingPlanModePersistScopesRef.current.delete(resolvedScopeKey);
+          resolvedPlanModePersistScopesRef.current.delete(scopeKey);
+        }
+      }
+    },
+    [
+      activePlanModeMetadataEnabled,
+      ensurePlanModeChatId,
+      message,
+      setPlanModeEnabledForScope,
+      setSessions,
+      t,
+    ],
+  );
+
+  const handleContinueModifyingPlan = useCallback(
+    (data: ChatPlanReviewCardData) => {
+      setPendingPlanRevision({
+        planId: data.plan_id,
+      });
+      setPlanModeEnabledForActiveScope(true);
+      if (!planModeEnabled) {
+        void persistPlanMode(true);
+      }
+    },
+    [persistPlanMode, planModeEnabled, setPlanModeEnabledForActiveScope],
+  );
+
+  const handlePlanModeDecision = useCallback(
+    (enabled: boolean) => {
+      setPendingPlanRevision(null);
+      setPlanModeEnabledForActiveScope(enabled);
+      void persistPlanMode(enabled);
+    },
+    [persistPlanMode, setPlanModeEnabledForActiveScope],
+  );
+
+  const activePlanModeControl = useMemo(
+    () => (
+      <ActivePlanModeControl
+        enabled={planModeEnabled}
+        label={t("chat.planMode.label", "计划模式")}
+        displayLabel={t("chat.planMode.shortLabel", "计划")}
+        onDisable={() => {
+          setPendingPlanRevision(null);
+          void persistPlanMode(false);
+        }}
+      />
+    ),
+    [persistPlanMode, planModeEnabled, t],
   );
 
   useEffect(() => {
@@ -1439,6 +1792,7 @@ export default function ChatPage() {
         channel: getChannel(session?.channel),
         // ==================== userId 统一整改结束 ====================
         stream: true,
+        mode: getPlanModeForRequest(planModeEnabled),
         ...biz_params,
         context_references:
           userText.startsWith("/") &&
@@ -1465,6 +1819,7 @@ export default function ChatPage() {
 
       const timeoutSignal = createTimedAbortSignal(data.signal);
       try {
+        setSubAgentMonitorResetKey((value) => value + 1);
         const response = await fetch(getApiUrl("/console/chat"), {
           method: "POST",
           headers,
@@ -1494,7 +1849,13 @@ export default function ChatPage() {
         timeoutSignal.cleanup();
       }
     },
-    [loadActiveModelData, resolveLogicalRequestSessionId, resolveRequestChatId],
+    [
+      loadActiveModelData,
+      planModeEnabled,
+      resolveLogicalRequestSessionId,
+      resolveRequestChatId,
+      selectedAgent,
+    ],
   );
 
   const handleFileUpload = useCallback(
@@ -1583,6 +1944,14 @@ export default function ChatPage() {
       handleFeedbackSaved,
     ],
   );
+  const planReviewRenderContextValue =
+    useMemo<ChatPlanReviewRenderContextValue>(
+      () => ({
+        onContinueModifying: handleContinueModifyingPlan,
+        onPlanModeDecision: handlePlanModeDecision,
+      }),
+      [handleContinueModifyingPlan, handlePlanModeDecision],
+    );
   const htmlPreviewTrackingContextValue = useMemo(
     () => ({
       cronTaskId: feedbackTask?.cronTaskId || null,
@@ -1617,13 +1986,22 @@ export default function ChatPage() {
         value: "deny",
         description: t("chat.commands.deny.description"),
       },
+      {
+        command: "/plan",
+        value: "plan",
+        description: t("chat.commands.plan.description", "进入计划模式"),
+      },
     ];
 
     const senderConfig = i18nConfig.sender as
       | IAgentScopeRuntimeWebUISenderOptions
       | undefined;
+    const senderPrefixNodes = [
+      ...Children.toArray(activePlanModeControl),
+      ...Children.toArray(senderConfig?.prefix),
+    ].filter(Boolean);
 
-    const { beforeSubmit: handleBeforeSubmit, skillMentions } =
+    const { beforeSubmit: handleSkillMentionsBeforeSubmit, skillMentions } =
       createWelcomeSkillMentions({
         contextReferences,
         contextReferencesError,
@@ -1634,6 +2012,78 @@ export default function ChatPage() {
         selectedContextReferences,
         setSelectedContextReferences,
       });
+
+    const handleBeforeSubmit: NonNullable<
+      IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"]
+    > = async (data) => {
+      if (isComposingRef.current) return false;
+      const skillPrepared = await handleSkillMentionsBeforeSubmit(data);
+      if (skillPrepared === false) return false;
+      const prepared = await preparePlanModeSubmit(skillPrepared, {
+        planModeEnabled,
+        persistPlanMode,
+        setPlanModeEnabled: setPlanModeEnabledForActiveScope,
+      });
+      if (isPlanModeSubmitCancelled(prepared)) {
+        return prepared;
+      }
+      const hasExplicitPlanInteractionResponse = Boolean(
+        prepared.biz_params &&
+          Object.prototype.hasOwnProperty.call(
+            prepared.biz_params,
+            "plan_interaction_response",
+          ),
+      );
+      if (hasExplicitPlanInteractionResponse) {
+        setPendingPlanRevision(null);
+        return prepared;
+      }
+      if (!pendingPlanRevision) {
+        return prepared;
+      }
+
+      const feedback = prepared.query.trim();
+      if (!feedback) {
+        return false;
+      }
+
+      setPendingPlanRevision(null);
+      return {
+        ...prepared,
+        biz_params: {
+          ...(prepared.biz_params || {}),
+          mode: "plan",
+          plan_interaction_response: {
+            card_type: "plan_review",
+            plan_id: pendingPlanRevision.planId,
+            decision: "revise",
+            feedback,
+          },
+        },
+      };
+    };
+
+    const planModeQuickMenuItems = [
+      <ComposerQuickMenuSubmenu
+        key="mode"
+        icon={<ControlOutlined />}
+        label={t("chat.quickMenu.mode", "模式")}
+        disabled={composerDisabled}
+      >
+        <PlanModeMenuItem
+          key="plan-mode"
+          ariaLabel={t("chat.planMode.label", "计划模式")}
+          enabled={planModeEnabled}
+          disabled={composerDisabled}
+          label={t("chat.planMode.shortLabel", "计划")}
+          showIcon={false}
+          tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
+          onChange={(enabled) => {
+            void persistPlanMode(enabled);
+          }}
+        />
+      </ComposerQuickMenuSubmenu>,
+    ];
 
     return {
       ...i18nConfig,
@@ -1671,9 +2121,12 @@ export default function ChatPage() {
             greeting={
               typeof greeting === "string" ? greeting : "你好，有什么可以帮您？"
             }
+            placeholder={t("chat.inputPlaceholder")}
+            beforeSubmit={handleBeforeSubmit}
+            quickMenuItems={planModeQuickMenuItems}
+            prefixItems={activePlanModeControl}
             onSubmit={(data) => onSubmit(data)}
             skillMentions={skillMentions}
-            beforeSubmit={handleBeforeSubmit}
           />
         ),
         // ==================== 首页改版结束 ====================
@@ -1681,27 +2134,25 @@ export default function ChatPage() {
       sender: {
         ...senderConfig,
         beforeSubmit: handleBeforeSubmit,
-        beforeUI: taskProgressEnabled ? (
-          <TaskProgressFloatingCard progress={taskProgress} />
-        ) : null,
+        beforeUI: (
+          <>
+            {taskProgressEnabled ? (
+              <TaskProgressFloatingCard progress={taskProgress} />
+            ) : null}
+          </>
+        ),
+        renderComposer: (defaultComposer) => (
+          <ActivePlanInteractionComposer
+            defaultComposer={defaultComposer}
+            onContinueModifying={handleContinueModifyingPlan}
+            onPlanModeDecision={handlePlanModeDecision}
+          />
+        ),
+        quickMenuItems: planModeQuickMenuItems,
+        prefix:
+          senderPrefixNodes.length > 0 ? <>{senderPrefixNodes}</> : undefined,
         allowSpeech: false,
         attachments: {
-          trigger: function AttachmentTrigger(props: AttachmentTriggerProps) {
-            const tooltipKey = multimodalCaps.supportsMultimodal
-              ? multimodalCaps.supportsImage && !multimodalCaps.supportsVideo
-                ? "chat.attachments.tooltipImageOnly"
-                : "chat.attachments.tooltip"
-              : "chat.attachments.tooltipNoMultimodal";
-            return (
-              <Tooltip title={t(tooltipKey, { limit: CHAT_ATTACHMENT_MAX_MB })}>
-                <IconButton
-                  disabled={props?.disabled}
-                  icon={<SparkAttachmentLine />}
-                  bordered={false}
-                />
-              </Tooltip>
-            );
-          },
           accept: CHAT_ATTACHMENT_ACCEPT_HINT,
           customRequest: handleFileUpload,
         },
@@ -1767,6 +2218,7 @@ export default function ChatPage() {
                 user_id: getUserId(),
                 channel: getChannel(),
                 // ==================== userId 统一整改结束 ====================
+                mode: getPlanModeForRequest(planModeEnabled),
               }),
               signal: timeoutSignal.signal,
             });
@@ -1797,25 +2249,36 @@ export default function ChatPage() {
       },
     } as unknown as IAgentScopeRuntimeWebUIOptions;
   }, [
+    activePlanModeControl,
     brandTheme.avatar,
     brandTheme.brandName,
     customFetch,
     copyResponse,
     chatId,
     activeSessionId,
+    feedbackChatId,
     handleFileUpload,
+    handleContinueModifyingPlan,
+    handlePlanModeDecision,
     isComposingRef,
     isContentOnly,
     isDark,
     multimodalCaps,
+    composerDisabled,
+    pendingPlanRevision,
+    persistPlanMode,
+    planModeEnabled,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
+    setPlanModeEnabledForActiveScope,
     selectedContextReferences,
     contextReferences,
     contextReferencesError,
     contextReferencesLoading,
     loadContextReferences,
     taskProgress,
+    taskProgressEnabled,
+    subAgentMonitorResetKey,
     t,
   ]);
 
@@ -1882,25 +2345,33 @@ export default function ChatPage() {
                 onDragOver={isContentOnly ? undefined : handleDragOver}
                 onDrop={isContentOnly ? undefined : handleDrop}
               >
-              <ChatContentOnlyProvider enabled={isContentOnly}>
-                  <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
-                    <WPlusSopActiveBar
-                      chatId={feedbackChatId || chatId}
-                      logicalSessionId={feedbackSessionId || undefined}
-                      onLocksChatInputChange={setWPlusSopLocksChatInput}
-                    />
-                    <div
-                      className={
-                        wPlusSopLocksChatInput
-                          ? styles.chatDisabledOverlay
-                          : undefined
-                      }
-                      style={{ height: "100%", width: "100%" }}
-                    >
-                      <AgentScopeRuntimeWebUILayout ref={chatRef} />
-                    </div>
-                  </GlobalVoiceRecorder>
+                <ChatContentOnlyProvider enabled={isContentOnly}>
+                  <ChatPlanReviewRenderProvider
+                    value={planReviewRenderContextValue}
+                  >
+                    <GlobalVoiceRecorder enabled={voiceRecorderEnabled}>
+                      <WPlusSopActiveBar
+                        chatId={feedbackChatId || chatId}
+                        logicalSessionId={feedbackSessionId || undefined}
+                        onLocksChatInputChange={setWPlusSopLocksChatInput}
+                      />
+                      <div
+                        className={
+                          wPlusSopLocksChatInput
+                            ? styles.chatDisabledOverlay
+                            : undefined
+                        }
+                        style={{ height: "100%", width: "100%" }}
+                      >
+                        <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                      </div>
+                    </GlobalVoiceRecorder>
+                  </ChatPlanReviewRenderProvider>
                 </ChatContentOnlyProvider>
+                <SubAgentRunMonitor
+                  chatId={feedbackChatId}
+                  resetKey={subAgentMonitorResetKey}
+                />
                 {!isContentOnly && (
                   <DragUploadOverlay
                     visible={isDragging}

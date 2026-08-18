@@ -120,13 +120,19 @@ vi.mock("./components", () => ({
     schedule: {},
   },
   JobDrawer: ({
+    open,
+    form,
     skillOptions,
   }: {
+    open: boolean;
+    form: { getFieldValue: (name: string) => unknown };
     skillOptions: Array<{ value: string; label: string }>;
   }) => (
     <div
       data-testid="skill-options"
+      data-open={String(open)}
       data-values={skillOptions.map((option) => option.value).join(",")}
+      data-skill-ids={String(form.getFieldValue("skillIds") ?? "")}
     >
       {skillOptions.length}
     </div>
@@ -146,6 +152,7 @@ vi.mock("./components", () => ({
   }),
   createColumns: (handlers: {
     onBroadcast: (job: CronJobSpecOutput) => void;
+    onEdit: (job: CronJobSpecOutput) => void;
   }) => [
     {
       title: "名称",
@@ -156,9 +163,14 @@ vi.mock("./components", () => ({
       title: "操作",
       key: "actions",
       render: (_: unknown, job: CronJobSpecOutput) => (
-        <button type="button" onClick={() => handlers.onBroadcast(job)}>
-          广播到租户
-        </button>
+        <>
+          <button type="button" onClick={() => handlers.onBroadcast(job)}>
+            广播到租户
+          </button>
+          <button type="button" onClick={() => handlers.onEdit(job)}>
+            编辑
+          </button>
+        </>
       ),
     },
   ],
@@ -270,6 +282,60 @@ describe("CronJobsPage broadcast task refresh", () => {
     expect(screen.getByTestId("skill-options")).toHaveAttribute(
       "data-values",
       "same-skill-id",
+    );
+  });
+
+  it("rehydrates bound skill ids after async skill options load while editing", async () => {
+    let resolveSkills: (value: {
+      source_id: string;
+      count: number;
+      skills: Array<{
+        skill_id: string;
+        skill_name: string;
+        cn_name?: string | null;
+      }>;
+    }) => void = () => {};
+    mocks.job = {
+      ...mocks.job,
+      enabled: false,
+      skill_ids: "skill-a",
+    };
+    mocks.listSweSkills.mockReturnValue(
+      new Promise((resolve) => {
+        resolveSkills = resolve;
+      }),
+    );
+
+    render(<CronJobsPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+
+    expect(screen.getByTestId("skill-options")).toHaveAttribute(
+      "data-skill-ids",
+      "skill-a",
+    );
+
+    resolveSkills({
+      source_id: "default",
+      count: 1,
+      skills: [
+        {
+          skill_id: "skill-a",
+          skill_name: "analysis_skill",
+          cn_name: "分析技能",
+        },
+      ],
+    });
+
+    await waitFor(() => {
+      expect(screen.getByTestId("skill-options")).toHaveAttribute(
+        "data-values",
+        "skill-a",
+      );
+    });
+    expect(screen.getByTestId("skill-options")).toHaveAttribute(
+      "data-skill-ids",
+      "skill-a",
     );
   });
 

@@ -55,6 +55,7 @@ export const KEY_TO_PATH: Record<string, string> = {
   "system-config-page": "/system-config-page",
   "system-check": "/system-check",
   security: "/security",
+  "skill-config": "/skill-config",
   "token-usage": "/token-usage",
   "voice-transcription": "/voice-transcription",
   "analytics-users": "/analytics/users",
@@ -76,6 +77,7 @@ export const KEY_TO_PATH: Record<string, string> = {
   market: "/market",
   "my-skills": "/my-skills",
   "my-mcp": "/my-mcp",
+  experts: "/experts",
 };
 
 export const KEY_TO_LABEL: Record<string, string> = {
@@ -96,6 +98,7 @@ export const KEY_TO_LABEL: Record<string, string> = {
   models: "nav.models",
   environments: "nav.environments",
   security: "nav.security",
+  "skill-config": "nav.skillConfig",
   "token-usage": "nav.tokenUsage",
   agents: "nav.agents",
   "analytics-users": "nav.analyticsUsers",

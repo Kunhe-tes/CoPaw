@@ -62,6 +62,7 @@ class FileBroadcastService:
         source_workspace_dir: Path,
         *,
         source_id: str | None = None,
+        tenant_workspace_pool: object,
     ):
         """
         Args:
@@ -74,6 +75,7 @@ class FileBroadcastService:
         # ~/.swe/<tenant>/workspaces/default → ~/.swe
         self.base_working_dir = self.source_workspace_dir.parent.parent.parent
         self.source_id = source_id
+        self._tenant_workspace_pool = tenant_workspace_pool
 
     # -- public API ---------------------------------------------------------
 
@@ -93,11 +95,23 @@ class FileBroadcastService:
         for tenant_id in target_tenant_ids:
             try:
                 validated = self._validate_tenant_id(tenant_id)
+                initializer = TenantInitializer(
+                    self.base_working_dir,
+                    validated,
+                    source_id=self.source_id,
+                )
+                was_bootstrapped = initializer.has_seeded_bootstrap()
+                if not was_bootstrapped:
+                    await self._tenant_workspace_pool.ensure_bootstrap(
+                        validated,
+                        source_id=self.source_id,
+                    )
                 result = await asyncio.to_thread(
                     self._copy_to_tenant,
                     target_tenant_id=validated,
                     file_names=file_names,
                     overwrite=overwrite,
+                    was_bootstrapped=was_bootstrapped,
                 )
                 results.append(result)
             except Exception as exc:
@@ -136,6 +150,7 @@ class FileBroadcastService:
         target_tenant_id: str,
         file_names: list[str],
         overwrite: bool,
+        was_bootstrapped: bool,
     ) -> BroadcastFileTenantResult:
         """Blocking: copy files from source to a single target tenant."""
         initializer = TenantInitializer(
@@ -146,10 +161,6 @@ class FileBroadcastService:
         target_ws = (
             initializer.tenant_dir / "workspaces" / get_current_agent_id()
         )
-
-        was_bootstrapped = initializer.has_seeded_bootstrap()
-        if not was_bootstrapped:
-            initializer.ensure_seeded_bootstrap()
 
         updated: list[str] = []
         for name in file_names:

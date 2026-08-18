@@ -17,6 +17,7 @@ import json as _json
 import logging
 import os
 from pathlib import Path
+import shlex
 import time
 import uuid as _uuid
 from typing import Any, Literal, NoReturn
@@ -81,9 +82,120 @@ _TOOLS_WITH_SPECIFIC_TIMEOUTS = {
     "grep_search",
     "glob_search",
 }
+_PLAN_MODE_ALLOWED_TOOLS = frozenset(
+    {
+        "execute_shell_command",
+        "read_file",
+        "grep_search",
+        "glob_search",
+        "get_current_time",
+        "memory_search",
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+        "start_subagent",
+        "wait_subagent",
+        "get_subagent",
+        "cancel_subagent",
+    },
+)
+_PLAN_INTERACTION_TOOL_NAMES = frozenset(
+    {
+        "ask_plan_clarification",
+        "submit_proposed_plan",
+        "start_subagent",
+        "wait_subagent",
+        "get_subagent",
+        "cancel_subagent",
+    },
+)
+_PLAN_INTERACTION_CARD_METADATA_KEY = "plan_interaction_card"
+PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY = (
+    "_plan_interaction_summarizing_short_circuit"
+)
+_PLAN_INTERACTION_TURN_BOUNDARY_ATTR = (
+    "_plan_interaction_turn_boundary_reached"
+)
+_PLAN_MODE_SHELL_META_CHARS = frozenset((";", "|", ">", "<", "&", "`", "$"))
+_PLAN_MODE_GIT_READONLY_SUBCOMMANDS = frozenset(
+    ("status", "diff", "grep", "log", "show"),
+)
+_PLAN_MODE_DENIED_GIT_OPTIONS = frozenset(
+    ("--output", "--ext-diff", "--textconv", "-O", "--open-files-in-pager"),
+)
+_PLAN_MODE_DENIED_READONLY_OPTIONS = frozenset(("--pre",))
 _APPROVAL_KIND_TOOL_GUARD = "tool_guard"
 _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
 _PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
+
+
+def _subagent_mcp_server_key(
+    mcp_server: str | None,
+    request_context: dict[str, Any],
+) -> str | None:
+    """Translate a registered MCP client name back to its snapshot key."""
+    if mcp_server is None:
+        return None
+    mapping = request_context.get("subagent_mcp_server_keys")
+    if not isinstance(mapping, dict):
+        return mcp_server
+    return str(mapping.get(mcp_server, mcp_server))
+
+
+def _has_plan_mode_shell_structure(command: str) -> bool:
+    return any(char in command for char in _PLAN_MODE_SHELL_META_CHARS)
+
+
+def _looks_like_env_assignment(token: str) -> bool:
+    name, separator, _value = token.partition("=")
+    return bool(separator and name and name.replace("_", "").isalnum())
+
+
+def _has_denied_option(
+    args: list[str],
+    denied_options: frozenset[str],
+) -> bool:
+    return any(
+        arg in denied_options
+        or any(arg.startswith(f"{option}=") for option in denied_options)
+        for arg in args
+    )
+
+
+def _validate_plan_mode_git(tokens: list[str]) -> str | None:
+    if len(tokens) < 2:
+        return "git command requires a readonly subcommand"
+    subcommand = tokens[1]
+    if subcommand.startswith("-"):
+        return "git global options are unavailable in Plan Mode"
+    if subcommand not in _PLAN_MODE_GIT_READONLY_SUBCOMMANDS:
+        return "git subcommand is unavailable in Plan Mode"
+    if _has_denied_option(tokens[2:], _PLAN_MODE_DENIED_GIT_OPTIONS):
+        return "git command option may write files or execute external helpers"
+    return None
+
+
+def _validate_plan_mode_readonly_shell(command: str) -> str | None:
+    if not command:
+        return "empty shell command"
+    if _has_plan_mode_shell_structure(command):
+        return "shell compound syntax is unavailable in Plan Mode"
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return "shell command could not be parsed safely"
+    if not tokens:
+        return "empty shell command"
+    if _looks_like_env_assignment(tokens[0]):
+        return "environment assignments are unavailable in Plan Mode"
+    if tokens[0] in {"pwd", "ls"}:
+        return None
+    if tokens[0] in {"rg", "grep"}:
+        if _has_denied_option(tokens[1:], _PLAN_MODE_DENIED_READONLY_OPTIONS):
+            return "search command option may execute external helpers"
+        return None
+    if tokens[0] == "git":
+        return _validate_plan_mode_git(tokens)
+    return "shell command is not in the Plan Mode readonly allowlist"
 
 
 class PreToolUseTerminalStop(Exception):
@@ -198,6 +310,48 @@ class ToolGuardMixin:
             return True
         return tool_name in _TOOLS_WITH_SPECIFIC_TIMEOUTS
 
+    async def _run_plan_interaction_tool_call(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+    ) -> dict | None:
+        """Execute a plan interaction and preserve its card metadata."""
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_name,
+                    output=[],
+                ),
+            ],
+            "system",
+        )
+        try:
+            tool_res = await self.toolkit.call_tool_function(tool_call)
+            async for chunk in tool_res:
+                tool_res_msg.content[0]["output"] = chunk.content
+                if chunk.metadata:
+                    tool_res_msg.metadata.update(chunk.metadata)
+                    if isinstance(
+                        chunk.metadata.get(
+                            _PLAN_INTERACTION_CARD_METADATA_KEY,
+                        ),
+                        dict,
+                    ):
+                        setattr(
+                            self,
+                            _PLAN_INTERACTION_TURN_BOUNDARY_ATTR,
+                            True,
+                        )
+                await self.print(tool_res_msg, chunk.is_last)
+                if chunk.is_interrupted:
+                    raise asyncio.CancelledError()
+            return None
+        finally:
+            await self.memory.add(tool_res_msg)
+
     async def _run_tool_call_with_hard_timeout(
         self,
         tool_call: dict[str, Any],
@@ -221,6 +375,17 @@ class ToolGuardMixin:
 
                 started_at = time.monotonic()
                 try:
+                    if tool_name in _PLAN_INTERACTION_TOOL_NAMES and hasattr(
+                        self,
+                        "toolkit",
+                    ):
+                        return await asyncio.wait_for(
+                            self._run_plan_interaction_tool_call(
+                                tool_call,
+                                tool_name,
+                            ),
+                            timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
+                        )
                     return await asyncio.wait_for(
                         super()._acting(tool_call),  # type: ignore[misc]
                         timeout=LOCAL_TOOL_EXECUTION_HARD_TIMEOUT,
@@ -1222,6 +1387,110 @@ class ToolGuardMixin:
         finally:
             self._active_tool_guard_acting_tasks.discard(task)
 
+    async def _acting_policy_denial(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+        *,
+        include_budget: bool,
+    ) -> bool:
+        """Enforce Plan Mode and SubAgent policy before executing a tool."""
+        request_context = getattr(self, "_request_context", {}) or {}
+        agent_role = request_context.get("agent_role", "main")
+        reason: str | None = None
+        if agent_role != "subagent":
+            reason = self._plan_mode_policy_denial(tool_name, tool_input)
+        elif agent_role == "subagent":
+            policy_payload = request_context.get("subagent_policy")
+            if not isinstance(policy_payload, dict):
+                reason = "missing SubAgent effective policy"
+            else:
+                try:
+                    from swe.app.subagents import (
+                        PermissionPolicy,
+                        validate_tool_call,
+                    )
+
+                    decision = validate_tool_call(
+                        PermissionPolicy.model_validate(policy_payload),
+                        tool_name,
+                        tool_input,
+                        mcp_server=_subagent_mcp_server_key(
+                            self._resolve_mcp_server(tool_name),
+                            request_context,
+                        ),
+                        allowed_mcp_servers=set(
+                            request_context.get(
+                                "subagent_allowed_mcp_servers",
+                            )
+                            or [],
+                        ),
+                    )
+                    if not decision.allowed:
+                        reason = decision.reason
+                except Exception as exc:
+                    reason = f"invalid SubAgent effective policy: {exc}"
+            if reason is None and include_budget:
+                budget = request_context.get("subagent_budget")
+                if isinstance(budget, dict):
+                    try:
+                        maximum = int(budget.get("max_tool_calls") or 0)
+                        used = int(
+                            request_context.get("_subagent_tool_calls_used")
+                            or 0,
+                        )
+                    except (TypeError, ValueError):
+                        reason = "invalid SubAgent tool-call budget"
+                    else:
+                        if used >= maximum > 0:
+                            reason = (
+                                "SubAgent tool-call budget exceeded "
+                                f"({used}/{maximum})."
+                            )
+                        elif maximum > 0:
+                            request_context["_subagent_tool_calls_used"] = (
+                                used + 1
+                            )
+        if reason is None:
+            return False
+        denied_text = (
+            f"Tool `{tool_name}` blocked by "
+            f"{'SubAgent' if agent_role == 'subagent' else 'Plan Mode'} policy.\n"
+            f"{reason}"
+        )
+        tool_res_msg = Msg(
+            "system",
+            [
+                ToolResultBlock(
+                    type="tool_result",
+                    id=tool_call["id"],
+                    name=tool_name,
+                    output=[{"type": "text", "text": denied_text}],
+                ),
+            ],
+            "system",
+        )
+        await self.print(tool_res_msg, True)
+        await self.memory.add(tool_res_msg)
+        return True
+
+    def _plan_mode_policy_denial(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> str | None:
+        request_context = getattr(self, "_request_context", {}) or {}
+        if not request_context.get("plan_mode_enabled"):
+            return None
+        if tool_name not in _PLAN_MODE_ALLOWED_TOOLS:
+            return "tool is unavailable while Plan Mode is active"
+        if tool_name != "execute_shell_command":
+            return None
+        return _validate_plan_mode_readonly_shell(
+            str(tool_input.get("command") or "").strip(),
+        )
+
     async def _apply_pre_tool_hook(
         self,
         tool_call: dict[str, Any],
@@ -1264,6 +1533,13 @@ class ToolGuardMixin:
                 pre_hook_result,
             )
         ):
+            if self._request_context.get("agent_role") == "subagent":
+                result = await self._acting_hook_denied(
+                    tool_call,
+                    tool_name,
+                    "Background SubAgent calls cannot await interactive approval.",
+                )
+                return tool_call, tool_input, True, result
             result = await self._acting_with_approval(
                 tool_call,
                 tool_name,
@@ -1311,6 +1587,14 @@ class ToolGuardMixin:
         # (agentscope ToolUseBlock) does not carry mcp_server.
         mcp_server = self._resolve_mcp_server(tool_name)
 
+        if await self._acting_policy_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+            include_budget=True,
+        ):
+            return None
+
         (
             tool_call,
             tool_input,
@@ -1319,6 +1603,13 @@ class ToolGuardMixin:
         ) = await self._apply_pre_tool_hook(tool_call, tool_name, tool_input)
         if hook_handled:
             return hook_result
+        if await self._acting_policy_denial(
+            tool_call,
+            tool_name,
+            tool_input,
+            include_budget=False,
+        ):
+            return None
 
         await self._notify_skill_detector_tool_call(
             tool_name,
@@ -1517,6 +1808,12 @@ class ToolGuardMixin:
                 action.tool_input,
             )
         if action.kind == "needs_approval":
+            if self._request_context.get("agent_role") == "subagent":
+                return await self._acting_auto_denied(
+                    tool_call,
+                    action.tool_name,
+                    action.guard_result,
+                )
             return await self._acting_with_approval(
                 tool_call,
                 action.tool_name,
@@ -1811,6 +2108,9 @@ class ToolGuardMixin:
         completion message so the ``ReActAgent.reply`` loop exits
         naturally.
         """
+        if self._consume_plan_interaction_turn_boundary():
+            return Msg(self.name, [], "assistant")
+
         with self._agent_phase_context(
             "approval_replay",
             reason="approval_replay_done",
@@ -1843,6 +2143,26 @@ class ToolGuardMixin:
         return await super()._reasoning(  # type: ignore[misc]
             tool_choice=tool_choice,
         )
+
+    def _consume_plan_interaction_turn_boundary(self) -> bool:
+        """Consume the plan-card turn boundary marker once."""
+        if not getattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False):
+            return False
+        setattr(self, _PLAN_INTERACTION_TURN_BOUNDARY_ATTR, False)
+        return True
+
+    async def _summarizing(self) -> Msg:
+        """Avoid a synthetic summary turn immediately after a plan card."""
+        if self._consume_plan_interaction_turn_boundary():
+            return Msg(
+                self.name,
+                [],
+                "assistant",
+                metadata={
+                    PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY: True,
+                },
+            )
+        return await super()._summarizing()  # type: ignore[misc]
 
     async def _reason_about_replay_done(self) -> Msg | None:
         """Emit replay continuation or completion message.

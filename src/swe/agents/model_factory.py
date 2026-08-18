@@ -34,6 +34,7 @@ except ImportError:  # pragma: no cover - compatibility fallback
     GeminiChatFormatter = None
     GeminiChatModel = None
 
+from .hook_runtime.messages import HOOK_ADDITIONAL_CONTEXT_PREFIX
 from .utils.tool_message_utils import _sanitize_tool_messages
 from ..constant import (
     DEFAULT_LLM_CHAT_MAX_CONCURRENT,
@@ -244,6 +245,25 @@ def _format_anthropic_output_items(output: list) -> list:
     ]
 
 
+def _append_to_initial_anthropic_system(
+    messages: list[dict],
+    content_blocks: list[dict],
+) -> None:
+    """把后续 system 上下文合并到 Anthropic 唯一允许的首条 system 消息。"""
+    if not content_blocks:
+        return
+    if messages and messages[0].get("role") == "system":
+        messages[0].setdefault("content", []).extend(content_blocks)
+        return
+    messages.insert(
+        0,
+        {
+            "role": "system",
+            "content": [*content_blocks],
+        },
+    )
+
+
 # TODO: remove after agentscope anthropic formatter updated
 def _format_anthropic_messages(  # pylint: disable=too-many-branches
     msgs: list,
@@ -304,6 +324,17 @@ def _format_anthropic_messages(  # pylint: disable=too-many-branches
                 )
 
         if msg.role == "system" and index != 0:
+            if _is_persisted_hook_follow_up_message(
+                {
+                    "role": msg.role,
+                    "content": content_blocks,
+                },
+            ):
+                _append_to_initial_anthropic_system(
+                    messages,
+                    content_blocks,
+                )
+                continue
             role = "user"
         else:
             role = msg.role
@@ -743,15 +774,35 @@ def _create_file_block_support_formatter(
 def _strip_top_level_message_name(
     messages: list[dict],
 ) -> list[dict]:
-    """Strip top-level `name` from OpenAI chat messages.
-
-    Some strict OpenAI-compatible backends reject `messages[*].name`
-    (especially for assistant/tool roles) and may return 500/400 on
-    follow-up turns. Keep function/tool names unchanged.
-    """
-    for message in messages:
+    """清理 OpenAI-compatible 后端容易拒绝的消息字段。"""
+    for index, message in enumerate(messages):
         message.pop("name", None)
+        if (
+            index != 0
+            and message.get("role") == "system"
+            and not _is_persisted_hook_follow_up_message(message)
+        ):
+            message["role"] = "user"
     return messages
+
+
+def _is_persisted_hook_follow_up_message(message: dict) -> bool:
+    """判断消息是否为需要跨 turn 保留 system 语义的 hook 上下文。"""
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.startswith(HOOK_ADDITIONAL_CONTEXT_PREFIX)
+    if not isinstance(content, list):
+        return False
+
+    for block in content:
+        if (
+            isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+            and block["text"].startswith(HOOK_ADDITIONAL_CONTEXT_PREFIX)
+        ):
+            return True
+    return False
 
 
 def _get_agent_id(
@@ -969,6 +1020,11 @@ def _wrap_model_with_tracing(
 def create_model_and_formatter(
     agent_id: Optional[str] = None,
     trace_context: Optional[dict[str, Any]] = None,
+    model_slot_override: Any | None = None,
+    model_provider_override: Any | None = None,
+    fallback_model_slot: Any | None = None,
+    fallback_model_provider: Any | None = None,
+    resolved_model_info: dict[str, str] | None = None,
 ) -> Tuple[ChatModelBase, FormatterBase]:
     """Factory method to create model and formatter instances.
 
@@ -1000,12 +1056,18 @@ def create_model_and_formatter(
             tenant_id,
         )
 
-        # Ensure tenant provider storage exists before accessing ProviderManager
-        ProviderManager.ensure_tenant_provider_storage(tenant_id)
-        manager = ProviderManager.get_instance(tenant_id)
-
-        # Get model slot from active model configuration
-        model_slot = _get_model_slot(manager)
+        # Snapshot workers supply both a frozen slot and provider. Avoid the
+        # tenant manager so later provider changes cannot affect that run.
+        manager = None
+        if (
+            model_slot_override is not None
+            and model_provider_override is not None
+        ):
+            model_slot = model_slot_override
+        else:
+            ProviderManager.ensure_tenant_provider_storage(tenant_id)
+            manager = ProviderManager.get_instance(tenant_id)
+            model_slot = model_slot_override or _get_model_slot(manager)
         if (
             not model_slot
             or not model_slot.provider_id
@@ -1019,12 +1081,38 @@ def create_model_and_formatter(
             )
 
         # Get provider and create model instance
-        provider = manager.get_provider(model_slot.provider_id)
+        provider = model_provider_override
+        if provider is None and manager is not None:
+            provider = manager.get_provider(model_slot.provider_id)
         if provider is None:
             raise ValueError(f"Provider '{model_slot.provider_id}' not found.")
 
-        model = provider.get_chat_model_instance(model_slot.model)
-        provider_id = model_slot.provider_id
+        try:
+            model = provider.get_chat_model_instance(model_slot.model)
+            provider_id = model_slot.provider_id
+            resolved_slot = model_slot
+        except Exception:
+            if (
+                fallback_model_slot is None
+                or fallback_model_provider is None
+                or not fallback_model_slot.provider_id
+                or not fallback_model_slot.model
+            ):
+                raise
+            model = fallback_model_provider.get_chat_model_instance(
+                fallback_model_slot.model,
+            )
+            provider_id = fallback_model_slot.provider_id
+            resolved_slot = fallback_model_slot
+
+        if resolved_model_info is not None:
+            resolved_model_info.clear()
+            resolved_model_info.update(
+                {
+                    "provider_id": provider_id,
+                    "model": resolved_slot.model,
+                },
+            )
 
         # Create the formatter based on the real model class
         formatter = _create_formatter_instance(model.__class__)

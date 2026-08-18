@@ -12,7 +12,7 @@ AgentContextMiddleware.
 import logging
 from pathlib import Path
 import time
-from typing import Callable, Awaitable
+from typing import TYPE_CHECKING, Callable, Awaitable
 
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -35,6 +35,25 @@ from swe.app.middleware.provider_models_timing import (
     log_provider_models_middleware_error,
 )
 from swe.app.identity_resolver import resolve_user_identity
+
+if TYPE_CHECKING:
+    from swe.app.workspace.bootstrap_state import (
+        TenantBootstrapUnavailable as _TenantBootstrapUnavailable,
+    )
+else:
+    try:
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable as _TenantBootstrapUnavailable,
+        )
+    except (
+        ModuleNotFoundError
+    ):  # pragma: no cover - isolated router module tests
+
+        class _TenantBootstrapUnavailable(RuntimeError):
+            """Compatibility placeholder when workspace package is stubbed."""
+
+            retry_after_seconds = 2
+
 
 logger = logging.getLogger(__name__)
 
@@ -217,6 +236,12 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 )
             return response
 
+        except _TenantBootstrapUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Tenant bootstrap unavailable",
+                headers={"Retry-After": str(exc.retry_after_seconds)},
+            ) from exc
         except Exception:
             if is_timing:
                 log_provider_models_middleware_error(
@@ -355,6 +380,12 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
                 f"dir={workspace_dir}",
             )
             return context
+        except _TenantBootstrapUnavailable:
+            logger.warning(
+                "tenant_bootstrap_unavailable tenant_id=%s",
+                tenant_id,
+            )
+            raise
         except Exception as e:
             if is_provider_models_list_request(request):
                 logger.exception(

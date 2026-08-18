@@ -12,7 +12,15 @@ import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncGenerator, Callable, Dict, Literal, Optional, Union
+from typing import (
+    Any,
+    AsyncGenerator,
+    Callable,
+    Dict,
+    Literal,
+    Optional,
+    Union,
+)
 from urllib.parse import quote, unquote, urlparse
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -25,12 +33,13 @@ from fastapi import (
     UploadFile,
 )
 from pydantic import BaseModel, Field
-from starlette.responses import StreamingResponse
+from starlette.responses import Response, StreamingResponse
 
 from ...config.context import resolve_request_effective_tenant_id
 from ..agent_context import (
     get_agent_and_config_for_request,
     get_agent_for_request,
+    resolve_file_manager_source_scope_location,
     resolve_file_manager_workspace_dir,
 )
 from ..context_references import (
@@ -43,6 +52,7 @@ from ..file_manager import (
     FileManagerItem,
     FileManagerNotFoundError,
     FileManagerPathError,
+    FileManagerService,
     FileManagerTextPreview,
     FileManagerUploadTooLargeError,
     get_file_manager_service,
@@ -636,6 +646,16 @@ def _extract_context_references(
     return request_data.get("context_references")
 
 
+def _extract_plan_mode(request_data: Union[AgentRequest, dict]) -> str | None:
+    """Keep supported Plan Mode requests in Console channel metadata."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        mode = getattr(request_data, "mode", None) or channel_meta.get("mode")
+    else:
+        mode = request_data.get("mode")
+    return mode if mode in {"plan", "normal"} else None
+
+
 def _local_path_from_console_attachment_url(url: object) -> Path | None:
     """Resolve the local path encoded in a Console attachment preview URL."""
     if not isinstance(url, str) or not url:
@@ -810,6 +830,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
         native_payload["meta"]["file_url_network"] = file_url_network
     if selected_skill_names is not None:
         native_payload["meta"]["selected_skill_names"] = selected_skill_names
+    plan_mode = _extract_plan_mode(request_data)
+    if plan_mode is not None:
+        native_payload["meta"]["mode"] = plan_mode
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references
@@ -902,6 +925,7 @@ async def _start_new_chat(
     native_payload,
     *,
     before_start: Callable[[], None] | None = None,
+    include_run_status: bool = False,
 ):
     """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
     msgid = str(uuid.uuid4())
@@ -937,7 +961,41 @@ async def _start_new_chat(
             console_channel.stream_one,
             before_start=before_start,
         )
-    return queue, chat.id, msgid, is_new_run
+    if include_run_status:
+        return queue, chat.id, msgid, is_new_run
+    return queue, chat.id, msgid
+
+
+def _validate_console_chat_identity(
+    request: Request,
+    workspace,
+    native_payload: dict,
+) -> None:
+    authenticated_user_id = str(
+        getattr(request.state, "user_id", None) or "",
+    ).strip()
+    payload_sender_id = str(native_payload.get("sender_id") or "").strip()
+    if authenticated_user_id and payload_sender_id != authenticated_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Console sender does not match authenticated user",
+        )
+
+    authenticated_agent_id = str(
+        getattr(request.state, "agent_id", None) or "",
+    ).strip()
+    workspace_agent_id = str(
+        getattr(workspace, "agent_id", None) or "",
+    ).strip()
+    if (
+        authenticated_agent_id
+        and workspace_agent_id
+        and authenticated_agent_id != workspace_agent_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail="Console Agent does not match authenticated Agent",
+        )
 
 
 @router.post(
@@ -1045,13 +1103,13 @@ def _inject_request_metadata(
         )
     native_payload["meta"]["source_id"] = source_id
 
-
 def _resolve_console_identity(
     request: Request,
     native_payload: dict[str, Any],
     workspace: Any,
 ) -> dict[str, str]:
     """Extract and validate authenticated identity from request state."""
+    _validate_console_chat_identity(request, workspace, native_payload)
     identity = {
         "tenant_id": str(
             getattr(request.state, "tenant_id", None) or "",
@@ -1066,24 +1124,9 @@ def _resolve_console_identity(
             getattr(request.state, "agent_id", None) or "",
         ).strip(),
     }
-    payload_sender_id = str(native_payload.get("sender_id") or "").strip()
-    if identity["user_id"] and payload_sender_id != identity["user_id"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Console sender does not match authenticated user",
-        )
     workspace_agent_id = str(
         getattr(workspace, "agent_id", None) or "",
     ).strip()
-    if (
-        identity["agent_id"]
-        and workspace_agent_id
-        and identity["agent_id"] != workspace_agent_id
-    ):
-        raise HTTPException(
-            status_code=403,
-            detail="Console Agent does not match authenticated Agent",
-        )
     identity["agent_id"] = identity["agent_id"] or workspace_agent_id
     return identity
 
@@ -1423,6 +1466,7 @@ async def _dispatch_console_stream(
                 workspace, tracker, console_channel,
                 session_id, native_payload,
                 before_start=before_start,
+                include_run_status=True,
             )
         except Exception:
             _release_suppression_on_failure(suppression_ctx, native_payload)
@@ -1570,6 +1614,20 @@ async def get_console_generated_files(
     )
 
 
+async def _get_file_manager_service_for_request(
+    request: Request,
+) -> FileManagerService:
+    """Construct a request-bound service with its tenant source root."""
+
+    workspace_dir = await resolve_file_manager_workspace_dir(request)
+    source_scope_location = resolve_file_manager_source_scope_location(request)
+    return get_file_manager_service(
+        workspace_dir,
+        source_scope_base_dir=source_scope_location.base_dir,
+        source_scope_component=source_scope_location.component,
+    )
+
+
 @router.get(
     "/file-manager/directories",
     response_model=FileManagerDirectoryListing,
@@ -1584,8 +1642,7 @@ async def get_file_manager_directory(
 ) -> FileManagerDirectoryListing:
     """List direct children for the workspace bound to this request only."""
 
-    workspace_dir = await resolve_file_manager_workspace_dir(request)
-    service = get_file_manager_service(workspace_dir)
+    service = await _get_file_manager_service_for_request(request)
     try:
         return await run_file_manager_read(
             service.list_directory,
@@ -1610,8 +1667,7 @@ async def get_file_manager_file_preview(
 ) -> FileManagerTextPreview:
     """Return at most one MiB of UTF-8 text without auditing reads."""
 
-    workspace_dir = await resolve_file_manager_workspace_dir(request)
-    service = get_file_manager_service(workspace_dir)
+    service = await _get_file_manager_service_for_request(request)
     try:
         return await run_file_manager_read(
             service.read_text_preview,
@@ -1633,8 +1689,7 @@ async def get_file_manager_file_download(
 ) -> StreamingResponse:
     """Stream a single regular file from a no-follow descriptor, unaudited."""
 
-    workspace_dir = await resolve_file_manager_workspace_dir(request)
-    service = get_file_manager_service(workspace_dir)
+    service = await _get_file_manager_service_for_request(request)
     try:
         download = await run_file_manager_read(
             service.open_file_for_download,
@@ -1669,8 +1724,7 @@ async def put_file_manager_text_file(
 ) -> FileManagerTextPreview:
     """Save small UTF-8 text only, rejecting stale revisions instead of overwrite."""
 
-    workspace_dir = await resolve_file_manager_workspace_dir(request)
-    service = get_file_manager_service(workspace_dir)
+    service = await _get_file_manager_service_for_request(request)
     try:
         result = await run_file_manager_mutation(
             service.save_text,
@@ -1725,8 +1779,7 @@ async def post_file_manager_upload(
                 f"File too large (max {MAX_UPLOAD_BYTES // (1024 * 1024)} MB)"
             ),
         )
-    workspace_dir = await resolve_file_manager_workspace_dir(request)
-    service = get_file_manager_service(workspace_dir)
+    service = await _get_file_manager_service_for_request(request)
     filename = file.filename or ""
     try:
         item = await run_file_manager_mutation(
@@ -1772,8 +1825,7 @@ async def delete_file_manager_file(
 ) -> dict[str, str]:
     """Move a file-manager file into the governance recycle-bin archive."""
 
-    workspace_dir = await resolve_file_manager_workspace_dir(request)
-    service = get_file_manager_service(workspace_dir)
+    service = await _get_file_manager_service_for_request(request)
     try:
         archived = await run_file_manager_mutation(
             service.archive_file,
@@ -1801,6 +1853,42 @@ async def delete_file_manager_file(
     }
 
 
+@router.delete(
+    "/file-manager/directories",
+    status_code=204,
+    summary="Permanently delete one controlled directory",
+)
+async def delete_file_manager_directory(
+    request: Request,
+    root: str = Query(..., description="Controlled file-manager root"),
+    path: str = Query(..., description="Relative directory path"),
+) -> Response:
+    """Permanently remove one controlled directory and its contents."""
+
+    service = await _get_file_manager_service_for_request(request)
+    try:
+        await run_file_manager_mutation(
+            service.delete_directory,
+            root,
+            path,
+        )
+    except FileManagerPathError as exc:
+        _audit_file_manager_mutation(
+            request,
+            action="delete_directory",
+            path=path,
+            outcome="failure",
+        )
+        raise _file_manager_http_error(exc) from exc
+    _audit_file_manager_mutation(
+        request,
+        action="delete_directory",
+        path=path,
+        outcome="success",
+    )
+    return Response(status_code=204)
+
+
 @router.post(
     "/file-manager/recycle/{archive_item_id}/restore",
     summary="Restore one recycle item to its original path without overwrite",
@@ -1811,8 +1899,7 @@ async def post_file_manager_recycle_restore(
 ) -> dict[str, str]:
     """Restore one archive item; a collision leaves the archive untouched."""
 
-    workspace_dir = await resolve_file_manager_workspace_dir(request)
-    service = get_file_manager_service(workspace_dir)
+    service = await _get_file_manager_service_for_request(request)
     try:
         restored = await run_file_manager_mutation(
             service.restore_recycle_item,
@@ -1849,8 +1936,7 @@ async def delete_file_manager_recycle_item(
 ) -> dict[str, str]:
     """Remove archived bytes and index entry after the UI confirmation."""
 
-    workspace_dir = await resolve_file_manager_workspace_dir(request)
-    service = get_file_manager_service(workspace_dir)
+    service = await _get_file_manager_service_for_request(request)
     try:
         purged = await run_file_manager_mutation(
             service.purge_recycle_item,

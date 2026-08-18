@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { installAudioPlaybackMocks } from "./testUtils";
 import GlobalVoiceRecorder from "./index";
+import VoiceRecorderQuickMenuItem from "./VoiceRecorderQuickMenuItem";
 import VoiceRecorderTrigger from "./VoiceRecorderTrigger";
 
 const mocks = vi.hoisted(() => ({
@@ -80,6 +81,14 @@ function renderRecorder(enabled = true) {
   );
 }
 
+function renderRecorderQuickMenuItem(enabled = true) {
+  return render(
+    <GlobalVoiceRecorder enabled={enabled}>
+      <VoiceRecorderQuickMenuItem />
+    </GlobalVoiceRecorder>,
+  );
+}
+
 describe("GlobalVoiceRecorder UI", () => {
   beforeEach(() => {
     seedRecorder();
@@ -99,6 +108,16 @@ describe("GlobalVoiceRecorder UI", () => {
     const launcher = screen.getByRole("button", { name: "开始语音录制" });
     expect(launcher).toBeEnabled();
     expect(launcher.textContent).toBe("");
+    fireEvent.click(launcher);
+    expect(mocks.recorder.startRecording).toHaveBeenCalledOnce();
+  });
+
+  it("renders a labelled quick menu item and starts recording from idle", () => {
+    renderRecorderQuickMenuItem();
+
+    const launcher = screen.getByRole("button", { name: "语音录制" });
+    expect(launcher).toBeEnabled();
+    expect(launcher).toHaveTextContent("语音录制");
     fireEvent.click(launcher);
     expect(mocks.recorder.startRecording).toHaveBeenCalledOnce();
   });

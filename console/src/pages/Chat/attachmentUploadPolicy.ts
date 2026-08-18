@@ -150,6 +150,8 @@ export async function uploadChatAttachment(
     onProgress?.({ percent: 100 });
     onSuccess({ url: filePreviewUrl(res.url) });
   } catch (e) {
-    onError?.(e instanceof Error ? e : new Error(String(e)));
+    const error = e instanceof Error ? e : new Error(String(e));
+    message.error(t("chat.attachments.uploadFailed"));
+    onError?.(error);
   }
 }

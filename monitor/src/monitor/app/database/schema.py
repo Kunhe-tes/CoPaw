@@ -334,7 +334,10 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     filename     VARCHAR(512) NOT NULL COMMENT '文件名',
     task_type    VARCHAR(16) DEFAULT NULL COMMENT '任务类型: list/plan',
     custuid      VARCHAR(64) DEFAULT NULL COMMENT '任务中客户ID',
+    bbk_org_id   VARCHAR(64) DEFAULT NULL COMMENT '客户归属二级分行ID',
     cust_nm      VARCHAR(255) DEFAULT NULL COMMENT '任务中客户名称',
+    template_id  BIGINT DEFAULT NULL COMMENT 'HTML模板ID',
+    result_id    VARCHAR(100) DEFAULT NULL COMMENT '待填充数据ID',
     notification_content_wplus VARCHAR(5000) DEFAULT NULL COMMENT 'W+渠道通知消息内容',
     notification_content_zhaohu VARCHAR(5000) DEFAULT NULL COMMENT '招乎渠道通知消息内容',
     need_notification TINYINT(1) DEFAULT 1 COMMENT '是否需要通知: 0-否, 1-是',
@@ -348,8 +351,53 @@ CREATE TABLE IF NOT EXISTS swe_cron_subtasks (
     INDEX idx_status (status),
     INDEX idx_task_type (task_type),
     INDEX idx_custuid (custuid),
+    INDEX idx_bbk_org_id (bbk_org_id),
     INDEX idx_created_at (created_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='定时任务子任务表';
+"""
+
+CREATE_CRON_RESULT_INDEX_TABLE = """
+CREATE TABLE IF NOT EXISTS swe_cron_result_index (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY COMMENT '主键ID',
+    source_id VARCHAR(64) NOT NULL DEFAULT '' COMMENT '来源ID',
+    tenant_id VARCHAR(64) NOT NULL COMMENT '客户经理/租户ID',
+    first_bbk_id VARCHAR(64) NOT NULL COMMENT '一级分行号',
+    bbk_org_id VARCHAR(64) NOT NULL COMMENT '二级分行号',
+    custuid VARCHAR(64) NOT NULL DEFAULT '' COMMENT '客户ID',
+    cust_nm VARCHAR(255) DEFAULT NULL COMMENT '客户名称',
+    skill_id VARCHAR(64) NOT NULL COMMENT '技能ID',
+    job_id VARCHAR(64) NOT NULL COMMENT '定时任务ID',
+    execution_id BIGINT NOT NULL COMMENT '执行记录ID',
+    trace_id VARCHAR(64) NOT NULL COMMENT '执行trace_id',
+    subtask_id BIGINT NOT NULL COMMENT 'subtask主键',
+    task_id VARCHAR(128) NOT NULL COMMENT '异步子任务ID',
+    result_type VARCHAR(16) NOT NULL COMMENT 'list/plan',
+    template_id BIGINT DEFAULT NULL COMMENT 'HTML模板ID',
+    result_id VARCHAR(100) DEFAULT NULL COMMENT '待填充数据ID',
+    filename VARCHAR(512) DEFAULT NULL COMMENT '文件名',
+    status VARCHAR(16) DEFAULT NULL COMMENT '子任务状态',
+    is_latest_success TINYINT(1) NOT NULL DEFAULT 1 COMMENT '是否为最新成功结果',
+    execution_at DATETIME NOT NULL COMMENT '执行成功时间',
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at DATETIME DEFAULT NULL COMMENT '更新时间',
+    expire_at DATETIME NOT NULL COMMENT '过期时间',
+
+    UNIQUE KEY uk_subtask_skill (subtask_id, skill_id),
+    KEY idx_plan_query (
+        source_id, tenant_id, first_bbk_id, bbk_org_id, custuid,
+        result_type, is_latest_success, execution_at DESC, id DESC
+    ),
+    KEY idx_list_query (
+        source_id, tenant_id, first_bbk_id, bbk_org_id,
+        result_type, is_latest_success, execution_at DESC, id DESC
+    ),
+    KEY idx_skill_scope (
+        source_id, tenant_id, first_bbk_id, skill_id,
+        result_type, is_latest_success, execution_at DESC
+    ),
+    KEY idx_expire_at (expire_at),
+    KEY idx_job_latest (job_id, is_latest_success, execution_at DESC)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='定时任务结果查询索引表';
 """
 
 CREATE_CRON_DISPATCH_BATCHES_TABLE = """
@@ -698,6 +746,24 @@ ALTER_CRON_SUBTASKS_NEW_COLUMNS = [
     """,
     """
     ALTER TABLE swe_cron_subtasks
+    ADD COLUMN bbk_org_id VARCHAR(64) DEFAULT NULL
+    COMMENT '客户归属二级分行ID'
+    AFTER custuid
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD COLUMN template_id BIGINT DEFAULT NULL
+    COMMENT 'HTML模板ID'
+    AFTER cust_nm
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD COLUMN result_id VARCHAR(100) DEFAULT NULL
+    COMMENT '待填充数据ID'
+    AFTER template_id
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
     ADD COLUMN notification_content_wplus VARCHAR(5000) DEFAULT NULL
     COMMENT 'W+渠道通知消息内容'
     AFTER cust_nm
@@ -715,6 +781,10 @@ ALTER_CRON_SUBTASKS_NEW_COLUMNS = [
     """
     ALTER TABLE swe_cron_subtasks
     ADD INDEX idx_custuid (custuid)
+    """,
+    """
+    ALTER TABLE swe_cron_subtasks
+    ADD INDEX idx_bbk_org_id (bbk_org_id)
     """,
 ]
 
@@ -784,6 +854,9 @@ async def init_database_tables() -> None:
 
         await db.execute(CREATE_CRON_SUBTASKS_TABLE)
         logger.info("Created cron_subtasks table (or already exists)")
+
+        await db.execute(CREATE_CRON_RESULT_INDEX_TABLE)
+        logger.info("Created cron_result_index table (or already exists)")
 
         await db.execute(CREATE_CRON_DISPATCH_BATCHES_TABLE)
         logger.info("Created cron_dispatch_batches table (or already exists)")

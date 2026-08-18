@@ -22,9 +22,9 @@ This document is the single design source of truth for new and modified user-fac
 
 CoPaw does not adopt named third-party product styles as visual authorities. The Console uses its own white-first embedded management language, tuned for Chinese AI operations, host-product integration, compact workflows, configured logos, and the independent Conversation Workspace identity.
 
-Impeccable may be used as a review framework for AI-assisted UI work. It helps detect generic AI design patterns, weak typography, low contrast, excessive decoration, overflow risk, incomplete states, and other finish issues. It is not a visual style to copy, and it does not replace this document.
+AI-assisted UI work may use `ui-ux-pro-max` to explore candidate visual directions, `frontend-design` to evaluate and refine design fundamentals, and Impeccable to implement, critique, and polish the selected direction. These skills are advisory layers rather than visual authorities, and none of them replaces this document.
 
-The Conversation Workspace keeps `#3769FC` as its fixed emphasis color unless a later approved chat-specific change revises it.
+The Conversation Workspace keeps `#3769FC` as its fixed emphasis color unless a later approved chat-specific change revises it. Non-chat management surfaces may treat that color as a reference rather than a mandatory page-level identity, while preserving shared semantic behavior and accessibility.
 
 When outside examples or prior explorations inform a decision, rewrite the durable rule as a CoPaw-specific principle before it becomes authoritative. Archived OpenSpec changes preserve historical exploration; this document remains the day-to-day design source of truth.
 
@@ -51,19 +51,28 @@ Future Console UI should pass these product checks before being treated as compl
 
 Good Console screens should feel like reliable tools used by people with work to finish: quiet, precise, and a little sharper than expected.
 
-## Impeccable-Assisted Quality Gate
+## AI-Assisted UI Workflow
 
-Impeccable may be used as a design-review and detector layer for Console UI work. Its findings are review input that must be reconciled against this document; they are not automatic requirements.
+For non-trivial visible UI optimization or redesign, use the following workflow by default. The stages may iterate, but later stages must reconcile their output with this document rather than silently replacing an accepted CoPaw rule.
 
-Recommended routine uses:
+1. **Explore with `ui-ux-pro-max`**: generate candidate directions for style, color, typography, layout, component treatment, and relevant anti-patterns. Select the `react` stack and translate recommendations into the existing React and Ant Design architecture; do not introduce an HTML + Tailwind rewrite from the skill's default stack.
+2. **Converge with `frontend-design`**: evaluate the candidates against visual hierarchy, typography, spacing rhythm, layout, component states, responsive behavior, and accessibility. Use these principles to improve a direction, not to bootstrap a competing generic token system.
+3. **Implement and polish with Impeccable**: load the project context and existing components, implement the selected direction, and use its critique, detector, and polish flows to catch generic AI patterns and incomplete finish work.
+4. **Review with `copaw-f2e-review`**: verify React and TypeScript quality, state and API contracts, accessibility, real-data resilience, and CoPaw-specific behavior.
+5. **Verify with `browser-qa`**: test the rendered result against this document's Verification scenarios, including the required desktop host sizes and `hideMenu=true` where applicable; exercise interactions and keyboard states, and inspect browser errors before delivery.
+
+When the user has provided or confirmed a clear visual direction, the exploration and convergence stages may be omitted. Small mechanical changes with an already-specified result may shorten the workflow further when their risk does not justify every stage.
+
+Operational rules:
 
 - Run `node .agents/skills/impeccable/scripts/context.mjs --target console` at the start of an Impeccable-assisted Console review to load `PRODUCT.md` context. Always read this file separately because the authoritative Console design document lives at `console/DESIGN.md` and may not be loaded by the Impeccable context script.
-- Use `audit`, `critique`, `polish`, `layout`, `typeset`, and `harden` to review new UI, substantial visible changes, reusable visual rules, and pre-ship polishing.
+- Use Impeccable's `audit`, `critique`, `polish`, `layout`, `typeset`, and `harden` flows to review new UI, substantial visible changes, reusable visual rules, and pre-ship polishing.
 - Use detector output to look for nested cards, generic gradients, low-contrast text, over-rounded containers, cramped spacing, skipped heading structure, small touch targets, text overflow, unstable responsive layouts, and missing loading, empty, error, disabled, focus, and in-progress states.
 - Record recurring valid findings as updates to this document or central design tokens when they reveal a reusable rule.
 
 Cautious or restricted uses:
 
+- Do not enable `ui-ux-pro-max` persistence with `--persist` or commit generated `design-system/MASTER.md` files unless an accepted change explicitly replaces this document's source-of-truth strategy.
 - Do not run or commit the output of `init`, `document`, or other context-generating commands in a way that creates a competing `DESIGN.md`, `PRODUCT.md`, or equivalent live project authority.
 - Do not run `/impeccable init` for this repository unless a future approved change explicitly replaces this context strategy.
 - Treat `colorize`, `bolder`, `quieter`, `delight`, `animate`, `overdrive`, and similar identity-shifting commands as exploratory unless the user has explicitly approved that visual direction through the repository workflow.
@@ -130,7 +139,7 @@ The current baseline uses platform fonts so it works without downloading font as
 | Warning                  | `#A56A24`     | Partial and caution states                         |
 | Error                    | `#B94A4F`     | Destructive and failed states                      |
 
-Blue is shared as the current product emphasis across management and conversation surfaces, but each theme retains separate semantic variables and component scopes. Conversation primary remains fixed at `#3769FC`; Management primary currently defaults to `#3769FC` and may follow an approved source/brand theme only when token values, this table, and affected surfaces are updated and verified together. Saturated blue is reserved for primary actions, focus, and concise selection; large surfaces use white, with near-white gray-blue reserved for functional grouping.
+Blue is the current reference emphasis across management and conversation surfaces, but each theme retains separate semantic variables and component scopes. Conversation primary remains fixed at `#3769FC`. Non-chat management surfaces may adapt their color balance and scoped visual expression to the workflow; `#3769FC` is a default reference rather than a mandatory page-level primary. Reusable changes to the Management primary or other cross-page semantic roles must update the central tokens, this table, and affected surfaces together. Saturated color is reserved for primary actions, focus, and concise selection; large surfaces use white, with near-white gray-blue reserved for functional grouping.
 
 `console/src/config/consoleDesignTokens.ts` is the normal palette-edit entry point. Change semantic token values there, keep role names stable, update this table, and verify affected surfaces. Do not tune the theme by scattering hexadecimal colors across page styles.
 

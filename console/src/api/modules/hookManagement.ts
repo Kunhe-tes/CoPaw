@@ -40,6 +40,25 @@ export type HookManualTestResponse = {
   redacted_summary: Record<string, unknown>;
 };
 
+export type HookDistributionRequest = {
+  matcherGroupIds: string[];
+  targetTenantIds: string[];
+};
+
+export type HookDistributionTenantResult = {
+  tenant_id: string;
+  success: boolean;
+  bootstrapped: boolean;
+  matcher_group_ids: string[];
+  script_names: string[];
+  error: string;
+};
+
+export type HookDistributionResponse = {
+  source_revision: string;
+  results: HookDistributionTenantResult[];
+};
+
 export const hookManagementApi = {
   getConfiguration: () =>
     request<HookConfigurationResponse>("/hook-management/configuration"),
@@ -72,4 +91,13 @@ export const hookManagementApi = {
         context,
       }),
     }),
+
+  distributeToDefaultAgents: (payload: HookDistributionRequest) =>
+    request<HookDistributionResponse>(
+      "/hook-management/distribute/default-agents",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+      },
+    ),
 };

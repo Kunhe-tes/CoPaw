@@ -49,28 +49,37 @@ describe("SystemConfigPage", () => {
     return { promise, resolve, reject };
   }
 
+  function getSwitchByTitle(title: string) {
+    const switchTitle = screen.getByText(title);
+    const switchRow = switchTitle.closest("div[class*='switchRow']");
+    if (!switchRow) {
+      throw new Error(`Switch row not found: ${title}`);
+    }
+    return within(switchRow).getByRole("switch");
+  }
+
   function getTaskProgressSwitch() {
-    return screen.getAllByRole("switch")[0];
+    return getSwitchByTitle("任务进度步骤条");
   }
 
   function getZhaohuToolGuardNotificationSwitch() {
-    return screen.getAllByRole("switch")[2];
+    return getSwitchByTitle("Tool Guard 审批招乎通知");
   }
 
   function getCronUnreadAutoPauseSwitch() {
-    return screen.getAllByRole("switch")[3];
+    return getSwitchByTitle("定时任务未读自动暂停");
   }
 
   function getCronSkipWeekendZhaohuSwitch() {
-    return screen.getAllByRole("switch")[4];
+    return getSwitchByTitle("周末不发招呼完成通知");
   }
 
   function getArchiveMaintenanceSwitch() {
-    return screen.getAllByRole("switch")[6];
+    return getSwitchByTitle("文件归档维护");
   }
 
   function getToolResultCompactSwitch() {
-    return screen.getAllByRole("switch")[7];
+    return getSwitchByTitle("启用工具结果压缩");
   }
 
   function seedEffectiveConfig(config: Record<string, unknown> = {}) {

@@ -50,6 +50,8 @@ from .models import (
 )
 from .scan_policy import ScanPolicy
 from .analyzers import BaseAnalyzer
+from .analyzers.ast_behavior_analyzer import AstBehaviorAnalyzer
+from .analyzers.package_analyzer import PackageAnalyzer
 from .analyzers.pattern_analyzer import PatternAnalyzer
 from .scanner import SkillScanner
 
@@ -58,7 +60,9 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "BaseAnalyzer",
     "BlockedSkillRecord",
+    "AstBehaviorAnalyzer",
     "Finding",
+    "PackageAnalyzer",
     "PatternAnalyzer",
     "ScanPolicy",
     "ScanResult",
@@ -239,6 +243,7 @@ _scanner_lock = threading.Lock()
 _scan_executor: futures.ThreadPoolExecutor | None = None
 _scan_executor_workers: int | None = None
 _scan_executor_slots: threading.BoundedSemaphore | None = None
+_scan_executor_pid: int | None = None
 _scan_executor_lock = threading.Lock()
 
 
@@ -270,12 +275,27 @@ def _get_scan_executor() -> tuple[
     threading.BoundedSemaphore,
 ]:
     """Return a shared, bounded executor for blocking scan work."""
-    global _scan_executor, _scan_executor_workers, _scan_executor_slots
+    global _scan_executor, _scan_executor_pid, _scan_executor_slots
+    global _scan_executor_workers
     workers = _configured_scan_executor_workers()
-    if _scan_executor is None or _scan_executor_workers != workers:
+    current_pid = os.getpid()
+    executor_stale = (
+        _scan_executor is None
+        or _scan_executor_workers != workers
+        or _scan_executor_pid != current_pid
+    )
+    if executor_stale:
         with _scan_executor_lock:
-            if _scan_executor is None or _scan_executor_workers != workers:
-                if _scan_executor is not None:
+            executor_stale = (
+                _scan_executor is None
+                or _scan_executor_workers != workers
+                or _scan_executor_pid != current_pid
+            )
+            if executor_stale:
+                if (
+                    _scan_executor is not None
+                    and _scan_executor_pid == current_pid
+                ):
                     _scan_executor.shutdown(
                         wait=False,
                         cancel_futures=True,
@@ -284,6 +304,7 @@ def _get_scan_executor() -> tuple[
                     max_workers=workers,
                 )
                 _scan_executor_workers = workers
+                _scan_executor_pid = current_pid
                 _scan_executor_slots = threading.BoundedSemaphore(workers)
     assert _scan_executor is not None
     assert _scan_executor_slots is not None

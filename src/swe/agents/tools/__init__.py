@@ -28,6 +28,14 @@ from .get_current_time import get_current_time
 from .copy_file_to_static import copy_file_to_static
 from .update_task_progress import update_task_progress
 from .emit_wplus_sop_event import emit_wplus_sop_event
+from .planning import ask_plan_clarification, create_submit_proposed_plan_tool
+from .subagent_background import (
+    build_background_subagent_scope,
+    create_background_subagent_tools,
+    get_default_background_subagent_supervisor,
+    has_explicit_subagent_run_id,
+    has_subagent_intent,
+)
 
 __all__ = [
     "execute_python_code",
@@ -50,4 +58,11 @@ __all__ = [
     "copy_file_to_static",
     "update_task_progress",
     "emit_wplus_sop_event",
+    "ask_plan_clarification",
+    "create_submit_proposed_plan_tool",
+    "build_background_subagent_scope",
+    "create_background_subagent_tools",
+    "get_default_background_subagent_supervisor",
+    "has_explicit_subagent_run_id",
+    "has_subagent_intent",
 ]

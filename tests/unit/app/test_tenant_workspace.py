@@ -216,6 +216,41 @@ class TestTenantWorkspaceHelpers:
         )
 
     @pytest.mark.asyncio
+    async def test_dispatch_returns_retryable_503_for_bootstrap_unavailable(
+        self,
+    ):
+        """Lock/recovery failures expose a stable retryable HTTP contract."""
+        from swe.app.middleware.tenant_workspace import (
+            TenantWorkspaceMiddleware,
+        )
+        from swe.app.workspace.bootstrap_state import (
+            TenantBootstrapUnavailable,
+        )
+
+        request = MagicMock(spec=Request)
+        request.method = "GET"
+        request.state = MagicMock()
+        request.state.tenant_id = "tenant-a"
+        request.state.source_id = None
+        request.state.scope_id = None
+        request.url = MagicMock()
+        request.url.path = "/api/test"
+        middleware = TenantWorkspaceMiddleware(app=MagicMock())
+        middleware._get_workspace = AsyncMock(
+            side_effect=TenantBootstrapUnavailable("locked"),
+        )
+
+        async def call_next(_request):
+            return Response(content=b"OK", status_code=200)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await middleware.dispatch(request, call_next)
+
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.detail == "Tenant bootstrap unavailable"
+        assert exc_info.value.headers == {"Retry-After": "2"}
+
+    @pytest.mark.asyncio
     async def test_dispatch_allows_public_static_without_tenant_context(self):
         """Public static routes should bypass workspace requirements."""
         from swe.app.middleware.tenant_workspace import (

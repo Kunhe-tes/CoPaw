@@ -1,11 +1,15 @@
 import { Empty, Spin, Tooltip, Typography } from "antd";
 import {
+  DeleteOutlined,
   FileOutlined,
   FolderOutlined,
   LinkOutlined,
   LoadingOutlined,
 } from "@ant-design/icons";
-import type { FileManagerDirectoryListing, FileManagerItem } from "@/api/modules/chat";
+import type {
+  FileManagerDirectoryListing,
+  FileManagerItem,
+} from "@/api/modules/chat";
 import { getFileIcon } from "@/components/agentscope-chat/FilePreviewModal/fileUtils";
 import styles from "./index.module.less";
 
@@ -17,6 +21,7 @@ export interface FileColumnProps {
   error?: string | null;
   onRetry?: () => void;
   onSelect: (entry: FileManagerItem) => void;
+  onDeleteDirectory?: (entry: FileManagerItem) => void;
   onLoadMore?: () => void;
 }
 
@@ -41,6 +46,7 @@ export default function FileColumn({
   error,
   onRetry,
   onSelect,
+  onDeleteDirectory,
   onLoadMore,
 }: FileColumnProps) {
   const handleScroll = (event: React.UIEvent<HTMLDivElement>) => {
@@ -74,35 +80,71 @@ export default function FileColumn({
           </button>
         </div>
       ) : loading && !directory ? (
-        <div className={styles.statePanel}><Spin /></div>
+        <div className={styles.statePanel}>
+          <Spin />
+        </div>
       ) : directory?.items.length ? (
         <div className={styles.fileRows}>
           {directory.items.map((entry) => {
             const selected = selectedPath === entry.path;
             return (
-              <button
+              <div
                 key={`${entry.kind}:${entry.path}`}
-                type="button"
-                className={`${styles.fileRow} ${selected ? styles.selected : ""}`}
-                aria-pressed={selected}
-                onClick={() => onSelect(entry)}
+                className={`${styles.fileRow} ${
+                  selected ? styles.selected : ""
+                }`}
               >
-                <span className={styles.entryIcon} aria-hidden="true">{entryIcon(entry)}</span>
-                <span className={styles.entryBody}>
-                  <Tooltip title={entry.name} mouseEnterDelay={0.5}>
-                    <Typography.Text ellipsis className={styles.entryName}>{entry.name}</Typography.Text>
-                  </Tooltip>
-                  <span className={styles.entryMeta}>
-                    {entry.kind === "symlink" ? "受限链接" : formattedTime(entry.modified_at)}
+                <button
+                  type="button"
+                  className={styles.entrySelect}
+                  aria-pressed={selected}
+                  onClick={() => onSelect(entry)}
+                >
+                  <span className={styles.entryIcon} aria-hidden="true">
+                    {entryIcon(entry)}
                   </span>
-                </span>
-              </button>
+                  <span className={styles.entryBody}>
+                    <Tooltip title={entry.name} mouseEnterDelay={0.5}>
+                      <Typography.Text ellipsis className={styles.entryName}>
+                        {entry.name}
+                      </Typography.Text>
+                    </Tooltip>
+                    <span className={styles.entryMeta}>
+                      {entry.kind === "symlink"
+                        ? "受限链接"
+                        : formattedTime(entry.modified_at)}
+                    </span>
+                  </span>
+                </button>
+                {entry.kind === "directory" &&
+                  entry.capabilities.archive &&
+                  onDeleteDirectory && (
+                    <Tooltip title="永久删除目录">
+                      <button
+                        type="button"
+                        className={styles.deleteDirectoryButton}
+                        aria-label={`永久删除目录 ${entry.name}`}
+                        onClick={() => onDeleteDirectory(entry)}
+                      >
+                        <DeleteOutlined />
+                      </button>
+                    </Tooltip>
+                  )}
+              </div>
             );
           })}
-          {loading && <div className={styles.loadMore}><LoadingOutlined /> 正在加载更多…</div>}
+          {loading && (
+            <div className={styles.loadMore}>
+              <LoadingOutlined /> 正在加载更多…
+            </div>
+          )}
         </div>
       ) : directory ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="此目录为空" className={styles.empty} />
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="此目录为空"
+          className={styles.empty}
+        />
       ) : (
         <div className={styles.statePanel}>选择一个目录以浏览内容</div>
       )}

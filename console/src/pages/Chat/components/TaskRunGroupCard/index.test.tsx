@@ -55,6 +55,11 @@ vi.mock("../RuntimeResponseCard", () => ({
       </div>
     );
   },
+  RuntimeResponseFeedbackCard: ({
+    data,
+  }: {
+    data: MockResponseData;
+  }) => <div data-testid={`feedback-${data.id}`}>{data.id}</div>,
 }));
 
 vi.mock("../ApprovalActionCard", () => ({
@@ -341,6 +346,23 @@ describe("TaskRunGroupCard", () => {
     expect(screen.getByTestId("response-step-response")).toBeInTheDocument();
   });
 
+  it("renders feedback after the final task response", () => {
+    const finalMessage = messageWithResponse("final-message", "final-response");
+    finalMessage.cards?.push({
+      code: "ResponseFeedback",
+      data: finalMessage.cards[0]?.data,
+    });
+
+    render(
+      <TaskRunGroupCard
+        data={taskRunData({ finalMessages: [finalMessage] })}
+      />,
+    );
+
+    expect(screen.getByTestId("response-final-response")).toBeInTheDocument();
+    expect(screen.getByTestId("feedback-final-response")).toBeInTheDocument();
+  });
+
   it("keeps historical step messages behind the step toggle after expanding history", () => {
     render(
       <TaskRunGroupCard data={taskRunData({ collapsedByDefault: true })} />,
@@ -377,10 +399,6 @@ describe("TaskRunGroupCard", () => {
     );
 
     expect(screen.getByTestId("response-preview-response")).toBeInTheDocument();
-    expect(screen.getByTestId("response-preview-response")).toHaveAttribute(
-      "data-show-feedback",
-      "true",
-    );
     expect(screen.queryByTestId("response-final-response")).toBeNull();
     expect(screen.queryByTestId("response-step-response")).toBeNull();
     expect(screen.queryByTestId("task-run-steps")).toBeNull();
@@ -391,10 +409,6 @@ describe("TaskRunGroupCard", () => {
     expect(screen.getByTestId("response-step-response")).toBeInTheDocument();
     expect(screen.getAllByTestId("response-preview-response")).toHaveLength(1);
     expect(getStepResponseIds()).toEqual(["response-step-response"]);
-    expect(screen.getByTestId("response-step-response")).toHaveAttribute(
-      "data-show-feedback",
-      "false",
-    );
     expect(screen.getByTestId("response-step-response")).toHaveAttribute(
       "data-output-ids",
       "step-response-message,preview-response-message,final-response-message",

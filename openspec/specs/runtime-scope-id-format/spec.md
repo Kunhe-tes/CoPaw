@@ -83,4 +83,3 @@ token, or session/chat-scoped transient store that isolates by runtime scope.
 - **THEN** the boundary SHALL canonicalize it before lookup or write
 - **AND** the store SHALL behave as if the canonical unprefixed scope had been
   provided originally
-

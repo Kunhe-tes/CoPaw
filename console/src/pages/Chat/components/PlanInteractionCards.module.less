@@ -1,0 +1,603 @@
+.planClarificationCard,
+.planReviewCard {
+  --clarification-card-bg: #ffffff;
+  --clarification-soft-bg: #f7f9fc;
+  --clarification-border: #e5e7eb;
+  --clarification-active-bg: #f7f9fc;
+  --clarification-selected-bg: #eef4ff;
+  --clarification-text: #111827;
+  --clarification-muted: #4b5563;
+  --clarification-soft: #8a94a6;
+  --clarification-accent: #3769fc;
+  --clarification-accent-hover: #2957dc;
+  --clarification-accent-text: #ffffff;
+  --clarification-kbd-bg: #f7f9fc;
+
+  width: min(100%, 818px);
+  margin: 0 auto;
+  padding: 20px;
+  overflow: hidden;
+  border: 1px solid var(--clarification-border);
+  border-radius: 12px;
+  outline: none;
+  background: var(--clarification-card-bg);
+  box-shadow: 0 1px 2px rgba(29, 36, 51, 0.05);
+  color: var(--clarification-text);
+  animation: clarification-enter 160ms ease-out both;
+}
+
+.planClarificationCard:focus-visible,
+.planReviewCard:focus-within {
+  box-shadow:
+    0 0 0 2px rgba(55, 105, 252, 0.16),
+    0 1px 2px rgba(29, 36, 51, 0.05);
+}
+
+.planClarificationCard {
+  padding: 16px;
+}
+
+.planReviewActiveCard {
+  display: flex;
+  height: auto;
+  min-height: 0;
+  max-height: min(560px, 62vh);
+  flex-direction: column;
+}
+
+.cardHeader,
+.reviewHeader {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 16px;
+}
+
+.cardHeader {
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
+.cardHeading,
+.reviewHeading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.cardHeading strong,
+.reviewHeading strong {
+  display: block;
+  overflow: hidden;
+  color: var(--clarification-text);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 24px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cardHeading strong {
+  font-size: 16px;
+  line-height: 22px;
+}
+
+.cardHeading span {
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: var(--clarification-selected-bg);
+  color: var(--clarification-accent);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 20px;
+  padding: 0 8px;
+}
+
+.cardPager {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  color: var(--clarification-soft);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 24px;
+  user-select: none;
+}
+
+.cardPager button {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  place-items: center;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cardPager button:hover:not(:disabled),
+.cardPager button:focus-visible:not(:disabled) {
+  background: var(--clarification-active-bg);
+  color: var(--clarification-text);
+}
+
+.cardPager button:focus-visible:not(:disabled),
+.reviewSecondaryButton:focus-visible:not(:disabled),
+.dismissButton:focus-visible:not(:disabled),
+.continueButton:focus-visible:not(:disabled) {
+  box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.24);
+}
+
+.cardPager button:disabled {
+  cursor: default;
+  opacity: 0.4;
+}
+
+.fieldDescription {
+  margin: -8px 0 12px;
+  color: var(--clarification-muted);
+  font-size: 12px;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.cardStage {
+  min-height: 36px;
+}
+
+.choiceOptionsViewport {
+  display: flex;
+  max-height: 244px;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-color: rgba(138, 148, 166, 0.36) transparent;
+  scrollbar-width: thin;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar {
+  width: 5px;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.choiceOptionsViewport::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(138, 148, 166, 0.36);
+}
+
+.choiceOptionsViewport + .textArea,
+.choiceOptionsViewport + .customFieldInput {
+  margin-top: 10px;
+}
+
+.optionRow {
+  display: flex;
+  width: 100%;
+  min-height: 44px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--clarification-border);
+  border-radius: 8px;
+  outline: none;
+  background: var(--clarification-card-bg);
+  color: var(--clarification-muted);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease;
+}
+
+.optionRow:hover {
+  border-color: #d0d7e2;
+  background: var(--clarification-active-bg);
+  color: var(--clarification-text);
+}
+
+.optionRowFocused,
+.optionRow:focus-visible {
+  border-color: var(--clarification-accent);
+  box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.18);
+  color: var(--clarification-text);
+}
+
+.optionRowSelected {
+  border-color: var(--clarification-accent);
+  background: var(--clarification-selected-bg);
+  color: var(--clarification-text);
+}
+
+.optionRowSelected .optionLabel {
+  font-weight: 600;
+}
+
+.optionNumber {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 6px;
+  place-items: center;
+  background: var(--clarification-soft-bg);
+  color: var(--clarification-muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.optionRowSelected .optionNumber {
+  background: #dceaff;
+  color: var(--clarification-accent);
+}
+
+.optionLabel {
+  min-width: 0;
+  flex: 1;
+  overflow: visible;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+  word-break: break-word;
+}
+
+.optionCheck {
+  display: inline-grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 50%;
+  place-items: center;
+  background: var(--clarification-accent);
+  color: var(--clarification-accent-text);
+}
+
+.textField,
+.textArea {
+  width: 100%;
+  border: 1px solid var(--clarification-border);
+  border-radius: 8px;
+  outline: none;
+  background: var(--clarification-card-bg);
+  color: var(--clarification-text);
+  font: inherit;
+  font-size: 14px;
+  line-height: 20px;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.textField {
+  height: 36px;
+  padding: 0 10px;
+}
+
+.customFieldInput {
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.textArea {
+  min-height: 64px;
+  max-height: 120px;
+  padding: 9px 10px;
+  resize: vertical;
+}
+
+.textField::placeholder,
+.textArea::placeholder {
+  color: var(--clarification-soft);
+}
+
+.textField:focus,
+.textArea:focus {
+  border-color: var(--clarification-accent);
+  box-shadow: 0 0 0 2px rgba(55, 105, 252, 0.16);
+}
+
+.cardFooter {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--clarification-border);
+}
+
+.reviewActions {
+  display: flex;
+  min-height: 36px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 16px;
+  padding-top: 16px;
+  border-top: 1px solid var(--clarification-border);
+}
+
+.keyboardHint {
+  margin: 0;
+  color: var(--clarification-soft);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.cardActions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.dismissButton,
+.continueButton,
+.reviewSecondaryButton,
+.reviewPrimaryButton {
+  display: inline-flex;
+  height: 36px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background-color 160ms ease,
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    color 160ms ease,
+    opacity 160ms ease;
+}
+
+.dismissButton {
+  gap: 6px;
+  padding: 0 12px;
+  border-color: var(--clarification-border);
+  background: var(--clarification-card-bg);
+  color: var(--clarification-muted);
+}
+
+.dismissButton:hover:not(:disabled) {
+  border-color: #d0d7e2;
+  background: var(--clarification-active-bg);
+  color: var(--clarification-text);
+}
+
+.dismissButton kbd {
+  min-width: 28px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--clarification-kbd-bg);
+  color: var(--clarification-soft);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 20px;
+}
+
+.continueButton,
+.reviewPrimaryButton {
+  min-width: 96px;
+  gap: 8px;
+  padding: 0 15px;
+  border-color: var(--clarification-accent);
+  background: var(--clarification-accent);
+  box-shadow: 0 1px 2px rgba(41, 87, 220, 0.2);
+  color: var(--clarification-accent-text);
+}
+
+.continueButton:hover:not(:disabled),
+.reviewPrimaryButton:hover:not(:disabled),
+.continueButton:focus-visible:not(:disabled),
+.reviewPrimaryButton:focus-visible:not(:disabled) {
+  background: var(--clarification-accent-hover);
+}
+
+.reviewSecondaryButton {
+  padding: 0 10px;
+  background: transparent;
+  color: var(--clarification-muted);
+}
+
+.reviewSecondaryButton:hover:not(:disabled),
+.reviewSecondaryButton:focus-visible:not(:disabled) {
+  background: var(--clarification-active-bg);
+  color: var(--clarification-text);
+}
+
+.dismissButton:disabled,
+.continueButton:disabled,
+.reviewSecondaryButton:disabled,
+.reviewPrimaryButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.reviewContent {
+  display: grid;
+  min-height: 0;
+  gap: 12px;
+}
+
+.planReviewActiveCard .reviewContent {
+  overflow-y: auto;
+  padding-right: 2px;
+}
+
+.reviewStatus {
+  margin: 4px 0 0;
+  color: var(--clarification-soft);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+}
+
+.reviewSummary {
+  margin: 0;
+  border-left: 3px solid var(--clarification-accent);
+  border-radius: 7px;
+  background: var(--clarification-soft-bg);
+  color: var(--clarification-muted);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 21px;
+  overflow-wrap: anywhere;
+  padding: 12px;
+  word-break: break-word;
+}
+
+.reviewSection {
+  border: 1px solid var(--clarification-border);
+  border-radius: 8px;
+  background: var(--clarification-card-bg);
+  padding: 12px;
+}
+
+.reviewSection h4 {
+  margin: 0 0 8px;
+  color: var(--clarification-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.reviewSection ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-inline-start: 18px;
+}
+
+.reviewSection li,
+.reviewFeedbackSummary {
+  color: var(--clarification-muted);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 21px;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.reviewFeedbackSummary {
+  margin: 0;
+}
+
+.reviewActions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+@keyframes clarification-enter {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.997);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@media (max-width: 768px) {
+  .planClarificationCard,
+  .planReviewCard {
+    padding: 16px;
+    border-radius: 10px;
+  }
+
+  .cardHeader,
+  .reviewHeader {
+    gap: 10px;
+    padding-bottom: 12px;
+  }
+
+  .cardHeading strong,
+  .reviewHeading strong {
+    font-size: 16px;
+    line-height: 22px;
+  }
+
+  .cardFooter {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .cardActions,
+  .reviewActions {
+    width: 100%;
+  }
+
+  .reviewActions {
+    justify-content: flex-end;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .planClarificationCard,
+  .planReviewCard,
+  .optionRow,
+  .textField,
+  .textArea,
+  .dismissButton,
+  .continueButton,
+  .reviewSecondaryButton,
+  .reviewPrimaryButton {
+    animation: none;
+    transition: none;
+  }
+}
+
+:global(.dark-mode) {
+  .planClarificationCard,
+  .planReviewCard {
+    --clarification-card-bg: #182231;
+    --clarification-soft-bg: #1e2d40;
+    --clarification-border: #2c4058;
+    --clarification-active-bg: #203249;
+    --clarification-selected-bg: #17385f;
+    --clarification-text: #e6f0ff;
+    --clarification-muted: #b5c4d5;
+    --clarification-soft: #8da0b6;
+    --clarification-accent: #5aa2ff;
+    --clarification-accent-hover: #82bbff;
+    --clarification-accent-text: #081827;
+    --clarification-kbd-bg: #24364b;
+
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.16);
+  }
+
+  .optionRowSelected .optionNumber {
+    background: #244b7a;
+  }
+
+  .dismissButton {
+    border-color: var(--clarification-border);
+    background: var(--clarification-card-bg);
+  }
+}

@@ -15,6 +15,11 @@ import {
   emitTaskProgressUpdate,
   extractTaskProgress,
 } from "@/pages/Chat/taskProgressEvents";
+import { emitSubAgentRunsRefreshIfPresent } from "@/pages/Chat/subAgentRunEvents";
+import {
+  extractPlanInteractionCard,
+  type ChatRuntimeResponseCardData,
+} from "@/pages/Chat/messageMeta";
 import {
   isActiveChatRequestOwner,
   type ChatRequestOwner,
@@ -65,8 +70,8 @@ function getUserVisibleErrorMessage(error: unknown) {
   return error instanceof Error
     ? error.message
     : typeof error === "string"
-      ? error
-      : JSON.stringify(error);
+    ? error
+    : JSON.stringify(error);
 }
 
 function getSessionTitlePatch(data: unknown) {
@@ -129,8 +134,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     hasMessage = () => true,
     getCurrentSessionId,
     onFinish,
-  } =
-    options;
+  } = options;
   const apiOptions = useChatAnywhereOptions((v) => v.api);
 
   // 使用 ref 保存最新的 apiOptions，避免闭包陷阱
@@ -199,7 +203,13 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
       onFinish(owner);
     },
-    [currentQARef, getResponseHeaderTimestamp, hasMessage, onFinish, updateMessage],
+    [
+      currentQARef,
+      getResponseHeaderTimestamp,
+      hasMessage,
+      onFinish,
+      updateMessage,
+    ],
   );
 
   const mockRequest = useCallback(async (mockdata) => {
@@ -230,14 +240,16 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     async (response: Response, owner: ChatRequestOwner) => {
       const responseHeaderTimestamp = getResponseHeaderTimestamp();
       const isOwnerActive = () =>
-        isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, owner);
+        isActiveChatRequestOwner(
+          currentQARef.current.activeRequestOwner,
+          owner,
+        );
       const isLiveResponseMounted = () => {
         const responseId = currentQARef.current.response?.id;
         return Boolean(responseId && hasMessage(responseId));
       };
       const buildResponseCard = () => {
-        const responseData = currentQARef.current.response?.cards?.[0]
-          ?.data as
+        const responseData = currentQARef.current.response?.cards?.[0]?.data as
           | {
               id?: string;
               status?: AgentScopeRuntimeRunStatus;
@@ -253,7 +265,11 @@ export default function useChatRequest(options: UseChatRequestOptions) {
         });
 
         if (responseData) {
-          builder.handle(responseData as never);
+          builder.handle({
+            ...responseData,
+            object: "response",
+            output: responseData.output ?? [],
+          } as never);
         }
 
         return builder;
@@ -333,7 +349,8 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
         if (metadata && typeof metadata === "object") {
           // 路径1: metadata.approval_action (直接)
-          const directAction = (metadata as Record<string, unknown>).approval_action;
+          const directAction = (metadata as Record<string, unknown>)
+            .approval_action;
           if (directAction && typeof directAction === "object") {
             return directAction;
           }
@@ -341,7 +358,8 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           // 路径2: metadata.metadata.approval_action (嵌套)
           const nestedMetadata = (metadata as Record<string, unknown>).metadata;
           if (nestedMetadata && typeof nestedMetadata === "object") {
-            const nestedAction = (nestedMetadata as Record<string, unknown>).approval_action;
+            const nestedAction = (nestedMetadata as Record<string, unknown>)
+              .approval_action;
             if (nestedAction && typeof nestedAction === "object") {
               return nestedAction;
             }
@@ -353,14 +371,17 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           for (const msg of data.output) {
             const msgMetadata = getMetadata(msg);
             if (msgMetadata && typeof msgMetadata === "object") {
-              const directAction = (msgMetadata as Record<string, unknown>).approval_action;
+              const directAction = (msgMetadata as Record<string, unknown>)
+                .approval_action;
               if (directAction && typeof directAction === "object") {
                 return directAction;
               }
 
-              const nestedMetadata = (msgMetadata as Record<string, unknown>).metadata;
+              const nestedMetadata = (msgMetadata as Record<string, unknown>)
+                .metadata;
               if (nestedMetadata && typeof nestedMetadata === "object") {
-                const nestedAction = (nestedMetadata as Record<string, unknown>).approval_action;
+                const nestedAction = (nestedMetadata as Record<string, unknown>)
+                  .approval_action;
                 if (nestedAction && typeof nestedAction === "object") {
                   return nestedAction;
                 }
@@ -447,6 +468,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           if (streamedTaskProgress !== undefined) {
             emitTaskProgressUpdate(streamedTaskProgress, owner);
           }
+          emitSubAgentRunsRefreshIfPresent(chunkData);
           const res = agentScopeRuntimeResponseBuilder.handle(chunkData);
           const isTerminalResponse =
             res.status === AgentScopeRuntimeRunStatus.Completed ||
@@ -466,10 +488,20 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             isOwnerActive() &&
             isLiveResponseMounted()
           ) {
+            const planInteractionCard =
+              extractPlanInteractionCard(chunkData) ||
+              extractPlanInteractionCard(res);
+            const responseData = {
+              ...withResponseHeaderMeta(res, responseHeaderTimestamp),
+              planReviewCard:
+                planInteractionCard?.card_type === "plan_review"
+                  ? planInteractionCard
+                  : undefined,
+            } as ChatRuntimeResponseCardData;
             const cards: any[] = [
               {
                 code: "AgentScopeRuntimeResponseCard",
-                data: withResponseHeaderMeta(res, responseHeaderTimestamp),
+                data: responseData,
               },
             ];
 
@@ -480,6 +512,20 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               cards.push({
                 code: "ApprovalAction",
                 data: approvalAction,
+              });
+            }
+
+            if (planInteractionCard) {
+              cards.push({
+                code: "PlanInteraction",
+                data: planInteractionCard,
+              });
+            }
+
+            if (res.status === AgentScopeRuntimeRunStatus.Completed) {
+              cards.push({
+                code: "ResponseFeedback",
+                data: responseData,
               });
             }
 
@@ -567,7 +613,10 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       } catch (error) {
         if (
           !isAbortLikeError(error) &&
-          isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, requestOwner)
+          isActiveChatRequestOwner(
+            currentQARef.current.activeRequestOwner,
+            requestOwner,
+          )
         ) {
           failActiveResponse(requestOwner, error);
         }
@@ -603,7 +652,10 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       } catch (error) {
         if (
           !isAbortLikeError(error) &&
-          isActiveChatRequestOwner(currentQARef.current.activeRequestOwner, requestOwner)
+          isActiveChatRequestOwner(
+            currentQARef.current.activeRequestOwner,
+            requestOwner,
+          )
         ) {
           failActiveResponse(requestOwner, error);
         }
@@ -670,7 +722,12 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     }
 
     emitTaskProgressUpdate(null, activeOwner);
-  }, [currentQARef, getCurrentSessionId, getResponseHeaderTimestamp, updateMessage]);
+  }, [
+    currentQARef,
+    getCurrentSessionId,
+    getResponseHeaderTimestamp,
+    updateMessage,
+  ]);
 
   return { request, reconnect, mockRequest, cancelActiveRequest };
 }

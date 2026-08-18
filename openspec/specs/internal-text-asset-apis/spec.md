@@ -79,4 +79,3 @@ The system SHALL keep the internal endpoints under the existing internal router 
 #### Scenario: External route remains callable without internal header
 - **WHEN** a caller invokes either external endpoint without `X-Internal-Token`
 - **THEN** the system SHALL process the request using the same validation and file-publishing rules as the internal endpoint
-

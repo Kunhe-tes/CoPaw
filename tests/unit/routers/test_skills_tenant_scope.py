@@ -66,12 +66,26 @@ skills_router = _load_module(
 )
 
 
+class _FakeTenantWorkspacePool:
+    async def ensure_bootstrap(
+        self,
+        _tenant_id: str,
+        *,
+        source_id: str | None = None,
+    ) -> None:
+        del source_id
+
+
 def _request(
     tenant_id: str | None = "tenant-a",
     source_id: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        state=SimpleNamespace(tenant_id=tenant_id, source_id=source_id),
+        state=SimpleNamespace(
+            tenant_id=tenant_id,
+            source_id=source_id,
+            tenant_workspace_pool=_FakeTenantWorkspacePool(),
+        ),
     )
 
 
@@ -1355,9 +1369,20 @@ def test_broadcast_pool_skills_bootstraps_missing_tenant(
         SimpleNamespace(TenantInitializer=FakeInitializer),
     )
 
+    request = _request("tenant-a", "ruice")
+
+    class BootstrapPool:
+        async def ensure_bootstrap(self, tenant_id, *, source_id=None):
+            FakeInitializer(
+                tmp_path,
+                tenant_id,
+                source_id,
+            ).ensure_seeded_bootstrap()
+
+    request.state.tenant_workspace_pool = BootstrapPool()
     result = asyncio.run(
         skills_router.broadcast_pool_skills_to_default_agents(
-            _request("tenant-a", "ruice"),
+            request,
             skills_router.BroadcastDefaultAgentsRequest(
                 skill_names=["guidance"],
                 target_tenant_ids=["tenant-new"],
@@ -1569,9 +1594,20 @@ def test_broadcast_pool_skills_reports_partial_success(
     reconcile_workspace_manifest(ok_workspace)
     reconcile_pool_manifest(working_dir=tmp_path / "tenant-ok")
 
+    request = _request("tenant-a")
+
+    class BootstrapPool:
+        async def ensure_bootstrap(self, tenant_id, *, source_id=None):
+            FakeInitializer(
+                tmp_path,
+                tenant_id,
+                source_id,
+            ).ensure_seeded_bootstrap()
+
+    request.state.tenant_workspace_pool = BootstrapPool()
     result = asyncio.run(
         skills_router.broadcast_pool_skills_to_default_agents(
-            _request("tenant-a"),
+            request,
             skills_router.BroadcastDefaultAgentsRequest(
                 skill_names=["guidance"],
                 target_tenant_ids=["tenant-ok", "tenant-fail"],

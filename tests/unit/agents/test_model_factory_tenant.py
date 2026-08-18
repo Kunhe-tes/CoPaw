@@ -16,6 +16,10 @@ from swe.agents.model_factory import (
     _get_formatter_for_chat_model,
     _create_file_block_support_formatter,
 )
+from swe.agents.hook_runtime.messages import (
+    build_hook_additional_context_msg,
+)
+from swe.agents.react_agent import _build_accepted_plan_tool_exchange
 
 
 class TestFormatterMapping:
@@ -53,6 +57,228 @@ class TestFileBlockSupportFormatter:
         )
         assert formatter_class is not None
         assert "FileBlockSupport" in formatter_class.__name__
+
+    @pytest.mark.asyncio
+    async def test_openai_formatter_demotes_later_generic_system_role(self):
+        """OpenAI 兼容后端应降级普通中段 system 消息。"""
+        from agentscope.formatter import OpenAIChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+        formatter = formatter_class()
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                Msg(name="user", role="user", content="hello"),
+                Msg(
+                    name="system",
+                    role="system",
+                    content="intermediate system context",
+                ),
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "user",
+            "user",
+            "user",
+        ]
+        assert messages[2]["content"][0]["text"] == (
+            "intermediate system context"
+        )
+
+    @pytest.mark.asyncio
+    async def test_anthropic_formatter_demotes_later_generic_system_role(
+        self,
+    ):
+        """Anthropic 后端应降级普通中段 system 消息。"""
+        from agentscope.formatter import AnthropicChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            AnthropicChatFormatter,
+        )
+        formatter = formatter_class()
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                Msg(name="user", role="user", content="hello"),
+                Msg(
+                    name="system",
+                    role="system",
+                    content="intermediate system context",
+                ),
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "user",
+            "user",
+            "user",
+        ]
+        assert messages[2]["content"][0]["text"] == (
+            "intermediate system context"
+        )
+
+    @pytest.mark.asyncio
+    async def test_openai_formatter_preserves_later_hook_system_role(self):
+        """OpenAI 兼容后端应保留持久化 hook system 消息。"""
+        from agentscope.formatter import OpenAIChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+        formatter = formatter_class()
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                Msg(name="user", role="user", content="hello"),
+                build_hook_additional_context_msg(
+                    "[Hook additional context]\nremember",
+                ),
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "user",
+            "system",
+            "user",
+        ]
+        assert messages[2]["content"][0]["text"] == (
+            "[Hook additional context]\nremember"
+        )
+
+    @pytest.mark.asyncio
+    async def test_anthropic_formatter_merges_later_hook_system_role(
+        self,
+    ):
+        """Anthropic 后端应把持久化 hook system 合并到首条 system。"""
+        from agentscope.formatter import AnthropicChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            AnthropicChatFormatter,
+        )
+        formatter = formatter_class()
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                Msg(name="user", role="user", content="hello"),
+                build_hook_additional_context_msg(
+                    "[Hook additional context]\nremember",
+                ),
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "user",
+            "user",
+        ]
+        assert messages[0]["content"][-1]["text"] == (
+            "[Hook additional context]\nremember"
+        )
+        assert all(message["role"] != "system" for message in messages[1:])
+
+    @pytest.mark.asyncio
+    async def test_openai_formatter_preserves_internal_accepted_plan_exchange(
+        self,
+    ):
+        """accepted plan 内部 tool exchange 应保持 OpenAI 协议配对。"""
+        from agentscope.formatter import OpenAIChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            OpenAIChatFormatter,
+        )
+        formatter = formatter_class()
+        accepted_plan_msgs = _build_accepted_plan_tool_exchange(
+            {
+                "turn_id": "turn-1",
+                "plan_mode_enabled": False,
+                "accepted_plan_source": "server_plan_store",
+                "accepted_plan": {"plan_id": "plan-123"},
+            },
+        )
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                *accepted_plan_msgs,
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "assistant",
+            "tool",
+            "user",
+        ]
+        tool_call = messages[1]["tool_calls"][0]
+        assert tool_call["function"]["name"] == "accepted_plan_context"
+        assert messages[2]["tool_call_id"] == tool_call["id"]
+        assert "Accepted Plan Execution Context" in messages[2]["content"]
+        assert "developer" not in {message["role"] for message in messages}
+
+    @pytest.mark.asyncio
+    async def test_anthropic_formatter_preserves_internal_accepted_plan_exchange(
+        self,
+    ):
+        """accepted plan 内部 tool exchange 应保持 Anthropic 协议配对。"""
+        from agentscope.formatter import AnthropicChatFormatter
+        from agentscope.message import Msg
+
+        formatter_class = _create_file_block_support_formatter(
+            AnthropicChatFormatter,
+        )
+        formatter = formatter_class()
+        accepted_plan_msgs = _build_accepted_plan_tool_exchange(
+            {
+                "turn_id": "turn-1",
+                "plan_mode_enabled": False,
+                "accepted_plan_source": "server_plan_store",
+                "accepted_plan": {"plan_id": "plan-123"},
+            },
+        )
+
+        messages = await formatter._format(
+            [
+                Msg(name="system", role="system", content="base prompt"),
+                *accepted_plan_msgs,
+                Msg(name="user", role="user", content="next turn"),
+            ],
+        )
+
+        assert [message["role"] for message in messages] == [
+            "system",
+            "assistant",
+            "user",
+            "user",
+        ]
+        assert messages[1]["content"][0]["name"] == "accepted_plan_context"
+        assert (
+            messages[2]["content"][0]["tool_use_id"]
+            == messages[1]["content"][0]["id"]
+        )
+        assert "Accepted Plan Execution Context" in (
+            messages[2]["content"][0]["content"][0]["text"]
+        )
+        assert "developer" not in {message["role"] for message in messages}
 
     def test_formatter_supports_structured_failed_tool_result(self):
         """Structured failed tool outputs remain readable to the model."""
@@ -667,4 +893,91 @@ class TestScopedModelSlotOverride:
         mock_manager.get_provider.assert_called_once_with("anthropic")
         override_provider.get_chat_model_instance.assert_called_once_with(
             "claude-3-7-sonnet",
+        )
+
+    def test_private_provider_override_does_not_read_current_provider(
+        self,
+    ):
+        """A frozen worker provider wins over mutable ProviderManager data."""
+        from swe.agents.model_factory import create_model_and_formatter
+        from swe.providers.models import ModelSlotConfig
+
+        with (
+            patch("swe.agents.model_factory.ProviderManager") as manager_cls,
+            patch("swe.agents.model_factory._create_formatter_instance"),
+            patch(
+                "swe.agents.model_factory.TokenRecordingModelWrapper",
+                side_effect=lambda _provider_id, model: model,
+            ),
+            patch(
+                "swe.agents.model_factory.RetryChatModel",
+                side_effect=lambda model, **_kwargs: model,
+            ),
+        ):
+            manager = MagicMock()
+            manager_cls.get_instance.return_value = manager
+            manager_cls.ensure_tenant_provider_storage = MagicMock()
+            frozen_provider = MagicMock()
+            frozen_provider.get_chat_model_instance.return_value = MagicMock()
+
+            create_model_and_formatter(
+                model_slot_override=ModelSlotConfig(
+                    provider_id="frozen",
+                    model="frozen-model",
+                ),
+                model_provider_override=frozen_provider,
+            )
+
+        manager.get_provider.assert_not_called()
+        manager_cls.get_instance.assert_not_called()
+        manager_cls.ensure_tenant_provider_storage.assert_not_called()
+        frozen_provider.get_chat_model_instance.assert_called_once_with(
+            "frozen-model",
+        )
+
+    def test_private_selected_model_falls_back_to_frozen_parent(self):
+        """A selected model failure does not consult changed tenant config."""
+        from swe.agents.model_factory import create_model_and_formatter
+        from swe.providers.models import ModelSlotConfig
+
+        with (
+            patch("swe.agents.model_factory.ProviderManager") as manager_cls,
+            patch("swe.agents.model_factory._create_formatter_instance"),
+            patch(
+                "swe.agents.model_factory.TokenRecordingModelWrapper",
+                side_effect=lambda _provider_id, model: model,
+            ),
+            patch(
+                "swe.agents.model_factory.RetryChatModel",
+                side_effect=lambda model, **_kwargs: model,
+            ),
+        ):
+            manager = MagicMock()
+            manager_cls.get_instance.return_value = manager
+            manager_cls.ensure_tenant_provider_storage = MagicMock()
+            selected_provider = MagicMock()
+            selected_provider.get_chat_model_instance.side_effect = ValueError(
+                "selected unavailable",
+            )
+            parent_provider = MagicMock()
+            parent_provider.get_chat_model_instance.return_value = MagicMock()
+
+            create_model_and_formatter(
+                model_slot_override=ModelSlotConfig(
+                    provider_id="selected",
+                    model="selected-model",
+                ),
+                model_provider_override=selected_provider,
+                fallback_model_slot=ModelSlotConfig(
+                    provider_id="parent",
+                    model="parent-model",
+                ),
+                fallback_model_provider=parent_provider,
+            )
+
+        manager.get_provider.assert_not_called()
+        manager_cls.get_instance.assert_not_called()
+        manager_cls.ensure_tenant_provider_storage.assert_not_called()
+        parent_provider.get_chat_model_instance.assert_called_once_with(
+            "parent-model",
         )

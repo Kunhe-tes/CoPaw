@@ -33,6 +33,18 @@ def _service(workspace: Path) -> FileManagerService:
     )
 
 
+def _source_scope_service(
+    workspace: Path,
+    source_scope_base: Path,
+) -> FileManagerService:
+    return FileManagerService(
+        workspace,
+        cursor_secret=b"test-file-manager-secret",
+        source_scope_base_dir=source_scope_base,
+        source_scope_component="tenant-a",
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clear_cursor_secret_cache() -> Generator[None, None, None]:
     file_manager._load_or_create_cursor_secret.cache_clear()
@@ -120,6 +132,126 @@ def test_working_listing_hides_only_sessions_and_governance(
     listing = _service(tmp_path).list_directory(FileManagerRoot.WORKING)
 
     assert [item.name for item in listing.items] == ["notes", ".env"]
+
+
+def test_delete_directory_removes_nested_entries_without_following_symlinks(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "reports"
+    nested = directory / "weekly"
+    outside = tmp_path / "outside"
+    nested.mkdir(parents=True)
+    outside.mkdir()
+    (nested / "report.md").write_text("report", encoding="utf-8")
+    (directory / "outside-link").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+
+    _service(tmp_path).delete_directory("working", "reports")
+
+    assert not directory.exists()
+    assert outside.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("root", "path"),
+    [
+        ("working", ""),
+        ("working", "sessions"),
+        ("conversation", "folder"),
+    ],
+)
+def test_delete_directory_rejects_root_protected_and_read_only_paths(
+    tmp_path: Path,
+    root: str,
+    path: str,
+) -> None:
+    (tmp_path / "sessions" / "folder").mkdir(parents=True)
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).delete_directory(root, path)
+
+
+@pytest.mark.parametrize("path", ["media", "static"])
+def test_delete_directory_rejects_top_level_file_manager_backing_dirs(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    backing_dir = tmp_path / path
+    backing_dir.mkdir()
+    (backing_dir / "existing.txt").write_text("kept", encoding="utf-8")
+
+    with pytest.raises(FileManagerPathError):
+        _service(tmp_path).delete_directory("working", path)
+
+    assert (backing_dir / "existing.txt").read_text(encoding="utf-8") == "kept"
+
+
+@pytest.mark.parametrize("path", ["media", "static"])
+def test_working_listing_disables_archive_for_top_level_backing_dirs(
+    tmp_path: Path,
+    path: str,
+) -> None:
+    (tmp_path / path).mkdir()
+
+    item = _service(tmp_path).list_directory("working").items[0]
+
+    assert item.name == path
+    assert item.capabilities.archive is False
+
+
+def test_source_scope_upload_archives_and_restores_to_tenant_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    source_scope_base = tmp_path / "source-scope"
+    workspace.mkdir()
+    source_scope_base.mkdir()
+    service = _source_scope_service(workspace, source_scope_base)
+
+    uploaded = service.upload_bytes(
+        "source_scope",
+        "",
+        "report.txt",
+        b"root file",
+    )
+    archived = service.archive_file(
+        "source_scope",
+        uploaded.path,
+        actor="test",
+    )
+
+    assert (source_scope_base / "tenant-a").is_dir()
+    assert archived.original_path == "source_scope/report.txt"
+    assert not (source_scope_base / "tenant-a" / "report.txt").exists()
+
+    restored = service.restore_recycle_item(
+        archived.archive_item_id,
+        actor="test",
+    )
+
+    assert restored.original_path == "source_scope/report.txt"
+    assert (source_scope_base / "tenant-a" / "report.txt").read_bytes() == (
+        b"root file"
+    )
+
+
+def test_source_scope_rejects_a_symlinked_tenant_root(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    source_scope_base = tmp_path / "source-scope"
+    outside = tmp_path / "outside"
+    workspace.mkdir()
+    source_scope_base.mkdir()
+    outside.mkdir()
+    (source_scope_base / "tenant-a").symlink_to(
+        outside,
+        target_is_directory=True,
+    )
+    service = _source_scope_service(workspace, source_scope_base)
+
+    with pytest.raises(FileManagerPathError, match="Unable to open directory"):
+        service.list_directory("source_scope")
 
 
 def test_listing_sorts_directories_first_with_case_insensitive_natural_order(
@@ -217,6 +349,72 @@ def test_directory_cursor_reuses_snapshot_and_rejects_changed_directory(
     (tmp_path / "changed.txt").write_text("changed", encoding="utf-8")
     with pytest.raises(FileManagerConflictError, match="refresh and retry"):
         service.list_directory("working", cursor=first.next_cursor)
+
+
+def test_directory_cursor_uses_the_30_second_snapshot_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for index in range(FILE_MANAGER_PAGE_SIZE + 1):
+        (tmp_path / f"item{index:03d}.txt").write_text("x", encoding="utf-8")
+    file_manager._DIRECTORY_SNAPSHOTS.clear()
+    clock = [0.0]
+    monkeypatch.setattr(file_manager.time, "monotonic", lambda: clock[0])
+    try:
+        service = _service(tmp_path)
+        first = service.list_directory("working")
+        assert first.next_cursor is not None
+
+        clock[0] = 29.9
+        second = service.list_directory("working", cursor=first.next_cursor)
+        assert [item.name for item in second.items] == ["item100.txt"]
+
+        clock[0] = 30.0
+        with pytest.raises(
+            FileManagerConflictError,
+            match="refresh and retry",
+        ):
+            service.list_directory("working", cursor=first.next_cursor)
+    finally:
+        file_manager._DIRECTORY_SNAPSHOTS.clear()
+
+
+def test_snapshot_workspace_quota_retains_sixteen_directories(
+    tmp_path: Path,
+) -> None:
+    file_manager._DIRECTORY_SNAPSHOTS.clear()
+    try:
+        service = _service(tmp_path)
+        cursors: dict[str, str] = {}
+        for directory_index in range(17):
+            directory = tmp_path / f"dir{directory_index:02d}"
+            directory.mkdir()
+            for item_index in range(FILE_MANAGER_PAGE_SIZE + 1):
+                (directory / f"item{item_index:03d}.txt").write_text(
+                    "x",
+                    encoding="utf-8",
+                )
+            listing = service.list_directory(
+                "working",
+                directory.name,
+            )
+            assert listing.next_cursor is not None
+            cursors[directory.name] = listing.next_cursor
+
+        with pytest.raises(
+            FileManagerConflictError,
+            match="refresh and retry",
+        ):
+            service.list_directory("working", "dir00", cursor=cursors["dir00"])
+        for directory_index in range(1, 17):
+            listing = service.list_directory(
+                "working",
+                f"dir{directory_index:02d}",
+                cursor=cursors[f"dir{directory_index:02d}"],
+            )
+            assert [item.name for item in listing.items] == ["item100.txt"]
+    finally:
+        file_manager._DIRECTORY_SNAPSHOTS.clear()
 
 
 def test_directory_cursor_rejects_deleted_directory(

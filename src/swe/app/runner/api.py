@@ -3,12 +3,16 @@
 
 from __future__ import annotations
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, ConfigDict
 from agentscope.memory import InMemoryMemory
 
-from .session import SafeJSONSession
+from .session import (
+    SafeJSONSession,
+    _normalize_state_for_load,
+)
 from .manager import ChatManager
 from .models import (
     ChatArchiveMetadata,
@@ -30,6 +34,53 @@ TASK_MESSAGES_STATE_KEY = "task_messages"
 TASK_RUNS_STATE_KEY = "task_runs"
 TASK_RUN_SECTION_STEP = "step"
 TASK_RUN_SECTION_FINAL = "final"
+
+
+class ChatUpdateRequest(BaseModel):
+    """聊天更新请求，允许调用方只提交本次需要修改的字段。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = None
+    name: str | None = None
+    session_id: str | None = None
+    user_id: str | None = None
+    channel: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    meta: dict[str, Any] | None = None
+    status: str | None = None
+
+
+def _merge_chat_update(
+    existing: ChatSpec,
+    patch: ChatUpdateRequest,
+) -> ChatSpec:
+    """将部分更新合并到已有会话，保留调用方没有提交的字段。"""
+    updates = patch.model_dump(exclude_unset=True)
+    merged = existing.model_dump()
+
+    for field_name in (
+        "name",
+        "session_id",
+        "user_id",
+        "channel",
+        "created_at",
+        "updated_at",
+        "status",
+    ):
+        if field_name in updates and updates[field_name] is not None:
+            merged[field_name] = updates[field_name]
+
+    if "meta" in updates:
+        # Plan Mode 只会提交一个 meta 开关，合并可避免覆盖其他会话元数据。
+        incoming_meta = updates["meta"] or {}
+        merged["meta"] = {
+            **(existing.meta or {}),
+            **incoming_meta,
+        }
+
+    return ChatSpec.model_validate(merged)
 
 
 async def _annotate_approval_action_statuses(
@@ -174,7 +225,8 @@ async def _messages_from_memory_state(
         return []
 
     memory = InMemoryMemory()
-    memory.load_state_dict(memory_state, strict=False)
+    normalized_state = _normalize_state_for_load(memory_state)
+    memory.load_state_dict(normalized_state, strict=False)
     memories = await memory.get_memory(prepend_summary=False)
     return agentscope_msg_to_message(memories)
 
@@ -813,14 +865,14 @@ async def get_chat(
 @router.put("/{chat_id}", response_model=ChatSpec)
 async def update_chat(
     chat_id: str,
-    spec: ChatSpec,
+    patch: ChatUpdateRequest,
     mgr: ChatManager = Depends(get_chat_manager),
 ):
     """Update an existing chat.
 
     Args:
         chat_id: Chat UUID
-        spec: Updated chat specification
+        patch: Updated chat fields
         mgr: Chat manager dependency
 
     Returns:
@@ -829,13 +881,12 @@ async def update_chat(
     Raises:
         HTTPException: If chat_id mismatch (400) or not found (404)
     """
-    if spec.id != chat_id:
+    if patch.id is not None and patch.id != chat_id:
         raise HTTPException(
             status_code=400,
             detail="chat_id mismatch",
         )
 
-    # Check if exists
     existing = await mgr.get_chat(chat_id)
     if not existing:
         raise HTTPException(
@@ -843,6 +894,7 @@ async def update_chat(
             detail=f"Chat not found: {chat_id}",
         )
 
+    spec = _merge_chat_update(existing, patch)
     updated = await mgr.update_chat(spec)
     return updated
 
