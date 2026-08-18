@@ -1055,6 +1055,10 @@ _Avoid_: env/header info, arbitrary key, passthrough name
 The **Runtime Invocation Claim** that names the resolved runtime isolation scope for a call, derived from the current tenant and source context when such a scope exists. A **Runtime Scope Claim** complements the logical tenant and source claims; it does not replace either one.
 _Avoid_: tenant id, source id, effective tenant
 
+**Tenant Runtime Environment Variable**:
+A tenant-controlled key/value configured for exactly one **Runtime Request Identity** and supplied only at permitted runtime boundaries. It is not a process environment value, **System Configuration Environment Key**, or **Runtime Invocation Claim**.
+_Avoid_: process env, backend env, global environment variable
+
 **Runtime-Owned Claim Name**:
 A claim name reserved for Swe-issued **Runtime Invocation Claims** at an invocation boundary. A **Runtime-Owned Claim Name** cannot be supplied or overridden by tenant env, tool config, passthrough headers, or handler config.
 _Avoid_: user env key, custom header, configurable claim

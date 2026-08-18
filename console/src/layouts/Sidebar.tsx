@@ -20,7 +20,6 @@ import {
   SparkWifiLine,
   // SparkUserGroupLine,
   SparkDateLine,
-  SparkVoiceChat01Line,
   SparkLocalFileLine,
   SparkModePlazaLine,
   SparkInternetLine,
@@ -164,22 +163,10 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
     },
     // 创作中心
     {
-      key: "workspace",
-      icon: <SparkLocalFileLine size={18} />,
-      path: "/workspace",
-      label: t("nav.workspace"),
-    },
-    {
       key: "my-skills",
       icon: <Wrench size={18} />,
       path: "/my-skills",
       label: t("nav.mySkills"),
-    },
-    {
-      key: "tools",
-      icon: <SparkToolLine size={18} />,
-      path: "/tools",
-      label: t("nav.tools"),
     },
     {
       key: "my-mcp",
@@ -187,7 +174,18 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/my-mcp",
       label: t("nav.myMcp"),
     },
-    { key: "experts", icon: <SearchCheck size={18} />, path: "/experts", label: "专家" },
+    {
+      key: "experts",
+      icon: <SearchCheck size={18} />,
+      path: "/experts",
+      label: t("nav.myExperts"),
+    },
+    {
+      key: "workspace",
+      icon: <SparkLocalFileLine size={18} />,
+      path: "/workspace",
+      label: t("nav.workspace"),
+    },
     // 应用市场
     {
       key: "market",
@@ -215,10 +213,10 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: t("nav.agentConfig"),
     },
     {
-      key: "heartbeat",
-      icon: <SparkVoiceChat01Line size={18} />,
-      path: "/heartbeat",
-      label: t("nav.heartbeat"),
+      key: "tools",
+      icon: <SparkToolLine size={18} />,
+      path: "/tools",
+      label: t("nav.tools"),
     },
     // 系统设置
     {
@@ -362,26 +360,25 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       icon: <PencilLine size={16} />,
       children: [
         {
-          key: "workspace",
-          label: collapsed ? null : t("nav.workspace"),
-          icon: <SparkLocalFileLine size={16} />,
-        },
-        {
           key: "my-skills",
           label: collapsed ? null : t("nav.mySkills"),
           icon: <Wrench size={16} />,
-        },
-        {
-          key: "tools",
-          label: collapsed ? null : t("nav.tools"),
-          icon: <SparkToolLine size={16} />,
         },
         {
           key: "my-mcp",
           label: collapsed ? null : t("nav.myMcp"),
           icon: <Puzzle size={16} />,
         },
-        { key: "experts", label: collapsed ? null : "专家", icon: <SearchCheck size={16} /> },
+        {
+          key: "experts",
+          label: collapsed ? null : t("nav.myExperts"),
+          icon: <SearchCheck size={16} />,
+        },
+        {
+          key: "workspace",
+          label: collapsed ? null : t("nav.workspace"),
+          icon: <SparkLocalFileLine size={16} />,
+        },
       ],
     },
     // 3. 应用市场（单独一级）
@@ -412,14 +409,14 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           icon: <SparkModifyLine size={16} />,
         },
         {
+          key: "tools",
+          label: collapsed ? null : t("nav.tools"),
+          icon: <SparkToolLine size={16} />,
+        },
+        {
           key: "hook-management",
           label: collapsed ? null : t("nav.hookManagement"),
           icon: <ShieldCheck size={16} />,
-        },
-        {
-          key: "heartbeat",
-          label: collapsed ? null : t("nav.heartbeat"),
-          icon: <SparkVoiceChat01Line size={16} />,
         },
       ],
     },
