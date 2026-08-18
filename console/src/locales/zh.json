@@ -43,7 +43,7 @@
     "heartbeat": "心跳",
     "casesManagement": "案例管理",
     "agent": "工作区",
-    "workspace": "文件",
+    "workspace": "个性化",
     "skills": "技能",
     "skillPool": "技能池",
     "tools": "内置工具",
@@ -82,6 +82,7 @@
     "market": "应用市场",
     "mySkills": "我的技能",
     "myMcp": "我的 MCP",
+    "myExperts": "我的专家",
     "systemCheck": "系统自检"
   },
   "systemCheck": {
