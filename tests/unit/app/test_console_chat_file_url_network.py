@@ -6,6 +6,8 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+
 from swe.app.routers import console as console_router
 from swe.app.routers.console import _extract_session_and_payload
 
@@ -22,6 +24,69 @@ def test_extract_session_and_payload_keeps_file_url_network():
     )
 
     assert payload["meta"]["file_url_network"] == "business"
+
+
+def test_extract_session_and_payload_keeps_plan_mode():
+    payload = _extract_session_and_payload(
+        {
+            "channel": "console",
+            "user_id": "alice",
+            "session_id": "chat-1",
+            "input": [],
+            "mode": "plan",
+        },
+    )
+
+    assert payload["meta"]["mode"] == "plan"
+
+
+def test_extract_session_and_payload_keeps_normal_mode():
+    payload = _extract_session_and_payload(
+        {
+            "channel": "console",
+            "user_id": "alice",
+            "session_id": "chat-1",
+            "input": [],
+            "mode": "normal",
+        },
+    )
+
+    assert payload["meta"]["mode"] == "normal"
+
+
+def test_extract_session_and_payload_keeps_agent_request_plan_mode():
+    request = AgentRequest.model_validate(
+        {
+            "input": [
+                {
+                    "role": "user",
+                    "type": "message",
+                    "content": [{"type": "text", "text": "plan this"}],
+                },
+            ],
+            "session_id": "chat-1",
+            "user_id": "alice",
+            "mode": "plan",
+        },
+    )
+
+    payload = _extract_session_and_payload(request)
+
+    assert payload["meta"]["mode"] == "plan"
+
+
+def test_extract_session_and_payload_drops_unsupported_mode():
+    payload = _extract_session_and_payload(
+        {
+            "channel": "console",
+            "user_id": "alice",
+            "session_id": "chat-1",
+            "input": [],
+            "mode": "unsupported",
+        },
+    )
+
+    assert "mode" not in payload["meta"]
 
 
 def test_extract_session_and_payload_keeps_identity_fields():
