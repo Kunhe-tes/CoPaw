@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import FileColumn from "./FileColumn";
 import FileManager from "./index";
 import FileDetail from "./FileDetail";
+import type { FileManagerDirectoryListing } from "@/api/modules/chat";
 
 const { deleteDirectory, listDirectory, readFile } = vi.hoisted(() => ({
   deleteDirectory: vi.fn(),
@@ -316,7 +317,7 @@ describe("FileManager", () => {
 
   it("does not apply a recovery response while the new root is loading", async () => {
     const recovery = deferred<typeof rootPage>();
-    const sourceScopeRoot = deferred<typeof rootPage>();
+    const sourceScopeRoot = deferred<FileManagerDirectoryListing>();
     const pagedRoot = { ...rootPage, next_cursor: "cursor-1" };
     let workingRootRequests = 0;
     listDirectory.mockImplementation(
