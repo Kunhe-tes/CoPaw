@@ -76,13 +76,18 @@ describe("SkillConfigPage", () => {
     expect(screen.queryByRole("button", { name: /新\s*增/ })).toBeNull();
     expect(screen.getByText("创建模式")).toBeTruthy();
     expect(screen.getByText("请选择SKILL名称（定时任务）")).toBeTruthy();
+    expect(screen.getByRole("button", { name: /保\s*存/ })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /创\s*建/ })).toBeNull();
     expect(screen.getByRole("textbox", { name: "SKILL ID" })).toBeDisabled();
     const sortInput = screen.getByRole("spinbutton", { name: "排序" });
     expect(sortInput).toHaveValue("1");
+    expect(sortInput).toHaveAttribute("aria-valuemax", "9999");
     fireEvent.keyDown(sortInput, { key: "ArrowDown" });
     expect(sortInput).toHaveValue("1");
     await waitFor(() =>
-      expect(screen.getByRole("combobox", { name: "SKILL名称" })).toHaveFocus(),
+      expect(
+        screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
+      ).toHaveFocus(),
     );
   });
 
@@ -108,17 +113,76 @@ describe("SkillConfigPage", () => {
       expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
     );
     expect(screen.getByText("查看模式")).toBeTruthy();
-    expect(screen.getByText(/点击左侧 SKILL 的编辑图标后可修改/)).toBeTruthy();
+    expect(screen.getByText(/点击左侧编辑图标后可修改/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
-    expect(screen.getByRole("combobox", { name: "SKILL名称" })).toBeDisabled();
+    expect(
+      screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "刷新 SKILL 列表" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /新\s*增/ }).querySelector("svg"),
+    ).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "编辑 存款到期续接" }));
 
     expect(await screen.findByRole("button", { name: /保\s*存/ })).toBeTruthy();
     expect(screen.getByText("编辑模式")).toBeTruthy();
     expect(
-      screen.getByRole("combobox", { name: "SKILL名称" }),
+      screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
     ).not.toBeDisabled();
+  });
+
+  it("refreshes the SKILL list and selects the first refreshed item", async () => {
+    const firstItem = {
+      skillId: "job-1",
+      name: "第一条",
+      sort: 1,
+      businessCenterEnabled: false,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skillId: "job-1", name: "第一条" },
+    };
+    const secondItem = {
+      ...firstItem,
+      skillId: "job-2",
+      name: "第二条",
+      source: { skillId: "job-2", name: "第二条" },
+    };
+    const refreshedFirstItem = {
+      ...firstItem,
+      skillId: "job-3",
+      name: "刷新后的第一条",
+      source: { skillId: "job-3", name: "刷新后的第一条" },
+    };
+    mocks.listSkillConfigs
+      .mockResolvedValueOnce([firstItem, secondItem])
+      .mockResolvedValueOnce([refreshedFirstItem]);
+    mocks.getSkillConfigDetail.mockImplementation(async (skillId: string) =>
+      [firstItem, secondItem, refreshedFirstItem].find(
+        (item) => item.skillId === skillId,
+      ),
+    );
+
+    render(<SkillConfigPage />);
+    await waitFor(() =>
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "第二条" }));
+    await waitFor(() =>
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-2", ""),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新 SKILL 列表" }));
+
+    await waitFor(() =>
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-3", ""),
+    );
+    expect(
+      screen.getByRole("button", { name: "刷新后的第一条" }),
+    ).toHaveAttribute("aria-current", "page");
   });
 
   it("shows an explicit retry state when the SKILL list fails to load", async () => {

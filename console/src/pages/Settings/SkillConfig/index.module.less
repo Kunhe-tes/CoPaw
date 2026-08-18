@@ -153,6 +153,24 @@
   }
 }
 
+.skillListActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.refreshButton {
+  width: 30px;
+  padding-inline: 0 !important;
+  color: var(--console-management-text-secondary, #4b5563);
+
+  &:hover,
+  &:focus-visible {
+    color: var(--console-management-primary, #3769fc) !important;
+    background: var(--console-management-primary-soft, #eef4ff) !important;
+  }
+}
+
 .skillList {
   display: grid;
   gap: 5px;
@@ -251,7 +269,7 @@
 }
 
 .statusDotEnabled {
-  background: var(--console-management-success, #2f7d5b);
+  background: #16a34a;
 }
 
 .skillName {
