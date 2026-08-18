@@ -15,7 +15,7 @@
 | `src/swe/agents/prompt.py` | 系统提示构造 |
 | `src/swe/agents/schema.py` | Agent 相关结构定义 |
 | `src/swe/agents/command_handler.py` | 命令处理 |
-| `src/swe/agents/skills_manager.py`, `src/swe/agents/skills_hub.py` | 技能扫描、加载、分发；创建、导入和启用前通过 `scan_skill_directory()` 进入安全扫描闸口 |
+| `src/swe/agents/skills_manager.py`, `src/swe/agents/skills_hub.py` | 技能扫描、加载、分发；创建、导入、启用和技能池刷新前通过 `scan_skill_directory()` 进入安全扫描闸口 |
 | `src/swe/agents/hooks/` | Bootstrap、Memory Compaction、Tracing 等 Hook |
 | `src/swe/agents/memory/` | Agent Markdown、短期/轻量记忆管理 |
 | `src/swe/agents/tools/` | 文件、Shell、浏览器、截图、媒体、时间、Token 等内置工具 |
