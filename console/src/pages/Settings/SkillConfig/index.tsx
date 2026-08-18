@@ -12,7 +12,7 @@ import {
   Tooltip,
   type RefSelectProps,
 } from "antd";
-import { CircleX, Plus, Settings2, SquarePen } from "lucide-react";
+import { CircleX, Plus, RefreshCw, Settings2, SquarePen } from "lucide-react";
 import { cronJobApi } from "@/api/modules/cronjob";
 import {
   buildSkillConfigCreatePayload,
@@ -53,11 +53,11 @@ const DEFAULT_FORM_VALUES: SkillConfigEditorValues = {
 const EDITOR_MODE_META = {
   view: {
     label: "查看模式",
-    description: "当前内容仅供查看，点击左侧 SKILL 的编辑图标后可修改。",
+    description: "当前内容仅供查看，点击左侧编辑图标后可修改。",
   },
   create: {
     label: "创建模式",
-    description: "请选择名称并完成触发规则配置，然后点击创建。",
+    description: "请选择名称并完成触发规则配置，然后点击保存。",
   },
   edit: {
     label: "编辑模式",
@@ -90,27 +90,39 @@ function SkillList({
   onSelect,
   onEdit,
   onCreate,
+  onRefresh,
+  refreshing,
 }: {
   items: SkillConfigItem[];
   selectedId: string | null;
   onSelect: (item: SkillConfigItem) => void;
   onEdit: (item: SkillConfigItem) => void;
   onCreate: () => void;
+  onRefresh: () => void;
+  refreshing: boolean;
 }) {
   return (
     <aside className={styles.skillListPanel} aria-label="SKILL 列表">
       <div className={styles.panelHeader}>
         <h2>SKILL 列表</h2>
-        {items.length ? (
-          <Button
-            type="primary"
-            size="small"
-            icon={<Plus size={14} />}
-            onClick={onCreate}
-          >
-            新增
-          </Button>
-        ) : null}
+        <div className={styles.skillListActions}>
+          <Tooltip title="刷新列表">
+            <Button
+              className={styles.refreshButton}
+              type="text"
+              size="small"
+              icon={<RefreshCw size={15} />}
+              loading={refreshing}
+              onClick={onRefresh}
+              aria-label="刷新 SKILL 列表"
+            />
+          </Tooltip>
+          {items.length ? (
+            <Button type="primary" size="small" onClick={onCreate}>
+              新增
+            </Button>
+          ) : null}
+        </div>
       </div>
       <div className={styles.skillList}>
         {items.length ? (
@@ -244,6 +256,7 @@ export default function SkillConfigPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
   const modeMeta = EDITOR_MODE_META[mode];
 
@@ -394,6 +407,30 @@ export default function SkillConfigPage() {
   const handleEdit = (item: SkillConfigItem) => {
     setMode("edit");
     setSelectedId(item.skillId);
+  };
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      const nextConfigs = await loadConfigs();
+      const firstConfig = nextConfigs[0];
+      if (firstConfig) {
+        setMode("view");
+        setSelectedId(firstConfig.skillId);
+        setSelectedConfig(null);
+        setInspection(null);
+      } else if (mode !== "create") {
+        setSelectedId(null);
+        setSelectedConfig(null);
+        setInspection(null);
+      }
+    } catch (error) {
+      message.error(
+        error instanceof Error ? error.message : "SKILL 列表刷新失败",
+      );
+    } finally {
+      setRefreshing(false);
+    }
   };
 
   const handleCronJobChange = (jobId: string) => {
@@ -548,6 +585,8 @@ export default function SkillConfigPage() {
             onSelect={handleSelect}
             onEdit={handleEdit}
             onCreate={handleCreate}
+            onRefresh={handleRefresh}
+            refreshing={refreshing}
           />
           <section className={styles.rulePanel} aria-labelledby="rule-title">
             <div className={styles.rulePanelHeader}>
@@ -566,7 +605,7 @@ export default function SkillConfigPage() {
                     loading={saving}
                     onClick={handleSave}
                   >
-                    {mode === "create" ? "创建" : "保存"}
+                    保存
                   </Button>
                 </div>
               ) : null}
@@ -588,16 +627,9 @@ export default function SkillConfigPage() {
                 requiredMark={false}
                 className={styles.ruleForm}
               >
-                <Form.Item name="skillId" label="SKILL ID">
-                  <Input
-                    disabled
-                    className={styles.skillIdInput}
-                    placeholder="选择名称后自动生成"
-                  />
-                </Form.Item>
                 <Form.Item
                   name="cronJobId"
-                  label="SKILL名称"
+                  label="SKILL 名称"
                   rules={[{ required: true, message: "请选择SKILL名称" }]}
                 >
                   <Select
@@ -610,12 +642,30 @@ export default function SkillConfigPage() {
                     onChange={handleCronJobChange}
                   />
                 </Form.Item>
+                <Form.Item name="skillId" label="SKILL ID">
+                  <Input
+                    disabled
+                    className={styles.skillIdInput}
+                    placeholder="选择名称后自动生成"
+                  />
+                </Form.Item>
                 <Form.Item name="name" hidden>
                   <Input />
                 </Form.Item>
                 <div className={styles.sortRow}>
-                  <Form.Item name="sort" label="排序">
-                    <InputNumber min={1} precision={0} />
+                  <Form.Item
+                    name="sort"
+                    label="排序"
+                    rules={[
+                      {
+                        type: "number",
+                        min: 1,
+                        max: 9999,
+                        message: "排序值请输入 1 至 9999",
+                      },
+                    ]}
+                  >
+                    <InputNumber min={1} max={9999} precision={0} />
                   </Form.Item>
                   <span>数值越小越优先</span>
                 </div>
