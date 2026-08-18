@@ -8,6 +8,9 @@ import logging
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
+import httpx
+
+from ....config.constant import API_CALL_TIMEOUT, CUSTOMER_NAME_QUERY_URL
 from ...database.connection import get_db_connection
 from ...models.subtask import SubtaskModel, SubtaskCreateResponse
 from ....utils.bbk import normalize_bbk_id_to_primary
@@ -16,6 +19,8 @@ logger = logging.getLogger(__name__)
 
 # 每批处理数量
 BATCH_SIZE = 50
+
+CUSTOMER_NAME_FIELD = "EAC_NM"
 
 
 class QueryService:
@@ -640,6 +645,146 @@ class QueryService:
         )
         await self.db.execute(query, params)
 
+    def _build_result_index_row(
+        self,
+        execution: dict,
+        subtask: dict,
+        skill_id: str,
+        execution_at: datetime,
+        expire_at: datetime,
+        customer_names: dict[str, str],
+    ) -> dict:
+        """Build one query-index row for a successful subtask result."""
+        bbk_org_id = subtask.get("bbk_org_id") or ""
+        custuid = subtask.get("custuid") or ""
+        customer_name = subtask.get("cust_nm") or customer_names.get(custuid)
+        first_bbk_id = (
+            normalize_bbk_id_to_primary(bbk_org_id)
+            or execution.get("bbk_id")
+            or ""
+        )
+        return {
+            "source_id": execution.get("source_id") or "",
+            "tenant_id": execution.get("tenant_id") or "",
+            "first_bbk_id": first_bbk_id,
+            "bbk_org_id": bbk_org_id,
+            "custuid": custuid,
+            "cust_nm": self._mask_customer_name(customer_name),
+            "skill_id": skill_id,
+            "job_id": execution.get("job_id") or "",
+            "execution_id": execution.get("execution_id"),
+            "trace_id": execution.get("trace_id") or "",
+            "subtask_id": subtask.get("subtask_id"),
+            "task_id": subtask.get("task_id") or "",
+            "result_type": subtask.get("task_type"),
+            "template_id": subtask.get("template_id"),
+            "result_id": subtask.get("result_id"),
+            "filename": subtask.get("filename"),
+            "status": subtask.get("status"),
+            "execution_at": execution_at,
+            "expire_at": expire_at,
+        }
+
+    async def _write_result_index_row(self, row: dict) -> None:
+        """Mark older rows stale, then upsert the latest result-index row."""
+        await self._mark_previous_result_index_stale(row)
+        await self._upsert_result_index_row(row)
+
+    @staticmethod
+    def _mask_customer_name(name: Optional[str]) -> Optional[str]:
+        """Mask a customer name unless it has already been masked."""
+        if name is None:
+            return None
+
+        clean_name = name.strip()
+        if not clean_name:
+            return None
+        if "*" in clean_name or len(clean_name) == 1:
+            return clean_name
+        if len(clean_name) == 2:
+            return f"{clean_name[0]}*"
+        return f"{clean_name[0]}{'*' * (len(clean_name) - 2)}{clean_name[-1]}"
+
+    @staticmethod
+    def _reverse_custuid(custuid: str) -> str:
+        """Build the customer-name query row key."""
+        return custuid[::-1]
+
+    def _extract_customer_names(self, data: dict) -> dict[str, str]:
+        """Extract customer names from the batch-query API response."""
+        customer_names = {}
+        rows = data.get("data", [])
+        if not isinstance(rows, list):
+            return customer_names
+
+        for item in rows:
+            if not isinstance(item, dict):
+                continue
+            row_key = item.get("row")
+            values = item.get("values")
+            if not row_key or not isinstance(values, dict):
+                continue
+            fields = values.get("f")
+            if not isinstance(fields, dict):
+                continue
+            customer_name = fields.get(CUSTOMER_NAME_FIELD)
+            if customer_name:
+                customer_names[row_key] = customer_name
+        return customer_names
+
+    async def _query_customer_names(
+        self,
+        custuids: set[str],
+    ) -> dict[str, str]:
+        """Batch query customer names by custuid."""
+        if not CUSTOMER_NAME_QUERY_URL or not custuids:
+            return {}
+
+        row_to_custuid = {
+            self._reverse_custuid(custuid): custuid
+            for custuid in custuids
+            if custuid
+        }
+        if not row_to_custuid:
+            return {}
+
+        try:
+            async with httpx.AsyncClient(timeout=API_CALL_TIMEOUT) as client:
+                response = await client.post(
+                    CUSTOMER_NAME_QUERY_URL,
+                    headers={"Content-Type": "application/json"},
+                    json={"rows": sorted(row_to_custuid.keys())},
+                )
+
+            if response.status_code != 200:
+                logger.warning(
+                    "Customer name query failed: status=%d",
+                    response.status_code,
+                )
+                return {}
+
+            row_names = self._extract_customer_names(response.json())
+            return {
+                row_to_custuid[row]: name
+                for row, name in row_names.items()
+                if row in row_to_custuid
+            }
+        except Exception as e:
+            logger.warning("Customer name query failed: %s", e)
+            return {}
+
+    async def _get_missing_customer_names(
+        self,
+        subtasks: list[dict],
+    ) -> dict[str, str]:
+        """Query names only for subtasks missing cust_nm."""
+        custuids = {
+            subtask.get("custuid") or ""
+            for subtask in subtasks
+            if not (subtask.get("cust_nm") or "").strip()
+        }
+        return await self._query_customer_names(custuids)
+
     async def _index_success_execution_results(
         self,
         executions: list[dict],
@@ -654,6 +799,7 @@ class QueryService:
             subtasks = await self._get_success_subtasks_for_trace(
                 execution.get("trace_id") or "",
             )
+            customer_names = await self._get_missing_customer_names(subtasks)
             execution_at = (
                 execution.get("actual_time")
                 or execution.get("created_at")
@@ -662,37 +808,16 @@ class QueryService:
             expire_at = execution_at + timedelta(days=30)
 
             for subtask in subtasks:
-                result_type = subtask.get("task_type")
-                bbk_org_id = subtask.get("bbk_org_id") or ""
-                first_bbk_id = (
-                    normalize_bbk_id_to_primary(bbk_org_id)
-                    or execution.get("bbk_id")
-                    or ""
-                )
                 for skill_id in skill_ids:
-                    row = {
-                        "source_id": execution.get("source_id") or "",
-                        "tenant_id": execution.get("tenant_id") or "",
-                        "first_bbk_id": first_bbk_id,
-                        "bbk_org_id": bbk_org_id,
-                        "custuid": subtask.get("custuid") or "",
-                        "cust_nm": subtask.get("cust_nm"),
-                        "skill_id": skill_id,
-                        "job_id": execution.get("job_id") or "",
-                        "execution_id": execution.get("execution_id"),
-                        "trace_id": execution.get("trace_id") or "",
-                        "subtask_id": subtask.get("subtask_id"),
-                        "task_id": subtask.get("task_id") or "",
-                        "result_type": result_type,
-                        "template_id": subtask.get("template_id"),
-                        "result_id": subtask.get("result_id"),
-                        "filename": subtask.get("filename"),
-                        "status": subtask.get("status"),
-                        "execution_at": execution_at,
-                        "expire_at": expire_at,
-                    }
-                    await self._mark_previous_result_index_stale(row)
-                    await self._upsert_result_index_row(row)
+                    row = self._build_result_index_row(
+                        execution,
+                        subtask,
+                        skill_id,
+                        execution_at,
+                        expire_at,
+                        customer_names,
+                    )
+                    await self._write_result_index_row(row)
                     indexed_count += 1
         return indexed_count
 
