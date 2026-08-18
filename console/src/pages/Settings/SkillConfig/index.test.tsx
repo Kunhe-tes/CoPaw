@@ -6,6 +6,7 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { useIframeStore } from "@/stores/iframeStore";
 import SkillConfigPage from "./index";
 
 const mocks = vi.hoisted(() => ({
@@ -14,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   createSkillConfig: vi.fn(),
   updateSkillConfig: vi.fn(),
   listActivityClasses: vi.fn(),
-  listCronJobs: vi.fn(),
+  listSweSkills: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
   warning: vi.fn(),
@@ -36,8 +37,8 @@ vi.mock("@/api/modules/skillConfig", async () => {
   };
 });
 
-vi.mock("@/api/modules/cronjob", () => ({
-  cronJobApi: { listCronJobs: mocks.listCronJobs },
+vi.mock("@/api/modules/mySkills", () => ({
+  mySkillsApi: { listSweSkills: mocks.listSweSkills },
 }));
 
 vi.mock("@/hooks/useAppMessage", () => {
@@ -50,12 +51,92 @@ vi.mock("@/hooks/useAppMessage", () => {
 });
 
 describe("SkillConfigPage", () => {
-  afterEach(cleanup);
+  afterEach(() => {
+    cleanup();
+    useIframeStore.setState({ bbk: null, source: null });
+  });
 
   beforeEach(() => {
     Object.values(mocks).forEach((mock) => mock.mockReset());
-    mocks.listCronJobs.mockResolvedValue([]);
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "RMASSIST",
+      count: 0,
+      skills: [],
+    });
     mocks.listActivityClasses.mockResolvedValue([]);
+  });
+
+  it("loads SKILL name options from the market API and prefers cn_name", async () => {
+    const createdItem = {
+      skillId: "skill-cn",
+      bbkId: "571",
+      bbkName: "杭州分行",
+      name: "存款到期续接",
+      sort: 1,
+      businessCenterEnabled: false,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skill_id: "skill-cn", skill_name: "存款到期续接" },
+    };
+    useIframeStore.setState({ bbk: "571" });
+    mocks.listSkillConfigs
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([createdItem]);
+    mocks.createSkillConfig.mockResolvedValue(createdItem);
+    mocks.getSkillConfigDetail.mockResolvedValue(createdItem);
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "RMASSIST",
+      count: 2,
+      skills: [
+        {
+          skill_id: "skill-cn",
+          skill_name: "deposit_maturity",
+          cn_name: "存款到期续接",
+        },
+        {
+          skill_id: "skill-en",
+          skill_name: "customer_insight",
+          cn_name: null,
+        },
+      ],
+    });
+
+    render(<SkillConfigPage />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "新增 SKILL" }),
+    );
+
+    expect(mocks.listSweSkills).toHaveBeenCalledWith("RMASSIST");
+    const skillSelect = screen.getByRole("combobox", {
+      name: /SKILL\s*名称/,
+    });
+    fireEvent.mouseDown(skillSelect);
+    expect(
+      await screen.findByRole("option", { name: "存款到期续接" }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("option", { name: "customer_insight" }),
+    ).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByText("存款到期续接", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+    expect(screen.getByRole("textbox", { name: "SKILL ID" })).toHaveValue(
+      "skill-cn",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+    await waitFor(() =>
+      expect(mocks.createSkillConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skill_id: "skill-cn",
+          skill_name: "存款到期续接",
+        }),
+      ),
+    );
   });
 
   it("centers the create action when no SKILL exists and reveals the workspace", async () => {
@@ -75,7 +156,7 @@ describe("SkillConfigPage", () => {
     expect(screen.getByText("暂无 SKILL 数据")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /新\s*增/ })).toBeNull();
     expect(screen.getByText("创建模式")).toBeTruthy();
-    expect(screen.getByText("请选择SKILL名称（定时任务）")).toBeTruthy();
+    expect(screen.getByText("请选择SKILL名称")).toBeTruthy();
     expect(screen.getByRole("button", { name: /保\s*存/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /创\s*建/ })).toBeNull();
     expect(screen.getByRole("textbox", { name: "SKILL ID" })).toBeDisabled();
@@ -104,9 +185,17 @@ describe("SkillConfigPage", () => {
     };
     mocks.listSkillConfigs.mockResolvedValue([item]);
     mocks.getSkillConfigDetail.mockResolvedValue(item);
-    mocks.listCronJobs.mockResolvedValue([
-      { id: "job-1", name: "存款到期续接" },
-    ]);
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "RMASSIST",
+      count: 1,
+      skills: [
+        {
+          skill_id: "job-1",
+          skill_name: "deposit_maturity",
+          cn_name: "存款到期续接",
+        },
+      ],
+    });
 
     render(<SkillConfigPage />);
     await waitFor(() =>
@@ -185,6 +274,67 @@ describe("SkillConfigPage", () => {
     ).toHaveAttribute("aria-current", "page");
   });
 
+  it("submits skill_name fallback when an edited SKILL has no cn_name", async () => {
+    const currentItem = {
+      skillId: "job-1",
+      bbkId: "571",
+      bbkName: "杭州分行",
+      name: "旧名称",
+      sort: 1,
+      businessCenterEnabled: false,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skillId: "job-1", name: "旧名称" },
+    };
+    const updatedItem = {
+      ...currentItem,
+      skillId: "skill-en",
+      name: "customer_insight",
+    };
+    mocks.listSkillConfigs
+      .mockResolvedValueOnce([currentItem])
+      .mockResolvedValueOnce([updatedItem]);
+    mocks.getSkillConfigDetail.mockResolvedValue(currentItem);
+    mocks.updateSkillConfig.mockResolvedValue(updatedItem);
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "RMASSIST",
+      count: 1,
+      skills: [
+        {
+          skill_id: "skill-en",
+          skill_name: "customer_insight",
+          cn_name: null,
+        },
+      ],
+    });
+
+    render(<SkillConfigPage />);
+    await waitFor(() =>
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "编辑 旧名称" }));
+    const skillSelect = await screen.findByRole("combobox", {
+      name: /SKILL\s*名称/,
+    });
+    fireEvent.mouseDown(skillSelect);
+    fireEvent.click(
+      await screen.findByText("customer_insight", {
+        selector: ".ant-select-item-option-content",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
+
+    await waitFor(() =>
+      expect(mocks.updateSkillConfig).toHaveBeenCalledWith(
+        expect.objectContaining({
+          skill_id: "skill-en",
+          skill_name: "customer_insight",
+        }),
+      ),
+    );
+  });
+
   it("shows an explicit retry state when the SKILL list fails to load", async () => {
     mocks.listSkillConfigs
       .mockRejectedValueOnce(new Error("网络异常"))
@@ -234,9 +384,17 @@ describe("SkillConfigPage", () => {
       .mockResolvedValueOnce([item])
       .mockRejectedValueOnce(new Error("刷新失败"));
     mocks.getSkillConfigDetail.mockResolvedValue(item);
-    mocks.listCronJobs.mockResolvedValue([
-      { id: "job-1", name: "存款到期续接" },
-    ]);
+    mocks.listSweSkills.mockResolvedValue({
+      source_id: "RMASSIST",
+      count: 1,
+      skills: [
+        {
+          skill_id: "job-1",
+          skill_name: "deposit_maturity",
+          cn_name: "存款到期续接",
+        },
+      ],
+    });
     mocks.updateSkillConfig.mockResolvedValue({});
 
     render(<SkillConfigPage />);

@@ -13,7 +13,10 @@ import {
   type RefSelectProps,
 } from "antd";
 import { CircleX, Plus, RefreshCw, Settings2, SquarePen } from "lucide-react";
-import { cronJobApi } from "@/api/modules/cronjob";
+import {
+  mySkillsApi,
+  type SweSkillListItem,
+} from "@/api/modules/mySkills";
 import {
   buildSkillConfigCreatePayload,
   buildSkillConfigUpdatePayload,
@@ -22,9 +25,8 @@ import {
   type SkillConfigFormValues,
   type SkillConfigItem,
 } from "@/api/modules/skillConfig";
-import type { CronJobSpecOutput } from "@/api/types";
 import { getBbkDisplayName } from "@/constants/bbk";
-import { DEFAULT_BBK_ID } from "@/constants/identity";
+import { DEFAULT_BBK_ID, DEFAULT_SOURCE_ID } from "@/constants/identity";
 import { useAppMessage } from "@/hooks/useAppMessage";
 import { useIframeStore } from "@/stores/iframeStore";
 import {
@@ -36,11 +38,11 @@ import styles from "./index.module.less";
 type EditorMode = "view" | "create" | "edit";
 
 interface SkillConfigEditorValues extends SkillConfigFormValues {
-  cronJobId?: string;
+  selectedSkillId?: string;
 }
 
 const DEFAULT_FORM_VALUES: SkillConfigEditorValues = {
-  cronJobId: undefined,
+  selectedSkillId: undefined,
   skillId: "",
   name: "",
   sort: 1,
@@ -73,7 +75,7 @@ function getErrorStatus(error: unknown): number | undefined {
 
 function toEditorValues(item: SkillConfigItem): SkillConfigEditorValues {
   return {
-    cronJobId: item.skillId,
+    selectedSkillId: item.skillId,
     skillId: item.skillId,
     name: item.name,
     sort: Math.max(1, item.sort || 1),
@@ -238,10 +240,12 @@ function InspectionPanel({
 export default function SkillConfigPage() {
   const { message } = useAppMessage();
   const bbkId = useIframeStore((state) => state.bbk) || DEFAULT_BBK_ID;
+  const sourceId =
+    useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const [form] = Form.useForm<SkillConfigEditorValues>();
   const nameSelectRef = useRef<RefSelectProps>(null);
   const [configs, setConfigs] = useState<SkillConfigItem[]>([]);
-  const [cronJobs, setCronJobs] = useState<CronJobSpecOutput[]>([]);
+  const [marketSkills, setMarketSkills] = useState<SweSkillListItem[]>([]);
   const [activityClasses, setActivityClasses] = useState<ActivityClassItem[]>(
     [],
   );
@@ -266,8 +270,13 @@ export default function SkillConfigPage() {
     }
   }, [mode]);
 
-  const cronOptions = useMemo(() => {
-    const options = cronJobs.map((job) => ({ value: job.id, label: job.name }));
+  const skillNameOptions = useMemo(() => {
+    const options = marketSkills
+      .filter((skill) => skill.skill_id)
+      .map((skill) => ({
+        value: skill.skill_id,
+        label: skill.cn_name || skill.skill_name || skill.skill_id,
+      }));
     if (
       selectedConfig &&
       !options.some((option) => option.value === selectedConfig.skillId)
@@ -278,7 +287,7 @@ export default function SkillConfigPage() {
       });
     }
     return options;
-  }, [cronJobs, selectedConfig]);
+  }, [marketSkills, selectedConfig]);
 
   const groupOptions = useMemo(() => {
     const options = [...activityClasses]
@@ -314,10 +323,10 @@ export default function SkillConfigPage() {
     setListError(null);
     Promise.allSettled([
       skillConfigApi.listSkillConfigs(bbkId),
-      cronJobApi.listCronJobs(),
+      mySkillsApi.listSweSkills(sourceId),
       skillConfigApi.listActivityClasses(bbkId),
     ])
-      .then(([configResult, cronResult, activityClassResult]) => {
+      .then(([configResult, skillResult, activityClassResult]) => {
         if (cancelled) return;
         if (configResult.status === "fulfilled") {
           setConfigs(configResult.value);
@@ -338,10 +347,11 @@ export default function SkillConfigPage() {
           setListError(errorMessage);
           message.error(errorMessage);
         }
-        if (cronResult.status === "fulfilled") {
-          setCronJobs(cronResult.value ?? []);
+        if (skillResult.status === "fulfilled") {
+          setMarketSkills(skillResult.value.skills ?? []);
         } else {
-          message.error("定时任务列表加载失败");
+          setMarketSkills([]);
+          message.error("SKILL 名称列表加载失败");
         }
         if (activityClassResult.status === "fulfilled") {
           setActivityClasses(activityClassResult.value);
@@ -360,7 +370,7 @@ export default function SkillConfigPage() {
     return () => {
       cancelled = true;
     };
-  }, [bbkId, message, reloadKey]);
+  }, [bbkId, message, reloadKey, sourceId]);
 
   useEffect(() => {
     if (!selectedId || mode === "create") return;
@@ -433,11 +443,11 @@ export default function SkillConfigPage() {
     }
   };
 
-  const handleCronJobChange = (jobId: string) => {
-    const job = cronJobs.find((item) => item.id === jobId);
+  const handleSkillChange = (skillId: string) => {
+    const skill = marketSkills.find((item) => item.skill_id === skillId);
     form.setFieldsValue({
-      skillId: jobId,
-      name: job?.name || jobId,
+      skillId,
+      name: skill?.cn_name || skill?.skill_name || skillId,
     });
   };
 
@@ -628,7 +638,7 @@ export default function SkillConfigPage() {
                 className={styles.ruleForm}
               >
                 <Form.Item
-                  name="cronJobId"
+                  name="selectedSkillId"
                   label="SKILL 名称"
                   rules={[{ required: true, message: "请选择SKILL名称" }]}
                 >
@@ -637,9 +647,9 @@ export default function SkillConfigPage() {
                     disabled={mode === "view"}
                     showSearch
                     optionFilterProp="label"
-                    options={cronOptions}
-                    placeholder="请选择SKILL名称（定时任务）"
-                    onChange={handleCronJobChange}
+                    options={skillNameOptions}
+                    placeholder="请选择SKILL名称"
+                    onChange={handleSkillChange}
                   />
                 </Form.Item>
                 <Form.Item name="skillId" label="SKILL ID">
