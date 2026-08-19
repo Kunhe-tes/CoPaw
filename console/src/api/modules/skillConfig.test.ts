@@ -188,6 +188,106 @@ describe("skillConfigApi", () => {
     ).rejects.toThrow("配置不存在");
   });
 
+  it("posts the selected SKILL identifiers when loading value return stats", async () => {
+    mocks.request.mockResolvedValue({
+      code: 0,
+      message: "success",
+      data: {
+        contact_count: 150,
+        list_count: 500,
+        contact_rate: 30,
+        accept_count: 300,
+        accept_rate: 60,
+        aum_increase: 1233.89,
+        wealth_product_amount: 984.31,
+      },
+    });
+
+    await expect(
+      skillConfigApi.getValueReturnStats("job-1", "571"),
+    ).resolves.toEqual({
+      contactCount: 150,
+      listCount: 500,
+      contactRate: 30,
+      acceptCount: 300,
+      acceptRate: 60,
+      aumIncrease: 1233.89,
+      wealthProductAmount: 984.31,
+    });
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/monitor/busiconfig/skill-config/value-return-stats",
+      {
+        method: "POST",
+        body: JSON.stringify({ skill_id: "job-1", bbk_id: "571" }),
+      },
+    );
+  });
+
+  it("rejects unsuccessful value return stats responses", async () => {
+    mocks.request.mockResolvedValue({
+      code: 2,
+      message: "回检数据查询失败",
+      data: {},
+    });
+
+    await expect(
+      skillConfigApi.getValueReturnStats("job-1", "571"),
+    ).rejects.toThrow("回检数据查询失败");
+  });
+
+  it("posts the selected SKILL identifiers when loading exposure stats", async () => {
+    mocks.request.mockResolvedValue({
+      code: 0,
+      message: "success",
+      data: {
+        total_count: 1000,
+        items: [
+          {
+            seq: 1,
+            event_target_id: "module-001",
+            event_target_name: "方案模块A",
+            exposure_count: 450,
+            exposure_rate: "45.00%",
+          },
+        ],
+      },
+    });
+
+    await expect(
+      skillConfigApi.getSkillExposureStats("job-1", "571"),
+    ).resolves.toEqual({
+      totalCount: 1000,
+      items: [
+        {
+          sequence: 1,
+          targetId: "module-001",
+          targetName: "方案模块A",
+          exposureCount: 450,
+          exposureRate: "45.00%",
+        },
+      ],
+    });
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/monitor/busiconfig/skill-config/skill-exposure-stats",
+      {
+        method: "POST",
+        body: JSON.stringify({ skill_id: "job-1", bbk_id: "571" }),
+      },
+    );
+  });
+
+  it("rejects unsuccessful exposure stats responses", async () => {
+    mocks.request.mockResolvedValue({
+      code: 2,
+      message: "曝光统计查询失败",
+      data: {},
+    });
+
+    await expect(
+      skillConfigApi.getSkillExposureStats("job-1", "571"),
+    ).rejects.toThrow("曝光统计查询失败");
+  });
+
   it("posts the create payload and normalizes the successful response", async () => {
     const payload = buildSkillConfigCreatePayload(
       {
