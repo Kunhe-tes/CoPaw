@@ -7,7 +7,7 @@ from pathlib import Path
 
 import click
 
-from ..app.crons.auth_state import CRON_AUTH_FILE_NAME, prefetch_auth_token
+from ..app.crons.auth_state import CRON_AUTH_FILE_NAME, issue_auth_token
 from ..app.auth import (
     _hash_password,
     _load_auth_data,
@@ -55,7 +55,7 @@ def _discover_cron_auth_tenant_ids() -> list[str]:
 
 def _sync_cron_auth_to_envs(tenant_id: str | None) -> tuple[str, str]:
     try:
-        resolved = prefetch_auth_token(tenant_id=tenant_id)
+        resolved = issue_auth_token(tenant_id=tenant_id)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -74,12 +74,11 @@ def _sync_cron_auth_to_envs(tenant_id: str | None) -> tuple[str, str]:
     envs[CRON_AUTH_COOKIE_ENV_KEY] = resolved.cookie_header
     save_envs(envs, envs_path)
 
-    status = "reused" if resolved.reused else "refreshed"
     expires_at = (
         resolved.expires_at.isoformat() if resolved.expires_at else "unknown"
     )
-    return status, (
-        f"{tenant_id or 'default'}: {status}; "
+    return "refreshed", (
+        f"{tenant_id or 'default'}: refreshed; "
         f"synced {CRON_AUTH_TOKEN_ENV_KEY} and "
         f"{CRON_AUTH_COOKIE_ENV_KEY} to {envs_path} "
         f"(expires_at={expires_at})."

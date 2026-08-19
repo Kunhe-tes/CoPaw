@@ -491,6 +491,12 @@ def _is_auth_token_reusable(
     return expires_at - utc_now() > min_remaining
 
 
+def _auth_token_user_info_payload(user_info: dict[str, Any]) -> Any:
+    if set(user_info.keys()) == {"value"}:
+        return user_info["value"]
+    return user_info
+
+
 def issue_auth_token(
     *,
     tenant_id: str | None = None,
@@ -503,7 +509,7 @@ def issue_auth_token(
     if not state.user_info:
         raise ValueError("cron auth user_info is not configured")
 
-    auth_token = get_auth_token(state.user_info)
+    auth_token = get_auth_token(_auth_token_user_info_payload(state.user_info))
     expires_at = utc_now() + DEFAULT_AUTH_TOKEN_TTL
     state.auth_token = auth_token
     state.auth_token_expires_at = expires_at
