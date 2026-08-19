@@ -287,6 +287,7 @@ export default function SkillConfigPage() {
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [detailReloadKey, setDetailReloadKey] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -442,7 +443,7 @@ export default function SkillConfigPage() {
     return () => {
       cancelled = true;
     };
-  }, [bbkId, form, message, mode, selectedId]);
+  }, [bbkId, detailReloadKey, form, message, mode, selectedId]);
 
   const handleCreate = () => {
     setMode("create");
@@ -472,6 +473,7 @@ export default function SkillConfigPage() {
         setSelectedId(firstConfig.skillId);
         setSelectedConfig(null);
         setInspection(null);
+        setDetailReloadKey((key) => key + 1);
       } else if (mode !== "create") {
         setSelectedId(null);
         setSelectedConfig(null);
