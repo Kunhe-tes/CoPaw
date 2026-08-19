@@ -13,6 +13,7 @@ import SkillConfigPage from "./index";
 const mocks = vi.hoisted(() => ({
   listSkillConfigs: vi.fn(),
   getSkillConfigDetail: vi.fn(),
+  getPreviewStats: vi.fn(),
   getValueReturnStats: vi.fn(),
   getSkillExposureStats: vi.fn(),
   createSkillConfig: vi.fn(),
@@ -33,6 +34,7 @@ vi.mock("@/api/modules/skillConfig", async () => {
     skillConfigApi: {
       listSkillConfigs: mocks.listSkillConfigs,
       getSkillConfigDetail: mocks.getSkillConfigDetail,
+      getPreviewStats: mocks.getPreviewStats,
       getValueReturnStats: mocks.getValueReturnStats,
       getSkillExposureStats: mocks.getSkillExposureStats,
       createSkillConfig: mocks.createSkillConfig,
@@ -69,6 +71,7 @@ describe("SkillConfigPage", () => {
       skills: [],
     });
     mocks.listActivityClasses.mockResolvedValue([]);
+    mocks.getPreviewStats.mockRejectedValue(new Error("查看数据暂不可用"));
     mocks.getValueReturnStats.mockRejectedValue(new Error("回检数据暂不可用"));
     mocks.getSkillExposureStats.mockRejectedValue(
       new Error("曝光统计暂不可用"),
@@ -211,7 +214,8 @@ describe("SkillConfigPage", () => {
     await waitFor(() =>
       expect(mocks.getValueReturnStats).toHaveBeenCalledWith("job-1", ""),
     );
-    expect(screen.getAllByText("--").length).toBeGreaterThanOrEqual(12);
+    expect(screen.getAllByText("--")).toHaveLength(6);
+    expect(screen.queryByText("客户核心信息")).toBeNull();
     expect(screen.getByText("查看模式")).toBeTruthy();
     expect(screen.getByText(/点击左侧编辑图标后可修改/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
@@ -270,7 +274,35 @@ describe("SkillConfigPage", () => {
     expect(screen.getByText("30")).toBeTruthy();
     expect(screen.getByText("1233.89")).toBeTruthy();
     expect(screen.getByText("984.31")).toBeTruthy();
-    expect(screen.getAllByText("--").length).toBeGreaterThanOrEqual(8);
+    expect(screen.getAllByText("--")).toHaveLength(2);
+  });
+
+  it("loads preview metrics from preview stats", async () => {
+    const item = {
+      skillId: "job-1",
+      bbkId: "571",
+      name: "存款到期续接",
+      sort: 1,
+      businessCenterEnabled: true,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skill_id: "job-1", skill_name: "存款到期续接" },
+    };
+    useIframeStore.setState({ bbk: "571" });
+    mocks.listSkillConfigs.mockResolvedValue([item]);
+    mocks.getSkillConfigDetail.mockResolvedValue(item);
+    mocks.getPreviewStats.mockResolvedValue({ uv: 25, pv: 156 });
+
+    render(<SkillConfigPage />);
+
+    await waitFor(() =>
+      expect(mocks.getPreviewStats).toHaveBeenCalledWith("job-1", "571"),
+    );
+    expect(await screen.findByText("25")).toBeTruthy();
+    expect(screen.getByText("156")).toBeTruthy();
+    expect(screen.getByText("客户经理数")).toBeTruthy();
+    expect(screen.getByText("名单页总浏览次数")).toBeTruthy();
   });
 
   it("loads and orders customer module exposure stats", async () => {

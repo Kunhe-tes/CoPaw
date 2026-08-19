@@ -34,6 +34,19 @@ type SkillConfigDetailResponse = SkillConfigResponse<SkillConfigSource>;
 type SkillConfigCreateResponse = SkillConfigResponse<SkillConfigSource>;
 type SkillConfigUpdateResponse = SkillConfigResponse<SkillConfigSource>;
 
+interface SkillPreviewStatsResponseData {
+  uv: number;
+  pv: number;
+}
+
+type SkillPreviewStatsResponse =
+  SkillConfigResponse<SkillPreviewStatsResponseData>;
+
+export interface SkillPreviewStats {
+  uv: number;
+  pv: number;
+}
+
 interface SkillValueReturnStatsResponseData {
   contact_count: number;
   list_count: number;
@@ -341,6 +354,23 @@ export const skillConfigApi = {
       throw new Error(response.message || "SKILL 配置详情加载失败");
     }
     return normalizeSkillConfig(response.data);
+  },
+
+  async getPreviewStats(
+    skillId: string,
+    bbkId: string,
+  ): Promise<SkillPreviewStats> {
+    const response = await request<SkillPreviewStatsResponse>(
+      `${SKILL_CONFIG_BASE_PATH}/preview-stats`,
+      {
+        method: "POST",
+        body: JSON.stringify({ skill_id: skillId, bbk_id: bbkId }),
+      },
+    );
+    if (response.code !== 0) {
+      throw new Error(response.message || "查看数据加载失败");
+    }
+    return { uv: response.data.uv, pv: response.data.pv };
   },
 
   async getValueReturnStats(

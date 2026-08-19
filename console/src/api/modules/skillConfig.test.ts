@@ -188,6 +188,37 @@ describe("skillConfigApi", () => {
     ).rejects.toThrow("配置不存在");
   });
 
+  it("posts the selected SKILL identifiers when loading preview stats", async () => {
+    mocks.request.mockResolvedValue({
+      code: 0,
+      message: "success",
+      data: { uv: 25, pv: 156 },
+    });
+
+    await expect(
+      skillConfigApi.getPreviewStats("job-1", "571"),
+    ).resolves.toEqual({ uv: 25, pv: 156 });
+    expect(mocks.request).toHaveBeenCalledWith(
+      "/monitor/busiconfig/skill-config/preview-stats",
+      {
+        method: "POST",
+        body: JSON.stringify({ skill_id: "job-1", bbk_id: "571" }),
+      },
+    );
+  });
+
+  it("rejects unsuccessful preview stats responses", async () => {
+    mocks.request.mockResolvedValue({
+      code: 2,
+      message: "查看数据查询失败",
+      data: {},
+    });
+
+    await expect(
+      skillConfigApi.getPreviewStats("job-1", "571"),
+    ).rejects.toThrow("查看数据查询失败");
+  });
+
   it("posts the selected SKILL identifiers when loading value return stats", async () => {
     mocks.request.mockResolvedValue({
       code: 0,
