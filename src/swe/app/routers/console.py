@@ -933,33 +933,13 @@ async def _start_new_chat(
     msgid = str(uuid.uuid4())
     native_payload["meta"]["msgid"] = msgid
     scenario_preset_id = native_payload["meta"].get("scenario_preset_id")
-    prevalidated_snapshot = None
+    existing_chat = None
     if scenario_preset_id:
         existing_chat = await workspace.chat_manager.get_chat_by_session(
             session_id,
             native_payload["channel_id"],
             native_payload["sender_id"],
         )
-        if existing_chat is None:
-            from ..scenario_preset.router import (
-                get_service as get_scenario_service,
-            )
-            from ..scenario_preset.runtime import initialize_scenario_snapshot
-
-            try:
-                prevalidated_snapshot = await initialize_scenario_snapshot(
-                    service=get_scenario_service(),
-                    source_id=native_payload["meta"]["source_id"],
-                    scenario_id=scenario_preset_id,
-                    agent_id=getattr(workspace, "agent_id", None),
-                    workspace_dir=getattr(workspace, "workspace_dir", None),
-                    agent_config=getattr(workspace, "config", None),
-                )
-            except ValueError as exc:
-                raise HTTPException(
-                    status_code=409,
-                    detail="Scenario preset is no longer available",
-                ) from exc
     chat = await workspace.chat_manager.get_or_create_chat(
         session_id,
         native_payload["sender_id"],
@@ -981,12 +961,41 @@ async def _start_new_chat(
 
         snapshot = get_scenario_snapshot(chat.meta)
         if snapshot is None:
-            if prevalidated_snapshot is None:
+            if existing_chat is not None:
                 raise HTTPException(
                     status_code=409,
                     detail="Scenario selection is only available for a new chat",
                 )
-            snapshot = prevalidated_snapshot
+            from ..scenario_preset.router import (
+                get_service as get_scenario_service,
+            )
+            from ..scenario_preset.runtime import initialize_scenario_snapshot
+
+            resource_root = None
+            workspace_dir = getattr(workspace, "workspace_dir", None)
+            if workspace_dir is not None:
+                resource_root = (
+                    Path(workspace_dir) / ".scenario_sessions" / chat.id
+                )
+            try:
+                snapshot = await initialize_scenario_snapshot(
+                    service=get_scenario_service(),
+                    source_id=native_payload["meta"]["source_id"],
+                    scenario_id=scenario_preset_id,
+                    agent_id=getattr(workspace, "agent_id", None),
+                    workspace_dir=workspace_dir,
+                    agent_config=getattr(workspace, "config", None),
+                    bbk_id=native_payload["meta"].get("bbk_id"),
+                    session_resource_root=resource_root,
+                )
+            except ValueError as exc:
+                delete_chats = getattr(workspace.chat_manager, "delete_chats", None)
+                if delete_chats is not None:
+                    await delete_chats([chat.id])
+                raise HTTPException(
+                    status_code=409,
+                    detail="Scenario preset is no longer available",
+                ) from exc
             chat.meta = with_scenario_snapshot(chat.meta, snapshot)
             await workspace.chat_manager.update_chat(chat)
         elif snapshot.get("scenario_id") != scenario_preset_id:
@@ -1000,6 +1009,7 @@ async def _start_new_chat(
                 detail="Scenario chat is bound to another Agent",
             )
         native_payload["meta"]["scenario_preset_snapshot"] = snapshot
+        native_payload["meta"]["scenario_preset_snapshot_source"] = "chat_meta"
     native_payload["meta"]["chat_id"] = chat.id
     # Inject session_channel from chat record so downstream (e.g. session-end
     # push) can identify the session's original channel (e.g. zhaohu).

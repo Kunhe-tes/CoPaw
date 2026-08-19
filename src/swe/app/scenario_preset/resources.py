@@ -9,6 +9,9 @@ references and are resolved by the normal runtime configuration path.
 from __future__ import annotations
 
 import re
+import json
+import shutil
+from pathlib import Path
 from typing import Any
 
 _ENV_REFERENCE = re.compile(r"^\$\{ENV:[A-Za-z_][A-Za-z0-9_]*\}$")
@@ -48,6 +51,58 @@ def sanitize_mcp_config(raw: Any) -> dict[str, Any]:
     return config
 
 
+def stage_temporary_skill_zip(
+    payload: bytes,
+    *,
+    resource_id: str,
+    session_root: Path,
+) -> tuple[str, Path]:
+    """Scan and place one market Skill below a single Chat's private root."""
+    from ...agents.skills_manager import (  # pylint: disable=import-outside-toplevel
+        _extract_zip_skills,
+        _scan_skill_dir_or_raise,
+    )
+
+    safe_resource_id = _safe_resource_id(resource_id)
+    root = session_root.resolve()
+    target_root = (root / safe_resource_id).resolve()
+    target_root.relative_to(root)
+    temporary_root, found = _extract_zip_skills(payload)
+    try:
+        if len(found) != 1:
+            raise ValueError("market Skill archive must contain exactly one Skill")
+        source_dir, skill_name = found[0]
+        _scan_skill_dir_or_raise(source_dir, skill_name)
+        target_dir = (target_root / skill_name).resolve()
+        target_dir.relative_to(target_root)
+        if target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(source_dir, target_dir)
+        return skill_name, target_dir / "SKILL.md"
+    finally:
+        shutil.rmtree(temporary_root, ignore_errors=True)
+
+
+def stage_temporary_mcp_config(
+    config: dict[str, Any],
+    *,
+    resource_id: str,
+    session_root: Path,
+) -> Path:
+    """Persist safe MCP config only in the Chat-private resource directory."""
+    root = session_root.resolve()
+    target_root = (root / _safe_resource_id(resource_id)).resolve()
+    target_root.relative_to(root)
+    target_root.mkdir(parents=True, exist_ok=True)
+    path = target_root / "mcp.json"
+    path.write_text(
+        json.dumps(config, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    return path
+
+
 def _sanitize_secret_map(raw: Any, label: str) -> dict[str, str]:
     if raw is None:
         return {}
@@ -66,3 +121,12 @@ def _sanitize_secret_map(raw: Any, label: str) -> dict[str, str]:
             raise ValueError(f"MCP {label} contains unsafe secret material")
         result[name] = text
     return result
+
+
+def _safe_resource_id(resource_id: str) -> str:
+    normalized = str(resource_id or "").strip()
+    if not normalized or normalized in {".", ".."}:
+        raise ValueError("invalid market resource ID")
+    if "/" in normalized or "\\" in normalized or "\x00" in normalized:
+        raise ValueError("invalid market resource ID")
+    return normalized

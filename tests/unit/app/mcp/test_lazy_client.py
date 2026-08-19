@@ -50,6 +50,30 @@ async def test_lazy_client_reuses_discovery_without_connecting_again():
 
 
 @pytest.mark.asyncio
+async def test_lazy_client_uses_frozen_tool_snapshot_without_discovery():
+    create_client = AsyncMock()
+    client = LazyMCPClient(
+        name="weather-mcp",
+        discovery_key="tenant:user:weather:v1",
+        create_client=create_client,
+        discovery_cache=MCPToolDiscoveryCache(),
+        frozen_tools=[
+            {
+                "name": "weather",
+                "description": "Return frozen weather.",
+                "inputSchema": {"type": "object", "properties": {}},
+            },
+        ],
+    )
+
+    tools = await client.list_tools()
+
+    assert tools[0].name == "weather"
+    assert tools[0].description == "Return frozen weather."
+    assert create_client.await_count == 0
+
+
+@pytest.mark.asyncio
 async def test_lazy_client_connects_only_when_the_tool_is_called():
     cache = MCPToolDiscoveryCache(ttl_seconds=60)
     await cache.put("tenant:user:weather:v1", [_tool()])
@@ -223,14 +247,12 @@ async def test_discovery_cache_evicts_oldest_entry_at_capacity():
     discover_first = AsyncMock(return_value=[_tool("first")])
 
     assert [
-        tool.name
-        for tool in await cache.get_or_discover("second", AsyncMock())
+        tool.name for tool in await cache.get_or_discover("second", AsyncMock())
     ] == [
         "second",
     ]
     assert [
-        tool.name
-        for tool in await cache.get_or_discover("first", discover_first)
+        tool.name for tool in await cache.get_or_discover("first", discover_first)
     ] == ["first"]
     discover_first.assert_awaited_once()
 

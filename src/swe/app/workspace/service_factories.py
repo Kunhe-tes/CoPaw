@@ -41,6 +41,7 @@ async def create_chat_service(ws: "Workspace", service):
             archive_store=ConversationArchiveStore(
                 ws.workspace_dir / "dialog",
             ),
+            resource_root=ws.workspace_dir / ".scenario_sessions",
         )
         ws._service_manager.services["chat_manager"] = cm
         logger.info(f"ChatManager created: {chats_path}")
@@ -72,9 +73,7 @@ async def _init_zhaohu_binding(ws: "Workspace", zhaohu_cfg):
         # tenant_id 解码：MDAw.MDAw -> 取前半段 MDAw -> 解码为 000
         try:
             decoded_parts = decode_scope_id(ws.tenant_id)
-            effective_tenant_id = (
-                decoded_parts[0] if decoded_parts else ws.tenant_id
-            )
+            effective_tenant_id = decoded_parts[0] if decoded_parts else ws.tenant_id
         except Exception:
             effective_tenant_id = ws.tenant_id
         # 仅在无已有记录时插入，避免热加载覆盖用户更新的 priority

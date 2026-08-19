@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from ...agents.memory.conversation_archive import ConversationArchiveStore
@@ -63,6 +65,7 @@ class ChatManager:
         *,
         repo: BaseChatRepository,
         archive_store: ConversationArchiveStore | None = None,
+        resource_root: Path | None = None,
     ):
         """Initialize chat manager.
 
@@ -71,6 +74,7 @@ class ChatManager:
         """
         self._repo = repo
         self._archive_store = archive_store
+        self._resource_root = resource_root.resolve() if resource_root else None
         self._lock = asyncio.Lock()
         repo_path = getattr(repo, "path", "<unknown>")
         logger.info(
@@ -175,9 +179,7 @@ class ChatManager:
                 user_id=user_id,
                 channel=channel,
             )
-            matching_chats = [
-                chat for chat in chats if chat.session_id == session_id
-            ]
+            matching_chats = [chat for chat in chats if chat.session_id == session_id]
             if not matching_chats:
                 return None
             if len(matching_chats) > 1:
@@ -345,9 +347,21 @@ class ChatManager:
                 if self._archive_store is not None:
                     for chat_id in chat_ids:
                         await self._archive_store.delete_chat(chat_id)
+                self._delete_session_resources(chat_ids)
                 logger.debug(f"Deleted chats: {chat_ids}")
 
             return deleted
+
+    def _delete_session_resources(self, chat_ids: list[str]) -> None:
+        if self._resource_root is None:
+            return
+        for chat_id in chat_ids:
+            target = (self._resource_root / chat_id).resolve()
+            try:
+                target.relative_to(self._resource_root)
+            except ValueError:
+                continue
+            shutil.rmtree(target, ignore_errors=True)
 
     async def count_chats(
         self,
@@ -390,9 +404,7 @@ class ChatManager:
         """
         async with self._lock:
             chats = await self._repo.filter_chats(channel=channel)
-            matching_chats = [
-                chat for chat in chats if chat.session_id == session_id
-            ]
+            matching_chats = [chat for chat in chats if chat.session_id == session_id]
 
             if not matching_chats:
                 logger.debug(
