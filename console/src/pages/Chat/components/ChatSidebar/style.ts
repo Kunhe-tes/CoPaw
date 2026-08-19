@@ -90,6 +90,10 @@ export default createGlobalStyle`
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+
+  &--without-guide {
+    height: calc(100vh - 79px);
+  }
 }
 
 /* History section */
