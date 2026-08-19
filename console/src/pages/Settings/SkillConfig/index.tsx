@@ -13,10 +13,7 @@ import {
   type RefSelectProps,
 } from "antd";
 import { CircleX, Plus, RefreshCw, Settings2, SquarePen } from "lucide-react";
-import {
-  mySkillsApi,
-  type SweSkillListItem,
-} from "@/api/modules/mySkills";
+import { mySkillsApi, type SweSkillListItem } from "@/api/modules/mySkills";
 import {
   buildSkillConfigCreatePayload,
   buildSkillConfigUpdatePayload,
@@ -224,18 +221,40 @@ function InspectionPanel({
           <span className={styles.sectionMarker} aria-hidden="true" />
           <h3>L2 客户级方案模块滚动深度</h3>
         </div>
-        <div className={styles.depthList}>
+        <div
+          className={styles.depthList}
+          role="list"
+          aria-label="客户级方案模块滚动深度"
+        >
           {data?.depthItems.map((item, index) => (
-            <div className={styles.depthRow} key={item.label}>
-              <span className={styles.depthIndex}>{index + 1}</span>
+            <div
+              className={styles.depthRow}
+              key={item.id || item.label}
+              role="listitem"
+              aria-label={
+                item.exposureCount === undefined
+                  ? undefined
+                  : `${item.label}：曝光 ${item.exposureCount} 次，占比 ${item.value}`
+              }
+            >
+              <span className={styles.depthIndex}>
+                {item.sequence ?? index + 1}
+              </span>
               <span className={styles.depthLabel}>{item.label}</span>
               <strong>{item.value}</strong>
-              <span className={styles.depthTrack} aria-hidden="true" />
+              <span className={styles.depthTrack} aria-hidden="true">
+                <span
+                  className={styles.depthTrackFill}
+                  style={{ width: `${item.ratePercent ?? 0}%` }}
+                />
+              </span>
             </div>
           ))}
         </div>
         <p className={styles.placeholderHint}>
-          回检接口接入后，将在此展示真实触达与转化数据。
+          {data?.depthTotalCount === undefined
+            ? "客户级方案模块滚动深度暂无数据"
+            : `曝光总数 ${data.depthTotalCount}`}
         </p>
       </div>
     </section>
@@ -245,8 +264,7 @@ function InspectionPanel({
 export default function SkillConfigPage() {
   const { message } = useAppMessage();
   const bbkId = useIframeStore((state) => state.bbk) || DEFAULT_BBK_ID;
-  const sourceId =
-    useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
+  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const [form] = Form.useForm<SkillConfigEditorValues>();
   const nameSelectRef = useRef<RefSelectProps>(null);
   const [configs, setConfigs] = useState<SkillConfigItem[]>([]);
@@ -381,9 +399,23 @@ export default function SkillConfigPage() {
     if (!selectedId || mode === "create") return;
     let cancelled = false;
     setDetailLoading(true);
+    const inspectionPromise = Promise.allSettled([
+      skillConfigApi.getValueReturnStats(selectedId, bbkId),
+      skillConfigApi.getSkillExposureStats(selectedId, bbkId),
+    ]).then(([valueReturnResult, exposureResult]) =>
+      getSkillInspectionMock(
+        selectedId,
+        valueReturnResult.status === "fulfilled"
+          ? valueReturnResult.value
+          : undefined,
+        exposureResult.status === "fulfilled"
+          ? exposureResult.value
+          : undefined,
+      ),
+    );
     Promise.all([
       skillConfigApi.getSkillConfigDetail(selectedId, bbkId),
-      getSkillInspectionMock(selectedId),
+      inspectionPromise,
     ])
       .then(([detail, inspectionData]) => {
         if (cancelled) return;

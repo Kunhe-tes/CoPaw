@@ -181,8 +181,7 @@
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
-  scrollbar-color: var(--console-management-border-strong, #d0d7e2)
-    transparent;
+  scrollbar-color: var(--console-management-border-strong, #d0d7e2) transparent;
 
   &:focus-visible {
     outline: 2px solid var(--console-management-primary, #3769fc);
@@ -549,8 +548,16 @@
 
 .depthTrack {
   height: 4px;
+  overflow: hidden;
   border-radius: 2px;
   background: var(--console-management-border, #e5e7eb);
+}
+
+.depthTrackFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--console-management-primary, #3769fc);
 }
 
 .placeholderHint {
