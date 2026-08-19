@@ -126,7 +126,12 @@ function SkillList({
           ) : null}
         </div>
       </div>
-      <div className={styles.skillList}>
+      <div
+        className={styles.skillList}
+        role="region"
+        aria-label="SKILL 列表内容"
+        tabIndex={items.length ? 0 : undefined}
+      >
         {items.length ? (
           items.map((item) => {
             const selected = selectedId === item.skillId;
@@ -467,6 +472,16 @@ export default function SkillConfigPage() {
 
   const handleSave = async () => {
     const values = await form.validateFields();
+    const selectedMarketSkill = marketSkills.find(
+      (item) => item.skill_id === values.skillId,
+    );
+    const valuesForSubmit = {
+      ...values,
+      name:
+        selectedMarketSkill?.cn_name ||
+        selectedMarketSkill?.skill_name ||
+        values.name,
+    };
     setSaving(true);
     try {
       const groupName = groupOptions.find(
@@ -477,7 +492,7 @@ export default function SkillConfigPage() {
           configs.find((item) => item.bbkId === bbkId)?.bbkName ||
           getBbkDisplayName(bbkId);
         const createPayload = buildSkillConfigCreatePayload(
-          values,
+          valuesForSubmit,
           bbkId,
           bbkName,
           groupName,
@@ -490,7 +505,7 @@ export default function SkillConfigPage() {
         message.success("SKILL 触发规则创建成功");
       } else {
         const updatePayload = buildSkillConfigUpdatePayload(
-          values,
+          valuesForSubmit,
           selectedConfig ?? undefined,
           bbkId,
           groupName,
@@ -644,7 +659,7 @@ export default function SkillConfigPage() {
                 >
                   <Select
                     ref={nameSelectRef}
-                    disabled={mode === "view"}
+                    disabled={mode !== "create"}
                     showSearch
                     optionFilterProp="label"
                     options={skillNameOptions}
