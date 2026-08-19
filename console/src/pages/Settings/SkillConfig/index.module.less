@@ -128,7 +128,7 @@
 .rulePanel,
 .inspectionPanel {
   min-width: 0;
-  padding: 28px 24px;
+  padding: 28px 20px;
 }
 
 .skillListPanel,
@@ -144,6 +144,7 @@
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 18px;
+  padding: 0 2px;
 
   h2 {
     margin: 0;
@@ -157,6 +158,27 @@
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.skillListHeader {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 18px;
+
+  .panelHeader {
+    margin-bottom: 0;
+  }
+}
+
+.skillListHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--console-management-text-muted, #8a94a6);
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 2px;
+  white-space: nowrap;
 }
 
 .refreshButton {
@@ -236,6 +258,15 @@
   &:hover {
     background: var(--console-management-primary-soft, #eef4ff);
   }
+
+  &:hover,
+  &:focus-within {
+    .editIconButton {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
+  }
 }
 
 .skillRowSelected {
@@ -275,10 +306,32 @@
   place-items: center;
   border-radius: 6px;
   color: var(--console-management-text-muted, #8a94a6);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(2px);
+  transition:
+    opacity 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
 
-  &:hover {
+  &:hover,
+  &:focus-visible {
     color: var(--console-management-primary-hover, #2957dc);
-    background: var(--console-management-primary-soft, #eef4ff);
+    background: transparent;
+  }
+}
+
+@media (hover: none) {
+  .editIconButton {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editIconButton {
+    transition: none;
   }
 }
 

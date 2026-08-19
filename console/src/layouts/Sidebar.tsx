@@ -247,7 +247,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       key: "skill-config",
       icon: <SlidersHorizontal size={18} />,
       path: "/skill-config",
-      label: t("nav.skillConfig", "SKILL 配置"),
+      label: t("nav.skillConfig", "Skill 配置"),
     },
     ...(canManageCurrentSourceConfig
       ? [
@@ -450,7 +450,7 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
         },
         {
           key: "skill-config",
-          label: collapsed ? null : t("nav.skillConfig", "SKILL 配置"),
+          label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
           icon: <SlidersHorizontal size={16} />,
         },
         ...(canManageCurrentSourceConfig
