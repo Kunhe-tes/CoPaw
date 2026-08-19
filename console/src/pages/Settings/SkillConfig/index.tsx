@@ -27,9 +27,9 @@ import { DEFAULT_BBK_ID, DEFAULT_SOURCE_ID } from "@/constants/identity";
 import { useAppMessage } from "@/hooks/useAppMessage";
 import { useIframeStore } from "@/stores/iframeStore";
 import {
-  getSkillInspectionMock,
-  type SkillInspectionPlaceholder,
-} from "./inspectionMock";
+  buildSkillInspectionData,
+  type SkillInspectionData,
+} from "./inspectionData";
 import styles from "./index.module.less";
 
 type EditorMode = "view" | "create" | "edit";
@@ -179,11 +179,7 @@ function SkillList({
   );
 }
 
-function InspectionPanel({
-  data,
-}: {
-  data: SkillInspectionPlaceholder | null;
-}) {
+function InspectionPanel({ data }: { data: SkillInspectionData | null }) {
   return (
     <section
       className={styles.inspectionPanel}
@@ -276,8 +272,9 @@ export default function SkillConfigPage() {
   const [selectedConfig, setSelectedConfig] = useState<SkillConfigItem | null>(
     null,
   );
-  const [inspection, setInspection] =
-    useState<SkillInspectionPlaceholder | null>(null);
+  const [inspection, setInspection] = useState<SkillInspectionData | null>(
+    null,
+  );
   const [mode, setMode] = useState<EditorMode>("view");
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
@@ -400,11 +397,12 @@ export default function SkillConfigPage() {
     let cancelled = false;
     setDetailLoading(true);
     const inspectionPromise = Promise.allSettled([
+      skillConfigApi.getPreviewStats(selectedId, bbkId),
       skillConfigApi.getValueReturnStats(selectedId, bbkId),
       skillConfigApi.getSkillExposureStats(selectedId, bbkId),
-    ]).then(([valueReturnResult, exposureResult]) =>
-      getSkillInspectionMock(
-        selectedId,
+    ]).then(([previewResult, valueReturnResult, exposureResult]) =>
+      buildSkillInspectionData(
+        previewResult.status === "fulfilled" ? previewResult.value : undefined,
         valueReturnResult.status === "fulfilled"
           ? valueReturnResult.value
           : undefined,
@@ -438,12 +436,12 @@ export default function SkillConfigPage() {
     };
   }, [bbkId, form, message, mode, selectedId]);
 
-  const handleCreate = async () => {
+  const handleCreate = () => {
     setMode("create");
     setSelectedId(null);
     setSelectedConfig(null);
     form.setFieldsValue(DEFAULT_FORM_VALUES);
-    setInspection(await getSkillInspectionMock("new"));
+    setInspection(buildSkillInspectionData());
   };
 
   const handleSelect = (item: SkillConfigItem) => {

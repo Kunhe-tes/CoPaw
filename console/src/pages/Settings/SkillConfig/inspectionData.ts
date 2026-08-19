@@ -1,5 +1,6 @@
 import type {
   SkillExposureStats,
+  SkillPreviewStats,
   SkillValueReturnStats,
 } from "@/api/modules/skillConfig";
 
@@ -25,23 +26,29 @@ export interface InspectionDepthItem {
   ratePercent?: number;
 }
 
-export interface SkillInspectionPlaceholder {
+export interface SkillInspectionData {
   sections: InspectionSection[];
   depthItems: InspectionDepthItem[];
   depthTotalCount?: number;
 }
 
-const DEPTH_ITEM_LABELS = [
-  "客户核心信息",
-  "到期产品",
-  "经营目标与策略",
-  "电话邀约话术",
-  "常见异议处理",
-  "营销小贴士",
-];
-
 function formatMetricValue(value: number | undefined): string {
   return Number.isFinite(value) ? String(value) : "--";
+}
+
+function formatAmount(value: number | undefined): {
+  value: string;
+  suffix?: string;
+} {
+  if (!Number.isFinite(value)) return { value: "--" };
+  const amount = value as number;
+  if (Math.abs(amount) < 10000) {
+    return { value: String(amount), suffix: "元" };
+  }
+  return {
+    value: String(Number((amount / 10000).toFixed(2))),
+    suffix: "万元",
+  };
 }
 
 function formatCountDescription(
@@ -60,18 +67,27 @@ function parseExposurePercent(value: string): number {
   return Number.isFinite(parsed) ? Math.min(100, Math.max(0, parsed)) : 0;
 }
 
-function buildInspectionData(
-  stats?: SkillValueReturnStats,
+export function buildSkillInspectionData(
+  previewStats?: SkillPreviewStats,
+  valueReturnStats?: SkillValueReturnStats,
   exposureStats?: SkillExposureStats,
-): SkillInspectionPlaceholder {
+): SkillInspectionData {
   return {
     sections: [
       {
         title: "查看",
         description: "L1 盘户名单触达",
         metrics: [
-          { label: "整体 UV", value: "--", description: "浏览人数" },
-          { label: "整体 PV", value: "--", description: "名单页总浏览次数" },
+          {
+            label: "整体 UV",
+            value: formatMetricValue(previewStats?.uv),
+            description: "客户经理数",
+          },
+          {
+            label: "整体 PV",
+            value: formatMetricValue(previewStats?.pv),
+            description: "名单页总浏览次数",
+          },
         ],
       },
       {
@@ -80,22 +96,22 @@ function buildInspectionData(
         metrics: [
           {
             label: "名单采纳率",
-            value: formatMetricValue(stats?.acceptRate),
+            value: formatMetricValue(valueReturnStats?.acceptRate),
             suffix: "%",
             description: formatCountDescription(
               "采纳数",
-              stats?.acceptCount,
-              stats?.listCount,
+              valueReturnStats?.acceptCount,
+              valueReturnStats?.listCount,
             ),
           },
           {
             label: "接触率",
-            value: formatMetricValue(stats?.contactRate),
+            value: formatMetricValue(valueReturnStats?.contactRate),
             suffix: "%",
             description: formatCountDescription(
               "接触数",
-              stats?.contactCount,
-              stats?.listCount,
+              valueReturnStats?.contactCount,
+              valueReturnStats?.listCount,
             ),
           },
         ],
@@ -106,14 +122,12 @@ function buildInspectionData(
         metrics: [
           {
             label: "AUM 提升金额",
-            value: formatMetricValue(stats?.aumIncrease),
-            suffix: "万元",
+            ...formatAmount(valueReturnStats?.aumIncrease),
             description: "接触后客户资产提升总额",
           },
           {
             label: "财富产品购买金额",
-            value: formatMetricValue(stats?.wealthProductAmount),
-            suffix: "万元",
+            ...formatAmount(valueReturnStats?.wealthProductAmount),
             description: "接触后客户购买财富产品总额",
           },
         ],
@@ -130,16 +144,7 @@ function buildInspectionData(
             exposureCount: item.exposureCount,
             ratePercent: parseExposurePercent(item.exposureRate),
           }))
-      : DEPTH_ITEM_LABELS.map((label) => ({ label, value: "--" })),
+      : [],
     depthTotalCount: exposureStats?.totalCount,
   };
-}
-
-export async function getSkillInspectionMock(
-  skillId: string,
-  stats?: SkillValueReturnStats,
-  exposureStats?: SkillExposureStats,
-): Promise<SkillInspectionPlaceholder> {
-  void skillId;
-  return Promise.resolve(buildInspectionData(stats, exposureStats));
 }
