@@ -220,7 +220,7 @@ describe("SkillConfigPage", () => {
     expect(screen.getByText("编辑模式")).toBeTruthy();
     expect(
       screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
-    ).not.toBeDisabled();
+    ).toBeDisabled();
   });
 
   it("refreshes the SKILL list and selects the first refreshed item", async () => {
@@ -274,9 +274,32 @@ describe("SkillConfigPage", () => {
     ).toHaveAttribute("aria-current", "page");
   });
 
-  it("submits skill_name fallback when an edited SKILL has no cn_name", async () => {
+  it("exposes a long SKILL list as a keyboard-accessible scroll region", async () => {
+    const items = Array.from({ length: 20 }, (_, index) => ({
+      skillId: `skill-${index + 1}`,
+      name: `SKILL ${index + 1}`,
+      sort: index + 1,
+      businessCenterEnabled: false,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skillId: `skill-${index + 1}`, name: `SKILL ${index + 1}` },
+    }));
+    mocks.listSkillConfigs.mockResolvedValue(items);
+    mocks.getSkillConfigDetail.mockResolvedValue(items[0]);
+
+    render(<SkillConfigPage />);
+
+    const listRegion = await screen.findByRole("region", {
+      name: "SKILL 列表内容",
+    });
+    expect(listRegion).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("button", { name: "SKILL 20" })).toBeTruthy();
+  });
+
+  it("keeps the SKILL name locked while submitting its fallback name on edit", async () => {
     const currentItem = {
-      skillId: "job-1",
+      skillId: "skill-en",
       bbkId: "571",
       bbkName: "杭州分行",
       name: "旧名称",
@@ -287,11 +310,7 @@ describe("SkillConfigPage", () => {
       enabled: true,
       source: { skillId: "job-1", name: "旧名称" },
     };
-    const updatedItem = {
-      ...currentItem,
-      skillId: "skill-en",
-      name: "customer_insight",
-    };
+    const updatedItem = { ...currentItem, name: "customer_insight", sort: 2 };
     mocks.listSkillConfigs
       .mockResolvedValueOnce([currentItem])
       .mockResolvedValueOnce([updatedItem]);
@@ -311,18 +330,16 @@ describe("SkillConfigPage", () => {
 
     render(<SkillConfigPage />);
     await waitFor(() =>
-      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("skill-en", ""),
     );
     fireEvent.click(screen.getByRole("button", { name: "编辑 旧名称" }));
     const skillSelect = await screen.findByRole("combobox", {
       name: /SKILL\s*名称/,
     });
-    fireEvent.mouseDown(skillSelect);
-    fireEvent.click(
-      await screen.findByText("customer_insight", {
-        selector: ".ant-select-item-option-content",
-      }),
-    );
+    expect(skillSelect).toBeDisabled();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "排序" }), {
+      target: { value: "2" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
 
     await waitFor(() =>
