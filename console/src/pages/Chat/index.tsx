@@ -2325,6 +2325,7 @@ export default function ChatPage() {
               {!isContentOnly && (
                 <ChatSidebar
                   tasks={tasks}
+                  showGuide={isOriginY}
                   selectedTaskId={currentTask?.id}
                   onCreateSession={handleCreateSessionFromSidebar}
                   onTaskClick={handleTaskOpen}
