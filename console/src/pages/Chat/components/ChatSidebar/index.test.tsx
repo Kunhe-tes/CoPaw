@@ -310,6 +310,9 @@ describe("ChatSidebar infinite history scrolling", () => {
 
     expect(container.querySelector(".chat-sidebar-footer")).toBeNull();
     expect(container.querySelector('[data-testid="guide-image"]')).toBeNull();
+    expect(
+      container.querySelector(".chat-sidebar-content-record-list"),
+    ).toHaveClass("chat-sidebar-content-record-list--without-guide");
   });
 
   it("hides the operation guide when bbk is not 121", () => {
@@ -344,5 +347,8 @@ describe("ChatSidebar infinite history scrolling", () => {
     expect(
       container.querySelector('[data-testid="guide-image"]'),
     ).toBeInTheDocument();
+    expect(
+      container.querySelector(".chat-sidebar-content-record-list"),
+    ).not.toHaveClass("chat-sidebar-content-record-list--without-guide");
   });
 });

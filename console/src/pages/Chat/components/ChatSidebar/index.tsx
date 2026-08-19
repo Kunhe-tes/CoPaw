@@ -429,7 +429,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
               </button>
             </div>
             <div
-              className="chat-sidebar-content-record-list"
+              className={`chat-sidebar-content-record-list${
+                shouldShowGuide
+                  ? ""
+                  : " chat-sidebar-content-record-list--without-guide"
+              }`}
               ref={historyScrollContainerRef}
             >
               <ChatTaskList
