@@ -334,7 +334,7 @@ export const skillConfigApi = {
       },
     );
     if (response.code !== 0) {
-      throw new Error(response.message || "SKILL 配置列表加载失败");
+      throw new Error(response.message || "Skill 配置列表加载失败");
     }
     return response.data.map(normalizeSkillConfig);
   },
@@ -351,7 +351,7 @@ export const skillConfigApi = {
       },
     );
     if (response.code !== 0) {
-      throw new Error(response.message || "SKILL 配置详情加载失败");
+      throw new Error(response.message || "Skill 配置详情加载失败");
     }
     return normalizeSkillConfig(response.data);
   },
@@ -435,7 +435,7 @@ export const skillConfigApi = {
       },
     );
     if (response.code !== 0) {
-      throw new Error(response.message || "SKILL 配置创建失败");
+      throw new Error(response.message || "Skill 配置创建失败");
     }
     return normalizeSkillConfig(response.data);
   },
@@ -451,7 +451,7 @@ export const skillConfigApi = {
       },
     );
     if (response.code !== 0) {
-      throw new Error(response.message || "SKILL 配置更新失败");
+      throw new Error(response.message || "Skill 配置更新失败");
     }
     return normalizeSkillConfig(response.data);
   },

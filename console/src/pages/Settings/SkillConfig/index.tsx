@@ -101,32 +101,40 @@ function SkillList({
   refreshing: boolean;
 }) {
   return (
-    <aside className={styles.skillListPanel} aria-label="SKILL 列表">
-      <div className={styles.panelHeader}>
-        <h2>SKILL 列表</h2>
-        <div className={styles.skillListActions}>
-          <Tooltip title="刷新列表">
-            <Button
-              className={styles.refreshButton}
-              type="text"
-              size="small"
-              icon={<RefreshCw size={15} />}
-              loading={refreshing}
-              onClick={onRefresh}
-              aria-label="刷新 SKILL 列表"
-            />
-          </Tooltip>
-          {items.length ? (
-            <Button type="primary" size="small" onClick={onCreate}>
-              新增
-            </Button>
-          ) : null}
+    <aside className={styles.skillListPanel} aria-label="Skill 列表">
+      <div className={styles.skillListHeader}>
+        <div className={styles.panelHeader}>
+          <h2>Skill 列表</h2>
+          <div className={styles.skillListActions}>
+            <Tooltip title="刷新列表">
+              <Button
+                className={styles.refreshButton}
+                type="text"
+                size="small"
+                icon={<RefreshCw size={15} />}
+                loading={refreshing}
+                onClick={onRefresh}
+                aria-label="刷新 Skill 列表"
+              />
+            </Tooltip>
+            {items.length ? (
+              <Button type="primary" size="small" onClick={onCreate}>
+                新增
+              </Button>
+            ) : null}
+          </div>
         </div>
+        {items.length ? (
+          <span className={styles.skillListHint}>
+            <SquarePen size={12} aria-hidden="true" />
+            悬停条目可编辑
+          </span>
+        ) : null}
       </div>
       <div
         className={styles.skillList}
         role="region"
-        aria-label="SKILL 列表内容"
+        aria-label="Skill 列表内容"
         tabIndex={items.length ? 0 : undefined}
       >
         {items.length ? (
@@ -170,7 +178,7 @@ function SkillList({
           })
         ) : (
           <div className={styles.skillListEmpty} role="status">
-            <strong>暂无 SKILL 数据</strong>
+            <strong>暂无 Skill 数据</strong>
             <span>完成右侧配置并创建后，将显示在这里。</span>
           </div>
         )}
@@ -371,7 +379,7 @@ export default function SkillConfigPage() {
           setMarketSkills(skillResult.value.skills ?? []);
         } else {
           setMarketSkills([]);
-          message.error("SKILL 名称列表加载失败");
+          message.error("Skill 名称列表加载失败");
         }
         if (activityClassResult.status === "fulfilled") {
           setActivityClasses(activityClassResult.value);
@@ -424,7 +432,7 @@ export default function SkillConfigPage() {
       .catch((error) => {
         if (!cancelled) {
           message.error(
-            error instanceof Error ? error.message : "SKILL 详情加载失败",
+            error instanceof Error ? error.message : "Skill 详情加载失败",
           );
         }
       })
@@ -471,7 +479,7 @@ export default function SkillConfigPage() {
       }
     } catch (error) {
       message.error(
-        error instanceof Error ? error.message : "SKILL 列表刷新失败",
+        error instanceof Error ? error.message : "Skill 列表刷新失败",
       );
     } finally {
       setRefreshing(false);
@@ -532,7 +540,7 @@ export default function SkillConfigPage() {
         );
         setSelectedConfig(createdConfig);
         form.setFieldsValue(toEditorValues(createdConfig));
-        message.success("SKILL 触发规则创建成功");
+        message.success("Skill 触发规则创建成功");
       } else {
         const updatePayload = buildSkillConfigUpdatePayload(
           valuesForSubmit,
@@ -545,7 +553,7 @@ export default function SkillConfigPage() {
         );
         setSelectedConfig(updatedConfig);
         form.setFieldsValue(toEditorValues(updatedConfig));
-        message.success("SKILL 触发规则更新成功");
+        message.success("Skill 触发规则更新成功");
       }
     } catch (error) {
       if (error instanceof Error) message.error(error.message);
@@ -559,7 +567,7 @@ export default function SkillConfigPage() {
       const nextConfigs = await loadConfigs();
       setSelectedId(values.skillId || nextConfigs[0]?.skillId || null);
     } catch {
-      message.warning("保存成功，但 SKILL 列表刷新失败，请稍后重试");
+      message.warning("保存成功，但 Skill 列表刷新失败，请稍后重试");
     } finally {
       setSaving(false);
     }
@@ -590,7 +598,7 @@ export default function SkillConfigPage() {
                 aria-hidden="true"
               />
             }
-            title="SKILL 配置加载失败"
+            title="Skill 配置加载失败"
             subTitle={listError}
             extra={
               <Button
@@ -617,7 +625,7 @@ export default function SkillConfigPage() {
             image={<Settings2 size={52} strokeWidth={1.35} />}
             description={
               <div className={styles.emptyCopy}>
-                <strong>暂无 SKILL 配置</strong>
+                <strong>暂无 Skill 配置</strong>
                 <span>创建第一条触发规则后，可在这里查看和维护回检配置。</span>
               </div>
             }
@@ -628,7 +636,7 @@ export default function SkillConfigPage() {
               icon={<Plus size={17} />}
               onClick={handleCreate}
             >
-              新增 SKILL
+              新增 Skill
             </Button>
           </Empty>
         </div>
@@ -647,7 +655,7 @@ export default function SkillConfigPage() {
             <div className={styles.rulePanelHeader}>
               <div className={styles.sectionHeading}>
                 <span className={styles.sectionMarker} aria-hidden="true" />
-                <h2 id="rule-title">SKILL 触发规则</h2>
+                <h2 id="rule-title">Skill 触发规则</h2>
               </div>
               {mode !== "view" ? (
                 <div className={styles.formActions}>
@@ -684,8 +692,8 @@ export default function SkillConfigPage() {
               >
                 <Form.Item
                   name="selectedSkillId"
-                  label="SKILL 名称"
-                  rules={[{ required: true, message: "请选择SKILL名称" }]}
+                  label="Skill 名称"
+                  rules={[{ required: true, message: "请选择 Skill 名称" }]}
                 >
                   <Select
                     ref={nameSelectRef}
@@ -693,11 +701,11 @@ export default function SkillConfigPage() {
                     showSearch
                     optionFilterProp="label"
                     options={skillNameOptions}
-                    placeholder="请选择SKILL名称"
+                    placeholder="请选择 Skill 名称"
                     onChange={handleSkillChange}
                   />
                 </Form.Item>
-                <Form.Item name="skillId" label="SKILL ID">
+                <Form.Item name="skillId" label="Skill ID">
                   <Input
                     disabled
                     className={styles.skillIdInput}

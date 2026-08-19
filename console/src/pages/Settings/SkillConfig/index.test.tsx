@@ -115,11 +115,11 @@ describe("SkillConfigPage", () => {
     });
 
     render(<SkillConfigPage />);
-    fireEvent.click(await screen.findByRole("button", { name: "新增 SKILL" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新增 Skill" }));
 
     expect(mocks.listSweSkills).toHaveBeenCalledWith("RMASSIST");
     const skillSelect = screen.getByRole("combobox", {
-      name: /SKILL\s*名称/,
+      name: /Skill\s*名称/,
     });
     fireEvent.mouseDown(skillSelect);
     expect(
@@ -134,7 +134,7 @@ describe("SkillConfigPage", () => {
         selector: ".ant-select-item-option-content",
       }),
     );
-    expect(screen.getByRole("textbox", { name: "SKILL ID" })).toHaveValue(
+    expect(screen.getByRole("textbox", { name: "Skill ID" })).toHaveValue(
       "skill-cn",
     );
 
@@ -154,22 +154,22 @@ describe("SkillConfigPage", () => {
     render(<SkillConfigPage />);
 
     const createButton = await screen.findByRole("button", {
-      name: "新增 SKILL",
+      name: "新增 Skill",
     });
     fireEvent.click(createButton);
 
     expect(
-      await screen.findByRole("heading", { name: "SKILL 触发规则" }),
+      await screen.findByRole("heading", { name: "Skill 触发规则" }),
     ).toBeTruthy();
     expect(screen.getByRole("heading", { name: "回检" })).toBeTruthy();
     expect(screen.getAllByText("--").length).toBeGreaterThan(5);
-    expect(screen.getByText("暂无 SKILL 数据")).toBeTruthy();
+    expect(screen.getByText("暂无 Skill 数据")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /新\s*增/ })).toBeNull();
     expect(screen.getByText("创建模式")).toBeTruthy();
-    expect(screen.getByText("请选择SKILL名称")).toBeTruthy();
+    expect(screen.getByText("请选择 Skill 名称")).toBeTruthy();
     expect(screen.getByRole("button", { name: /保\s*存/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /创\s*建/ })).toBeNull();
-    expect(screen.getByRole("textbox", { name: "SKILL ID" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Skill ID" })).toBeDisabled();
     const sortInput = screen.getByRole("spinbutton", { name: "排序" });
     expect(sortInput).toHaveValue("1");
     expect(sortInput).toHaveAttribute("aria-valuemax", "9999");
@@ -177,7 +177,7 @@ describe("SkillConfigPage", () => {
     expect(sortInput).toHaveValue("1");
     await waitFor(() =>
       expect(
-        screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
+        screen.getByRole("combobox", { name: /Skill\s*名称/ }),
       ).toHaveFocus(),
     );
   });
@@ -220,11 +220,12 @@ describe("SkillConfigPage", () => {
     expect(screen.getByText(/点击左侧编辑图标后可修改/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
     expect(
-      screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
+      screen.getByRole("combobox", { name: /Skill\s*名称/ }),
     ).toBeDisabled();
     expect(
-      screen.getByRole("button", { name: "刷新 SKILL 列表" }),
+      screen.getByRole("button", { name: "刷新 Skill 列表" }),
     ).toBeTruthy();
+    expect(screen.getByText("悬停条目可编辑")).toBeTruthy();
     expect(
       screen.getByRole("button", { name: /新\s*增/ }).querySelector("svg"),
     ).toBeNull();
@@ -234,7 +235,7 @@ describe("SkillConfigPage", () => {
     expect(await screen.findByRole("button", { name: /保\s*存/ })).toBeTruthy();
     expect(screen.getByText("编辑模式")).toBeTruthy();
     expect(
-      screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
+      screen.getByRole("combobox", { name: /Skill\s*名称/ }),
     ).toBeDisabled();
   });
 
@@ -398,7 +399,7 @@ describe("SkillConfigPage", () => {
       expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-2", ""),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "刷新 SKILL 列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Skill 列表" }));
 
     await waitFor(() =>
       expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-3", ""),
@@ -425,7 +426,7 @@ describe("SkillConfigPage", () => {
     render(<SkillConfigPage />);
 
     const listRegion = await screen.findByRole("region", {
-      name: "SKILL 列表内容",
+      name: "Skill 列表内容",
     });
     expect(listRegion).toHaveAttribute("tabindex", "0");
     expect(screen.getByRole("button", { name: "SKILL 20" })).toBeTruthy();
@@ -468,7 +469,7 @@ describe("SkillConfigPage", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "编辑 旧名称" }));
     const skillSelect = await screen.findByRole("combobox", {
-      name: /SKILL\s*名称/,
+      name: /Skill\s*名称/,
     });
     expect(skillSelect).toBeDisabled();
     fireEvent.change(screen.getByRole("spinbutton", { name: "排序" }), {
@@ -493,13 +494,13 @@ describe("SkillConfigPage", () => {
 
     render(<SkillConfigPage />);
 
-    expect(await screen.findByText("SKILL 配置加载失败")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "新增 SKILL" })).toBeNull();
+    expect(await screen.findByText("Skill 配置加载失败")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "新增 Skill" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
 
     expect(
-      await screen.findByRole("button", { name: "新增 SKILL" }),
+      await screen.findByRole("button", { name: "新增 Skill" }),
     ).toBeTruthy();
     expect(mocks.listSkillConfigs).toHaveBeenCalledTimes(2);
   });
@@ -514,9 +515,9 @@ describe("SkillConfigPage", () => {
     render(<SkillConfigPage />);
 
     expect(
-      await screen.findByRole("button", { name: "新增 SKILL" }),
+      await screen.findByRole("button", { name: "新增 Skill" }),
     ).toBeTruthy();
-    expect(screen.queryByText("SKILL 配置加载失败")).toBeNull();
+    expect(screen.queryByText("Skill 配置加载失败")).toBeNull();
     expect(mocks.error).not.toHaveBeenCalled();
   });
 
@@ -557,7 +558,7 @@ describe("SkillConfigPage", () => {
 
     await waitFor(() => expect(mocks.updateSkillConfig).toHaveBeenCalled());
     await waitFor(() => expect(mocks.warning).toHaveBeenCalled());
-    expect(mocks.success).toHaveBeenCalledWith("SKILL 触发规则更新成功");
+    expect(mocks.success).toHaveBeenCalledWith("Skill 触发规则更新成功");
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
   });
 });
