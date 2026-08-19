@@ -820,11 +820,35 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references
+    scenario_preset_id = _extract_scenario_preset_id(request_data)
+    if scenario_preset_id is not None:
+        native_payload["meta"]["scenario_preset_id"] = scenario_preset_id
     if user_name:
         native_payload["meta"]["user_name"] = user_name
     if bbk_id:
         native_payload["meta"]["bbk_id"] = bbk_id
     return native_payload
+
+
+def _extract_scenario_preset_id(
+    request_data: Union[AgentRequest, dict],
+) -> str | None:
+    """Read the optional first-message scenario selection without trusting text."""
+    mapping = (
+        request_data
+        if isinstance(request_data, dict)
+        else request_data.model_dump()
+    )
+    value = mapping.get("scenario_preset_id")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value.strip()) > 64
+    ):
+        raise ValueError("Invalid scenario_preset_id")
+    return value.strip()
 
 
 def _derive_chat_name(native_payload: dict) -> str:
@@ -908,6 +932,33 @@ async def _start_new_chat(
     """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
     msgid = str(uuid.uuid4())
     native_payload["meta"]["msgid"] = msgid
+    scenario_preset_id = native_payload["meta"].get("scenario_preset_id")
+    prevalidated_snapshot = None
+    if scenario_preset_id:
+        existing_chat = await workspace.chat_manager.get_chat_by_session(
+            session_id,
+            native_payload["channel_id"],
+            native_payload["sender_id"],
+        )
+        if existing_chat is None:
+            from ..scenario_preset.router import (
+                get_service as get_scenario_service,
+            )
+            from ..scenario_preset.runtime import initialize_scenario_snapshot
+
+            try:
+                prevalidated_snapshot = await initialize_scenario_snapshot(
+                    service=get_scenario_service(),
+                    source_id=native_payload["meta"]["source_id"],
+                    scenario_id=scenario_preset_id,
+                    agent_id=getattr(workspace, "agent_id", None),
+                    workspace_dir=getattr(workspace, "workspace_dir", None),
+                )
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Scenario preset is no longer available",
+                ) from exc
     chat = await workspace.chat_manager.get_or_create_chat(
         session_id,
         native_payload["sender_id"],
@@ -921,6 +972,33 @@ async def _start_new_chat(
             else None
         ),
     )
+    if scenario_preset_id:
+        from ..scenario_preset.runtime import (
+            get_scenario_snapshot,
+            with_scenario_snapshot,
+        )
+
+        snapshot = get_scenario_snapshot(chat.meta)
+        if snapshot is None:
+            if prevalidated_snapshot is None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Scenario selection is only available for a new chat",
+                )
+            snapshot = prevalidated_snapshot
+            chat.meta = with_scenario_snapshot(chat.meta, snapshot)
+            await workspace.chat_manager.update_chat(chat)
+        elif snapshot.get("scenario_id") != scenario_preset_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Scenario selection is locked for this chat",
+            )
+        elif snapshot.get("agent_id") not in (None, workspace.agent_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Scenario chat is bound to another Agent",
+            )
+        native_payload["meta"]["scenario_preset_snapshot"] = snapshot
     native_payload["meta"]["chat_id"] = chat.id
     # Inject session_channel from chat record so downstream (e.g. session-end
     # push) can identify the session's original channel (e.g. zhaohu).

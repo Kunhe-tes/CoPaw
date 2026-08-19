@@ -110,4 +110,23 @@ export default createGlobalStyle`
   width: 935px;
   margin: 0 auto;
 }
+
+.scenario-preset-selector {
+  width: ${DESIGN_TOKENS.inputCardWidth}px;
+  max-width: 100%;
+  margin-bottom: 12px;
+}
+
+.scenario-preset-capability,
+.scenario-preset-scenarios {
+  display: inline-flex;
+  gap: 4px;
+  margin-left: 8px;
+}
+
+.welcome-scenario-marker {
+  color: ${DESIGN_TOKENS.colorPrimary};
+  font-size: 14px;
+  font-weight: 500;
+}
 `;

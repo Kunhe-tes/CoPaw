@@ -5,7 +5,7 @@ import React, {
   useEffect,
   useMemo,
 } from "react";
-import { Input, Upload, message } from "antd";
+import { Input, Modal, Upload, message } from "antd";
 import type { GetRef, UploadFile } from "antd";
 import { SparkAttachmentLine } from "@agentscope-ai/icons";
 import {
@@ -22,6 +22,11 @@ import { featuredCasesApi } from "@/api/modules/featuredCases";
 import type { FeaturedCase } from "@/api/types/featuredCases";
 import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
+import ScenarioPresetSelector from "../ScenarioPresetSelector";
+import type {
+  ScenarioPresetCapability,
+  ScenarioPresetScenario,
+} from "@/api/types/scenarioPreset";
 import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
 import VoiceRecorderQuickMenuItem from "@/components/GlobalVoiceRecorder/VoiceRecorderQuickMenuItem";
@@ -52,6 +57,7 @@ interface WelcomeCenterLayoutProps {
   quickMenuItems?: React.ReactNode | React.ReactNode[];
   prefixItems?: React.ReactNode | React.ReactNode[];
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void | Promise<void>;
+  onScenarioPresetSubmit?: (scenarioPresetId: string) => void;
   skillMentions?: SkillMentionsData;
 }
 
@@ -75,6 +81,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     placeholder,
     quickMenuItems,
     prefixItems,
+    onScenarioPresetSubmit,
   } = props;
   const { t } = useTranslation();
   const inputState = useChatAnywhereInput((value) => ({
@@ -90,6 +97,10 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const [loadingCase, setLoadingCase] = useState(false);
   const [mentionMenuContainer, setMentionMenuContainer] =
     useState<HTMLDivElement | null>(null);
+  const [selectedScenario, setSelectedScenario] = useState<{
+    capability: ScenarioPresetCapability;
+    scenario: ScenarioPresetScenario;
+  } | null>(null);
   const uploadRef = useRef<GetRef<typeof Upload>>(null);
   const voiceRecorder = useVoiceRecorderTrigger();
   const inputValueRef = useRef(inputValue);
@@ -111,6 +122,19 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       setFileList(next);
     },
     [],
+  );
+  const effectiveSkillMentions = useMemo<SkillMentionsData>(
+    () =>
+      skillMentions || {
+        items: [],
+        selected: [],
+        loading: false,
+        error: false,
+        onOpen: () => undefined,
+        onChange: () => undefined,
+        onRetry: () => undefined,
+      },
+    [skillMentions],
   );
 
   // 组件挂载时随机选择placeholder文案
@@ -155,7 +179,11 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     if (isSubmittingRef.current) return;
 
     const submittedInputValue = inputValueRef.current;
-    const query = submittedInputValue.trim();
+    const promptDraft = submittedInputValue.trim();
+    const capabilityMarker = selectedScenario
+      ? `@${selectedScenario.capability.name}`
+      : "";
+    const query = [capabilityMarker, promptDraft].filter(Boolean).join(" ");
     if (!query) return;
     const uploadedFiles = fileListRef.current.filter((file) =>
       Boolean(file.response?.url),
@@ -179,6 +207,9 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         return;
       }
 
+      if (selectedScenario) {
+        onScenarioPresetSubmit?.(selectedScenario.scenario.id);
+      }
       await Promise.resolve(
         onSubmit(typeof next === "object" ? next : inputData),
       );
@@ -194,7 +225,14 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
-  }, [beforeSubmit, onSubmit, setCurrentFileList, setCurrentInputValue]);
+  }, [
+    beforeSubmit,
+    onScenarioPresetSubmit,
+    onSubmit,
+    selectedScenario,
+    setCurrentFileList,
+    setCurrentInputValue,
+  ]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLElement>) => {
@@ -212,6 +250,33 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       setCurrentInputValue(text);
     },
     [inputDisabled, setCurrentInputValue],
+  );
+
+  const handleScenarioSelect = useCallback(
+    ({
+      capability,
+      scenario,
+    }: {
+      capability: ScenarioPresetCapability;
+      scenario: ScenarioPresetScenario;
+    }) => {
+      const replace = () => {
+        setSelectedScenario({ capability, scenario });
+        setCurrentInputValue(scenario.prompt_draft);
+      };
+      if (inputValueRef.current.trim()) {
+        Modal.confirm({
+          title: "替换当前提示草稿？",
+          content: "选择新的场景会替换当前草稿，取消则保留当前选择和文本。",
+          okText: "替换",
+          cancelText: "取消",
+          onOk: replace,
+        });
+        return;
+      }
+      replace();
+    },
+    [selectedScenario, setCurrentInputValue],
   );
 
   // Handle "看案例" click - fetch detail from API
@@ -366,6 +431,11 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         {/* Greeting */}
         <div className="welcome-greeting">{greeting}</div>
 
+        <ScenarioPresetSelector
+          disabled={inputDisabled || isSubmitting}
+          onSelect={handleScenarioSelect}
+        />
+
         {/* Input Card with upload */}
         <div className="welcome-input-card" ref={setMentionMenuContainer}>
           {/* Attachment preview area */}
@@ -378,24 +448,32 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
             </div>
           )}
 
-          {skillMentions ? (
+          {skillMentions || selectedScenario ? (
             <SkillTokenEditor
               aria-label="消息"
               className="welcome-input-placeholder welcome-skill-editor"
-              disabled={isSubmitting}
+              disabled={inputDisabled || isSubmitting}
+              fixedToken={
+                selectedScenario
+                  ? {
+                      text: `@${selectedScenario.capability.name}`,
+                      onRemove: () => setSelectedScenario(null),
+                    }
+                  : undefined
+              }
               mentionMenuContainer={mentionMenuContainer}
               mentionMenuPlacement="bottom"
               onKeyDown={handleKeyDown}
               onValueChange={setCurrentInputValue}
               placeholder={placeholder || randomPlaceholder}
-              skillMentions={skillMentions}
+              skillMentions={effectiveSkillMentions}
               value={inputValue}
             />
           ) : (
             <Input.TextArea
               className="welcome-input-placeholder"
               value={inputValue}
-              onChange={(e) => setCurrentInputValue(e.target.value)}
+              onChange={(event) => setCurrentInputValue(event.target.value)}
               onKeyDown={handleKeyDown}
               placeholder={placeholder || randomPlaceholder}
               autoSize={{ minRows: 1, maxRows: 5 }}
@@ -416,7 +494,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
             <button
               className="welcome-input-send-btn"
               onClick={handleSend}
-              disabled={inputDisabled || isSubmitting || !inputValue.trim()}
+              disabled={inputDisabled || isSubmitting || (!inputValue.trim() && !selectedScenario)}
               type="button"
             >
               <img src={sendIcon} alt="发送" width={24} height={24} />

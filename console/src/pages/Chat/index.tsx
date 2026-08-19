@@ -108,6 +108,7 @@ import {
 import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
 import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
+import { shouldClearPendingScenarioPreset } from "./scenarioPresetRequest";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
 import {
   CHAT_ATTACHMENT_ACCEPT_HINT,
@@ -630,6 +631,7 @@ export default function ChatPage() {
     useState(false);
   const [contextReferencesError, setContextReferencesError] = useState(false);
   const pendingContextReferencesRef = useRef<SkillMentionItem[]>([]);
+  const pendingScenarioPresetIdRef = useRef<string | null>(null);
   const contextReferencesRequestIdRef = useRef(0);
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
@@ -1793,6 +1795,7 @@ export default function ChatPage() {
           pendingContextReferencesRef.current.length === 0
             ? []
             : pendingContextReferencesRef.current,
+        scenario_preset_id: pendingScenarioPresetIdRef.current || undefined,
         file_url_network: resolveCurrentFileUrlNetwork(),
       };
       pendingContextReferencesRef.current = [];
@@ -1820,6 +1823,10 @@ export default function ChatPage() {
           body: JSON.stringify(requestBody),
           signal: timeoutSignal.signal,
         });
+
+        if (shouldClearPendingScenarioPreset(response.status)) {
+          pendingScenarioPresetIdRef.current = null;
+        }
 
         return response;
       } catch (error) {
@@ -2121,6 +2128,9 @@ export default function ChatPage() {
             quickMenuItems={planModeQuickMenuItems}
             prefixItems={activePlanModeControl}
             onSubmit={(data) => onSubmit(data)}
+            onScenarioPresetSubmit={(scenarioPresetId) => {
+              pendingScenarioPresetIdRef.current = scenarioPresetId;
+            }}
             skillMentions={skillMentions}
           />
         ),

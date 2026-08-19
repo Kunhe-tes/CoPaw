@@ -16,6 +16,7 @@ import ChannelsPage from "../../pages/Control/Channels";
 import SessionsPage from "../../pages/Control/Sessions";
 import CronJobsPage from "../../pages/Control/CronJobs";
 import FeaturedCasesPage from "../../pages/Control/FeaturedCases";
+import ScenarioPresetsPage from "../../pages/Control/ScenarioPresets";
 import GreetingPage from "../../pages/Control/Greeting";
 import HeartbeatPage from "../../pages/Control/Heartbeat";
 import HookManagementPage from "../../pages/Control/HookManagement";
@@ -58,6 +59,7 @@ const pathToKey: Record<string, string> = {
   "/cron-jobs": "cron-jobs",
   "/greeting-management": "greeting-management",
   "/featured-cases-management": "featured-cases-management",
+  "/scenario-presets-management": "scenario-presets-management",
   "/heartbeat": "heartbeat",
   "/hook-management": "hook-management",
   "/skills": "skills",
@@ -163,6 +165,10 @@ export default function MainLayout() {
               <Route
                 path="/featured-cases-management"
                 element={<FeaturedCasesPage />}
+              />
+              <Route
+                path="/scenario-presets-management"
+                element={<ScenarioPresetsPage />}
               />
               <Route path="/heartbeat" element={<HeartbeatPage />} />
               <Route path="/hook-management" element={<HookManagementPage />} />

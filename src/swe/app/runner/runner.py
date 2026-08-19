@@ -1807,6 +1807,17 @@ def _request_context_references(request: AgentRequest) -> list[object]:
     return list(value) if isinstance(value, list) else []
 
 
+def _request_scenario_preset_snapshot(
+    request: AgentRequest,
+) -> dict[str, Any] | None:
+    """Read only the server-populated scenario snapshot from request metadata."""
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    if channel_meta.get("scenario_preset_snapshot_source") != "chat_meta":
+        return None
+    value = channel_meta.get("scenario_preset_snapshot")
+    return dict(value) if isinstance(value, dict) else None
+
+
 def _request_file_url_network(request: AgentRequest) -> str:
     """从请求属性和 channel_meta 中读取静态文件访问网络。"""
     from ...config.context import normalize_file_url_network
@@ -2706,6 +2717,16 @@ class AgentRunner(Runner):
             "turn_id": turn_id,
             _PLAN_MODE_META_KEY: plan_mode_enabled,
         }
+        from ..scenario_preset.runtime import get_scenario_snapshot
+
+        scenario_snapshot = get_scenario_snapshot(getattr(chat, "meta", None))
+        if scenario_snapshot is not None:
+            request.channel_meta["scenario_preset_snapshot"] = (
+                scenario_snapshot
+            )
+            request.channel_meta["scenario_preset_snapshot_source"] = (
+                "chat_meta"
+            )
         return chat
 
     async def _emit_session_start_hook(
@@ -3282,6 +3303,7 @@ class AgentRunner(Runner):
                 SkillUseDirective,
                 build_skill_use_directives,
             )
+            from ..scenario_preset.runtime import scenario_snapshot_skill_names
 
             context_reference_directives = (
                 await build_context_reference_directives(
@@ -3301,7 +3323,12 @@ class AgentRunner(Runner):
                 channel=inputs.channel,
                 selected_skill_names=[
                     name
-                    for name in _request_selected_skill_names(request)
+                    for name in [
+                        *_request_selected_skill_names(request),
+                        *scenario_snapshot_skill_names(
+                            _request_scenario_preset_snapshot(request),
+                        ),
+                    ]
                     if name not in selected_context_skill_names
                 ],
             )

@@ -230,6 +230,16 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/featured-cases-management",
       label: t("nav.featuredCasesManagement", "精选案例管理"),
     },
+    ...(canManageCurrentSourceConfig
+      ? [
+          {
+            key: "scenario-presets-management",
+            icon: <Settings size={18} />,
+            path: "/scenario-presets-management",
+            label: "场景预设管理",
+          },
+        ]
+      : []),
     {
       key: "environments",
       icon: <SparkInternetLine size={18} />,
@@ -431,6 +441,15 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             : t("nav.featuredCasesManagement", "精选案例管理"),
           icon: <SparkFileTxtLine size={16} />,
         },
+        ...(canManageCurrentSourceConfig
+          ? [
+              {
+                key: "scenario-presets-management",
+                label: collapsed ? null : "场景预设管理",
+                icon: <Settings size={16} />,
+              },
+            ]
+          : []),
         {
           key: "environments",
           label: collapsed ? null : t("nav.environments"),
