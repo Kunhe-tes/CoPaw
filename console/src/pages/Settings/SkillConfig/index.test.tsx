@@ -409,6 +409,55 @@ describe("SkillConfigPage", () => {
     ).toHaveAttribute("aria-current", "page");
   });
 
+  it("reloads the selected Skill details and inspection data when its id is unchanged", async () => {
+    const item = {
+      skillId: "job-1",
+      bbkId: "571",
+      name: "存款到期续接",
+      sort: 1,
+      businessCenterEnabled: false,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skill_id: "job-1", skill_name: "存款到期续接" },
+    };
+    useIframeStore.setState({ bbk: "571" });
+    mocks.listSkillConfigs
+      .mockResolvedValueOnce([item])
+      .mockResolvedValueOnce([item]);
+    mocks.getSkillConfigDetail.mockResolvedValue(item);
+    mocks.getPreviewStats
+      .mockResolvedValueOnce({ uv: 25, pv: 156 })
+      .mockResolvedValueOnce({ uv: 35, pv: 256 });
+    mocks.getValueReturnStats.mockResolvedValue({
+      contactCount: 150,
+      listCount: 500,
+      contactRate: 30,
+      acceptCount: 300,
+      acceptRate: 60,
+      aumIncrease: 1233.89,
+      wealthProductAmount: 984.31,
+    });
+    mocks.getSkillExposureStats
+      .mockResolvedValueOnce({ totalCount: 100, items: [] })
+      .mockResolvedValueOnce({ totalCount: 200, items: [] });
+
+    render(<SkillConfigPage />);
+    expect(await screen.findByText("156")).toBeTruthy();
+    expect(screen.getByText("曝光总数 100")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Skill 列表" }));
+
+    await waitFor(() =>
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledTimes(2),
+    );
+    expect(mocks.getPreviewStats).toHaveBeenCalledTimes(2);
+    expect(mocks.getValueReturnStats).toHaveBeenCalledTimes(2);
+    expect(mocks.getSkillExposureStats).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("256")).toBeTruthy();
+    expect(screen.getByText("曝光总数 200")).toBeTruthy();
+  });
+
   it("exposes a long SKILL list as a keyboard-accessible scroll region", async () => {
     const items = Array.from({ length: 20 }, (_, index) => ({
       skillId: `skill-${index + 1}`,
