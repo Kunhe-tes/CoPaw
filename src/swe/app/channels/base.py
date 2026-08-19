@@ -1064,14 +1064,20 @@ class BaseChannel(ABC):
     ) -> None:
         """If session-end push is enabled, send notification via zhaohu.
 
-        For zhaohu sessions: notification is always sent (with or without
-        file links).
-        For other sessions: notification is only sent when file links are
-        present (legacy behavior).
+        When session_end_push_link_prefix is configured, an extra jump link
+        is attached (using session_id or chat_id as configured).
+        Push rule by source_id:
+        - "ruice": only push when a link (file link or jump link) exists
+        - other sources: push without link requirement
         """
         if not self._should_session_end_push(request):
             return
         try:
+            zhaohu_cfg = getattr(
+                self._workspace._config.channels,
+                "zhaohu",
+                None,
+            )
             cm = self._workspace.channel_manager
             if cm is None:
                 return
@@ -1083,12 +1089,16 @@ class BaseChannel(ABC):
                 return
 
             session_channel = self._get_session_channel(request)
-            is_zhaohu_session = session_channel == "zhaohu"
+            channel_meta = getattr(request, "channel_meta", None) or {}
+            source_id = (
+                getattr(request, "source_id", None)
+                or channel_meta.get("source_id")
+            )
             logger.info(
-                "session-end push check: channel=%s session_channel=%s is_zhaohu=%s",
+                "session-end push check: channel=%s session_channel=%s source_id=%s",
                 self.channel,
                 session_channel,
-                is_zhaohu_session,
+                source_id,
             )
 
             query = self._extract_user_query(request)
@@ -1107,16 +1117,66 @@ class BaseChannel(ABC):
                 meta["link_items"] = [
                     {"url": url, "text": name} for name, url in links
                 ]
-            # Zhaohu sessions: always push; other sessions: only with links
-            if not is_zhaohu_session and not links:
+
+            # 跳转链接（仅配置前缀时生成）
+            link_url = ""
+            if zhaohu_cfg and getattr(
+                zhaohu_cfg,
+                "session_end_push_link_prefix",
+                "",
+            ):
+                prefix = zhaohu_cfg.session_end_push_link_prefix
+                id_type = getattr(
+                    zhaohu_cfg,
+                    "session_end_push_link_id_type",
+                    "",
+                ) or "session_id"
+                session_id = getattr(request, "session_id", "") or ""
+                if id_type == "chat_id":
+                    chat_id = await self._resolve_chat_id(request)
+                    if chat_id:
+                        link_url = f"{prefix}?chatId={chat_id}"
+                    elif session_id:
+                        link_url = f"{prefix}?sessionId={session_id}"
+                        logger.info(
+                            "session-end push: chat_id unavailable, fallback sessionId",
+                        )
+                elif session_id:
+                    link_url = f"{prefix}?sessionId={session_id}"
+                if link_url:
+                    meta["link_url"] = link_url
+                    meta["link_text"] = "点击查看详情"
+
+            has_link = bool(links or link_url)
+            if source_id == "ruice" and not has_link:
                 logger.info(
-                    "session-end push skipped: not zhaohu session and no file links",
+                    "session-end push skipped: ruice source and no links",
                 )
                 return
             await zhaohu_ch.send(to_handle, text, meta or None)
             logger.info("session-end push sent via zhaohu to %s", to_handle)
         except Exception:
             logger.exception("session-end push failed for %s", to_handle)
+
+    async def _resolve_chat_id(self, request: "AgentRequest") -> str:
+        """Get chat_id from workspace chat_manager.
+
+        Returns empty string on failure so the caller can fall back
+        to session_id, without aborting the whole push.
+        """
+        try:
+            session_id = getattr(request, "session_id", "") or ""
+            user_id = getattr(request, "user_id", "") or ""
+            channel_id = getattr(request, "channel", self.channel)
+            chat = await self._workspace.chat_manager.get_or_create_chat(
+                session_id,
+                user_id,
+                channel_id,
+            )
+            return getattr(chat, "id", "") or ""
+        except Exception:
+            logger.info("session-end push: get_or_create_chat failed")
+            return ""
 
     def _get_session_channel(self, request: "AgentRequest") -> str:
         """Get the session's original channel from channel_meta."""

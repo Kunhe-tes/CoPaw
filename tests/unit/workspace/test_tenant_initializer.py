@@ -23,9 +23,68 @@ from swe.config.config import (
     SecurityConfig,
     ToolGuardConfig,
     ToolsConfig,
+    ZhaohuConfig,
 )
 from swe.config.utils import save_config
 from swe.constant import BUILTIN_QA_AGENT_ID
+
+
+def _build_source_template(
+    tmp_path,
+    *,
+    source_id="rmassist",
+    tpl_zhaohu=None,
+    config_zhaohu=None,
+    agent_has_zhaohu=True,
+):
+    """Build a source template directory (default_{source_id}) for tests."""
+    template_dir = tmp_path / f"default_{source_id}"
+    template_ws = template_dir / "workspaces" / "default"
+    template_ws.mkdir(parents=True)
+
+    channels = ChannelConfig(
+        console=ConsoleConfig(media_dir="/tmp/console-media"),
+    )
+    if config_zhaohu is not None:
+        channels.zhaohu = ZhaohuConfig(**config_zhaohu)
+    tpl_config = Config(
+        agents=AgentsConfig(
+            active_agent="default",
+            profiles={
+                "default": AgentProfileRef(
+                    id="default",
+                    workspace_dir=str(template_ws),
+                ),
+            },
+        ),
+        channels=channels,
+        tools=ToolsConfig(),
+        security=SecurityConfig(tool_guard=ToolGuardConfig(enabled=False)),
+    )
+    save_config(tpl_config, template_dir / "config.json")
+
+    agent_payload = {
+        "id": "default",
+        "name": "Default Template Agent",
+        "workspace_dir": str(template_ws),
+    }
+    if agent_has_zhaohu:
+        agent_payload["channels"] = {"zhaohu": tpl_zhaohu or {}}
+    (template_ws / "agent.json").write_text(
+        json.dumps(agent_payload),
+        encoding="utf-8",
+    )
+    for filename, content in {
+        "AGENTS.md": "# agents template\n",
+        "BOOTSTRAP.md": "# bootstrap template\n",
+        "HEARTBEAT.md": "# heartbeat template\n",
+        "MEMORY.md": "# memory template\n",
+        "PROFILE.md": "# profile template\n",
+        "SOUL.md": "# soul template\n",
+    }.items():
+        (template_ws / filename).write_text(content, encoding="utf-8")
+    (template_ws / "jobs.json").write_text("{}", encoding="utf-8")
+    return template_dir
 
 
 class TestTenantInitializerBasics:
@@ -432,6 +491,139 @@ class TestEnsureSeededBootstrap:
         assert result["pool_seed"]["seeded"] is True
         assert result["pool_seed"]["source"] == "builtin"
         assert len(result["pool_seed"]["skills"]) > 0
+
+    def test_new_tenant_inherits_full_zhaohu_from_template(self, tmp_path):
+        """New tenant inherits non-empty zhaohu config from source template."""
+        _build_source_template(
+            tmp_path,
+            tpl_zhaohu={
+                "push_url": "https://tpl/push",
+                "sys_id": "RMS",
+                "robot_open_id": "ROBOT_TPL",
+                "channel": "ZH",
+                "net": "DMZ",
+                "oauth_url": "https://tpl/oauth",
+                "client_id": "CID_TPL",
+                "client_secret": "SECRET_TPL",
+            },
+        )
+
+        new_init = TenantInitializer(
+            tmp_path,
+            "tenant-bootstrap",
+            source_id="rmassist",
+        )
+        new_init.ensure_seeded_bootstrap()
+
+        agent_data = json.loads(
+            (
+                new_init.tenant_dir / "workspaces" / "default" / "agent.json"
+            ).read_text(encoding="utf-8"),
+        )
+        zhaohu = agent_data["channels"]["zhaohu"]
+        assert zhaohu["push_url"] == "https://tpl/push"
+        assert zhaohu["sys_id"] == "RMS"
+        assert zhaohu["robot_open_id"] == "ROBOT_TPL"
+        assert zhaohu["channel"] == "ZH"
+        assert zhaohu["net"] == "DMZ"
+        assert zhaohu["oauth_url"] == "https://tpl/oauth"
+        assert zhaohu["client_id"] == "CID_TPL"
+        assert zhaohu["client_secret"] == "SECRET_TPL"
+
+    def test_template_zhaohu_empty_fields_fall_back_to_config(self, tmp_path):
+        """Empty template zhaohu fields keep config.json / env defaults."""
+        _build_source_template(
+            tmp_path,
+            tpl_zhaohu={"push_url": "", "robot_open_id": "ROBOT_TPL"},
+            config_zhaohu={
+                "push_url": "https://cfg/push",
+                "client_id": "CID_CFG",
+            },
+        )
+
+        new_init = TenantInitializer(
+            tmp_path,
+            "tenant-bootstrap",
+            source_id="rmassist",
+        )
+        new_init.ensure_seeded_bootstrap()
+
+        agent_data = json.loads(
+            (
+                new_init.tenant_dir / "workspaces" / "default" / "agent.json"
+            ).read_text(encoding="utf-8"),
+        )
+        zhaohu = agent_data["channels"]["zhaohu"]
+        assert zhaohu["push_url"] == "https://cfg/push"
+        assert zhaohu["client_id"] == "CID_CFG"
+        assert zhaohu["robot_open_id"] == "ROBOT_TPL"
+
+    def test_template_without_zhaohu_keeps_existing_behavior(self, tmp_path):
+        """Template without zhaohu node keeps prior behavior (config.json values)."""
+        _build_source_template(
+            tmp_path,
+            agent_has_zhaohu=False,
+            config_zhaohu={
+                "push_url": "https://cfg/push",
+                "client_id": "CID_CFG",
+            },
+        )
+
+        new_init = TenantInitializer(
+            tmp_path,
+            "tenant-bootstrap",
+            source_id="rmassist",
+        )
+        new_init.ensure_seeded_bootstrap()
+
+        agent_data = json.loads(
+            (
+                new_init.tenant_dir / "workspaces" / "default" / "agent.json"
+            ).read_text(encoding="utf-8"),
+        )
+        zhaohu = agent_data["channels"]["zhaohu"]
+        assert zhaohu["push_url"] == "https://cfg/push"
+        assert zhaohu["client_id"] == "CID_CFG"
+
+    def test_idempotent_scaffold_does_not_override_inherited_zhaohu(
+        self,
+        tmp_path,
+    ):
+        """Re-running bootstrap must not override the inherited zhaohu snapshot."""
+        _build_source_template(
+            tmp_path,
+            tpl_zhaohu={
+                "push_url": "https://tpl/push",
+                "robot_open_id": "ROBOT_TPL",
+            },
+        )
+
+        new_init = TenantInitializer(
+            tmp_path,
+            "tenant-bootstrap",
+            source_id="rmassist",
+        )
+        new_init.ensure_seeded_bootstrap()
+        agent_path = (
+            new_init.tenant_dir / "workspaces" / "default" / "agent.json"
+        )
+        first = json.loads(agent_path.read_text(encoding="utf-8"))
+
+        # Simulate template change after the new tenant was created
+        tpl_agent_path = (
+            tmp_path
+            / "default_rmassist"
+            / "workspaces"
+            / "default"
+            / "agent.json"
+        )
+        tpl = json.loads(tpl_agent_path.read_text(encoding="utf-8"))
+        tpl["channels"]["zhaohu"]["push_url"] = "https://tpl/changed"
+        tpl_agent_path.write_text(json.dumps(tpl), encoding="utf-8")
+
+        new_init.ensure_seeded_bootstrap()
+        second = json.loads(agent_path.read_text(encoding="utf-8"))
+        assert second["channels"]["zhaohu"] == first["channels"]["zhaohu"]
 
 
 class TestTenantPoolIntegration:

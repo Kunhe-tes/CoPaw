@@ -282,7 +282,7 @@ export function ChannelDrawer({
     try {
       const result = await api.distributeChannelConfig(activeKey, {
         target_tenant_ids: selectedDistributeTenantIds,
-        fields: ["enabled", "bot_prefix", "filter_tool_messages", "filter_thinking", "robot_open_id", "client_id", "client_secret", "session_end_push_enabled"],
+        fields: ["enabled", "bot_prefix", "filter_tool_messages", "filter_thinking", "robot_open_id", "client_id", "client_secret", "session_end_push_enabled", "session_end_push_link_prefix", "session_end_push_link_id_type"],
         overwrite: distributeOverwrite,
       });
       const items = result.results || [];
@@ -987,6 +987,23 @@ export function ChannelDrawer({
               rules={[{ required: true }]}
             >
               <Input.Password />
+            </Form.Item>
+            <Form.Item
+              name="session_end_push_link_prefix"
+              label={t("channels.sessionEndPushLinkPrefix")}
+              tooltip={t("channels.sessionEndPushLinkPrefixTooltip")}
+            >
+              <Input placeholder="https://example.com/push" />
+            </Form.Item>
+            <Form.Item
+              name="session_end_push_link_id_type"
+              label={t("channels.sessionEndPushLinkIdType")}
+              initialValue="session_id"
+            >
+              <Select>
+                <Select.Option value="chat_id">Chat ID</Select.Option>
+                <Select.Option value="session_id">Session ID</Select.Option>
+              </Select>
             </Form.Item>
           </>
         );
