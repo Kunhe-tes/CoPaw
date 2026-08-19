@@ -34,9 +34,10 @@ async def initialize_scenario_snapshot(
 ) -> dict[str, Any]:
     """Validate current catalog state and create the immutable safe snapshot.
 
-    Market resolution is deliberately deferred to a follow-up runtime adapter;
-    the persisted contract already excludes text, payloads, configuration, and
-    credentials so later resource resolution cannot accidentally leak them.
+    Only the first submit resolves market resources. Persistent resources are
+    preferred; missing resources are staged below the Chat-private directory.
+    The metadata snapshot carries IDs, versions, paths and frozen tool schemas,
+    never packaged content, MCP configuration, or credentials.
     """
     scenario, bindings, capability = await service.get_submittable_scenario(
         source_id,
