@@ -294,7 +294,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     mocks.iframeState.bbk = "121";
     mocks.iframeState.source = "RMASSIST";
 
-    const { container } = render(<ChatSidebar tasks={[]} />);
+    const { container } = render(<ChatSidebar tasks={[]} showGuide />);
     const guide = container.querySelector(
       '[data-testid="guide-image"]',
     ) as HTMLImageElement;
@@ -306,7 +306,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     mocks.iframeState.bbk = "121";
     mocks.iframeState.source = "OTHER";
 
-    const { container } = render(<ChatSidebar tasks={[]} />);
+    const { container } = render(<ChatSidebar tasks={[]} showGuide />);
     const guide = container.querySelector(
       '[data-testid="guide-image"]',
     ) as HTMLImageElement;
@@ -317,11 +317,29 @@ describe("ChatSidebar infinite history scrolling", () => {
   it("uses the default guide image when bbk is not 121", () => {
     mocks.iframeState.bbk = "100";
 
-    const { container } = render(<ChatSidebar tasks={[]} />);
+    const { container } = render(<ChatSidebar tasks={[]} showGuide />);
     const guide = container.querySelector(
       '[data-testid="guide-image"]',
     ) as HTMLImageElement;
 
     expect(guide).toHaveAttribute("src", "guide-image.png");
+  });
+
+  it("hides the operation guide unless it is enabled", () => {
+    const { container } = render(<ChatSidebar tasks={[]} />);
+
+    expect(container.querySelector(".chat-sidebar-footer")).toBeNull();
+    expect(container.querySelector('[data-testid="guide-image"]')).toBeNull();
+  });
+
+  it("shows the operation guide when it is enabled", () => {
+    const { container } = render(<ChatSidebar tasks={[]} showGuide />);
+
+    expect(container.querySelector(".chat-sidebar-footer")).toHaveTextContent(
+      "操作指南",
+    );
+    expect(
+      container.querySelector('[data-testid="guide-image"]'),
+    ).toBeInTheDocument();
   });
 });

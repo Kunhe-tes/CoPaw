@@ -44,6 +44,7 @@ const mocks = vi.hoisted(() => {
     currentSessionId: "chat-1",
     inputDisabled: true,
     pathname: "/chat/chat-1",
+    search: "",
     getChatIdForSession: vi.fn((sessionId: string) => sessionId),
     getLogicalSessionId: vi.fn((sessionId: string) => sessionId),
     getRealIdForSession: vi.fn((sessionId: string) => sessionId),
@@ -237,7 +238,7 @@ vi.mock("@agentscope-ai/icons", () => ({
 }));
 
 vi.mock("react-router-dom", () => ({
-  useLocation: () => ({ pathname: mocks.pathname }),
+  useLocation: () => ({ pathname: mocks.pathname, search: mocks.search }),
   useNavigate: () => mocks.navigate,
 }));
 
@@ -391,6 +392,7 @@ vi.mock("./sessionApi", () => {
 vi.mock("./components/ChatSidebar", () => {
   function ChatSidebar(props: {
     tasks: Array<{ id: string; name?: string }>;
+    showGuide?: boolean;
     selectedTaskId?: string;
     onTaskClick?: (task: { id: string; name?: string }) => void;
   }) {
@@ -398,6 +400,7 @@ vi.mock("./components/ChatSidebar", () => {
       <div
         data-testid="chat-sidebar"
         data-selected-task-id={props.selectedTaskId || ""}
+        data-show-guide={String(Boolean(props.showGuide))}
       >
         {props.tasks.map((task) => (
           <button
@@ -591,6 +594,7 @@ describe("ChatPage plan mode wiring", () => {
     mocks.showContentOnly = false;
     mocks.inputDisabled = true;
     mocks.pathname = "/chat/chat-1";
+    mocks.search = "";
     mocks.currentSessionId = "chat-1";
     mocks.getChatIdForSession.mockImplementation(
       (sessionId: string) => sessionId,
@@ -645,6 +649,24 @@ describe("ChatPage plan mode wiring", () => {
     const monitor = screen.getByTestId("subagent-run-monitor");
     expect(screen.getByTestId("chat-sender-before-ui")).not.toContainElement(
       monitor,
+    );
+  });
+
+  it("enables the operation guide only when origin is Y", () => {
+    const defaultRender = render(<ChatPage />);
+
+    expect(screen.getByTestId("chat-sidebar")).toHaveAttribute(
+      "data-show-guide",
+      "false",
+    );
+
+    defaultRender.unmount();
+    mocks.search = "?origin=Y";
+    render(<ChatPage />);
+
+    expect(screen.getByTestId("chat-sidebar")).toHaveAttribute(
+      "data-show-guide",
+      "true",
     );
   });
 

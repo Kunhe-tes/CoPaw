@@ -84,6 +84,7 @@ function ToggleIcon({ collapsed }: { collapsed: boolean }) {
 
 export interface ChatSidebarProps {
   tasks: CronJobSpecOutput[];
+  showGuide?: boolean;
   selectedTaskId?: string;
   onCreateSession?: () => void;
   onTaskClick?: (task: CronJobSpecOutput) => void;
@@ -97,6 +98,7 @@ export interface ChatSidebarProps {
 export default function ChatSidebar(props: ChatSidebarProps) {
   const {
     tasks,
+    showGuide = false,
     selectedTaskId,
     onCreateSession,
     onTaskClick,
@@ -487,23 +489,25 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
           </div>
 
-          <div className="chat-sidebar-footer">
-            {/* 暂时隐藏，后续需要时再开放
-            <div className="chat-sidebar-footer-item">
-              <img src={skillMarketIcon} alt="发送" width="24" height="24" />
-              skill市场
+          {showGuide && (
+            <div className="chat-sidebar-footer">
+              {/* 暂时隐藏，后续需要时再开放
+              <div className="chat-sidebar-footer-item">
+                <img src={skillMarketIcon} alt="发送" width="24" height="24" />
+                skill市场
+              </div>
+              <div className="chat-sidebar-footer-divider" /> */}
+              <div
+                className="chat-sidebar-footer-item"
+                onClick={handleOpenGuide}
+                role="button"
+                tabIndex={0}
+              >
+                <img src={operateIcon} alt="note" width="20" height="20" />
+                操作指南
+              </div>
             </div>
-            <div className="chat-sidebar-footer-divider" /> */}
-            <div
-              className="chat-sidebar-footer-item"
-              onClick={handleOpenGuide}
-              role="button"
-              tabIndex={0}
-            >
-              <img src={operateIcon} alt="note" width="20" height="20" />
-              操作指南
-            </div>
-          </div>
+          )}
         </div>
         <button
           className="chat-sidebar-collapse-toggle"
@@ -523,17 +527,19 @@ export default function ChatSidebar(props: ChatSidebarProps) {
         </button>
       </div>
       {/* Guide Image Preview */}
-      <div style={{ display: "none" }}>
-        <Image.PreviewGroup
-          preview={{
-            visible: guidePreviewVisible,
-            rootClassName: "chat-sidebar-guide-preview",
-            onVisibleChange: (vis) => setGuidePreviewVisible(vis),
-          }}
-        >
-          <Image src={currentGuideImage} />
-        </Image.PreviewGroup>
-      </div>
+      {showGuide && (
+        <div style={{ display: "none" }}>
+          <Image.PreviewGroup
+            preview={{
+              visible: guidePreviewVisible,
+              rootClassName: "chat-sidebar-guide-preview",
+              onVisibleChange: (vis) => setGuidePreviewVisible(vis),
+            }}
+          >
+            <Image src={currentGuideImage} />
+          </Image.PreviewGroup>
+        </div>
+      )}
     </>
   );
 }
