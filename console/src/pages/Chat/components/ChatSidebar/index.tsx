@@ -30,6 +30,9 @@ import { HistorySkeleton } from "./HistorySkeleton";
 import { HistoryInfiniteScrollTrigger } from "./HistoryInfiniteScrollTrigger";
 import { mergeConcurrentSessions } from "./mergeConcurrentSessions";
 
+const OPERATION_GUIDE_BBK = "121";
+const OPERATION_GUIDE_SOURCE = "RMASSIST";
+
 /** Extended session type with additional backend fields */
 interface ExtendedHistorySession extends HistorySession {
   channel?: string;
@@ -143,8 +146,11 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const { selectedAgent, setSelectedAgent } = useAgentStore();
   const bbk = useIframeStore((state) => state.bbk);
   const source = useIframeStore((state) => state.source);
-  const currentGuideImage =
-    bbk === "121" && source === "RMASSIST" ? shGuideImage : guideImage;
+  const isOperationGuideContext =
+    bbk === OPERATION_GUIDE_BBK && source === OPERATION_GUIDE_SOURCE;
+  const currentGuideImage = isOperationGuideContext ? shGuideImage : guideImage;
+  // 临时变更：操作指南仅对指定的 BBK 和来源开放，后续取消时恢复为 showGuide。
+  const shouldShowGuide = showGuide && isOperationGuideContext;
 
   const currentChatId = location.pathname.match(/^\/chat\/(.+)$/)?.[1] || null;
   const currentChatIdRef = useRef<string | null>(currentChatId);
@@ -489,7 +495,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
           </div>
 
-          {showGuide && (
+          {shouldShowGuide && (
             <div className="chat-sidebar-footer">
               {/* 暂时隐藏，后续需要时再开放
               <div className="chat-sidebar-footer-item">
@@ -527,7 +533,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
         </button>
       </div>
       {/* Guide Image Preview */}
-      {showGuide && (
+      {shouldShowGuide && (
         <div style={{ display: "none" }}>
           <Image.PreviewGroup
             preview={{

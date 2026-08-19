@@ -302,30 +302,30 @@ describe("ChatSidebar infinite history scrolling", () => {
     expect(guide).toHaveAttribute("src", "sh-guide-image.png");
   });
 
-  it("uses the default guide image when source is not RMASSIST", () => {
+  it("hides the operation guide when source is not RMASSIST", () => {
     mocks.iframeState.bbk = "121";
     mocks.iframeState.source = "OTHER";
 
     const { container } = render(<ChatSidebar tasks={[]} showGuide />);
-    const guide = container.querySelector(
-      '[data-testid="guide-image"]',
-    ) as HTMLImageElement;
 
-    expect(guide).toHaveAttribute("src", "guide-image.png");
+    expect(container.querySelector(".chat-sidebar-footer")).toBeNull();
+    expect(container.querySelector('[data-testid="guide-image"]')).toBeNull();
   });
 
-  it("uses the default guide image when bbk is not 121", () => {
+  it("hides the operation guide when bbk is not 121", () => {
     mocks.iframeState.bbk = "100";
+    mocks.iframeState.source = "RMASSIST";
 
     const { container } = render(<ChatSidebar tasks={[]} showGuide />);
-    const guide = container.querySelector(
-      '[data-testid="guide-image"]',
-    ) as HTMLImageElement;
 
-    expect(guide).toHaveAttribute("src", "guide-image.png");
+    expect(container.querySelector(".chat-sidebar-footer")).toBeNull();
+    expect(container.querySelector('[data-testid="guide-image"]')).toBeNull();
   });
 
   it("hides the operation guide unless it is enabled", () => {
+    mocks.iframeState.bbk = "121";
+    mocks.iframeState.source = "RMASSIST";
+
     const { container } = render(<ChatSidebar tasks={[]} />);
 
     expect(container.querySelector(".chat-sidebar-footer")).toBeNull();
@@ -333,6 +333,9 @@ describe("ChatSidebar infinite history scrolling", () => {
   });
 
   it("shows the operation guide when it is enabled", () => {
+    mocks.iframeState.bbk = "121";
+    mocks.iframeState.source = "RMASSIST";
+
     const { container } = render(<ChatSidebar tasks={[]} showGuide />);
 
     expect(container.querySelector(".chat-sidebar-footer")).toHaveTextContent(
