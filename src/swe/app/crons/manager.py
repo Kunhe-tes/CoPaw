@@ -2562,18 +2562,19 @@ class CronManager:  # pylint: disable=too-many-public-methods
         prefix = getattr(zhaohu_cfg, "session_end_push_link_prefix", "") or ""
         if not prefix:
             return ""
+        sep = "&" if "?" in prefix else "?"
         id_type = (
             getattr(zhaohu_cfg, "session_end_push_link_id_type", "")
             or "session_id"
         )
         if id_type == "chat_id":
             chat_id = str(getattr(job, "id", "") or "")
-            return f"{prefix}?chatId={chat_id}" if chat_id else ""
+            return f"{prefix}{sep}chatId={chat_id}" if chat_id else ""
         session_id = (getattr(job, "meta", None) or {}).get(
             "task_chat_id",
             "",
         ) or ""
-        return f"{prefix}?sessionId={session_id}" if session_id else ""
+        return f"{prefix}{sep}sessionId={session_id}" if session_id else ""
 
     def _build_wplus_pc_link(self, session_id: str) -> str:
         """Build W+ PC menu HTTPS link for notification jump.

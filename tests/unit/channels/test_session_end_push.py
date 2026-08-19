@@ -101,6 +101,22 @@ async def test_ruice_chat_id_link_is_pushed():
 
 
 @pytest.mark.asyncio
+async def test_prefix_with_query_uses_ampersand():
+    """prefix already containing ? -> use & as separator."""
+    prefix = "https://wplus.example/detail?foo=bar"
+    zhaohu_cfg = _build_zhaohu_cfg(prefix=prefix)
+    channel, zhaohu_ch = _build_channel(zhaohu_cfg)
+    await channel._try_session_end_push(
+        _build_request(),
+        "user-1",
+        reply_text="done",
+    )
+    zhaohu_ch.send.assert_called_once()
+    meta = zhaohu_ch.send.call_args.args[2]
+    assert meta["link_url"] == f"{prefix}&sessionId=s1"
+
+
+@pytest.mark.asyncio
 async def test_ruice_chat_failure_falls_back_to_session_id():
     """chat lookup failure -> fall back to sessionId link."""
     zhaohu_cfg = _build_zhaohu_cfg(id_type="chat_id")
