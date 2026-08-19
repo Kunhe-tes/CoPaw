@@ -14,6 +14,7 @@ from swe.app.scenario_preset.models import (
 )
 from swe.app.scenario_preset.runtime import initialize_scenario_snapshot
 from swe.app.scenario_preset.runtime import scenario_snapshot_skill_names
+from swe.config.config import MCPClientConfig, MCPConfig
 
 
 class _Service:
@@ -127,3 +128,77 @@ async def test_snapshot_prefers_matching_enabled_local_skill(
             "skill_name": "summarize",
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_snapshot_marks_matching_persistent_mcp_client(
+    tmp_path: Path,
+) -> None:
+    service = _Service()
+    service.nodes[-1] = service.nodes[-1].model_copy()
+    service.get_submittable_scenario = _mcp_scenario
+
+    config = type(
+        "AgentConfig",
+        (),
+        {
+            "mcp": MCPConfig(
+                clients={
+                    "market-mcp": MCPClientConfig(
+                        name="Market MCP",
+                        command="echo",
+                        source="marketplace:mcp-1",
+                        market_client_key="market-key",
+                    ),
+                },
+            ),
+        },
+    )()
+
+    snapshot = await initialize_scenario_snapshot(
+        service=service,
+        source_id="source",
+        scenario_id="scenario",
+        agent_id="agent-a",
+        workspace_dir=tmp_path,
+        agent_config=config,
+    )
+
+    assert snapshot["resources"] == [
+        {
+            "id": "mcp-1",
+            "type": "mcp_service",
+            "status": "persistent",
+            "mcp_client_key": "market-key",
+        },
+    ]
+
+
+async def _mcp_scenario(source_id: str, scenario_id: str):
+    return (
+        CatalogNode(
+            id="scenario",
+            source_id=source_id,
+            kind=NodeKind.SCENARIO,
+            parent_id="capability",
+            name="摘要",
+            prompt_draft="总结内容",
+            sort_order=1,
+        ),
+        [
+            ScenarioResourceBinding(
+                resource_id="mcp-1",
+                resource_type=ScenarioResourceType.MCP_SERVICE,
+                display_name="MCP",
+                sort_order=1,
+            ),
+        ],
+        CatalogNode(
+            id="capability",
+            source_id=source_id,
+            kind=NodeKind.CAPABILITY,
+            parent_id="domain",
+            name="提取",
+            sort_order=1,
+        ),
+    )

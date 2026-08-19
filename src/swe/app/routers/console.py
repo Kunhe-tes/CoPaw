@@ -953,6 +953,7 @@ async def _start_new_chat(
                     scenario_id=scenario_preset_id,
                     agent_id=getattr(workspace, "agent_id", None),
                     workspace_dir=getattr(workspace, "workspace_dir", None),
+                    agent_config=getattr(workspace, "config", None),
                 )
             except ValueError as exc:
                 raise HTTPException(

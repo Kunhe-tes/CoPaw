@@ -21,6 +21,7 @@ async def initialize_scenario_snapshot(
     scenario_id: str,
     agent_id: str | None,
     workspace_dir: Path | None = None,
+    agent_config: Any | None = None,
 ) -> dict[str, Any]:
     """Validate current catalog state and create the immutable safe snapshot.
 
@@ -34,7 +35,8 @@ async def initialize_scenario_snapshot(
     )
     skill_names = _resolve_local_skill_names(workspace_dir, bindings)
     resources: list[dict[str, Any]] = [
-        _resource_snapshot(binding, skill_names) for binding in bindings
+        _resource_snapshot(binding, skill_names, agent_config)
+        for binding in bindings
     ]
     snapshot: dict[str, Any] = {
         "scenario_id": scenario.id,
@@ -85,18 +87,48 @@ def _resolve_local_skill_names(
 def _resource_snapshot(
     binding: Any,
     skill_names: dict[str, str],
+    agent_config: Any | None,
 ) -> dict[str, Any]:
     resource = {
         "id": binding.resource_id,
         "type": binding.resource_type.value,
         "status": "unresolved",
     }
-    if binding.resource_type.value != "skill":
-        return resource
-    matching_name = skill_names.get(binding.resource_id)
-    if matching_name is not None:
-        resource.update({"status": "persistent", "skill_name": matching_name})
+    if binding.resource_type.value == "skill":
+        matching_name = skill_names.get(binding.resource_id)
+        if matching_name is not None:
+            resource.update(
+                {"status": "persistent", "skill_name": matching_name},
+            )
+    elif binding.resource_type.value == "mcp_service":
+        matching_key = _resolve_local_mcp_client_key(agent_config, binding.resource_id)
+        if matching_key is not None:
+            resource.update(
+                {
+                    "status": "persistent",
+                    "mcp_client_key": matching_key,
+                },
+            )
     return resource
+
+
+def _resolve_local_mcp_client_key(
+    agent_config: Any | None,
+    resource_id: str,
+) -> str | None:
+    mcp_config = getattr(agent_config, "mcp", None)
+    clients = getattr(mcp_config, "clients", None)
+    if not isinstance(clients, dict):
+        return None
+    expected_source = f"marketplace:{resource_id}"
+    for key, client in clients.items():
+        if not getattr(client, "enabled", False):
+            continue
+        if getattr(client, "source", "") != expected_source:
+            continue
+        market_key = str(getattr(client, "market_client_key", "") or "").strip()
+        return market_key or str(key)
+    return None
 
 
 def get_scenario_snapshot(
