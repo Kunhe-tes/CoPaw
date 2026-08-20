@@ -68,7 +68,9 @@ class _Service:
 
 
 @pytest.mark.asyncio
-async def test_snapshot_contains_only_non_sensitive_resource_identity() -> None:
+async def test_snapshot_contains_only_non_sensitive_resource_identity() -> (
+    None
+):
     """First submit captures stable IDs and agent, never prompt text or secrets."""
     snapshot = await initialize_scenario_snapshot(
         service=_Service(),
@@ -86,7 +88,9 @@ async def test_snapshot_contains_only_non_sensitive_resource_identity() -> None:
     assert "prompt_draft" not in snapshot
 
 
-def test_scenario_snapshot_skill_names_uses_server_resolved_skill_name() -> None:
+def test_scenario_snapshot_skill_names_uses_server_resolved_skill_name() -> (
+    None
+):
     snapshot = {
         "resources": [
             {"id": "market-1", "type": "skill", "skill_name": "摘要"},
@@ -101,7 +105,9 @@ def test_scenario_snapshot_mcp_configs_returns_only_temporary_entries(
     tmp_path: Path,
 ) -> None:
     chat_id = "00000000-0000-0000-0000-000000000001"
-    config_path = tmp_path / ".scenario_sessions" / chat_id / "mcp-1" / "mcp.json"
+    config_path = (
+        tmp_path / ".scenario_sessions" / chat_id / "mcp-1" / "mcp.json"
+    )
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
         '{"transport": "stdio", "command": "node"}',
@@ -197,7 +203,9 @@ async def test_snapshot_stages_missing_market_skill_for_only_this_chat(
         scenario_id="scenario",
         agent_id="agent-a",
         session_resource_root=(
-            tmp_path / ".scenario_sessions" / "00000000-0000-0000-0000-000000000001"
+            tmp_path
+            / ".scenario_sessions"
+            / "00000000-0000-0000-0000-000000000001"
         ),
         market_client=MarketClient(),
     )
@@ -210,7 +218,9 @@ async def test_snapshot_stages_missing_market_skill_for_only_this_chat(
     assert not (tmp_path / "skill.json").exists()
 
 
-def test_snapshot_builds_directive_only_for_chat_private_skill(tmp_path: Path) -> None:
+def test_snapshot_builds_directive_only_for_chat_private_skill(
+    tmp_path: Path,
+) -> None:
     chat_id = "00000000-0000-0000-0000-000000000001"
     skill_path = (
         tmp_path
@@ -246,7 +256,9 @@ def test_snapshot_builds_directive_only_for_chat_private_skill(tmp_path: Path) -
     assert directives[0].path == skill_path
 
 
-def test_snapshot_rejects_temporary_resource_from_another_chat(tmp_path: Path) -> None:
+def test_snapshot_rejects_temporary_resource_from_another_chat(
+    tmp_path: Path,
+) -> None:
     first_chat = "00000000-0000-0000-0000-000000000001"
     other_chat = "00000000-0000-0000-0000-000000000002"
     skill_path = (
@@ -276,6 +288,62 @@ def test_snapshot_rejects_temporary_resource_from_another_chat(tmp_path: Path) -
     )
 
     assert directives == []
+
+
+def test_snapshot_rejects_symlinked_temporary_skill_path(
+    tmp_path: Path,
+) -> None:
+    chat_id = "00000000-0000-0000-0000-000000000001"
+    other_chat = "00000000-0000-0000-0000-000000000002"
+    root = tmp_path / ".scenario_sessions"
+    (root / chat_id).mkdir(parents=True)
+    other_root = root / other_chat / "skill-1" / "summarize"
+    other_root.mkdir(parents=True)
+    (other_root / "SKILL.md").write_text("---\n---\nUse me.", encoding="utf-8")
+    (root / chat_id / "skill-1").symlink_to(
+        root / other_chat / "skill-1",
+        target_is_directory=True,
+    )
+
+    directives = scenario_snapshot_skill_directives(
+        {
+            "resources": [
+                {
+                    "type": "skill",
+                    "status": "temporary",
+                    "skill_name": "summarize",
+                    "skill_path": str(
+                        root / chat_id / "skill-1" / "summarize" / "SKILL.md",
+                    ),
+                },
+            ],
+        },
+        workspace_dir=tmp_path,
+        chat_id=chat_id,
+    )
+
+    assert directives == []
+
+
+@pytest.mark.asyncio
+async def test_snapshot_marks_failed_market_skill_unavailable(
+    tmp_path: Path,
+) -> None:
+    class MarketClient:
+        async def get_skill_detail(self, **_kwargs):
+            raise RuntimeError("market unavailable")
+
+    snapshot = await initialize_scenario_snapshot(
+        service=_Service(),
+        source_id="source",
+        scenario_id="scenario",
+        agent_id="agent-a",
+        session_resource_root=tmp_path / ".scenario_sessions" / "chat-a",
+        market_client=MarketClient(),
+    )
+
+    assert snapshot["resources"][0]["status"] == "unavailable"
+    assert snapshot["resources"][0]["unavailable_reason"] == "RuntimeError"
 
 
 @pytest.mark.asyncio

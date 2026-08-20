@@ -6,7 +6,6 @@ from __future__ import annotations
 import logging
 import os
 import httpx
-import hashlib
 import json
 from copy import deepcopy
 from pathlib import Path
@@ -170,7 +169,6 @@ async def _freeze_persistent_mcp_tools(
             continue
         key, config = client
         try:
-            resource["config_fingerprint"] = _mcp_config_fingerprint(config)
             if mcp_tool_discoverer is not None:
                 tools = await mcp_tool_discoverer(
                     resource["id"],
@@ -333,24 +331,6 @@ def _serialize_mcp_tools(tools: list[Any]) -> list[dict[str, Any]]:
         for tool in tools
         if getattr(tool, "name", None)
     ]
-
-
-def _mcp_config_fingerprint(config: Any) -> str:
-    """Return a stable comparison token without retaining MCP credentials."""
-    if hasattr(config, "model_dump"):
-        payload = config.model_dump(mode="json")
-    elif isinstance(config, dict):
-        payload = config
-    else:
-        payload = {}
-    encoded = json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        default=str,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
 
 
 class HttpMarketScenarioResourceClient:
