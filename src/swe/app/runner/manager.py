@@ -8,7 +8,9 @@ import logging
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
+from collections.abc import Awaitable, Callable
 from typing import Any, Optional
+from uuid import UUID
 
 from ...agents.memory.conversation_archive import ConversationArchiveStore
 from .models import ChatPage, ChatSpec
@@ -261,6 +263,51 @@ class ChatManager:
             )
             return spec
 
+    async def get_or_create_scenario_chat(
+        self,
+        session_id: str,
+        user_id: str,
+        channel: str,
+        name: str,
+        meta: dict[str, Any],
+        snapshot_factory: Callable[[ChatSpec], Awaitable[dict[str, Any]]],
+    ) -> tuple[ChatSpec, bool]:
+        """Atomically create a new Chat and bind its scenario snapshot.
+
+        The factory runs while the manager lock is held, ensuring competing
+        first messages cannot write different scenarios into the same Chat.
+        An exception leaves no chat record or private-resource root behind.
+        """
+        from ..scenario_preset.runtime import with_scenario_snapshot
+
+        async with self._lock:
+            existing = await self._repo.get_chat_by_id(
+                session_id,
+                user_id,
+                channel,
+            )
+            if existing is not None:
+                return existing, False
+            spec = ChatSpec(
+                session_id=session_id,
+                user_id=user_id,
+                channel=channel,
+                name=name,
+                meta=meta,
+            )
+            try:
+                snapshot = await snapshot_factory(spec)
+                spec.meta = with_scenario_snapshot(spec.meta, snapshot)
+                chat, created = await self._repo.create_chat_if_absent_by_session(
+                    spec,
+                )
+            except BaseException:
+                self._delete_session_resources([spec.id])
+                raise
+            if not created:
+                self._delete_session_resources([spec.id])
+            return chat, created
+
     async def create_chat(self, spec: ChatSpec) -> ChatSpec:
         """Create a new chat.
 
@@ -341,14 +388,24 @@ class ChatManager:
             True if deleted, False if not found
         """
         async with self._lock:
+            existing_ids = {
+                chat.id
+                for chat in await self._repo.list_chats()
+                if _is_valid_chat_id(chat.id)
+            }
+            deleted_ids = [
+                chat_id
+                for chat_id in chat_ids
+                if chat_id in existing_ids and _is_valid_chat_id(chat_id)
+            ]
             deleted = await self._repo.delete_chats(chat_ids)
 
-            if deleted:
+            if deleted and deleted_ids:
                 if self._archive_store is not None:
-                    for chat_id in chat_ids:
+                    for chat_id in deleted_ids:
                         await self._archive_store.delete_chat(chat_id)
-                self._delete_session_resources(chat_ids)
-                logger.debug(f"Deleted chats: {chat_ids}")
+                self._delete_session_resources(deleted_ids)
+                logger.debug(f"Deleted chats: {deleted_ids}")
 
             return deleted
 
@@ -356,10 +413,14 @@ class ChatManager:
         if self._resource_root is None:
             return
         for chat_id in chat_ids:
+            if not _is_valid_chat_id(chat_id):
+                continue
             target = (self._resource_root / chat_id).resolve()
             try:
                 target.relative_to(self._resource_root)
             except ValueError:
+                continue
+            if target == self._resource_root:
                 continue
             shutil.rmtree(target, ignore_errors=True)
 
@@ -420,3 +481,11 @@ class ChatManager:
                 f"(from {len(matching_chats)} matches)",
             )
             return most_recent.id
+
+
+def _is_valid_chat_id(value: object) -> bool:
+    try:
+        UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return True

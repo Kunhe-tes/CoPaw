@@ -120,6 +120,12 @@ _EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
 _APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
 _APPROVAL_DECISION_META_KEY = "approval_decision"
 _SESSION_TITLE_GENERATED_META_KEY = "session_title_generated"
+_SCENARIO_SNAPSHOT_REQUEST_META_KEYS = frozenset(
+    {
+        "scenario_preset_snapshot",
+        "scenario_preset_snapshot_source",
+    },
+)
 _TASK_SESSION_KIND = "task"
 _STOP_FOLLOW_UP_REASON_TEMPLATE = (
     "Stop completion gate blocked stopping: {reason}\n"
@@ -1086,6 +1092,14 @@ def _build_lazy_mcp_clients(
         if not client_config.enabled:
             continue
 
+        effective_passthrough_headers = (
+            None
+            if str(getattr(client_config, "source", "") or "").startswith(
+                "marketplace:",
+            )
+            else passthrough_headers
+        )
+
         config_payload = client_config.model_dump(mode="json")
         config_fingerprint = hashlib.sha256(
             json.dumps(
@@ -1096,7 +1110,9 @@ def _build_lazy_mcp_clients(
         ).hexdigest()
         request_scope_headers = {
             header_name.casefold(): header_value
-            for header_name, header_value in (passthrough_headers or {}).items()
+            for header_name, header_value in (
+                effective_passthrough_headers or {}
+            ).items()
         }
         request_scope_fingerprint = hashlib.sha256(
             json.dumps(
@@ -1117,7 +1133,7 @@ def _build_lazy_mcp_clients(
 
         async def create_client(
             config: MCPClientConfig = client_config,
-            headers: dict[str, str] | None = passthrough_headers,
+            headers: dict[str, str] | None = effective_passthrough_headers,
             request_session_id: str | None = session_id,
             request_chat_id: str | None = chat_id,
             request_trace_id: str | None = trace_id,
@@ -1138,7 +1154,7 @@ def _build_lazy_mcp_clients(
                 discovery_cache=get_mcp_tool_discovery_cache(),
                 connect_timeout=_MCP_CONNECT_TIMEOUT_SECONDS,
                 frozen_tools=(frozen_tools_by_key or {}).get(
-                    client_config.market_client_key or key,
+                    getattr(client_config, "market_client_key", "") or key,
                 ),
             ),
         )
@@ -1802,19 +1818,37 @@ def _request_scenario_preset_snapshot(
     return dict(value) if isinstance(value, dict) else None
 
 
+def _without_request_scenario_snapshot(
+    channel_meta: dict[str, Any],
+) -> dict[str, Any]:
+    """Discard client-supplied scenario state before restoring Chat state."""
+    return {
+        key: value
+        for key, value in channel_meta.items()
+        if key not in _SCENARIO_SNAPSHOT_REQUEST_META_KEYS
+    }
+
+
 def _agent_config_with_scenario_mcp(
     agent_config: Any,
     snapshot: dict[str, Any] | None,
     *,
     workspace_dir: Path,
+    chat_id: str,
 ) -> Any:
     """Overlay trusted temporary scenario MCPs without persisting config."""
-    from ..scenario_preset.resources import sanitize_mcp_config
+    if snapshot is None:
+        return agent_config
+    from ..scenario_preset.resources import (
+        resolve_temporary_mcp_config,
+        sanitize_mcp_config,
+    )
     from ..scenario_preset.runtime import scenario_snapshot_mcp_configs
 
     entries = scenario_snapshot_mcp_configs(
         snapshot,
         workspace_dir=workspace_dir,
+        chat_id=chat_id,
     )
     if not entries:
         return agent_config
@@ -1830,8 +1864,22 @@ def _agent_config_with_scenario_mcp(
         for entry in entries:
             key = entry["client_key"]
             if key in clients:
+                existing_source = str(getattr(clients[key], "source", "") or "")
+                if existing_source == f"marketplace:{entry['resource_id']}":
+                    continue
+                logger.warning(
+                    "Temporary scenario MCP key collision; skipping resource_id=%s",
+                    entry["resource_id"],
+                )
                 continue
-            config = sanitize_mcp_config(entry["config"])
+            config = resolve_temporary_mcp_config(
+                sanitize_mcp_config(entry["config"]),
+            )
+            if config is None:
+                logger.warning(
+                    "Temporary scenario MCP credentials unavailable; skipping",
+                )
+                continue
             config.update(
                 {
                     "name": f"scenario:{entry['resource_id']}",
@@ -1849,18 +1897,30 @@ def _agent_config_with_scenario_mcp(
 
 def _scenario_snapshot_frozen_mcp_tools(
     snapshot: dict[str, Any] | None,
+    agent_config: Any,
 ) -> dict[str, list[dict[str, Any]]]:
-    return {
-        str(resource.get("mcp_client_key") or resource.get("id") or ""): resource[
-            "tools"
-        ]
-        for resource in (snapshot or {}).get("resources", [])
-        if isinstance(resource, dict)
-        and resource.get("type") == "mcp_service"
-        and resource.get("status") in {"temporary", "persistent"}
-        and isinstance(resource.get("tools"), list)
-        and str(resource.get("mcp_client_key") or resource.get("id") or "")
-    }
+    clients = getattr(getattr(agent_config, "mcp", None), "clients", None)
+    if not isinstance(clients, dict):
+        return {}
+    frozen: dict[str, list[dict[str, Any]]] = {}
+    for resource in (snapshot or {}).get("resources", []):
+        if (
+            not isinstance(resource, dict)
+            or resource.get("type") != "mcp_service"
+            or resource.get("status") not in {"temporary", "persistent"}
+            or not isinstance(resource.get("tools"), list)
+        ):
+            continue
+        key = str(resource.get("mcp_client_key") or resource.get("id") or "")
+        source = f"marketplace:{resource.get('id') or ''}"
+        if not key or not any(
+            str(getattr(client, "source", "") or "") == source
+            and str(getattr(client, "market_client_key", "") or key) == key
+            for client in clients.values()
+        ):
+            continue
+        frozen[key] = resource["tools"]
+    return frozen
 
 
 def _request_file_url_network(request: AgentRequest) -> str:
@@ -2738,7 +2798,9 @@ class AgentRunner(Runner):
             meta={"agent_id": self.agent_id},
         )
         logger.debug(f"Runner: Got chat: {chat.id}")
-        channel_meta = getattr(request, "channel_meta", None) or {}
+        channel_meta = _without_request_scenario_snapshot(
+            getattr(request, "channel_meta", None) or {},
+        )
         plan_mode_enabled = _resolve_plan_mode_enabled(channel_meta, chat)
         requested_plan_mode = _requested_plan_mode_update(channel_meta)
         if requested_plan_mode is not None:
@@ -3331,11 +3393,14 @@ class AgentRunner(Runner):
                 scenario_snapshot_skill_names,
             )
 
-            scenario_snapshot = _request_scenario_preset_snapshot(request)
+            scenario_snapshot = (
+                _request_scenario_preset_snapshot(request) if chat is not None else None
+            )
             inputs.agent_config = _agent_config_with_scenario_mcp(
                 inputs.agent_config,
                 scenario_snapshot,
                 workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                chat_id=chat.id if chat is not None else "",
             )
 
             context_reference_directives = await build_context_reference_directives(
@@ -3356,17 +3421,20 @@ class AgentRunner(Runner):
                     name
                     for name in [
                         *_request_selected_skill_names(request),
-                        *scenario_snapshot_skill_names(
-                            _request_scenario_preset_snapshot(request),
-                        ),
+                        *scenario_snapshot_skill_names(scenario_snapshot),
                     ]
                     if name not in selected_context_skill_names
                 ],
             )
             selected_skill_directives.extend(
-                scenario_snapshot_skill_directives(
-                    scenario_snapshot,
-                    workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                (
+                    scenario_snapshot_skill_directives(
+                        scenario_snapshot,
+                        workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                        chat_id=chat.id,
+                    )
+                    if scenario_snapshot is not None and chat is not None
+                    else []
                 ),
             )
             all_context_directives = [
@@ -3391,7 +3459,8 @@ class AgentRunner(Runner):
                 chat_id=chat.id if chat is not None else None,
                 trace_id=getattr(request, "trace_id", None),
                 frozen_tools_by_key=_scenario_snapshot_frozen_mcp_tools(
-                    _request_scenario_preset_snapshot(request),
+                    scenario_snapshot,
+                    inputs.agent_config,
                 ),
             ),
         )

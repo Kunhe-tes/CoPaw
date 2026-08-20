@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 
 from swe.app.scenario_preset.resources import sanitize_mcp_config
+from swe.app.scenario_preset.resources import resolve_temporary_mcp_config
 from swe.app.scenario_preset.resources import stage_temporary_mcp_config
 from swe.app.scenario_preset.resources import stage_temporary_skill_zip
 
@@ -77,3 +78,33 @@ def test_stage_temporary_mcp_config_keeps_config_out_of_chat_metadata(
 
     assert path == tmp_path / "market-mcp-1" / "mcp.json"
     assert '"command": "node"' in path.read_text(encoding="utf-8")
+
+
+def test_resolve_temporary_mcp_config_omits_missing_tenant_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "swe.app.scenario_preset.resources.get_tenant_runtime_env_value",
+        lambda _name: None,
+    )
+
+    assert (
+        resolve_temporary_mcp_config(
+            {"env": {"TOKEN": "${ENV:MISSING_SCENARIO_MCP_TOKEN}"}},
+        )
+        is None
+    )
+
+
+def test_resolve_temporary_mcp_config_uses_only_tenant_environment(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("MCP_TOKEN", "process-secret")
+    monkeypatch.setattr(
+        "swe.app.scenario_preset.resources.get_tenant_runtime_env_value",
+        lambda name: "tenant-secret" if name == "MCP_TOKEN" else None,
+    )
+
+    assert resolve_temporary_mcp_config(
+        {"env": {"TOKEN": "${ENV:MCP_TOKEN}"}},
+    ) == {"env": {"TOKEN": "tenant-secret"}, "headers": {}}

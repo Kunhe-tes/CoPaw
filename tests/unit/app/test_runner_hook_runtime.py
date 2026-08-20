@@ -1345,6 +1345,46 @@ async def test_build_lazy_mcp_clients_defers_client_creation_until_discovery(
 
 
 @pytest.mark.asyncio
+async def test_build_lazy_mcp_clients_never_forwards_user_headers_to_marketplace(
+    monkeypatch,
+) -> None:
+    import swe.app.runner.runner as runner_module
+    from swe.config.config import MCPClientConfig, MCPConfig
+
+    tool = SimpleNamespace(name="search", description="", inputSchema={})
+    created_client = SimpleNamespace(
+        connect=AsyncMock(),
+        list_tools=AsyncMock(return_value=[tool]),
+        close=AsyncMock(),
+    )
+    create_client = AsyncMock(return_value=created_client)
+    monkeypatch.setattr(
+        runner_module,
+        "_create_mcp_client_with_headers",
+        create_client,
+    )
+
+    clients = runner_module._build_lazy_mcp_clients(
+        MCPConfig(
+            clients={
+                "market": MCPClientConfig(
+                    name="market",
+                    command="node",
+                    source="marketplace:mcp-1",
+                ),
+            },
+        ),
+        tenant_id="tenant-a",
+        user_id="user-a",
+        passthrough_headers={"Authorization": "Bearer user-token"},
+    )
+
+    await clients[0].list_tools()
+
+    assert create_client.await_args.args[1] is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_query_runtime_logs_agent_build_duration(
     monkeypatch,
     tmp_path,

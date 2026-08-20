@@ -14,6 +14,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
+from swe.envs.runtime import get_tenant_runtime_env_value
+
 _ENV_REFERENCE = re.compile(r"^\$\{ENV:[A-Za-z_][A-Za-z0-9_]*\}$")
 _MASKED_SECRET_MARKERS = {"*", "***", "****", "[REDACTED]", "<masked>"}
 
@@ -101,6 +103,29 @@ def stage_temporary_mcp_config(
         encoding="utf-8",
     )
     return path
+
+
+def resolve_temporary_mcp_config(
+    config: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Resolve current-tenant references or omit an unusable MCP safely."""
+    resolved = dict(config)
+    for field_name in ("headers", "env"):
+        raw_values = resolved.get(field_name, {})
+        values: dict[str, str] = {}
+        for name, value in raw_values.items():
+            text = str(value or "")
+            match = _ENV_REFERENCE.fullmatch(text)
+            if match is None:
+                values[str(name)] = text
+                continue
+            env_name = text[len("${ENV:") : -1]
+            resolved_value = get_tenant_runtime_env_value(env_name)
+            if not resolved_value:
+                return None
+            values[str(name)] = resolved_value
+        resolved[field_name] = values
+    return resolved
 
 
 def _sanitize_secret_map(raw: Any, label: str) -> dict[str, str]:

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import shutil
@@ -49,7 +50,7 @@ class JsonChatRepository(BaseChatRepository):
     Similar to JsonJobRepository pattern from crons.
 
     Notes:
-    - Single-machine, no cross-process lock.
+    - Session creation uses a cross-process advisory file lock.
     - Atomic write: write tmp then replace.
     """
 
@@ -238,6 +239,41 @@ class JsonChatRepository(BaseChatRepository):
             chats_file,
         )
         self._set_snapshot(snapshot_state)
+
+    def _create_chat_if_absent_by_session_sync(
+        self,
+        spec: ChatSpec,
+    ) -> tuple[_SnapshotState | None, ChatSpec, bool]:
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._path.with_suffix(f"{self._path.suffix}.lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                _, chats_file = self._load_sync()
+                for existing in chats_file.chats:
+                    if (
+                        existing.session_id == spec.session_id
+                        and existing.user_id == spec.user_id
+                        and existing.channel == spec.channel
+                    ):
+                        return None, existing.model_copy(deep=True), False
+                chats_file.chats.append(spec.model_copy(deep=True))
+                snapshot_state = self._save_and_prepare_snapshot_sync(chats_file)
+                return snapshot_state, spec.model_copy(deep=True), True
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    async def create_chat_if_absent_by_session(
+        self,
+        spec: ChatSpec,
+    ) -> tuple[ChatSpec, bool]:
+        """Atomically create one Chat for a logical session across workers."""
+        snapshot_state, chat, created = await run_runtime_state_work(
+            self._create_chat_if_absent_by_session_sync,
+            spec,
+        )
+        self._set_snapshot(snapshot_state)
+        return chat, created
 
     async def get_chat(self, chat_id: str) -> ChatSpec | None:
         """Get chat spec by chat_id (UUID), reusing a valid snapshot index."""

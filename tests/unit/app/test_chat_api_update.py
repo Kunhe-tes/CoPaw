@@ -32,6 +32,10 @@ class _FakeChatManager:
         self.chat = spec
         return spec
 
+    async def create_chat(self, spec: ChatSpec) -> ChatSpec:
+        self.updated_chat = spec
+        return spec
+
 
 def test_update_chat_allows_partial_meta_patch() -> None:
     manager = _FakeChatManager()
@@ -60,3 +64,63 @@ def test_update_chat_allows_partial_meta_patch() -> None:
     }
     assert manager.updated_chat is not None
     assert manager.updated_chat.meta == payload["meta"]
+
+
+def test_update_chat_rejects_server_owned_scenario_snapshot() -> None:
+    manager = _FakeChatManager()
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _get_chat_manager_override() -> _FakeChatManager:
+        return manager
+
+    app.dependency_overrides[get_chat_manager] = _get_chat_manager_override
+    response = TestClient(app).put(
+        "/chats/chat-1",
+        json={"meta": {"scenario_preset_snapshot": {"scenario_id": "fake"}}},
+    )
+
+    assert response.status_code == 400
+    assert manager.updated_chat is None
+
+
+def test_update_chat_rejects_server_owned_scenario_snapshot_source() -> None:
+    manager = _FakeChatManager()
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _get_chat_manager_override() -> _FakeChatManager:
+        return manager
+
+    app.dependency_overrides[get_chat_manager] = _get_chat_manager_override
+    response = TestClient(app).put(
+        "/chats/chat-1",
+        json={"meta": {"scenario_preset_snapshot_source": "chat_meta"}},
+    )
+
+    assert response.status_code == 400
+    assert manager.updated_chat is None
+
+
+def test_create_chat_rejects_server_owned_scenario_snapshot() -> None:
+    manager = _FakeChatManager()
+    app = FastAPI()
+    app.include_router(router)
+
+    async def _get_chat_manager_override() -> _FakeChatManager:
+        return manager
+
+    app.dependency_overrides[get_chat_manager] = _get_chat_manager_override
+    response = TestClient(app).post(
+        "/chats",
+        json={
+            "name": "forged",
+            "session_id": "console:user-1",
+            "user_id": "user-1",
+            "channel": "console",
+            "meta": {"scenario_preset_snapshot": {"scenario_id": "fake"}},
+        },
+    )
+
+    assert response.status_code == 400
+    assert manager.updated_chat is None

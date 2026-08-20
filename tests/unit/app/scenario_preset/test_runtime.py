@@ -100,7 +100,8 @@ def test_scenario_snapshot_skill_names_uses_server_resolved_skill_name() -> None
 def test_scenario_snapshot_mcp_configs_returns_only_temporary_entries(
     tmp_path: Path,
 ) -> None:
-    config_path = tmp_path / ".scenario_sessions" / "chat-a" / "mcp-1" / "mcp.json"
+    chat_id = "00000000-0000-0000-0000-000000000001"
+    config_path = tmp_path / ".scenario_sessions" / chat_id / "mcp-1" / "mcp.json"
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
         '{"transport": "stdio", "command": "node"}',
@@ -125,7 +126,11 @@ def test_scenario_snapshot_mcp_configs_returns_only_temporary_entries(
         ],
     }
 
-    assert scenario_snapshot_mcp_configs(snapshot, workspace_dir=tmp_path) == [
+    assert scenario_snapshot_mcp_configs(
+        snapshot,
+        workspace_dir=tmp_path,
+        chat_id=chat_id,
+    ) == [
         {
             "resource_id": "mcp-1",
             "client_key": "market-key",
@@ -191,7 +196,9 @@ async def test_snapshot_stages_missing_market_skill_for_only_this_chat(
         source_id="source",
         scenario_id="scenario",
         agent_id="agent-a",
-        session_resource_root=tmp_path / ".scenario_sessions" / "chat-a",
+        session_resource_root=(
+            tmp_path / ".scenario_sessions" / "00000000-0000-0000-0000-000000000001"
+        ),
         market_client=MarketClient(),
     )
 
@@ -204,10 +211,11 @@ async def test_snapshot_stages_missing_market_skill_for_only_this_chat(
 
 
 def test_snapshot_builds_directive_only_for_chat_private_skill(tmp_path: Path) -> None:
+    chat_id = "00000000-0000-0000-0000-000000000001"
     skill_path = (
         tmp_path
         / ".scenario_sessions"
-        / "chat-a"
+        / chat_id
         / "skill-1"
         / "summarize"
         / "SKILL.md"
@@ -230,11 +238,44 @@ def test_snapshot_builds_directive_only_for_chat_private_skill(tmp_path: Path) -
             ],
         },
         workspace_dir=tmp_path,
+        chat_id=chat_id,
     )
 
     assert len(directives) == 1
     assert directives[0].name == "summarize"
     assert directives[0].path == skill_path
+
+
+def test_snapshot_rejects_temporary_resource_from_another_chat(tmp_path: Path) -> None:
+    first_chat = "00000000-0000-0000-0000-000000000001"
+    other_chat = "00000000-0000-0000-0000-000000000002"
+    skill_path = (
+        tmp_path
+        / ".scenario_sessions"
+        / other_chat
+        / "skill-1"
+        / "summarize"
+        / "SKILL.md"
+    )
+    skill_path.parent.mkdir(parents=True)
+    skill_path.write_text("---\n---\nUse me.", encoding="utf-8")
+
+    directives = scenario_snapshot_skill_directives(
+        {
+            "resources": [
+                {
+                    "type": "skill",
+                    "status": "temporary",
+                    "skill_name": "summarize",
+                    "skill_path": str(skill_path),
+                },
+            ],
+        },
+        workspace_dir=tmp_path,
+        chat_id=first_chat,
+    )
+
+    assert directives == []
 
 
 @pytest.mark.asyncio

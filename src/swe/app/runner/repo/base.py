@@ -89,6 +89,25 @@ class BaseChatRepository(ABC):
         logger.debug("get_chat_by_id: No match found")
         return None
 
+    async def create_chat_if_absent_by_session(
+        self,
+        spec: ChatSpec,
+    ) -> tuple[ChatSpec, bool]:
+        """Create a Chat only when its logical session has no record yet.
+
+        Storage implementations with cross-process coordination override this
+        compare-and-set operation. The default supports in-memory repositories.
+        """
+        existing = await self.get_chat_by_id(
+            spec.session_id,
+            spec.user_id,
+            spec.channel,
+        )
+        if existing is not None:
+            return existing, False
+        await self.upsert_chat(spec)
+        return spec, True
+
     async def upsert_chat(self, spec: ChatSpec) -> None:
         """Insert or update a chat spec.
 

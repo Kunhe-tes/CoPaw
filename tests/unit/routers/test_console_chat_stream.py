@@ -240,20 +240,18 @@ async def test_start_new_chat_persists_first_submit_scenario_snapshot(
     """The server-created snapshot, not the client ID, reaches the runner."""
 
     class _ChatManager:
-        updated = None
+        created = None
 
-        async def get_chat_by_session(self, *_args):
-            return None
-
-        async def get_or_create_chat(self, *_args, **_kwargs):
-            return SimpleNamespace(
-                id="chat-scenario",
+        async def get_or_create_scenario_chat(self, *_args):
+            factory = _args[-1]
+            chat = SimpleNamespace(
+                id="00000000-0000-0000-0000-000000000001",
                 channel="console",
                 meta={},
             )
-
-        async def update_chat(self, chat):
-            self.updated = chat
+            self.created = chat
+            chat.meta["scenario_preset_snapshot"] = await factory(chat)
+            return chat, True
 
     class _TaskTracker:
         payload = None
@@ -306,7 +304,7 @@ async def test_start_new_chat_persists_first_submit_scenario_snapshot(
         native_payload,
     )
 
-    assert chat_manager.updated.meta["scenario_preset_snapshot"] == snapshot
+    assert chat_manager.created.meta["scenario_preset_snapshot"] == snapshot
     assert tracker.payload["meta"]["scenario_preset_snapshot"] == snapshot
 
 
@@ -315,15 +313,12 @@ async def test_start_new_chat_rejects_scenario_on_existing_plain_chat():
     """A preset cannot be injected into a chat that was started without it."""
 
     class _ChatManager:
-        async def get_chat_by_session(self, *_args):
-            return SimpleNamespace(id="chat-existing")
-
-        async def get_or_create_chat(self, *_args, **_kwargs):
+        async def get_or_create_scenario_chat(self, *_args):
             return SimpleNamespace(
                 id="chat-existing",
                 channel="console",
                 meta={},
-            )
+            ), False
 
     native_payload = {
         "sender_id": "user-1",
@@ -353,10 +348,7 @@ async def test_start_new_chat_rejects_scenario_on_existing_plain_chat():
 @pytest.mark.asyncio
 async def test_start_new_chat_rejects_switching_scenario_on_locked_chat():
     class _ChatManager:
-        async def get_chat_by_session(self, *_args):
-            return SimpleNamespace(id="chat-existing")
-
-        async def get_or_create_chat(self, *_args, **_kwargs):
+        async def get_or_create_scenario_chat(self, *_args):
             return SimpleNamespace(
                 id="chat-existing",
                 channel="console",
@@ -366,7 +358,7 @@ async def test_start_new_chat_rejects_switching_scenario_on_locked_chat():
                         "agent_id": "agent-1",
                     },
                 },
-            )
+            ), False
 
     native_payload = {
         "sender_id": "user-1",

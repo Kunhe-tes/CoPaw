@@ -34,6 +34,18 @@ TASK_MESSAGES_STATE_KEY = "task_messages"
 TASK_RUNS_STATE_KEY = "task_runs"
 TASK_RUN_SECTION_STEP = "step"
 TASK_RUN_SECTION_FINAL = "final"
+_SERVER_OWNED_CHAT_META_KEYS = frozenset(
+    {
+        "scenario_preset_snapshot",
+        "scenario_preset_snapshot_source",
+    },
+)
+
+
+def _reject_server_owned_chat_meta(meta: dict[str, Any] | None) -> None:
+    for key in _SERVER_OWNED_CHAT_META_KEYS:
+        if key in (meta or {}):
+            raise HTTPException(status_code=400, detail=f"{key} is server-owned")
 
 
 class ChatUpdateRequest(BaseModel):
@@ -75,6 +87,7 @@ def _merge_chat_update(
     if "meta" in updates:
         # Plan Mode 只会提交一个 meta 开关，合并可避免覆盖其他会话元数据。
         incoming_meta = updates["meta"] or {}
+        _reject_server_owned_chat_meta(incoming_meta)
         merged["meta"] = {
             **(existing.meta or {}),
             **incoming_meta,
@@ -731,6 +744,7 @@ async def create_chat(
     Returns:
         Created chat spec with UUID
     """
+    _reject_server_owned_chat_meta(request.meta)
     chat_id = str(uuid4())
     spec = ChatSpec(
         id=chat_id,

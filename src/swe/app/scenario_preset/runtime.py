@@ -166,6 +166,7 @@ async def _freeze_persistent_mcp_tools(
                 tools = await _discover_persistent_mcp_tools(key, config)
             resource["tools"] = tools
         except Exception as exc:
+            resource["tools"] = []
             logger.warning(
                 "scenario_persistent_mcp_discovery_failed resource_id=%s "
                 "error_type=%s",
@@ -201,11 +202,18 @@ async def _resolve_temporary_mcp_resources(
             )
             if not isinstance(detail, dict):
                 continue
-            from .resources import sanitize_mcp_config, stage_temporary_mcp_config
+            from .resources import (
+                resolve_temporary_mcp_config,
+                sanitize_mcp_config,
+                stage_temporary_mcp_config,
+            )
 
             config = sanitize_mcp_config(detail.get("config"))
+            resolved_config = resolve_temporary_mcp_config(config)
+            if resolved_config is None:
+                continue
             discover = mcp_tool_discoverer or _discover_snapshot_mcp_tools
-            tools = await discover(resource["id"], config)
+            tools = await discover(resource["id"], resolved_config)
             config_path = stage_temporary_mcp_config(
                 config,
                 resource_id=resource["id"],
@@ -488,12 +496,13 @@ def scenario_snapshot_skill_directives(
     snapshot: dict[str, Any] | None,
     *,
     workspace_dir: Path,
+    chat_id: str,
 ) -> list[Any]:
     """Build trusted Skill directives for staged, Chat-private packages."""
     from ..runner.skill_selection import SkillUseDirective
     import frontmatter
 
-    session_root = (workspace_dir / ".scenario_sessions").resolve()
+    session_root = _chat_session_root(workspace_dir, chat_id)
     directives: list[Any] = []
     for resource in (snapshot or {}).get("resources", []):
         if not isinstance(resource, dict) or resource.get("type") != "skill":
@@ -528,6 +537,7 @@ def scenario_snapshot_mcp_configs(
     snapshot: dict[str, Any] | None,
     *,
     workspace_dir: Path,
+    chat_id: str,
 ) -> list[dict[str, Any]]:
     """Return trusted session MCP configs captured in a Chat snapshot.
 
@@ -535,7 +545,7 @@ def scenario_snapshot_mcp_configs(
     callers still validate each entry before constructing a runtime client.
     """
     result: list[dict[str, Any]] = []
-    session_root = (workspace_dir / ".scenario_sessions").resolve()
+    session_root = _chat_session_root(workspace_dir, chat_id)
     for resource in (snapshot or {}).get("resources", []):
         if not isinstance(resource, dict):
             continue
@@ -576,3 +586,10 @@ def _read_temporary_mcp_config(
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None
+
+
+def _chat_session_root(workspace_dir: Path, chat_id: str) -> Path:
+    from uuid import UUID
+
+    UUID(str(chat_id))
+    return (workspace_dir / ".scenario_sessions" / str(chat_id)).resolve()
