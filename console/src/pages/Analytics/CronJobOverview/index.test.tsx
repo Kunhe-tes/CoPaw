@@ -136,7 +136,7 @@ describe("CronJobOverview summary cards", () => {
   });
 
   it("renders the report metric card with footer metrics and no sub-icons", async () => {
-    render(
+    const { container } = render(
       <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
         <Routes>
           <Route
@@ -186,7 +186,7 @@ describe("CronJobOverview summary cards", () => {
       const selectedItem = container.querySelector(
         ".ant-select-selection-item",
       );
-      expect(selectedItem?.textContent).toContain("北京分行");
+      expect(selectedItem?.textContent).toContain("200");
     });
     expect(container.querySelector(".ant-select")).toHaveClass(
       "ant-select-disabled",
@@ -292,6 +292,204 @@ describe("CronJobOverview summary cards", () => {
     expect(
       container.querySelector(`.${styles.drillDownTableScroll}`),
     ).toBeNull();
+  });
+
+  it("sorts skill-view branch manager detail metrics while keeping manager name unsortable", async () => {
+    monitorApiMock.getCronJobOverviewPageData.mockResolvedValueOnce({
+      summaryMetrics: [],
+      branchRankingRows: [
+        {
+          rank: 1,
+          branchName: "测试分行",
+          bbkId: "100",
+          skillCount: "3",
+          totalTasks: "20",
+          successCount: "18",
+          readTasks: "11",
+          involvedManagers: "5",
+          resultViewManagers: "4",
+          planManagers: "3",
+          insightManagers: "2",
+          phoneManagers: "1",
+          recommendedCustomers: "30",
+          viewedCustomers: "12",
+          insightCustomers: "5",
+          phoneCustomers: "2",
+          contactedCustomers: "8",
+          contactRate: "40.00%",
+        },
+      ],
+      failureReasons: [],
+      anomalySummary: {
+        affectedBranches: "0",
+        affectedBranchesUnit: "家",
+        affectedManagers: "0",
+        affectedManagersUnit: "人",
+      },
+      anomalyRankRows: [],
+    });
+    monitorApiMock.getBranchManagerSummary.mockResolvedValueOnce({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      bbk_id: "100",
+      bbk_name: "测试分行",
+      items: [
+        {
+          user_id: "u2",
+          user_name: "李四",
+          skill_count: 3,
+          total_tasks: 20,
+          success_count: 16,
+          read_tasks: 9,
+          recommended_customers: 24,
+          viewed_customers: 10,
+          insight_customers: 4,
+          phone_customers: 2,
+          contacted_customers: 8,
+          contact_rate: 0.4,
+        },
+        {
+          user_id: "u1",
+          user_name: "张三",
+          skill_count: 1,
+          total_tasks: 5,
+          success_count: 5,
+          read_tasks: 2,
+          recommended_customers: 8,
+          viewed_customers: 3,
+          insight_customers: 1,
+          phone_customers: 1,
+          contacted_customers: 2,
+          contact_rate: 0.25,
+        },
+      ],
+    });
+
+    const { container } = render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("测试分行"));
+
+    await screen.findByText("当前分行下的客户经理明细");
+    const managerTable = container.querySelector(".ant-table");
+    expect(managerTable).not.toBeNull();
+    const headerCells = Array.from(
+      managerTable!.querySelectorAll(".ant-table-thead th"),
+    );
+    const managerNameHeader = headerCells.find(
+      (cell) => cell.textContent?.includes("客户经理名称"),
+    );
+    const totalTasksHeader = headerCells.find(
+      (cell) => cell.textContent?.includes("任务总数"),
+    );
+
+    expect(managerNameHeader?.querySelector(".ant-table-column-sorter")).toBe(
+      null,
+    );
+    expect(
+      totalTasksHeader?.querySelector(".ant-table-column-sorter"),
+    ).not.toBeNull();
+
+    const managerNames = () =>
+      Array.from(
+        managerTable!.querySelectorAll(
+          ".ant-table-tbody tr:not(.ant-table-measure-row)",
+        ),
+      ).map((row) => row.children[0]?.textContent);
+
+    expect(managerNames()).toEqual(["李四", "张三"]);
+
+    fireEvent.click(
+      totalTasksHeader!.querySelector(".ant-table-column-sorters")!,
+    );
+
+    expect(managerNames()).toEqual(["张三", "李四"]);
+  });
+
+  it("shows unified loading placeholders for overview cards, anomaly section, and skill-view ranking while the main query is pending", async () => {
+    let resolveOverview:
+      | ((
+          value: Awaited<
+            ReturnType<typeof monitorApiMock.getCronJobOverviewPageData>
+          >,
+        ) => void)
+      | null = null;
+    let resolveTaskRanking:
+      | ((
+          value: Awaited<
+            ReturnType<typeof monitorApiMock.getCronBranchTaskBehavior>
+          >,
+        ) => void)
+      | null = null;
+
+    monitorApiMock.getCronJobOverviewPageData.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOverview = resolve;
+        }),
+    );
+    monitorApiMock.getCronBranchTaskBehavior.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveTaskRanking = resolve;
+        }),
+    );
+
+    render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByTestId("cron-panel-loading").length,
+      ).toBeGreaterThanOrEqual(9);
+    });
+    expect(screen.getByText("分行综合排行")).toBeInTheDocument();
+    expect(screen.getAllByText("加载中...").length).toBeGreaterThan(0);
+    expect(screen.getByText("分行层异常诊断")).toBeInTheDocument();
+    expect(screen.getByText("分行异常排行").closest("section")).toHaveClass(
+      styles.rankPanel,
+    );
+    expect(screen.getByLabelText("概览指标")).toBeInTheDocument();
+
+    resolveTaskRanking?.({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      items: [],
+    });
+    resolveOverview?.({
+      summaryMetrics: [],
+      branchRankingRows: [],
+      failureReasons: [],
+      anomalySummary: {
+        affectedBranches: "0",
+        affectedBranchesUnit: "家",
+        affectedManagers: "0",
+        affectedManagersUnit: "人",
+      },
+      anomalyRankRows: [],
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.queryByTestId("cron-panel-loading"),
+      ).not.toBeInTheDocument();
+    });
   });
 
   it("renders branch skill details returned by the backend without local filtering", async () => {

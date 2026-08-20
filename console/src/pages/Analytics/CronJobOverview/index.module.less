@@ -183,6 +183,17 @@
   padding: 16px 16px 14px;
 }
 
+.listFootnote {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 92px;
+  padding: 28px 0;
+  color: #94a3b8;
+  font-size: 14px;
+  text-align: center;
+}
+
 .reportSubGrid {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -457,11 +468,7 @@
 }
 
 .sortableHeader {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  min-width: 0;
+  display: inline;
 }
 
 .sortButton {
@@ -470,13 +477,14 @@
   justify-content: center;
   width: 18px;
   height: 18px;
-  flex: 0 0 auto;
+  margin-left: 4px;
   padding: 0;
   color: #64748b;
   background: transparent;
   border: 0;
   border-radius: 6px;
   cursor: pointer;
+  vertical-align: middle;
   transition:
     background 0.15s ease,
     color 0.15s ease;
@@ -543,6 +551,26 @@
   &:hover span {
     border-bottom-color: #1a5cd8;
     color: #1a5cd8;
+  }
+}
+
+.skillBranchRankingTable {
+  min-width: 1154px;
+
+  .branchName,
+  .branchNameLink {
+    white-space: nowrap;
+    word-break: keep-all;
+  }
+
+  .branchName span,
+  .branchNameLink span {
+    display: inline-block;
+    max-width: 6em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    white-space: nowrap;
   }
 }
 
