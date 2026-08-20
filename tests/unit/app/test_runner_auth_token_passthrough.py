@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+import json
 
 import pytest
 
@@ -168,6 +169,166 @@ def test_create_agent_for_query_injects_selected_expert_id_from_channel_meta(
     )
 
     assert captured["request_context"]["selected_expert_id"] == "expert-1"
+
+
+def test_create_agent_for_query_forces_the_selected_expert_start(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """A submitted expert selection starts its exact enabled definition."""
+    selected_id = "11111111-1111-4111-8111-111111111111"
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / f"{selected_id}.toml").write_text(
+        'name = "researcher"\n'
+        'description = "Research expert."\n'
+        'instruction = "Research the requested topic."\n'
+        "enabled = true\n",
+        encoding="utf-8",
+    )
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.tenant_id = "tenant-1"
+    runner.session = SimpleNamespace(
+        _get_save_path=lambda session_id, user_id: (
+            f"/tmp/{session_id}-{user_id}.json"
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["request_context"] = kwargs["request_context"]
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+
+    runner._create_agent_for_query(
+        agent_config=_fake_agent_config(),
+        env_context="",
+        mcp_clients=[],
+        request=SimpleNamespace(
+            channel_meta={"selected_expert_id": selected_id},
+        ),
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        chat=SimpleNamespace(id="chat-1"),
+        turn_id="turn-1",
+        hook_overlay=HookSessionOverlay(),
+        auth_token=None,
+        approved_tool_call=None,
+        current_user_text="Research this topic",
+    )
+
+    forced = json.loads(captured["request_context"]["forced_tool_call_json"])
+    assert forced["name"] == "start_subagent"
+    assert forced["input"] == {
+        "name": "researcher",
+        "objective": "Research this topic",
+    }
+
+
+def test_selected_expert_keeps_matching_approved_start_for_hook_replay(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """Approval recovery must retain the original call ID and objective."""
+    selected_id = "11111111-1111-4111-8111-111111111111"
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / f"{selected_id}.toml").write_text(
+        'name = "researcher"\n'
+        'description = "Research expert."\n'
+        'instruction = "Research the requested topic."\n'
+        "enabled = true\n",
+        encoding="utf-8",
+    )
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.tenant_id = "tenant-1"
+    runner.session = SimpleNamespace(
+        _get_save_path=lambda session_id, user_id: (
+            f"/tmp/{session_id}-{user_id}.json"
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["request_context"] = kwargs["request_context"]
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+    approved_start = {
+        "id": "approved-start-id",
+        "name": "start_subagent",
+        "input": {
+            "name": "researcher",
+            "objective": "Research this topic",
+        },
+        "_approval_replay": {"approval_kind": "hook_pre_tool_use"},
+    }
+
+    runner._create_agent_for_query(
+        agent_config=_fake_agent_config(),
+        env_context="",
+        mcp_clients=[],
+        request=SimpleNamespace(
+            channel_meta={"selected_expert_id": selected_id},
+        ),
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        chat=SimpleNamespace(id="chat-1"),
+        turn_id="turn-1",
+        hook_overlay=HookSessionOverlay(),
+        auth_token=None,
+        approved_tool_call=approved_start,
+        current_user_text="/approve",
+    )
+
+    assert json.loads(
+        captured["request_context"]["forced_tool_call_json"],
+    ) == (approved_start)
+
+
+def test_create_agent_for_query_marks_an_unavailable_selected_expert(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    """An invalid selection cannot fall back to an optional Main Agent turn."""
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.tenant_id = "tenant-1"
+    runner.session = SimpleNamespace(
+        _get_save_path=lambda session_id, user_id: (
+            f"/tmp/{session_id}-{user_id}.json"
+        ),
+    )
+    captured: dict[str, Any] = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured["request_context"] = kwargs["request_context"]
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+
+    runner._create_agent_for_query(
+        agent_config=_fake_agent_config(),
+        env_context="",
+        mcp_clients=[],
+        request=SimpleNamespace(
+            channel_meta={"selected_expert_id": "missing-expert"},
+        ),
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        chat=SimpleNamespace(id="chat-1"),
+        turn_id="turn-1",
+        hook_overlay=HookSessionOverlay(),
+        auth_token=None,
+        approved_tool_call=None,
+        current_user_text="Research this topic",
+    )
+
+    assert "forced_tool_call_json" not in captured["request_context"]
+    assert captured["request_context"]["selected_expert_execution_error"]
 
 
 def test_create_agent_for_query_keeps_subagents_disabled_by_default(

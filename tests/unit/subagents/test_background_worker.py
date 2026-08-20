@@ -30,6 +30,7 @@ from swe.app.subagents.launch_snapshot import (
 )
 from swe.app.subagents.models import AgentOwnedDefinitionMetadata
 from swe.config.config import MCPClientConfig, MCPConfig
+from swe.app import subagents as subagents_module
 
 
 def _definition():
@@ -688,6 +689,128 @@ def test_received_expert_missing_frozen_dependency_fails_closed(tmp_path):
             definition=definition,
             effective_skill_names=["quality"],
         )
+
+
+def test_received_expert_session_view_is_initialized_once_and_reused(
+    tmp_path: Path,
+) -> None:
+    """A selected community expert gets one frozen dependency view per chat."""
+    initialize = getattr(
+        subagents_module,
+        "initialize_community_expert_dependency_view",
+        None,
+    )
+    assert callable(initialize)
+
+    definition = _definition().model_copy(
+        update={
+            "agent_owned": AgentOwnedDefinitionMetadata(
+                definition_id="00000000-0000-0000-0000-000000000003",
+                declared_skills=["quality"],
+                declared_mcps=["github"],
+                community={
+                    "item_id": "expert-1",
+                    "version": "1.0.0",
+                    "content_fingerprint": "fingerprint",
+                },
+            ),
+        },
+    )
+    dependency_root = (
+        tmp_path
+        / "agents"
+        / "00000000-0000-0000-0000-000000000003.dependencies"
+    )
+    (dependency_root / "skills" / "quality").mkdir(parents=True)
+    skill_md = dependency_root / "skills" / "quality" / "SKILL.md"
+    skill_md.write_text("# Frozen quality", encoding="utf-8")
+    (dependency_root / "mcp").mkdir()
+    (dependency_root / "mcp" / "config.json").write_text(
+        '{"github":{"name":"github","command":"frozen-github"}}',
+        encoding="utf-8",
+    )
+
+    first_view = initialize(
+        workspace_dir=tmp_path,
+        chat_id="00000000-0000-0000-0000-000000000010",
+        definition=definition,
+    )
+    assert first_view is not None
+    assert (first_view / "skills" / "quality" / "SKILL.md").read_text(
+        encoding="utf-8",
+    ) == "# Frozen quality"
+
+    skill_md.write_text("# Admin update", encoding="utf-8")
+    second_view = initialize(
+        workspace_dir=tmp_path,
+        chat_id="00000000-0000-0000-0000-000000000010",
+        definition=definition,
+    )
+
+    assert second_view == first_view
+    assert (second_view / "skills" / "quality" / "SKILL.md").read_text(
+        encoding="utf-8",
+    ) == "# Frozen quality"
+
+
+def test_releasing_received_expert_removes_every_chat_dependency_view(
+    tmp_path: Path,
+) -> None:
+    initialize = getattr(
+        subagents_module,
+        "initialize_community_expert_dependency_view",
+        None,
+    )
+    release = getattr(
+        subagents_module,
+        "release_community_expert_dependency_views",
+        None,
+    )
+    assert callable(initialize)
+    assert callable(release)
+
+    definition = _definition().model_copy(
+        update={
+            "agent_owned": AgentOwnedDefinitionMetadata(
+                definition_id="00000000-0000-0000-0000-000000000004",
+                community={
+                    "item_id": "expert-1",
+                    "version": "1.0.0",
+                    "content_fingerprint": "fingerprint",
+                },
+            ),
+        },
+    )
+    (
+        tmp_path
+        / "agents"
+        / "00000000-0000-0000-0000-000000000004.dependencies"
+    ).mkdir(
+        parents=True,
+    )
+    for chat_id in (
+        "00000000-0000-0000-0000-000000000011",
+        "00000000-0000-0000-0000-000000000012",
+    ):
+        assert (
+            initialize(
+                workspace_dir=tmp_path,
+                chat_id=chat_id,
+                definition=definition,
+            )
+            is not None
+        )
+
+    release(
+        workspace_dir=tmp_path,
+        definition_id="00000000-0000-0000-0000-000000000004",
+    )
+
+    assert not list(
+        (tmp_path / ".expert_sessions").rglob(
+            "00000000-0000-0000-0000-000000000004",
+        ),
+    )
 
 
 def test_skill_owned_model_reference_uses_available_tenant_model(

@@ -1,0 +1,71 @@
+# -*- coding: utf-8 -*-
+"""Selected community expert session dependency binding tests."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from swe.app.subagents.models import AgentOwnedDefinitionMetadata
+from swe.app.subagents import AgentRegistry, builtin_definition_provider
+
+
+def test_selected_received_expert_initializes_its_chat_dependency_view(
+    tmp_path: Path,
+) -> None:
+    from swe.app.runner import runner as runner_module
+
+    initialize = getattr(
+        runner_module,
+        "_initialize_selected_expert_dependency_view",
+        None,
+    )
+    assert callable(initialize)
+    definition_id = "00000000-0000-0000-0000-000000000050"
+    definition = (
+        AgentRegistry([builtin_definition_provider()])
+        .resolve(
+            "plan-researcher",
+        )
+        .model_copy(
+            update={
+                "agent_owned": AgentOwnedDefinitionMetadata(
+                    definition_id=definition_id,
+                    community={
+                        "item_id": "expert-1",
+                        "version": "1.0.0",
+                        "content_fingerprint": "fingerprint",
+                    },
+                ),
+            },
+        )
+    )
+    expert_dir = tmp_path / "agents"
+    expert_dir.mkdir()
+    (expert_dir / f"{definition_id}.toml").write_text(
+        'name = "received-reviewer"\n'
+        'description = "Received"\n'
+        'instruction = "Do work"\n'
+        "enabled = true\n\n"
+        "[community]\n"
+        'item_id = "expert-1"\n'
+        'version = "1.0.0"\n'
+        'content_fingerprint = "fingerprint"\n',
+        encoding="utf-8",
+    )
+    (expert_dir / f"{definition_id}.dependencies").mkdir()
+    # Populate metadata using the same reader path the actual runner uses.
+    del definition
+    chat_id = "00000000-0000-0000-0000-000000000051"
+
+    view_root = initialize(
+        workspace_dir=tmp_path,
+        tenant_id="tenant-1",
+        agent_id="agent-1",
+        selected_expert_id=definition_id,
+        chat_id=chat_id,
+    )
+
+    assert view_root == (
+        tmp_path / ".expert_sessions" / chat_id / definition_id
+    )
+    assert view_root.is_dir()

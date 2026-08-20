@@ -22,9 +22,11 @@ from swe.app.subagents import (
     SkillOwnedDefinitionMetadata,
     SubAgentStartRequest,
     builtin_definition_provider,
+    initialize_community_expert_dependency_view,
 )
 from swe.config.config import AgentProfileConfig, MCPClientConfig, MCPConfig
 from swe.app.tenant_context import bind_tenant_context
+from swe.app.subagents.models import AgentOwnedDefinitionMetadata
 
 
 @pytest.fixture(autouse=True)
@@ -131,6 +133,91 @@ async def test_start_blocks_when_concurrency_limit_reached(tmp_path):
     assert second.limit == 1
     assert second.active_run_ids == [first.run_id]
     assert len(run_files) == 1
+
+
+@pytest.mark.asyncio
+async def test_start_uses_the_initialized_community_expert_session_view(
+    tmp_path: Path,
+) -> None:
+    """Later runs in a Chat keep using the first selected dependency view."""
+    definition = (
+        AgentRegistry([builtin_definition_provider()])
+        .resolve(
+            "plan-researcher",
+        )
+        .model_copy(
+            update={
+                "name": "received-reviewer",
+                "agent_owned": AgentOwnedDefinitionMetadata(
+                    definition_id="00000000-0000-0000-0000-000000000030",
+                    declared_skills=["quality"],
+                    declared_mcps=["github"],
+                    community={
+                        "item_id": "expert-1",
+                        "version": "1.0.0",
+                        "content_fingerprint": "fingerprint",
+                    },
+                ),
+            },
+        )
+    )
+    source_root = (
+        tmp_path
+        / "agents"
+        / "00000000-0000-0000-0000-000000000030.dependencies"
+    )
+    (source_root / "skills" / "quality").mkdir(parents=True)
+    (source_root / "skills" / "quality" / "SKILL.md").write_text(
+        "# session original",
+        encoding="utf-8",
+    )
+    (source_root / "mcp").mkdir()
+    (source_root / "mcp" / "config.json").write_text(
+        '{"github":{"name":"github","command":"session-github"}}',
+        encoding="utf-8",
+    )
+    chat_id = "00000000-0000-0000-0000-000000000031"
+    view_root = initialize_community_expert_dependency_view(
+        workspace_dir=tmp_path,
+        chat_id=chat_id,
+        definition=definition,
+    )
+    assert view_root is not None
+    (source_root / "skills" / "quality" / "SKILL.md").write_text(
+        "# later profile update",
+        encoding="utf-8",
+    )
+
+    popen_factory = _FakePopenFactory()
+    supervisor = BackgroundSubAgentSupervisor(popen_factory=popen_factory)
+    scope = _scope(tmp_path)
+    started = await supervisor.start(
+        scope=scope,
+        spec=_spec().model_copy(update={"name": definition.name}),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        definition=definition,
+        request_context={
+            "chat_id": chat_id,
+            "_expert_dependency_view_root": str(view_root),
+        },
+    )
+
+    assert started.status == "running"
+    launch = json.loads(
+        (scope.run_store_dir / f"{started.run_id}.launch.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+    skill_dir = Path(launch["launch_snapshot"]["skill_snapshot_dirs"][0])
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == (
+        "# session original"
+    )
+    mcp_path = Path(launch["launch_snapshot"]["private_mcp_snapshot_path"])
+    assert (
+        json.loads(mcp_path.read_text(encoding="utf-8"))["github"]["command"]
+        == "session-github"
+    )
 
 
 @pytest.mark.asyncio

@@ -1826,6 +1826,95 @@ def _request_selected_expert_id(request: AgentRequest) -> str | None:
     return value or None
 
 
+def _selected_expert_start_tool_call(
+    *,
+    workspace_dir: Path,
+    tenant_id: str | None,
+    agent_id: str,
+    selected_expert_id: str,
+    objective: str,
+) -> dict[str, Any] | None:
+    """Build the exact forced start call for one enabled local expert.
+
+    The Definition ID is a management identity, whereas the Background
+    SubAgent tool deliberately accepts only its runtime name.  Resolve that
+    mapping server-side so a submitted composer selection cannot be silently
+    skipped or changed by the Main Agent.
+    """
+    from ..subagents import AgentOwnedDefinitionRepository
+
+    try:
+        package = AgentOwnedDefinitionRepository(
+            workspace_dir / "agents",
+            owner_scope=f"{tenant_id or 'default'}/{agent_id}",
+        ).get(selected_expert_id)
+    except ValueError:
+        return None
+    definition = package.definition if package is not None else None
+    if definition is None or not definition.enabled:
+        return None
+    normalized_objective = objective.strip()
+    if not normalized_objective:
+        return None
+    return {
+        "id": f"selected-expert-{uuid4().hex}",
+        "name": "start_subagent",
+        "input": {
+            "name": definition.name,
+            "objective": normalized_objective,
+        },
+    }
+
+
+def _is_selected_expert_start_approval(
+    approved_tool_call: dict[str, Any] | None,
+    selected_expert_call: dict[str, Any],
+) -> bool:
+    """Keep a matching approved start call's identity and hook replay."""
+    if not isinstance(approved_tool_call, dict):
+        return False
+    if approved_tool_call.get("name") != "start_subagent":
+        return False
+    approved_input = approved_tool_call.get("input")
+    selected_input = selected_expert_call.get("input")
+    return (
+        isinstance(approved_input, dict)
+        and isinstance(selected_input, dict)
+        and approved_input.get("name") == selected_input.get("name")
+    )
+
+
+def _initialize_selected_expert_dependency_view(
+    *,
+    workspace_dir: Path,
+    tenant_id: str | None,
+    agent_id: str,
+    selected_expert_id: str,
+    chat_id: str,
+) -> Path | None:
+    """Bind a received expert's frozen dependencies to this Chat once."""
+    from ..subagents import (
+        AgentOwnedDefinitionRepository,
+        initialize_community_expert_dependency_view,
+    )
+
+    try:
+        package = AgentOwnedDefinitionRepository(
+            workspace_dir / "agents",
+            owner_scope=f"{tenant_id or 'default'}/{agent_id}",
+        ).get(selected_expert_id)
+    except ValueError:
+        return None
+    definition = package.definition if package is not None else None
+    if definition is None or not definition.enabled:
+        return None
+    return initialize_community_expert_dependency_view(
+        workspace_dir=workspace_dir,
+        chat_id=chat_id,
+        definition=definition,
+    )
+
+
 def _request_context_references(request: AgentRequest) -> list[object]:
     """Read the Console's typed, one-turn context references."""
     channel_meta = getattr(request, "channel_meta", None) or {}
@@ -2983,9 +3072,55 @@ class AgentRunner(Runner):
         selected_expert_id = _request_selected_expert_id(request)
         if selected_expert_id is not None:
             request_context["selected_expert_id"] = selected_expert_id
+            try:
+                dependency_view_root = (
+                    _initialize_selected_expert_dependency_view(
+                        workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                        tenant_id=self.tenant_id,
+                        agent_id=self.agent_id,
+                        selected_expert_id=selected_expert_id,
+                        chat_id=chat.id if chat is not None else "",
+                    )
+                )
+            except OSError as exc:
+                dependency_view_root = None
+                request_context["selected_expert_execution_error"] = str(exc)
+            if dependency_view_root is not None:
+                request_context["_expert_dependency_view_root"] = str(
+                    dependency_view_root,
+                )
+            selected_expert_call = _selected_expert_start_tool_call(
+                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                tenant_id=self.tenant_id,
+                agent_id=self.agent_id,
+                selected_expert_id=selected_expert_id,
+                objective=current_user_text,
+            )
+            if selected_expert_call is not None:
+                request_context["selected_expert_execution"] = True
+                approved_selected_start = (
+                    approved_tool_call
+                    if _is_selected_expert_start_approval(
+                        approved_tool_call,
+                        selected_expert_call,
+                    )
+                    else None
+                )
+                request_context["forced_tool_call_json"] = json.dumps(
+                    approved_selected_start or selected_expert_call,
+                    ensure_ascii=False,
+                )
+            elif "selected_expert_execution_error" not in request_context:
+                request_context["selected_expert_execution_error"] = (
+                    "The selected expert is unavailable or disabled. "
+                    "Choose an enabled expert and try again."
+                )
         if auth_token:
             request_context["auth_token"] = auth_token
-        if approved_tool_call:
+        if (
+            approved_tool_call
+            and "forced_tool_call_json" not in request_context
+        ):
             request_context["forced_tool_call_json"] = json.dumps(
                 approved_tool_call,
                 ensure_ascii=False,

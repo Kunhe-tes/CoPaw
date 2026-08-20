@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -135,6 +136,170 @@ class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
 
     async def print(self, msg, *args, **kwargs):
         self.printed.append(msg)
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_forced_start_waits_for_its_terminal_result(
+    tmp_path: Path,
+) -> None:
+    """Selected-expert replay cannot fall through to Main Agent early."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution"] = True
+    agent._tool_guard_replay_done = {
+        "tool_name": "start_subagent",
+        "tool_call_id": "start-1",
+        "tool_input": {"name": "researcher", "objective": "Inspect"},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"accepted": True, "run_id": "subagent-1"},
+        )
+    )
+
+    reply = await agent._reason_about_replay_done()
+
+    assert reply is not None
+    tool_call = reply.get_content_blocks("tool_use")[0]
+    assert tool_call["name"] == "wait_subagent"
+    assert tool_call["input"] == {"timeout_ms": 3000}
+    assert agent._request_context["selected_expert_run_id"] == "subagent-1"
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_start_rejection_does_not_fall_back_to_main_agent(
+    tmp_path: Path,
+) -> None:
+    """A rejected selected run remains an explicit failure, never rerouting."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution"] = True
+    agent._tool_guard_replay_done = {
+        "tool_name": "start_subagent",
+        "tool_call_id": "start-1",
+        "tool_input": {"name": "researcher", "objective": "Inspect"},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"accepted": False, "reason": "concurrency_limit"},
+        )
+    )
+
+    reply = await agent._reason_about_replay_done()
+
+    assert "could not be started" in reply.get_text_content()
+    assert agent._request_context["selected_expert_execution"] is False
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_wait_replays_until_the_run_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """A timed-out observation remains synchronous rather than optional."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "subagent-1",
+        },
+    )
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_subagent",
+        "tool_call_id": "wait-1",
+        "tool_input": {"timeout_ms": 3000},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"timed_out": True, "active_runs": [{"run_id": "subagent-1"}]},
+        )
+    )
+
+    reply = await agent._reason_about_replay_done()
+
+    assert reply is not None
+    assert reply.get_content_blocks("tool_use")[0]["name"] == "wait_subagent"
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_fetches_a_cancelled_run_before_summarizing(
+    tmp_path: Path,
+) -> None:
+    """A cancellation from the monitor is visible to the same turn."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "subagent-1",
+        },
+    )
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_subagent",
+        "tool_call_id": "wait-1",
+        "tool_input": {"timeout_ms": 3000},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"timed_out": False, "active_runs": [], "terminal_runs": []},
+        )
+    )
+
+    follow_up = await agent._reason_about_replay_done()
+
+    assert follow_up is not None
+    tool_call = follow_up.get_content_blocks("tool_use")[0]
+    assert tool_call["name"] == "get_subagent"
+    assert tool_call["input"] == {"run_id": "subagent-1"}
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_execution_gate_closes_after_terminal_result(
+    tmp_path: Path,
+) -> None:
+    """Terminal completion prevents a duplicate expert launch in the turn."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "subagent-1",
+        },
+    )
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_subagent",
+        "tool_call_id": "wait-1",
+        "tool_input": {"timeout_ms": 3000},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "timed_out": False,
+                "active_runs": [],
+                "terminal_runs": [
+                    {"run_id": "subagent-1", "status": "completed"},
+                ],
+            },
+        )
+    )
+
+    assert await agent._reason_about_replay_done() is None
+    assert agent._request_context["selected_expert_execution"] is False
+
+
+@pytest.mark.asyncio
+async def test_unavailable_selected_expert_stops_before_main_agent_reasoning(
+    tmp_path: Path,
+) -> None:
+    """An invalid explicit selection cannot degrade into normal routing."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution_error"] = (
+        "The selected expert is unavailable."
+    )
+
+    reply = await agent._reasoning()
+
+    assert reply.get_text_content() == "The selected expert is unavailable."
 
 
 class _FakePlanGuardAgent(ToolGuardMixin, _BaseAgent):
