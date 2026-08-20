@@ -46,8 +46,9 @@ async def test_query_handler_injects_auth_headers_into_mcp_headers_and_context(
         session_id=None,
         chat_id=None,
         trace_id=None,
+        **kwargs,
     ):
-        del tenant_id, user_id
+        del tenant_id, user_id, kwargs
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
         captured["chat_id"] = chat_id
@@ -269,8 +270,9 @@ async def test_query_handler_keeps_existing_passthrough_headers(monkeypatch):
         session_id=None,
         chat_id=None,
         trace_id=None,
+        **kwargs,
     ):
-        del tenant_id, user_id
+        del tenant_id, user_id, kwargs
         captured["passthrough_headers"] = passthrough_headers
         captured["session_id"] = session_id
         captured["chat_id"] = chat_id
@@ -394,9 +396,10 @@ async def test_query_handler_injects_identity_into_request_context(
         session_id=None,
         chat_id=None,
         trace_id=None,
+        **kwargs,
     ):
         del tenant_id, user_id
-        del _mcp, passthrough_headers, session_id, chat_id, trace_id
+        del _mcp, passthrough_headers, session_id, chat_id, trace_id, kwargs
         return []
 
     class FakeAgent:

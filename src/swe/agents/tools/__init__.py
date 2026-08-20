@@ -33,7 +33,6 @@ from .subagent_background import (
     create_background_subagent_tools,
     get_default_background_subagent_supervisor,
     has_explicit_subagent_run_id,
-    has_subagent_intent,
 )
 
 __all__ = [
@@ -62,5 +61,4 @@ __all__ = [
     "create_background_subagent_tools",
     "get_default_background_subagent_supervisor",
     "has_explicit_subagent_run_id",
-    "has_subagent_intent",
 ]

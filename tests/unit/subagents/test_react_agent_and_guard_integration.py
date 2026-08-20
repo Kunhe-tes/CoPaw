@@ -458,19 +458,18 @@ def test_main_agent_registers_plan_interaction_tools_by_mode_and_source_config(
 def test_background_subagent_tools_require_explicit_intent(
     tmp_path: Path,
 ) -> None:
-    """Main Agent sees start_subagent only after explicit SubAgent intent."""
+    """Main Agent sees start_subagent only after explicit expert selection."""
     hidden = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请分析这个模块",
         },
     )
     visible = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请用子代理分析这个模块",
+            "selected_expert_id": "expert-1",
         },
     )
 
@@ -535,7 +534,7 @@ def test_start_subagent_description_lists_enabled_skill_definitions(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请使用子代理检查变更",
+            "selected_expert_id": "expert-1",
         },
     )
 
@@ -550,12 +549,12 @@ def test_start_subagent_description_lists_enabled_skill_definitions(
 def test_register_subagent_definition_is_never_exposed(
     tmp_path: Path,
 ) -> None:
-    """Registration tool is not exposed for ordinary SubAgent intent."""
+    """Registration tool is not exposed for explicit expert selection."""
     normal = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请用子代理分析这个模块",
+            "selected_expert_id": "expert-1",
         },
     )
     normal_tools = SWEAgent._create_toolkit(normal).tools
@@ -665,12 +664,12 @@ def test_background_subagent_observe_tools_visible_with_active_runs(
 def test_background_subagent_management_tools_require_fresh_intent(
     tmp_path: Path,
 ) -> None:
-    """A new explicit SubAgent turn exposes all management tools."""
+    """A new explicit expert turn exposes all management tools."""
     agent = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请继续管理这个子代理任务",
+            "selected_expert_id": "expert-1",
         },
     )
 
@@ -898,14 +897,14 @@ def test_plan_mode_toolkit_excludes_synchronous_delegation(
 def test_plan_mode_toolkit_allows_background_subagent_intent(
     tmp_path: Path,
 ) -> None:
-    """Plan Mode may use readonly background SubAgent tools."""
+    """Plan Mode may use readonly background SubAgent tools when selected."""
     agent = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
             "plan_mode_enabled": True,
             "enable_subagents": True,
-            "current_user_text": "请用 subAgent 检查计划风险",
+            "selected_expert_id": "expert-1",
         },
     )
 

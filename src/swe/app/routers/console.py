@@ -859,7 +859,11 @@ def _extract_scenario_preset_id(
     mapping = (
         request_data
         if isinstance(request_data, dict)
-        else request_data.model_dump()
+        else (
+            request_data.model_dump()
+            if hasattr(request_data, "model_dump")
+            else dict(getattr(request_data, "__dict__", {}))
+        )
     )
     value = mapping.get("scenario_preset_id")
     if value is None:
