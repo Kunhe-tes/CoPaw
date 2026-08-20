@@ -21,7 +21,7 @@ from ...marketplace.service import (
     ExpertDependencyError,
     ExpertNameConflictError,
 )
-from ..deps import require_source_id
+from ..deps import decode_user_name, require_source_id
 
 router = APIRouter()
 
@@ -61,7 +61,7 @@ async def publish_expert(
             req.definition_id,
             category_id=req.category_id,
             bbk_ids=req.bbk_ids,
-            creator_name=x_user_name or "",
+            creator_name=decode_user_name(x_user_name) or "",
             overwrite=req.overwrite,
         )
     except ExpertNameConflictError as exc:

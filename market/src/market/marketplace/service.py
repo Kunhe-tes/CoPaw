@@ -1716,18 +1716,18 @@ class MarketplaceService:
                 fields.append(
                     f"bbk_ids = {json.dumps(bbk_ids, ensure_ascii=False)}",
                 )
-            missing_fields = [
-                field
-                for field in fields
-                if not re.search(
-                    rf"(?m)^{re.escape(field.split(' = ', 1)[0])}\\s*=",
-                    definition_text,
-                )
-            ]
-            if missing_fields:
-                definition_text = (
-                    "\n".join(missing_fields) + "\n" + definition_text
-                )
+            for field in fields:
+                field_name = field.split(" = ", 1)[0]
+                field_pattern = rf"(?m)^{re.escape(field_name)}\s*=.*$"
+                if re.search(field_pattern, definition_text):
+                    definition_text = re.sub(
+                        field_pattern,
+                        field,
+                        definition_text,
+                        count=1,
+                    )
+                else:
+                    definition_text = field + "\n" + definition_text
             (source_dir / "definition.toml").write_text(
                 definition_text,
                 encoding="utf-8",
