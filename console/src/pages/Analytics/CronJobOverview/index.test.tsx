@@ -192,17 +192,13 @@ describe("CronJobOverview summary cards", () => {
       "ant-select-disabled",
     );
     await waitFor(() => {
-      expect(
-        monitorApiMock.getCronJobOverviewPageData,
-      ).toHaveBeenCalledWith(
+      expect(monitorApiMock.getCronJobOverviewPageData).toHaveBeenCalledWith(
         expect.objectContaining({
           bbk_ids: "200",
         }),
       );
     });
-    expect(
-      container.querySelector(".ant-select-disabled"),
-    ).toBeInTheDocument();
+    expect(container.querySelector(".ant-select-disabled")).toBeInTheDocument();
   });
 
   it("renders expanded manager detail without extra drill-down scroll wrapper", async () => {
@@ -347,5 +343,179 @@ describe("CronJobOverview summary cards", () => {
     fireEvent.click(await screen.findByText("测试分行"));
 
     expect(await screen.findByText("insurance_mkt")).toBeInTheDocument();
+  });
+
+  it("sorts skill-view branch ranking metrics on the client while keeping rank and branch headers unsortable", async () => {
+    monitorApiMock.getCronJobOverviewPageData.mockResolvedValueOnce({
+      summaryMetrics: [],
+      branchRankingRows: [
+        {
+          rank: 1,
+          branchName: "甲分行",
+          bbkId: "100",
+          skillCount: "3",
+          totalTasks: "20",
+          successCount: "18",
+          readTasks: "11",
+          involvedManagers: "5",
+          resultViewManagers: "4",
+          planManagers: "3",
+          insightManagers: "2",
+          phoneManagers: "1",
+          recommendedCustomers: "30",
+          viewedCustomers: "12",
+          insightCustomers: "5",
+          phoneCustomers: "2",
+          contactedCustomers: "8",
+          contactRate: "40.00%",
+        },
+        {
+          rank: 2,
+          branchName: "乙分行",
+          bbkId: "200",
+          skillCount: "5",
+          totalTasks: "8",
+          successCount: "8",
+          readTasks: "7",
+          involvedManagers: "2",
+          resultViewManagers: "2",
+          planManagers: "1",
+          insightManagers: "1",
+          phoneManagers: "1",
+          recommendedCustomers: "10",
+          viewedCustomers: "9",
+          insightCustomers: "6",
+          phoneCustomers: "1",
+          contactedCustomers: "6",
+          contactRate: "60.00%",
+        },
+        {
+          rank: 3,
+          branchName: "丙分行",
+          bbkId: "300",
+          skillCount: "1",
+          totalTasks: "32",
+          successCount: "4",
+          readTasks: "2",
+          involvedManagers: "1",
+          resultViewManagers: "1",
+          planManagers: "0",
+          insightManagers: "0",
+          phoneManagers: "0",
+          recommendedCustomers: "5",
+          viewedCustomers: "3",
+          insightCustomers: "1",
+          phoneCustomers: "0",
+          contactedCustomers: "1",
+          contactRate: "20.00%",
+        },
+      ],
+      failureReasons: [],
+      anomalySummary: {
+        affectedBranches: "0",
+        affectedBranchesUnit: "家",
+        affectedManagers: "0",
+        affectedManagersUnit: "人",
+      },
+      anomalyRankRows: [],
+    });
+
+    const { container } = render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await screen.findByText("技能视角-分行综合排行");
+
+    expect(
+      screen.queryByRole("button", { name: "分行名称排序" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "任务总数排序" }),
+    ).toBeInTheDocument();
+
+    const skillViewTable = container.querySelectorAll(
+      `.${styles.behaviorTable}`,
+    )[1];
+    const branchNames = () =>
+      Array.from(skillViewTable.querySelectorAll("tbody tr")).map(
+        (row) => row.children[1]?.textContent,
+      );
+
+    expect(branchNames()).toEqual(["甲分行", "乙分行", "丙分行"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "任务总数排序" }));
+
+    expect(branchNames()).toEqual(["丙分行", "甲分行", "乙分行"]);
+    expect(
+      Array.from(skillViewTable.querySelectorAll("tbody tr")).map(
+        (row) => row.children[0]?.textContent,
+      ),
+    ).toEqual(["1", "2", "3"]);
+  });
+
+  it("uses full-row drill-down table styling for wrapped branch skill names", async () => {
+    monitorApiMock.getCronBranchTaskBehavior.mockResolvedValueOnce({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      items: [
+        {
+          bbk_id: "100",
+          bbk_name: "测试分行",
+          manager_count: 1,
+          total_tasks: 2,
+          success_count: 2,
+          success_rate: 100,
+          read_tasks: 1,
+          plan_count: 0,
+          insight_count: 0,
+          phone_count: 0,
+          plan_clicks: 0,
+          insight_clicks: 0,
+          phone_clicks: 0,
+          error_count: 0,
+        },
+      ],
+    });
+    monitorApiMock.getBranchSkills.mockResolvedValueOnce({
+      start_date: "2026-06-30",
+      end_date: "2026-06-30",
+      bbk_id: "100",
+      bbk_name: "测试分行",
+      items: [
+        {
+          skill_name: "长名称技能长名称技能长名称技能长名称技能长名称技能",
+          cron_task_count: 2,
+          success_count: 2,
+          success_rate: 100,
+          read_count: 1,
+          error_count: 0,
+        },
+      ],
+    });
+
+    const { container } = render(
+      <MemoryRouter initialEntries={["/analytics/cron-job-overview"]}>
+        <Routes>
+          <Route
+            path="/analytics/cron-job-overview"
+            element={<CronJobOverviewPage />}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByText("测试分行"));
+
+    expect(await screen.findByText(/长名称技能/)).toBeInTheDocument();
+    expect(
+      container.querySelector(`.${styles.branchSkillDrillDownTable}`),
+    ).toHaveClass(styles.branchSkillDrillDownTable);
   });
 });

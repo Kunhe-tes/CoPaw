@@ -1,8 +1,11 @@
 import {
   ArrowLeft,
+  ArrowDownUp,
   Banknote,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   ChevronRight,
   Eye,
   FileText,
@@ -51,6 +54,11 @@ const { Option } = Select;
 
 type TimeRange = "day" | "week" | "month" | "custom";
 type SummaryMetricTone = "blue" | "green" | "orange" | "red";
+type SortDirection = "asc" | "desc";
+type BranchRankingSortKey = Exclude<
+  keyof CronJobOverviewPageData["branchRankingRows"][number],
+  "rank" | "bbkId" | "branchName"
+>;
 
 const failureReasonOptions = [
   "子任务执行失败",
@@ -76,6 +84,11 @@ const DRILL_DOWN_TABLE_SCROLL = {
 
 const formatRatioPercent = (value?: number | null) =>
   `${((value ?? 0) * 100).toFixed(2)}%`;
+
+const parseRankingValue = (value: string | number) => {
+  const numericValue = Number(String(value).replace(/[%\s,]/g, ""));
+  return Number.isFinite(numericValue) ? numericValue : 0;
+};
 
 type SummaryMetricDefinition = {
   key: string;
@@ -417,6 +430,63 @@ function RankingTable({
   onRowClick: (bbkId: string, bbkName: string) => void;
   selectedBranchId: string | null;
 }) {
+  const [sortConfig, setSortConfig] = useState<{
+    key: BranchRankingSortKey;
+    direction: SortDirection;
+  } | null>(null);
+  const sortedData = useMemo(() => {
+    if (!sortConfig) {
+      return data;
+    }
+    return [...data].sort((left, right) => {
+      const leftValue = parseRankingValue(left[sortConfig.key]);
+      const rightValue = parseRankingValue(right[sortConfig.key]);
+      const result = leftValue - rightValue;
+      return sortConfig.direction === "asc" ? result : -result;
+    });
+  }, [data, sortConfig]);
+
+  const handleSort = (key: BranchRankingSortKey) => {
+    setSortConfig((current) => {
+      if (!current || current.key !== key) {
+        return { key, direction: "desc" };
+      }
+      if (current.direction === "desc") {
+        return { key, direction: "asc" };
+      }
+      return null;
+    });
+  };
+
+  const renderSortableHeader = (title: string, key: BranchRankingSortKey) => {
+    const isActive = sortConfig?.key === key;
+    const Icon = isActive
+      ? sortConfig?.direction === "desc"
+        ? ChevronDown
+        : ChevronUp
+      : ArrowDownUp;
+    return (
+      <span className={styles.sortableHeader}>
+        <span>{title}</span>
+        <button
+          type="button"
+          className={`${styles.sortButton} ${
+            isActive ? styles.sortButtonActive : ""
+          }`.trim()}
+          aria-label={`${title}排序`}
+          aria-pressed={isActive}
+          title={`${title}排序`}
+          onClick={(event) => {
+            event.stopPropagation();
+            handleSort(key);
+          }}
+        >
+          <Icon size={13} aria-hidden="true" />
+        </button>
+      </span>
+    );
+  };
+
   return (
     <section className={`${styles.panel} ${styles.behaviorPanel}`}>
       <div className={styles.tableScroller}>
@@ -444,27 +514,52 @@ function RankingTable({
             <tr>
               <th className={styles.indexCell} />
               <th>分行名称</th>
-              <th>技能数</th>
-              <th>任务总数</th>
-              <th>成功执行数</th>
-              <th>已读任务数</th>
-              <th>涉及客户经理数</th>
-              <th>查看结果的客户经理数</th>
-              <th>查看方案客户经理数</th>
-              <th>去洞察的客户经理数</th>
-              <th>去电访的客户经理数</th>
-              <th>推荐的客户数</th>
-              <th>被客户经理查看的客户数</th>
-              <th>去洞察客户数</th>
-              <th>去电访客户数</th>
-              <th>接触客户数</th>
-              <th>接触客户率</th>
+              <th>{renderSortableHeader("技能数", "skillCount")}</th>
+              <th>{renderSortableHeader("任务总数", "totalTasks")}</th>
+              <th>{renderSortableHeader("成功执行数", "successCount")}</th>
+              <th>{renderSortableHeader("已读任务数", "readTasks")}</th>
+              <th>
+                {renderSortableHeader("涉及客户经理数", "involvedManagers")}
+              </th>
+              <th>
+                {renderSortableHeader(
+                  "查看结果的客户经理数",
+                  "resultViewManagers",
+                )}
+              </th>
+              <th>
+                {renderSortableHeader("查看方案客户经理数", "planManagers")}
+              </th>
+              <th>
+                {renderSortableHeader("去洞察的客户经理数", "insightManagers")}
+              </th>
+              <th>
+                {renderSortableHeader("去电访的客户经理数", "phoneManagers")}
+              </th>
+              <th>
+                {renderSortableHeader("推荐的客户数", "recommendedCustomers")}
+              </th>
+              <th>
+                {renderSortableHeader(
+                  "被客户经理查看的客户数",
+                  "viewedCustomers",
+                )}
+              </th>
+              <th>
+                {renderSortableHeader("去洞察客户数", "insightCustomers")}
+              </th>
+              <th>{renderSortableHeader("去电访客户数", "phoneCustomers")}</th>
+              <th>
+                {renderSortableHeader("接触客户数", "contactedCustomers")}
+              </th>
+              <th>{renderSortableHeader("接触客户率", "contactRate")}</th>
             </tr>
           </thead>
           <tbody>
-            {data.map((row, index) => {
+            {sortedData.map((row, index) => {
               const isClickable = row.bbkId && row.rank !== "...";
               const isSelected = row.bbkId && row.bbkId === selectedBranchId;
+              const rank = sortConfig ? index + 1 : row.rank;
 
               return (
                 <tr
@@ -481,7 +576,7 @@ function RankingTable({
                     }
                   }}
                 >
-                  <td className={styles.indexCell}>{row.rank}</td>
+                  <td className={styles.indexCell}>{rank}</td>
                   <td
                     className={
                       isClickable ? styles.branchNameLink : styles.branchName
@@ -1517,7 +1612,7 @@ export default function CronJobOverviewPage() {
               </span>
             </h3>
             <Table
-              className={styles.drillDownTable}
+              className={`${styles.drillDownTable} ${styles.branchSkillDrillDownTable}`}
               dataSource={taskSkills}
               rowKey="skill_name"
               loading={taskSkillsLoading}

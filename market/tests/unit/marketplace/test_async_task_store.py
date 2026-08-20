@@ -185,3 +185,23 @@ async def test_record_item_result_backfills_target_name() -> None:
     assert "target_name = COALESCE(%s, target_name)" in sql
     assert params is not None
     assert params[1] == "用户一"
+
+
+@pytest.mark.asyncio
+async def test_record_item_result_refreshes_master_progress() -> None:
+    """单个目标完成后应刷新主任务进度，供任务中心列表展示。"""
+    db = FakeDb()
+    store = AsyncTaskStore(db)
+
+    await store.record_item_result(
+        task_id="task-1",
+        target_id="u1",
+        success=True,
+        result={"user_name": "用户一"},
+    )
+
+    assert len(db.executed) == 2
+    sql, params = db.executed[1]
+    assert "UPDATE swe_async_tasks" in sql
+    assert "swe_async_task_items" in sql
+    assert params == ("task-1", "task-1", "task-1")

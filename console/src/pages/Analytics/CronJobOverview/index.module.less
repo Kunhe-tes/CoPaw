@@ -456,6 +456,47 @@
   overflow: hidden;
 }
 
+.sortableHeader {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sortButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  padding: 0;
+  color: #64748b;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+
+  &:hover {
+    color: #2563eb;
+    background: #eaf2ff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgba(37, 99, 235, 0.4);
+    outline-offset: 1px;
+  }
+}
+
+.sortButtonActive {
+  color: #2563eb;
+  background: #eaf2ff;
+}
+
 .behaviorTable td,
 .rankTable td {
   height: 42px;
@@ -578,6 +619,23 @@
     white-space: normal !important;
     word-break: break-all;
     padding: 6px 4px !important;
+  }
+}
+
+.branchSkillDrillDownTable {
+  :global(.ant-table-body) {
+    max-height: 300px !important;
+    overflow-y: auto !important;
+  }
+
+  :global(.ant-table-tbody) > tr > :global(.ant-table-cell) {
+    height: auto;
+    min-height: 40px;
+    line-height: 20px;
+    white-space: normal !important;
+    word-break: break-word;
+    overflow: visible;
+    text-overflow: clip;
   }
 }
 

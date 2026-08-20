@@ -51,6 +51,7 @@ from .models import MarketItem
 from .schemas import (
     DistributeRequest,
     DistributeResponse,
+    DistributeTenantResult,
     DistributionRecord,
     MCPDistributionRequest,
     MCPDistributionResponse,
@@ -1389,15 +1390,17 @@ class MarketplaceService:
         target_users = await self._resolve_target_users(source_id, req)
         count = 0
         conflicts: list[dict] = []
+        results: list[DistributeTenantResult] = []
 
         for user in target_users:
+            tenant_id = user["tenant_id"]
             try:
                 result = copy_skill_to_user(
                     marketplace_root=self.marketplace_root,
                     source_id=source_id,
                     item_id=item_id,
                     swe_root=self.swe_root,
-                    user_id=user["tenant_id"],
+                    user_id=tenant_id,
                     skill_name=safe_skill_name,
                     original_name=item.name,
                     description=item.description,
@@ -1410,10 +1413,19 @@ class MarketplaceService:
                 if result.get("status") == "conflict":
                     conflicts.append(
                         {
-                            "user_id": user["tenant_id"],
+                            "user_id": tenant_id,
                             "skill_name": safe_skill_name,
                             "reason": result.get("reason", "unknown"),
                         },
+                    )
+                    results.append(
+                        DistributeTenantResult(
+                            user_id=tenant_id,
+                            success=False,
+                            status="conflict",
+                            skill_name=safe_skill_name,
+                            error=result.get("reason", "unknown"),
+                        ),
                     )
                     continue
 
@@ -1421,7 +1433,7 @@ class MarketplaceService:
                 metadata = result.get("metadata") or {}
                 final_enabled = bool(result["final_enabled"])
                 self.register_skill_in_manifest(
-                    user["tenant_id"],
+                    tenant_id,
                     safe_skill_name,
                     "default",
                     source_id,
@@ -1436,7 +1448,7 @@ class MarketplaceService:
                     skill_id=skill_id,
                     skill_name=safe_skill_name,
                     cn_name=cn_name,
-                    tenant_id=user["tenant_id"],
+                    tenant_id=tenant_id,
                     tenant_name=user.get("tenant_name", ""),
                     bbk_id=user.get("bbk_id", ""),
                     source=f"marketplace:{item_id}",
@@ -1448,21 +1460,38 @@ class MarketplaceService:
                 if not inserted:
                     logger.warning(
                         "分发成功但 swe_skills 写入失败: user=%s, skill=%s",
-                        user["tenant_id"],
+                        tenant_id,
                         safe_skill_name,
                     )
                 if final_enabled:
                     await self._trigger_agent_reload(
-                        user["tenant_id"],
+                        tenant_id,
                         "default",
                         source_id,
                     )
                 count += 1
+                results.append(
+                    DistributeTenantResult(
+                        user_id=tenant_id,
+                        success=True,
+                        status="distributed",
+                        skill_name=safe_skill_name,
+                    ),
+                )
             except Exception as e:
                 logger.warning(
                     "Failed to copy skill to user %s: %s",
-                    user["tenant_id"],
+                    tenant_id,
                     e,
+                )
+                results.append(
+                    DistributeTenantResult(
+                        user_id=tenant_id,
+                        success=False,
+                        status="failed",
+                        skill_name=safe_skill_name,
+                        error=str(e),
+                    ),
                 )
                 continue
 
@@ -1478,7 +1507,7 @@ class MarketplaceService:
                             "skill",
                             item_id,
                             item.name,
-                            user["tenant_id"],
+                            tenant_id,
                             user.get("tenant_name", ""),
                             user.get("bbk_id", ""),
                         ),
@@ -1489,7 +1518,13 @@ class MarketplaceService:
         return DistributeResponse(
             distributed_count=count,
             conflict_count=len(conflicts),
+            failed_count=sum(
+                1
+                for item in results
+                if not item.success and item.status != "conflict"
+            ),
             conflicts=conflicts,
+            results=results,
             item_id=item_id,
         )
 
