@@ -5,6 +5,7 @@ import {
   Empty,
   Input,
   List,
+  Modal,
   Space,
   Spin,
   Tag,
@@ -29,6 +30,10 @@ export default function ExpertCommunityPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [versionItem, setVersionItem] = useState<MarketExpert | null>(null);
+  const [versions, setVersions] = useState<Awaited<
+    ReturnType<typeof marketApi.listExpertVersions>
+  > | null>(null);
   const { message } = useAppMessage();
 
   const load = useCallback(async () => {
@@ -90,9 +95,8 @@ export default function ExpertCommunityPage() {
         sourceId,
         item.item_id,
       );
-      message.info(
-        `共 ${versions.versions.length} 个版本，当前 v${item.version}`,
-      );
+      setVersions(versions);
+      setVersionItem(item);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "加载版本历史失败");
     }
@@ -238,6 +242,35 @@ export default function ExpertCommunityPage() {
           />
         )}
       </Space>
+      <Modal
+        title={versionItem ? `${versionItem.name} · 版本历史` : "版本历史"}
+        open={versionItem !== null}
+        footer={null}
+        onCancel={() => {
+          setVersionItem(null);
+          setVersions(null);
+        }}
+      >
+        <List
+          dataSource={versions?.versions || []}
+          locale={{ emptyText: "暂无版本历史" }}
+          renderItem={(version) => (
+            <List.Item>
+              <List.Item.Meta
+                title={
+                  <Space>
+                    <span>v{version.version_id}</span>
+                    {version.is_current ? <Tag color="green">当前</Tag> : null}
+                  </Space>
+                }
+                description={`${
+                  version.created_by_name || version.created_by
+                } · ${version.created_at}`}
+              />
+            </List.Item>
+          )}
+        />
+      </Modal>
     </section>
   );
 }
