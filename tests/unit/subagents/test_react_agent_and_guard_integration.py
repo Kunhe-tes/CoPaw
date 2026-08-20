@@ -483,6 +483,38 @@ def test_background_subagent_tools_require_explicit_intent(
     assert "delegate_to_subagent" not in visible_tools
 
 
+def test_background_subagent_tools_require_selected_expert(
+    tmp_path: Path,
+) -> None:
+    """Only an explicit expert selection should unlock background subagents."""
+    hidden = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": "请用子代理分析这个模块",
+        },
+    )
+    visible = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "selected_expert_id": "expert-1",
+        },
+    )
+
+    hidden_tools = SWEAgent._create_toolkit(hidden).tools
+    assert "start_subagent" not in hidden_tools
+    assert "wait_subagent" not in hidden_tools
+    assert "get_subagent" not in hidden_tools
+    assert "cancel_subagent" not in hidden_tools
+
+    visible_tools = SWEAgent._create_toolkit(visible).tools
+    assert "start_subagent" in visible_tools
+    assert "wait_subagent" in visible_tools
+    assert "get_subagent" in visible_tools
+    assert "cancel_subagent" in visible_tools
+
+
 def test_start_subagent_description_lists_enabled_skill_definitions(
     tmp_path: Path,
 ) -> None:
