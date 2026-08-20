@@ -6,6 +6,7 @@ import {
   Empty,
   Form,
   Input,
+  Modal,
   Popconfirm,
   Select,
   Space,
@@ -23,6 +24,9 @@ import {
   type ExpertPayload,
 } from "../../api/modules/experts";
 import { useAppMessage } from "../../hooks/useAppMessage";
+import { marketApi, type Category } from "../../api/modules/market";
+import { useIframeStore } from "../../stores/iframeStore";
+import { useAgentStore } from "../../stores/agentStore";
 
 const emptyPayload: ExpertPayload = {
   name: "",
@@ -41,6 +45,11 @@ type ExpertFormValues = Omit<Partial<ExpertPayload>, "model"> & {
   skillsText?: string[];
   mcpsText?: string[];
   model?: ExpertPayload["model"] | string;
+};
+
+type PublishFormValues = {
+  category_id?: number;
+  bbk_ids?: string;
 };
 
 const splitList = (value?: string) =>
@@ -76,6 +85,9 @@ export const payloadFromValues = (values: ExpertFormValues): ExpertPayload => {
 };
 
 export default function ExpertsPage() {
+  const sourceId = useIframeStore((state) => state.source) || "default";
+  const isManager = useIframeStore((state) => state.manager);
+  const selectedAgent = useAgentStore((state) => state.selectedAgent);
   const [items, setItems] = useState<Expert[]>([]);
   const [skillOptions, setSkillOptions] = useState<
     { label: string; value: string }[]
@@ -91,7 +103,12 @@ export default function ExpertsPage() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [previewToml, setPreviewToml] = useState("");
   const [selected, setSelected] = useState<Expert | null>(null);
+  const [publishTarget, setPublishTarget] = useState<Expert | null>(null);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [form] = Form.useForm<ExpertFormValues>();
+  const [publishForm] = Form.useForm<PublishFormValues>();
   const { message } = useAppMessage();
   const load = async () => {
     setLoading(true);
@@ -147,6 +164,52 @@ export default function ExpertsPage() {
       })
       .catch(() => {});
   }, []);
+  const openPublish = async (expert: Expert) => {
+    setPublishTarget(expert);
+    publishForm.resetFields();
+    setPublishOpen(true);
+    try {
+      setCategories(await marketApi.listCategories(sourceId));
+    } catch {
+      setCategories([]);
+    }
+  };
+  const publish = async (overwrite = false) => {
+    if (!publishTarget) return;
+    const values = await publishForm.validateFields();
+    setPublishing(true);
+    try {
+      const published = await marketApi.publishExpert(sourceId, {
+        definition_id: publishTarget.definition_id,
+        agent_id: selectedAgent,
+        category_id: values.category_id,
+        bbk_ids: splitList(values.bbk_ids),
+        overwrite,
+      });
+      message.success(
+        published.version_unchanged
+          ? "专家内容未变化，社区版本保持不变"
+          : `已同步到专家社区 v${published.version}`,
+      );
+      setPublishOpen(false);
+      setPublishTarget(null);
+    } catch (error) {
+      const requestError = error as Error & { status?: number };
+      if (requestError.status === 409 && !overwrite) {
+        Modal.confirm({
+          title: "社区中已有同名专家",
+          content: "确认后将作为该社区专家的新版本继续发布，保留历史版本。",
+          okText: "确认覆盖",
+          cancelText: "取消",
+          onOk: () => publish(true),
+        });
+        return;
+      }
+      message.error(error instanceof Error ? error.message : "同步专家失败");
+    } finally {
+      setPublishing(false);
+    }
+  };
   const open = (expert?: Expert) => {
     const definition = expert?.definition;
     const model = definition?.agent_owned?.model;
@@ -293,6 +356,11 @@ export default function ExpertsPage() {
                     >
                       编辑
                     </Button>
+                    {isManager && item.valid ? (
+                      <Button type="link" onClick={() => void openPublish(item)}>
+                        同步到专家社区
+                      </Button>
+                    ) : null}
                     <Popconfirm
                       title="删除此专家？"
                       onConfirm={() =>
@@ -380,6 +448,32 @@ export default function ExpertsPage() {
           </Typography.Paragraph>
         ) : null}
       </Drawer>
+      <Modal
+        title={publishTarget ? `同步“${publishTarget.definition?.name || publishTarget.definition_id}”` : "同步到专家社区"}
+        open={publishOpen}
+        confirmLoading={publishing}
+        okText="同步"
+        onOk={() => void publish()}
+        onCancel={() => {
+          setPublishOpen(false);
+          setPublishTarget(null);
+        }}
+      >
+        <Form layout="vertical" form={publishForm}>
+          <Form.Item name="category_id" label="社区分类">
+            <Select
+              allowClear
+              options={categories.map((category) => ({
+                label: category.name,
+                value: category.id,
+              }))}
+            />
+          </Form.Item>
+          <Form.Item name="bbk_ids" label="BBK">
+            <Input placeholder="可选，多个 BBK 用逗号分隔" />
+          </Form.Item>
+        </Form>
+      </Modal>
     </section>
   );
 }

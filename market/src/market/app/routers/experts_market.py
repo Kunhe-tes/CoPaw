@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException, Request, status
@@ -42,18 +41,28 @@ async def publish_expert(
     request: Request,
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
 ):
     """Publish a community expert."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+    if not x_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-Id header is required",
+        )
     svc = request.app.state.marketplace
     try:
-        item, version_unchanged = await svc.publish_expert(
+        item, version_unchanged = await svc.publish_expert_from_profile(
             source_id,
-            Path(req.source_dir),
+            x_user_id,
+            req.agent_id,
+            req.definition_id,
+            category_id=req.category_id,
+            bbk_ids=req.bbk_ids,
+            creator_name=x_user_name or "",
             overwrite=req.overwrite,
-            operator_id="manager",
-            operator_name="Manager",
         )
     except ExpertNameConflictError as exc:
         raise HTTPException(

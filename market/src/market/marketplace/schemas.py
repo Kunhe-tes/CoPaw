@@ -80,7 +80,10 @@ class MarketSkillDetail(MarketSkillResponse):
 class PublishExpertRequest(BaseModel):
     """上架社区专家请求体."""
 
-    source_dir: str
+    definition_id: str
+    agent_id: str = "default"
+    category_id: int | None = None
+    bbk_ids: list[str] = Field(default_factory=list)
     overwrite: bool = False
 
 

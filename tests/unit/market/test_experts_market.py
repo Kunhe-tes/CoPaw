@@ -21,6 +21,7 @@ class FakeMarketplace:
         self.list_expert_items = AsyncMock()
         self.get_expert_detail = AsyncMock()
         self.publish_expert = AsyncMock()
+        self.publish_expert_from_profile = AsyncMock()
         self.restore_expert_version = AsyncMock()
         self.unpublish_expert = AsyncMock()
         self.install_expert = AsyncMock()
@@ -175,19 +176,34 @@ def test_publish_expert_manager_only(
     test_app: FastAPI,
 ) -> None:
     """Publish endpoint requires manager header."""
-    test_app.state.marketplace.publish_expert.return_value = (
+    test_app.state.marketplace.publish_expert_from_profile.return_value = (
         SimpleNamespace(**_expert_item()),
         False,
     )
 
     response = manager_client.post(
         "/market/experts",
-        headers={"X-Source-Id": "SRC"},
-        json={"source_dir": "/tmp/source"},
+        headers={"X-Source-Id": "SRC", "X-User-Id": "alice"},
+        json={
+            "definition_id": "expert-local-1",
+            "agent_id": "research",
+            "category_id": 7,
+            "bbk_ids": ["100"],
+        },
     )
 
     assert response.status_code == 201
     assert response.json()["version"] == "1.0.0"
+    test_app.state.marketplace.publish_expert_from_profile.assert_awaited_once_with(
+        "SRC",
+        "alice",
+        "research",
+        "expert-local-1",
+        category_id=7,
+        bbk_ids=["100"],
+        creator_name="",
+        overwrite=False,
+    )
 
 
 def test_restore_and_unpublish_expert(

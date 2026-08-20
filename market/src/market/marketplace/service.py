@@ -9,6 +9,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import tomllib
 import uuid
 from datetime import datetime, timezone
@@ -40,6 +41,7 @@ from .fs import (
     get_user_disabled_skills_dir,
     get_user_skill_manifest_path,
     get_user_skills_dir,
+    _validate_path_segment,
     load_index,
     migrate_legacy_scope_dir_if_needed,
     mutate_user_skill_manifest,
@@ -1666,6 +1668,157 @@ class MarketplaceService:
         )
         return item, False
 
+    async def publish_expert_from_profile(
+        self,
+        source_id: str,
+        user_id: str,
+        agent_id: str,
+        definition_id: str,
+        *,
+        category_id: int | None = None,
+        bbk_ids: list[str] | None = None,
+        creator_name: str = "",
+        overwrite: bool = False,
+    ) -> tuple[MarketItem, bool]:
+        """Publish one Agent Profile expert without accepting arbitrary paths."""
+        _validate_path_segment(definition_id, "definition_id")
+        expert_dir = get_user_expert_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        definition_path = expert_dir / f"{definition_id}.toml"
+        if not definition_path.is_file():
+            raise ValueError("expert definition not found")
+        try:
+            definition = tomllib.loads(
+                definition_path.read_text(encoding="utf-8"),
+            )
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ValueError("expert definition is invalid") from exc
+        declared_skills, declared_mcps = _extract_expert_dependencies(
+            definition,
+        )
+        workspace_dir = expert_dir.parent
+        with tempfile.TemporaryDirectory(prefix="expert-publish-") as temp_dir:
+            source_dir = Path(temp_dir)
+            source_dir.joinpath("skills").mkdir()
+            source_dir.joinpath("mcp").mkdir()
+            definition_text = definition_path.read_text(encoding="utf-8")
+            fields = [
+                f"creator_id = {json.dumps(user_id, ensure_ascii=False)}",
+                f"creator_name = {json.dumps(creator_name, ensure_ascii=False)}",
+            ]
+            if category_id is not None:
+                fields.append(f"category_id = {category_id}")
+            if bbk_ids:
+                fields.append(
+                    f"bbk_ids = {json.dumps(bbk_ids, ensure_ascii=False)}",
+                )
+            missing_fields = [
+                field
+                for field in fields
+                if not re.search(
+                    rf"(?m)^{re.escape(field.split(' = ', 1)[0])}\\s*=",
+                    definition_text,
+                )
+            ]
+            if missing_fields:
+                definition_text = (
+                    "\n".join(missing_fields) + "\n" + definition_text
+                )
+            (source_dir / "definition.toml").write_text(
+                definition_text,
+                encoding="utf-8",
+            )
+            frozen_dir = expert_dir / f"{definition_id}.dependencies"
+            for skill_name in declared_skills:
+                frozen_skill = frozen_dir / "skills" / skill_name
+                source_skill = (
+                    frozen_skill
+                    if frozen_skill.is_dir()
+                    else (workspace_dir / "skills" / skill_name)
+                )
+                if not source_skill.is_dir():
+                    raise ExpertDependencyError(
+                        f"Missing declared dependency skill: {skill_name}",
+                    )
+                shutil.copytree(
+                    source_skill,
+                    source_dir / "skills" / skill_name,
+                )
+            mcp_payload: dict[str, Any] = {}
+            frozen_config = frozen_dir / "mcp" / "config.json"
+            if frozen_config.is_file():
+                try:
+                    raw_payload = json.loads(
+                        frozen_config.read_text(encoding="utf-8"),
+                    )
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    raise ExpertDependencyError(
+                        "Invalid frozen MCP config",
+                    ) from exc
+                if isinstance(raw_payload, dict):
+                    mcp_payload = raw_payload
+            if declared_mcps:
+                agent_config_path = workspace_dir / "agent.json"
+                agent_payload: dict[str, Any] = {}
+                if agent_config_path.is_file():
+                    try:
+                        loaded = json.loads(
+                            agent_config_path.read_text(encoding="utf-8"),
+                        )
+                        agent_payload = (
+                            loaded if isinstance(loaded, dict) else {}
+                        )
+                    except (
+                        OSError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        raise ExpertDependencyError(
+                            "Agent profile MCP config is invalid",
+                        ) from exc
+                clients = (agent_payload.get("mcp") or {}).get("clients") or {}
+                for mcp_name in declared_mcps:
+                    mcp_file = frozen_dir / "mcp" / mcp_name / "mcp.json"
+                    config = mcp_payload.get(mcp_name) or clients.get(mcp_name)
+                    if not isinstance(config, dict) and mcp_file.is_file():
+                        try:
+                            raw_config = json.loads(
+                                mcp_file.read_text(encoding="utf-8"),
+                            )
+                        except (
+                            OSError,
+                            UnicodeDecodeError,
+                            json.JSONDecodeError,
+                        ) as exc:
+                            raise ExpertDependencyError(
+                                f"Invalid declared dependency MCP: {mcp_name}",
+                            ) from exc
+                        config = raw_config
+                    if not isinstance(config, dict):
+                        raise ExpertDependencyError(
+                            f"Missing declared dependency MCP: {mcp_name}",
+                        )
+                    (source_dir / "mcp" / mcp_name).mkdir()
+                    (source_dir / "mcp" / mcp_name / "mcp.json").write_text(
+                        json.dumps(config, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+            return await self.publish_expert(
+                source_id,
+                source_dir,
+                operator_id=user_id,
+                operator_name=creator_name,
+                overwrite=overwrite,
+            )
+
     async def restore_expert_version(
         self,
         source_id: str,
@@ -1836,6 +1989,33 @@ class MarketplaceService:
                 if reference and reference["item_id"] == item_id:
                     matches.append((definition_path, profile_root.name))
         return matches
+
+    def _release_expert_session_views(
+        self,
+        user_id: str,
+        source_id: str,
+        agent_id: str,
+        definition_id: str,
+    ) -> None:
+        """Drop Chat-local views before a received expert is withdrawn."""
+        expert_dir = get_user_expert_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        session_root = expert_dir.parent / ".expert_sessions"
+        if not session_root.is_dir() or session_root.is_symlink():
+            return
+        target_name = str(definition_id)
+        for chat_root in session_root.iterdir():
+            if not chat_root.is_dir() or chat_root.is_symlink():
+                continue
+            target = chat_root / target_name
+            if target.is_symlink():
+                continue
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
 
     def _received_expert_user_ids(self, source_id: str) -> list[str]:
         """Find local user scopes for all-user recall without relying on DB."""
@@ -2103,6 +2283,12 @@ class MarketplaceService:
                 )
                 for definition_path, agent_id in matches:
                     matched_agent_ids.add(agent_id)
+                    self._release_expert_session_views(
+                        user_id,
+                        source_id,
+                        agent_id,
+                        definition_path.stem,
+                    )
                     definition_path.unlink(missing_ok=True)
                     dependency_root = definition_path.with_name(
                         f"{definition_path.stem}.dependencies",

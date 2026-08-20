@@ -91,6 +91,14 @@ export interface ExpertRecallResponse {
   results: ExpertOperationResult[];
 }
 
+export interface PublishExpertRequest {
+  definition_id: string;
+  agent_id: string;
+  category_id?: number;
+  bbk_ids: string[];
+  overwrite: boolean;
+}
+
 // 更新统计配置请求
 export interface UpdateStatisticsConfigRequest {
   include_in_statistics: boolean;
@@ -312,6 +320,21 @@ export const marketApi = {
   listMarketExperts: async (sourceId: string): Promise<MarketExpert[]> => {
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
     return request<MarketExpert[]>("/market/experts", opts);
+  },
+
+  publishExpert: async (
+    sourceId: string,
+    data: PublishExpertRequest,
+  ): Promise<MarketExpert> => {
+    return request<MarketExpert>("/market/experts", {
+      method: "POST",
+      ...mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      }),
+      body: JSON.stringify(data),
+    });
   },
 
   getMarketExpert: async (

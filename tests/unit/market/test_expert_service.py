@@ -154,6 +154,83 @@ class TestPublishExpert:
         assert (snapshot_dir / "scan_result.json").is_file()
 
     @pytest.mark.asyncio
+    async def test_publish_from_agent_profile_builds_safe_source_package(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+        definition_id = "expert-local-1"
+        dependency_dir = expert_dir / f"{definition_id}.dependencies"
+        (dependency_dir / "skills" / "skill_a").mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+        (dependency_dir / "skills" / "skill_a" / "SKILL.md").write_text(
+            "# local skill\n",
+            encoding="utf-8",
+        )
+        (dependency_dir / "mcp" / "mcp_a").mkdir(parents=True)
+        (dependency_dir / "mcp" / "mcp_a" / "mcp.json").write_text(
+            '{"command":"tool"}',
+            encoding="utf-8",
+        )
+        (expert_dir / f"{definition_id}.toml").write_text(
+            'name = "Local Expert"\n'
+            'description = "From profile"\n'
+            'instruction = "Inspect the request."\n'
+            'skills = ["skill_a"]\n'
+            'mcps = ["mcp_a"]\n\n'
+            '[model]\nprovider = "openai"\nid = "gpt-test"\n',
+            encoding="utf-8",
+        )
+
+        item, unchanged = await service.publish_expert_from_profile(
+            "source-a",
+            "alice",
+            "default",
+            definition_id,
+            category_id=7,
+            bbk_ids=["100"],
+            creator_name="Alice",
+            overwrite=False,
+        )
+
+        assert unchanged is False
+        assert item.name == "Local Expert"
+        assert item.creator_id == "alice"
+        assert item.category_id == 7
+        snapshot_dir = (
+            service.marketplace_root
+            / "source-a"
+            / "experts"
+            / item.item_id
+            / "versions"
+            / "1.0.0"
+        )
+        assert (snapshot_dir / "skills" / "skill_a" / "SKILL.md").is_file()
+        assert (snapshot_dir / "mcp" / "mcp_a" / "mcp.json").is_file()
+
+    @pytest.mark.asyncio
+    async def test_publish_from_agent_profile_rejects_path_traversal(
+        self,
+        service: MarketplaceService,
+    ) -> None:
+        with pytest.raises(ValueError, match="definition_id"):
+            await service.publish_expert_from_profile(
+                "source-a",
+                "alice",
+                "default",
+                "../outside",
+                creator_name="Alice",
+            )
+
+    @pytest.mark.asyncio
     async def test_publish_scans_each_bundled_skill_once(
         self,
         service: MarketplaceService,
@@ -546,6 +623,20 @@ class TestReceivedExpertLifecycle:
             item.item_id,
             "alice",
         )
+        workspace_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        ).parent
+        session_view = (
+            workspace_dir
+            / ".expert_sessions"
+            / "chat-1"
+            / installed.definition_id
+        )
+        session_view.mkdir(parents=True)
+        (session_view / "marker").write_text("active", encoding="utf-8")
 
         recalled = await service.recall_expert(
             "source-a",
@@ -565,6 +656,7 @@ class TestReceivedExpertLifecycle:
         assert not (
             expert_dir / f"{installed.definition_id}.dependencies"
         ).exists()
+        assert not session_view.exists()
 
     @pytest.mark.asyncio
     async def test_distribution_installs_first_copy_to_default_profile(
