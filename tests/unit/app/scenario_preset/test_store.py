@@ -8,20 +8,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from swe.app.scenario_preset.models import CatalogNode, NodeKind
+from swe.app.scenario_preset.router import init_scenario_preset_module
 from swe.app.scenario_preset.store import ScenarioPresetStore
 
 
 @pytest.mark.asyncio
-async def test_initialize_uses_null_safe_root_name_uniqueness() -> None:
-    """Root domains must be unique despite MySQL treating NULL unique keys loosely."""
+async def test_module_initialization_does_not_execute_schema_ddl() -> None:
+    """Scenario tables are provisioned by the deployment SQL, never app startup."""
     db = MagicMock(is_connected=True)
     db.execute = AsyncMock()
 
-    await ScenarioPresetStore(db).initialize()
+    await init_scenario_preset_module(db)
 
-    ddl = "\n".join(call.args[0] for call in db.execute.await_args_list)
-    assert "parent_key VARCHAR(64) AS (IFNULL(parent_id, '')) STORED" in ddl
-    assert "(source_id, parent_key, normalized_name)" in ddl
+    db.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio

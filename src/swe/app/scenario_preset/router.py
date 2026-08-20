@@ -20,10 +20,9 @@ _service: ScenarioPresetCatalogService | None = None
 
 
 async def init_scenario_preset_module(db) -> None:
-    """Initialize persistent scenario catalog storage at application startup."""
+    """Initialize the scenario catalog service for pre-provisioned storage."""
     global _service
     store = ScenarioPresetStore(db)
-    await store.initialize()
     _service = ScenarioPresetCatalogService(store)
 
 

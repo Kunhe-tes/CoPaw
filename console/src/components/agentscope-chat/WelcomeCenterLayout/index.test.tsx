@@ -10,6 +10,7 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import WelcomeCenterLayout from "./index";
 import { chatApi } from "@/api/modules/chat";
+import { scenarioPresetApi } from "@/api/modules/scenarioPreset";
 import {
   CHAT_INPUT_APPEND_TEXT_EVENT,
   CHAT_INPUT_REPLACE_TEXT_EVENT,
@@ -77,6 +78,10 @@ vi.mock("@/api/modules/chat", () => ({
   },
 }));
 
+vi.mock("@/api/modules/scenarioPreset", () => ({
+  scenarioPresetApi: { getEffectiveCatalog: vi.fn() },
+}));
+
 vi.mock("../FeaturedCases", () => ({
   default: () => <div data-testid="featured-cases" />,
 }));
@@ -92,6 +97,7 @@ vi.mock("@/api/modules/featuredCases", () => ({
 }));
 
 const mockedUploadFile = vi.mocked(chatApi.uploadFile);
+const getEffectiveCatalog = vi.mocked(scenarioPresetApi.getEffectiveCatalog);
 const skills = [
   {
     id: "skill:browser",
@@ -124,6 +130,7 @@ describe("WelcomeCenterLayout", () => {
       url: "demo.txt",
       file_name: "demo.txt",
     });
+    getEffectiveCatalog.mockResolvedValue({ domains: [] });
   });
 
   it("handles files dispatched by the chat drag-and-drop bridge", async () => {
@@ -208,6 +215,204 @@ describe("WelcomeCenterLayout", () => {
       expect(input).toHaveValue("完整 SOP 提示词");
     });
     expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("immediately fills a scenario draft and submits the second-level capability marker", async () => {
+    getEffectiveCatalog.mockResolvedValueOnce({
+      domains: [
+        {
+          id: "domain-a",
+          name: "文档处理",
+          capabilities: [
+            {
+              id: "capability-a",
+              name: "信息提取",
+              scenarios: [
+                {
+                  id: "scenario-a",
+                  name: "提取字段",
+                  prompt_draft: "提取这份文件的字段",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+    const onSubmit = vi.fn();
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={onSubmit} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "提取字段" }));
+
+    const input = screen.getByRole("textbox");
+    expect(input).toHaveTextContent("@信息提取提取这份文件的字段");
+
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledWith({
+        fileList: [],
+        query: "@信息提取 提取这份文件的字段",
+      });
+    });
+  });
+
+  it("uses the compact recommendation strip treatment in the three-level composer", async () => {
+    getEffectiveCatalog.mockResolvedValueOnce({
+      domains: [
+        {
+          id: "domain-a",
+          name: "文档处理",
+          capabilities: [
+            {
+              id: "capability-a",
+              name: "信息提取",
+              scenarios: [
+                {
+                  id: "scenario-a",
+                  name: "提取字段",
+                  prompt_draft: "提取",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={vi.fn()} />);
+
+    const capabilityRow = await screen.findByRole("tablist", { name: "能力" });
+    const sceneStrip = screen.getByLabelText("推荐场景");
+    const capabilityStyle = getComputedStyle(capabilityRow);
+    const sceneStyle = getComputedStyle(sceneStrip);
+
+    expect(capabilityStyle.borderTopStyle).toBe("none");
+    expect(sceneStyle.minHeight).toBe("48px");
+    expect(sceneStyle.borderTopLeftRadius).toBe("12px");
+    expect(sceneStyle.borderTopRightRadius).toBe("12px");
+  });
+
+  it("renders centered domain segments and pill-shaped capability and scene controls", async () => {
+    getEffectiveCatalog.mockResolvedValueOnce({
+      domains: [
+        {
+          id: "domain-a",
+          name: "文档处理",
+          capabilities: [
+            {
+              id: "capability-a",
+              name: "信息提取",
+              scenarios: [
+                {
+                  id: "scenario-a",
+                  name: "提取字段",
+                  prompt_draft: "提取",
+                },
+              ],
+            },
+          ],
+        },
+        {
+          id: "domain-b",
+          name: "数据分析",
+          capabilities: [],
+        },
+      ],
+    });
+
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={vi.fn()} />);
+
+    const domainSelector = await screen.findByRole("tablist", {
+      name: "能力域",
+    });
+    const domainTrack = domainSelector.querySelector(
+      ".scenario-preset-domain-track",
+    );
+    const activeDomain = screen.getByRole("tab", { name: "文档处理" });
+    const capability = screen.getByRole("tab", { name: "信息提取" });
+    const scene = screen.getByRole("button", { name: "提取字段" });
+
+    expect(domainSelector).toHaveClass("scenario-preset-domain-selector");
+    expect(domainTrack).toBeInTheDocument();
+    expect(getComputedStyle(domainSelector).justifyContent).toBe("center");
+    expect(getComputedStyle(domainTrack as Element).borderTopLeftRadius).toBe(
+      "999px",
+    );
+    expect(getComputedStyle(activeDomain).borderTopLeftRadius).toBe("999px");
+    expect(getComputedStyle(capability).borderTopLeftRadius).toBe("999px");
+    expect(getComputedStyle(scene).borderTopLeftRadius).toBe("999px");
+  });
+
+  it("does not render an empty recommendation strip when the capability has no scenes", async () => {
+    getEffectiveCatalog.mockResolvedValueOnce({
+      domains: [
+        {
+          id: "domain-a",
+          name: "文档处理",
+          capabilities: [
+            {
+              id: "capability-a",
+              name: "信息提取",
+              scenarios: [],
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={vi.fn()} />);
+
+    await screen.findByRole("tab", { name: "信息提取" });
+    expect(screen.queryByLabelText("推荐场景")).not.toBeInTheDocument();
+  });
+
+  it("uses the capsule palette for the selected domain and secondary controls", async () => {
+    getEffectiveCatalog.mockResolvedValueOnce({
+      domains: [
+        {
+          id: "domain-a",
+          name: "文档处理",
+          capabilities: [
+            {
+              id: "capability-a",
+              name: "信息提取",
+              scenarios: [
+                {
+                  id: "scenario-a",
+                  name: "提取字段",
+                  prompt_draft: "提取",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={vi.fn()} />);
+
+    const domain = await screen.findByRole("tab", { name: "文档处理" });
+    const capability = screen.getByRole("tab", { name: "信息提取" });
+    const scene = screen.getByRole("button", { name: "提取字段" });
+
+    const selector = domain.closest(".scenario-preset-selector");
+    const selectorStyle = getComputedStyle(selector as Element);
+
+    expect(domain).toHaveClass("is-active");
+    expect(capability).toHaveClass("is-active");
+    expect(scene).not.toHaveClass("is-active");
+    expect(selectorStyle.getPropertyValue("--capsule-bg").trim()).toBe(
+      "#F1F2F6",
+    );
+    expect(selectorStyle.getPropertyValue("--capsule-text").trim()).toBe(
+      "#6D7C96",
+    );
+    expect(selectorStyle.getPropertyValue("--capsule-active-bg").trim()).toBe(
+      "#697892",
+    );
+    expect(selectorStyle.getPropertyValue("--capsule-active-text").trim()).toBe(
+      "#FFFFFF",
+    );
   });
 
   it("opens the shared labelled skill menu and selects a matching skill by click", () => {
