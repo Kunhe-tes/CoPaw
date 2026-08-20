@@ -323,8 +323,19 @@ export default function ExpertsPage() {
               },
               {
                 title: "说明",
-                render: (_, item) =>
-                  item.definition?.description || item.validation_error,
+                render: (_, item) => (
+                  <Space direction="vertical" size={2}>
+                    <span>
+                      {item.definition?.description || item.validation_error}
+                    </span>
+                    {item.definition?.agent_owned?.community ? (
+                      <Tag color="blue">
+                        社区已接收 · v
+                        {item.definition.agent_owned.community.version}
+                      </Tag>
+                    ) : null}
+                  </Space>
+                ),
               },
               {
                 title: "关键词",

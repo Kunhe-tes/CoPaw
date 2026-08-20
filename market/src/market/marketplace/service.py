@@ -1700,6 +1700,7 @@ class MarketplaceService:
         declared_skills, declared_mcps = _extract_expert_dependencies(
             definition,
         )
+        received_variant = isinstance(definition.get("community"), dict)
         workspace_dir = expert_dir.parent
         with tempfile.TemporaryDirectory(prefix="expert-publish-") as temp_dir:
             source_dir = Path(temp_dir)
@@ -1816,7 +1817,9 @@ class MarketplaceService:
                 source_dir,
                 operator_id=user_id,
                 operator_name=creator_name,
-                overwrite=overwrite,
+                # A received expert is a new source if re-shared.  It must
+                # never overwrite the community item it originated from.
+                overwrite=overwrite and not received_variant,
             )
 
     async def restore_expert_version(

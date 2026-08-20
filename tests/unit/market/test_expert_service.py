@@ -12,7 +12,10 @@ import pytest
 
 from market.marketplace.fs import get_user_expert_dir, load_index
 from market.marketplace.schemas import ExpertDistributionRequest
-from market.marketplace.service import MarketplaceService
+from market.marketplace.service import (
+    ExpertNameConflictError,
+    MarketplaceService,
+)
 
 
 @pytest.fixture
@@ -228,6 +231,38 @@ class TestPublishExpert:
                 "default",
                 "../outside",
                 creator_name="Alice",
+            )
+
+    @pytest.mark.asyncio
+    async def test_received_variant_cannot_overwrite_its_original_community_item(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir, name="Shared Expert")
+        original, _ = await _publish(service, "source-a", source_dir)
+        installed = await service.install_expert(
+            "source-a",
+            original.item_id,
+            "alice",
+        )
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+
+        with pytest.raises(ExpertNameConflictError):
+            await service.publish_expert_from_profile(
+                "source-a",
+                "alice",
+                "default",
+                str(installed.definition_id),
+                creator_name="Alice",
+                overwrite=True,
             )
 
     @pytest.mark.asyncio

@@ -16,6 +16,11 @@ export interface AgentOwnedExpertMetadata {
   declared_skills: string[];
   declared_mcps: string[] | null;
   model: { provider: string; id: string } | null;
+  community?: {
+    item_id: string;
+    version: string;
+    content_fingerprint: string;
+  } | null;
 }
 
 export interface ExpertDefinition {
