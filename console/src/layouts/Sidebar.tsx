@@ -64,11 +64,15 @@ const { Sider } = Layout;
 
 interface SidebarProps {
   selectedKey: string;
+  withoutHeader?: boolean;
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────
 
-export default function Sidebar({ selectedKey }: SidebarProps) {
+export default function Sidebar({
+  selectedKey,
+  withoutHeader = false,
+}: SidebarProps) {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { message } = useAppMessage();
@@ -582,7 +586,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       width={collapsed ? 72 : 240}
       className={`${styles.sider}${
         collapsed ? ` ${styles.siderCollapsed}` : ""
-      }${isDark ? ` ${styles.siderDark}` : ""}`}
+      }${isDark ? ` ${styles.siderDark}` : ""}${
+        withoutHeader ? ` ${styles.siderWithoutHeader}` : ""
+      }`}
     >
       {/* ==================== 选择智能体 (Kun He) - 已注释 ==================== */}
       {/* <div className={styles.agentSelectorContainer}>
