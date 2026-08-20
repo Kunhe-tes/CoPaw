@@ -2547,6 +2547,33 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
         return urllib.parse.quote(text, safe="")
 
+    def _get_zhaohu_push_config(self) -> Any:
+        """Read the zhaohu channel config for session-end push links.
+
+        Prefer the tenant agent config (where the prefix is distributed via
+        console / inherited from template); fall back to global config.json
+        so the call never fails.
+        """
+        from ...config.utils import load_config
+
+        try:
+            from ...config.config import load_agent_config
+
+            agent_cfg = load_agent_config(
+                self._agent_id or "default",
+                tenant_id=self._tenant_id,
+            )
+            channels = getattr(agent_cfg, "channels", None)
+            if channels is not None:
+                zhaohu = getattr(channels, "zhaohu", None)
+                if zhaohu is not None:
+                    return zhaohu
+        except Exception:
+            logger.info(
+                "zhaohu push config from agent failed, fallback to global",
+            )
+        return load_config().channels.zhaohu
+
     def _build_session_end_push_link(self, job: CronJobSpec) -> str:
         """非 RMASSIST 来源的定时任务通知跳转链接。
 
@@ -2556,9 +2583,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         - id_type=session_id -> {prefix}?sessionId={job.meta.task_chat_id}
         前缀为空或对应 ID 值为空时返回空串（不附加链接）。
         """
-        from ...config.utils import load_config
-
-        zhaohu_cfg = load_config().channels.zhaohu
+        zhaohu_cfg = self._get_zhaohu_push_config()
         prefix = getattr(zhaohu_cfg, "session_end_push_link_prefix", "") or ""
         if not prefix:
             return ""
