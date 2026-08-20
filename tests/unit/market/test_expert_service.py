@@ -174,6 +174,49 @@ class TestPublishExpert:
         assert scanned == [source_dir / "skills" / "skill_a"]
 
     @pytest.mark.asyncio
+    async def test_publish_replaces_stale_community_identity_and_scan_snapshot(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        (source_dir / "definition.toml").write_text(
+            (source_dir / "definition.toml").read_text(encoding="utf-8")
+            + '\n[community]\nitem_id = "old-item"\nversion = "9.9.9"\ncontent_fingerprint = "old"\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "market.marketplace.service.scan_skill_directory",
+            lambda path, **_kwargs: MagicMock(
+                to_dict=lambda: {"skill_name": path.name, "is_safe": True},
+            ),
+        )
+
+        item, _ = await _publish(service, "source-a", source_dir)
+        definition = (
+            service.marketplace_root
+            / "source-a"
+            / "experts"
+            / item.item_id
+            / "definition.toml"
+        ).read_text(encoding="utf-8")
+        assert 'item_id = "old-item"' not in definition
+        assert "[community]" not in definition
+        scan_snapshot = json.loads(
+            (
+                service.marketplace_root
+                / "source-a"
+                / "experts"
+                / item.item_id
+                / "scan_result.json"
+            ).read_text(encoding="utf-8"),
+        )
+        assert scan_snapshot["skills"][0]["skill_name"] == "skill_a"
+
+    @pytest.mark.asyncio
     async def test_identical_republish_is_noop(
         self,
         service: MarketplaceService,
@@ -352,6 +395,86 @@ class TestReceivedExpertLifecycle:
         assert payload["community"]["version"] == "1.0.0"
 
     @pytest.mark.asyncio
+    async def test_install_normalizes_bundled_mcp_server_config(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(
+            source_dir,
+            mcp_config=(
+                '{"mcpServers":{"mcp_a":{"command":"tool",'
+                '"env":{"TOKEN":"value"},"headers":{"X-Test":"yes"}}}}'
+            ),
+        )
+        item, _ = await _publish(service, "source-a", source_dir)
+
+        installed = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+        )
+
+        config = json.loads(
+            (
+                get_user_expert_dir(
+                    service.swe_root,
+                    "alice",
+                    "default",
+                    "source-a",
+                )
+                / f"{installed.definition_id}.dependencies"
+                / "mcp"
+                / "config.json"
+            ).read_text(encoding="utf-8"),
+        )
+        assert config["mcp_a"]["env"] == {"TOKEN": "value"}
+        assert config["mcp_a"]["headers"] == {"X-Test": "yes"}
+        assert config["mcp_a"]["transport"] == "stdio"
+
+    @pytest.mark.asyncio
+    async def test_install_does_not_overwrite_existing_received_expert(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        item, _ = await _publish(service, "source-a", source_dir)
+        installed = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+        )
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+        definition = expert_dir / f"{installed.definition_id}.toml"
+        definition.write_text(
+            definition.read_text(encoding="utf-8").replace(
+                "Expert description",
+                "Local variant",
+            ),
+            encoding="utf-8",
+        )
+
+        second = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+        )
+
+        assert second.success is False
+        assert "already installed" in (second.reason or "")
+        assert "Local variant" in definition.read_text(encoding="utf-8")
+
+    @pytest.mark.asyncio
     async def test_distribution_silently_overwrites_local_variant_and_preserves_enablement(
         self,
         service: MarketplaceService,
@@ -518,3 +641,34 @@ class TestReceivedExpertLifecycle:
             )
             assert not (expert_dir / f"{definition_id}.toml").exists()
             assert not (expert_dir / f"{definition_id}.dependencies").exists()
+
+    @pytest.mark.asyncio
+    async def test_all_user_recall_falls_back_to_local_received_scopes(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        item, _ = await _publish(service, "source-a", source_dir)
+        installed = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+        )
+
+        recalled = await service.recall_expert(
+            "source-a",
+            item.item_id,
+            "manager",
+        )
+
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+        assert recalled.recalled_count == 1
+        assert not (expert_dir / f"{installed.definition_id}.toml").exists()

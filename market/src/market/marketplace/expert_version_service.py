@@ -24,6 +24,7 @@ _IGNORED_ARTIFACTS = {
     "desktop.ini",
     ".git",
     "versions",
+    "versions.json",
 }
 
 _TEXT_EXTENSIONS = {
@@ -175,7 +176,13 @@ class ExpertVersionService:
         return digest.hexdigest()
 
     def _get_version_root(self, source_id: str, item_id: str) -> Path:
-        return self.marketplace_root / source_id / "experts" / item_id / "versions"
+        return (
+            self.marketplace_root
+            / source_id
+            / "experts"
+            / item_id
+            / "versions"
+        )
 
     def _get_version_dir(
         self,
@@ -186,7 +193,13 @@ class ExpertVersionService:
         return self._get_version_root(source_id, item_id) / version_id
 
     def _get_versions_json_path(self, source_id: str, item_id: str) -> Path:
-        return self.marketplace_root / source_id / "experts" / item_id / "versions.json"
+        return (
+            self.marketplace_root
+            / source_id
+            / "experts"
+            / item_id
+            / "versions.json"
+        )
 
     def _load_versions_manifest(
         self,
@@ -197,7 +210,9 @@ class ExpertVersionService:
         if not path.exists():
             return ExpertVersionsManifest()
         try:
-            return ExpertVersionsManifest(**json.loads(path.read_text(encoding="utf-8")))
+            return ExpertVersionsManifest(
+                **json.loads(path.read_text(encoding="utf-8")),
+            )
         except (json.JSONDecodeError, KeyError, TypeError):
             return ExpertVersionsManifest()
 
@@ -243,7 +258,10 @@ class ExpertVersionService:
                 return {"name": path.name, "type": "file", "path": relative}
             children = []
             for child in sorted(path.iterdir()):
-                if child.name.startswith(".") or child.name in _IGNORED_ARTIFACTS:
+                if (
+                    child.name.startswith(".")
+                    or child.name in _IGNORED_ARTIFACTS
+                ):
                     continue
                 children.append(build_tree(child))
             return {
@@ -256,5 +274,6 @@ class ExpertVersionService:
         return [
             build_tree(item)
             for item in sorted(root.iterdir())
-            if not item.name.startswith(".") and item.name not in _IGNORED_ARTIFACTS
+            if not item.name.startswith(".")
+            and item.name not in _IGNORED_ARTIFACTS
         ]

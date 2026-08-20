@@ -53,6 +53,7 @@ from .fs import (
     normalize_skill_name,
 )
 from .skill_registry import SkillRegistry
+from ..runtime.context import decode_scope_id
 from .models import MarketItem
 from .schemas import (
     DistributeRequest,
@@ -378,8 +379,7 @@ def _community_toml(
     fingerprint: str,
 ) -> str:
     """在本地专家 TOML 末尾写入社区来源元数据。"""
-    if "[community]" in toml_text:
-        return toml_text
+    toml_text = _without_community_toml(toml_text)
     suffix = "\n" if toml_text.endswith("\n") else "\n\n"
     return (
         toml_text
@@ -388,6 +388,15 @@ def _community_toml(
         + f"item_id = {json.dumps(item_id, ensure_ascii=False)}\n"
         + f"version = {json.dumps(version, ensure_ascii=False)}\n"
         + f"content_fingerprint = {json.dumps(fingerprint, ensure_ascii=False)}\n"
+    )
+
+
+def _without_community_toml(toml_text: str) -> str:
+    """Remove received-community metadata before publishing a new source."""
+    return re.sub(
+        r"(?ms)\n\[community\]\n.*?(?=\n\[[^\]]+\]\n|\Z)",
+        "\n",
+        toml_text,
     )
 
 
@@ -690,6 +699,43 @@ class MarketplaceService:
     def _get_expert_version_service(self) -> ExpertVersionService:
         """获取社区专家版本服务."""
         return ExpertVersionService(self.marketplace_root)
+
+    async def _log_expert_operation(
+        self,
+        source_id: str,
+        operator_id: str,
+        operator_name: str,
+        operation: str,
+        item: MarketItem,
+        *,
+        target_user_id: str = "",
+        target_user_name: str = "",
+        target_bbk_id: str = "",
+    ) -> None:
+        if not self.db.is_connected:
+            return
+        try:
+            await self.db.execute(
+                _LOG_MARKET_OP_SQL,
+                (
+                    source_id,
+                    operator_id,
+                    operator_name,
+                    operation,
+                    "expert",
+                    item.item_id,
+                    item.name,
+                    target_user_id,
+                    target_user_name,
+                    target_bbk_id,
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - audit must not block ops
+            logger.warning(
+                "Failed to log expert operation %s: %s",
+                operation,
+                exc,
+            )
 
     async def _trigger_agent_reload(
         self,
@@ -1465,14 +1511,35 @@ class MarketplaceService:
         declared_skills, declared_mcps = _extract_expert_dependencies(
             definition,
         )
-        for skill_name in declared_skills:
+        skill_dirs = (
+            sorted(
+                path
+                for path in (source_dir / "skills").iterdir()
+                if path.is_dir()
+            )
+            if (source_dir / "skills").is_dir()
+            else []
+        )
+        scan_results: list[dict[str, Any]] = []
+        for skill_dir in skill_dirs:
+            skill_name = skill_dir.name
             skill_dir = source_dir / "skills" / skill_name
             skill_md = skill_dir / "SKILL.md"
             if not skill_md.is_file():
                 raise ExpertDependencyError(
                     f"Missing declared dependency skill: {skill_name}",
                 )
-            scan_skill_directory(skill_dir, skill_name=skill_name)
+            scan_result = scan_skill_directory(
+                skill_dir,
+                skill_name=skill_name,
+            )
+            if scan_result is not None:
+                scan_results.append(scan_result.to_dict())
+        for skill_name in declared_skills:
+            if not (source_dir / "skills" / skill_name).is_dir():
+                raise ExpertDependencyError(
+                    f"Missing declared dependency skill: {skill_name}",
+                )
         for mcp_name in declared_mcps:
             mcp_json = source_dir / "mcp" / mcp_name / "mcp.json"
             if not mcp_json.is_file():
@@ -1524,9 +1591,21 @@ class MarketplaceService:
             item.item_id,
         )
         _copy_expert_package(source_dir, expert_root)
-
+        definition_path = expert_root / "definition.toml"
+        definition_path.write_text(
+            _without_community_toml(
+                definition_path.read_text(encoding="utf-8"),
+            ),
+            encoding="utf-8",
+        )
+        (expert_root / "scan_result.json").unlink(missing_ok=True)
         version_svc = self._get_expert_version_service()
-        signature = version_svc.calculate_signature(source_dir)
+        signature = version_svc.calculate_signature(expert_root)
+        (expert_root / "scan_result.json").write_text(
+            json.dumps({"skills": scan_results}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
         manifest = version_svc._load_versions_manifest(source_id, item.item_id)
         current_version = next(
             (version for version in manifest.versions if version.is_current),
@@ -1543,6 +1622,13 @@ class MarketplaceService:
             item.status = "active"
             item.updated_at = now
             save_index(self.marketplace_root, source_id, items)
+            await self._log_expert_operation(
+                source_id,
+                operator_id,
+                operator_name,
+                "publish",
+                item,
+            )
             return item, True
 
         existing_ids = {version.version_id for version in manifest.versions}
@@ -1571,6 +1657,13 @@ class MarketplaceService:
         item.status = "active"
         item.updated_at = now
         save_index(self.marketplace_root, source_id, items)
+        await self._log_expert_operation(
+            source_id,
+            operator_id,
+            operator_name,
+            "publish",
+            item,
+        )
         return item, False
 
     async def restore_expert_version(
@@ -1607,6 +1700,13 @@ class MarketplaceService:
         item.status = "active"
         item.updated_at = datetime.now(timezone.utc).isoformat()
         save_index(self.marketplace_root, source_id, items)
+        await self._log_expert_operation(
+            source_id,
+            operator_id,
+            operator_name,
+            "restore",
+            item,
+        )
         return item
 
     async def unpublish_expert(
@@ -1632,6 +1732,13 @@ class MarketplaceService:
         item.status = "inactive"
         item.updated_at = datetime.now(timezone.utc).isoformat()
         save_index(self.marketplace_root, source_id, items)
+        await self._log_expert_operation(
+            source_id,
+            operator_id,
+            operator_name,
+            "unpublish",
+            item,
+        )
         return True
 
     def _expert_current_package(
@@ -1672,6 +1779,19 @@ class MarketplaceService:
                 self._get_expert_version_service().calculate_signature(root)
             )
         return item, root, fingerprint
+
+    def _expert_item(self, source_id: str, item_id: str) -> MarketItem:
+        item = next(
+            (
+                entry
+                for entry in load_index(self.marketplace_root, source_id)
+                if entry.item_id == item_id and entry.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"Expert item {item_id} not found")
+        return item
 
     def _find_received_expert(
         self,
@@ -1717,6 +1837,26 @@ class MarketplaceService:
                     matches.append((definition_path, profile_root.name))
         return matches
 
+    def _received_expert_user_ids(self, source_id: str) -> list[str]:
+        """Find local user scopes for all-user recall without relying on DB."""
+        if not self.swe_root.exists():
+            return []
+        user_ids: set[str] = set()
+        default_scope = f"default_{source_id}"
+        for scope_dir in self.swe_root.iterdir():
+            if not scope_dir.is_dir():
+                continue
+            if scope_dir.name == default_scope:
+                user_ids.add("default")
+                continue
+            try:
+                user_id, scope_source = decode_scope_id(scope_dir.name)
+            except ValueError:
+                continue
+            if scope_source == source_id:
+                user_ids.add(user_id)
+        return sorted(user_ids)
+
     # pylint: disable=too-many-statements
     def _install_expert_for_user(
         self,
@@ -1747,6 +1887,12 @@ class MarketplaceService:
         )
         if received is None and update:
             update = False
+        if received is not None and not update:
+            return ExpertOperationResult(
+                user_id=user_id,
+                success=False,
+                reason="expert already installed",
+            )
         if received is not None:
             definition_path, existing_ref = received
             definition_id = definition_path.stem
@@ -1832,7 +1978,9 @@ class MarketplaceService:
                         raise ExpertDependencyError(
                             f"Invalid bundled MCP config: {mcp_dir.name}",
                         )
-                    mcp_payload[mcp_dir.name] = config
+                    mcp_payload[mcp_dir.name] = normalize_mcp_config_data(
+                        config,
+                    )
                 (mcp_root / "config.json").write_text(
                     json.dumps(mcp_payload, ensure_ascii=False, indent=2),
                     encoding="utf-8",
@@ -1857,7 +2005,7 @@ class MarketplaceService:
         agent_id: str = "default",
         operator_id: str = "",
     ) -> ExpertOperationResult:
-        return self._install_expert_for_user(
+        result = self._install_expert_for_user(
             source_id,
             item_id,
             user_id,
@@ -1865,6 +2013,9 @@ class MarketplaceService:
             operator_id,
             update=False,
         )
+        if result.success:
+            await self._trigger_agent_reload(user_id, agent_id, source_id)
+        return result
 
     async def distribute_expert(
         self,
@@ -1873,6 +2024,7 @@ class MarketplaceService:
         operator_id: str,
         req: ExpertDistributionRequest,
     ) -> ExpertDistributionResponse:
+        item, _, _ = self._expert_current_package(source_id, item_id)
         target_users = await self._resolve_target_users(
             source_id,
             DistributeRequest(
@@ -1898,6 +2050,16 @@ class MarketplaceService:
                     reason=str(exc),
                 )
             results.append(result)
+            await self._log_expert_operation(
+                source_id,
+                operator_id,
+                "",
+                "distribute",
+                item,
+                target_user_id=user["tenant_id"],
+                target_user_name=user.get("tenant_name", ""),
+                target_bbk_id=user.get("bbk_id", ""),
+            )
             if result.success:
                 await self._trigger_agent_reload(
                     user["tenant_id"],
@@ -1918,6 +2080,7 @@ class MarketplaceService:
         operator_id: str,
         target_user_ids: list[str] | None = None,
     ) -> ExpertRecallResponse:
+        item = self._expert_item(source_id, item_id)
         users = target_user_ids
         if users is None:
             users = [
@@ -1927,6 +2090,8 @@ class MarketplaceService:
                     DistributeRequest(target_type="all"),
                 )
             ]
+            if not users:
+                users = self._received_expert_user_ids(source_id)
         results: list[ExpertOperationResult] = []
         for user_id in users:
             matched_agent_ids: set[str] = set()
@@ -1957,6 +2122,14 @@ class MarketplaceService:
                     reason=str(exc),
                 )
             results.append(result)
+            await self._log_expert_operation(
+                source_id,
+                operator_id,
+                "",
+                "recall",
+                item,
+                target_user_id=user_id,
+            )
             if result.success:
                 for agent_id in matched_agent_ids or {"default"}:
                     await self._trigger_agent_reload(

@@ -332,6 +332,23 @@ export const marketApi = {
     );
   },
 
+  restoreExpertVersion: async (
+    sourceId: string,
+    itemId: string,
+    versionId: string,
+  ): Promise<MarketExpert> => {
+    return request<MarketExpert>(
+      `/market/experts/${itemId}/versions/${encodeURIComponent(versionId)}/restore`,
+      {
+        method: "POST",
+        ...mergeHeaders({
+          "X-Source-Id": sourceId,
+          "X-Manager": "true",
+        }),
+      },
+    );
+  },
+
   installExpert: async (
     sourceId: string,
     itemId: string,

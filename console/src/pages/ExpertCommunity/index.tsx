@@ -6,6 +6,7 @@ import {
   Input,
   List,
   Modal,
+  Popconfirm,
   Space,
   Spin,
   Tag,
@@ -120,6 +121,24 @@ export default function ExpertCommunityPage() {
       message.success(`已撤回 ${result.recalled_count} 个用户的专家`);
     } catch (err) {
       message.error(err instanceof Error ? err.message : "撤回失败");
+    }
+  };
+
+  const restoreVersion = async (versionId: string) => {
+    if (!versionItem) return;
+    setBusyId(versionItem.item_id);
+    try {
+      await marketApi.restoreExpertVersion(
+        sourceId,
+        versionItem.item_id,
+        versionId,
+      );
+      message.success(`已恢复到 v${versionId}`);
+      await Promise.all([load(), showVersions(versionItem)]);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "恢复版本失败");
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -267,6 +286,20 @@ export default function ExpertCommunityPage() {
                   version.created_by_name || version.created_by
                 } · ${version.created_at}`}
               />
+              {manager && !version.is_current ? (
+                <Popconfirm
+                  title={`恢复到 v${version.version_id}？`}
+                  description="恢复后会成为当前发布版本。"
+                  onConfirm={() => void restoreVersion(version.version_id)}
+                >
+                  <Button
+                    type="link"
+                    loading={busyId === versionItem?.item_id}
+                  >
+                    恢复
+                  </Button>
+                </Popconfirm>
+              ) : null}
             </List.Item>
           )}
         />
