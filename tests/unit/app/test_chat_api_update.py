@@ -124,3 +124,26 @@ def test_create_chat_rejects_server_owned_scenario_snapshot() -> None:
 
     assert response.status_code == 400
     assert manager.updated_chat is None
+
+
+def test_update_chat_rejects_another_authenticated_users_chat() -> None:
+    manager = _FakeChatManager()
+    app = FastAPI()
+    app.include_router(router)
+
+    @app.middleware("http")
+    async def _identity(request, call_next):
+        request.state.user_id = "user-2"
+        return await call_next(request)
+
+    async def _get_chat_manager_override() -> _FakeChatManager:
+        return manager
+
+    app.dependency_overrides[get_chat_manager] = _get_chat_manager_override
+    response = TestClient(app).put(
+        "/chats/chat-1",
+        json={"name": "should not update"},
+    )
+
+    assert response.status_code == 404
+    assert manager.updated_chat is None

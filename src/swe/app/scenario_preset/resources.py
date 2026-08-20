@@ -66,16 +66,19 @@ def stage_temporary_skill_zip(
     )
 
     safe_resource_id = _safe_resource_id(resource_id)
-    root = session_root.resolve()
-    target_root = (root / safe_resource_id).resolve()
-    target_root.relative_to(root)
+    root = _validated_session_root(session_root)
+    target_root = root / safe_resource_id
+    _reject_symlink_components(target_root, root)
     temporary_root, found = _extract_zip_skills(payload)
     try:
         if len(found) != 1:
-            raise ValueError("market Skill archive must contain exactly one Skill")
+            raise ValueError(
+                "market Skill archive must contain exactly one Skill",
+            )
         source_dir, skill_name = found[0]
         _scan_skill_dir_or_raise(source_dir, skill_name)
-        target_dir = (target_root / skill_name).resolve()
+        target_dir = target_root / skill_name
+        _reject_symlink_components(target_dir, target_root)
         target_dir.relative_to(target_root)
         if target_dir.exists():
             shutil.rmtree(target_dir)
@@ -93,9 +96,9 @@ def stage_temporary_mcp_config(
     session_root: Path,
 ) -> Path:
     """Persist safe MCP config only in the Chat-private resource directory."""
-    root = session_root.resolve()
-    target_root = (root / _safe_resource_id(resource_id)).resolve()
-    target_root.relative_to(root)
+    root = _validated_session_root(session_root)
+    target_root = root / _safe_resource_id(resource_id)
+    _reject_symlink_components(target_root, root)
     target_root.mkdir(parents=True, exist_ok=True)
     path = target_root / "mcp.json"
     path.write_text(
@@ -142,7 +145,9 @@ def _sanitize_secret_map(raw: Any, label: str) -> dict[str, str]:
         if not text:
             result[name] = ""
             continue
-        if text in _MASKED_SECRET_MARKERS or not _ENV_REFERENCE.fullmatch(text):
+        if text in _MASKED_SECRET_MARKERS or not _ENV_REFERENCE.fullmatch(
+            text,
+        ):
             raise ValueError(f"MCP {label} contains unsafe secret material")
         result[name] = text
     return result
@@ -155,3 +160,29 @@ def _safe_resource_id(resource_id: str) -> str:
     if "/" in normalized or "\\" in normalized or "\x00" in normalized:
         raise ValueError("invalid market resource ID")
     return normalized
+
+
+def _validated_session_root(session_root: Path) -> Path:
+    root = Path(session_root)
+    _reject_symlink_components(root, root.parent)
+    root.mkdir(parents=True, exist_ok=True)
+    _reject_symlink_components(root, root.parent)
+    return root
+
+
+def _reject_symlink_components(path: Path, boundary: Path) -> None:
+    """Reject symlink components between a session path and its boundary."""
+    current = Path(boundary)
+    try:
+        relative = Path(path).relative_to(current)
+    except ValueError as exc:
+        raise ValueError("session resource path escapes boundary") from exc
+    for component in relative.parts:
+        current = current / component
+        try:
+            if current.is_symlink():
+                raise ValueError("session resource path contains symlink")
+        except OSError as exc:
+            raise ValueError(
+                "unable to validate session resource path",
+            ) from exc

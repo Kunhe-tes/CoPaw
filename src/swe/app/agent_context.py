@@ -342,6 +342,7 @@ async def get_agent_for_request(
         request.state.source_id = source_id
     if user_id:
         request.state.user_id = user_id
+    request.state.agent_id = target_agent_id
 
     manager = request.app.state.multi_agent_manager
 

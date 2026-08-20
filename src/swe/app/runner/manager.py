@@ -76,7 +76,9 @@ class ChatManager:
         """
         self._repo = repo
         self._archive_store = archive_store
-        self._resource_root = resource_root.resolve() if resource_root else None
+        self._resource_root = (
+            resource_root.resolve() if resource_root else None
+        )
         self._lock = asyncio.Lock()
         repo_path = getattr(repo, "path", "<unknown>")
         logger.info(
@@ -181,7 +183,9 @@ class ChatManager:
                 user_id=user_id,
                 channel=channel,
             )
-            matching_chats = [chat for chat in chats if chat.session_id == session_id]
+            matching_chats = [
+                chat for chat in chats if chat.session_id == session_id
+            ]
             if not matching_chats:
                 return None
             if len(matching_chats) > 1:
@@ -298,8 +302,10 @@ class ChatManager:
             try:
                 snapshot = await snapshot_factory(spec)
                 spec.meta = with_scenario_snapshot(spec.meta, snapshot)
-                chat, created = await self._repo.create_chat_if_absent_by_session(
-                    spec,
+                chat, created = (
+                    await self._repo.create_chat_if_absent_by_session(
+                        spec,
+                    )
                 )
             except BaseException:
                 self._delete_session_resources([spec.id])
@@ -415,12 +421,21 @@ class ChatManager:
         for chat_id in chat_ids:
             if not _is_valid_chat_id(chat_id):
                 continue
-            target = (self._resource_root / chat_id).resolve()
+            target = self._resource_root / chat_id
             try:
                 target.relative_to(self._resource_root)
             except ValueError:
                 continue
             if target == self._resource_root:
+                continue
+            try:
+                if target.is_symlink():
+                    logger.warning(
+                        "Refusing to delete symlinked chat resources: %s",
+                        target,
+                    )
+                    continue
+            except OSError:
                 continue
             shutil.rmtree(target, ignore_errors=True)
 
@@ -465,7 +480,9 @@ class ChatManager:
         """
         async with self._lock:
             chats = await self._repo.filter_chats(channel=channel)
-            matching_chats = [chat for chat in chats if chat.session_id == session_id]
+            matching_chats = [
+                chat for chat in chats if chat.session_id == session_id
+            ]
 
             if not matching_chats:
                 logger.debug(
