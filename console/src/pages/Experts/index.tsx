@@ -36,7 +36,7 @@ const emptyPayload: ExpertPayload = {
   budget: {},
 };
 
-type ExpertFormValues = Partial<ExpertPayload> & {
+type ExpertFormValues = Omit<Partial<ExpertPayload>, "model"> & {
   keywordsText?: string;
   skillsText?: string[];
   mcpsText?: string[];
