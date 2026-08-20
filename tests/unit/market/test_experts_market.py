@@ -171,6 +171,31 @@ def test_list_expert_versions(
     assert response.json()["versions"][0]["version_id"] == "1.0.0"
 
 
+def test_inactive_expert_hides_version_history(
+    client: TestClient,
+    test_app: FastAPI,
+    tmp_path: Path,
+) -> None:
+    """Unpublished experts are not browseable through their version routes."""
+    test_app.state.marketplace.marketplace_root = tmp_path
+    index_dir = tmp_path / "SRC"
+    index_dir.mkdir(parents=True)
+    (index_dir / "index.json").write_text(
+        '{"items":[{"item_id":"expert-1","item_type":"expert",'
+        '"name":"Community Expert","description":"",'
+        '"version":"1.0.0","creator_id":"author",'
+        '"status":"inactive"}]}',
+        encoding="utf-8",
+    )
+
+    response = client.get(
+        "/market/experts/expert-1/versions",
+        headers={"X-Source-Id": "SRC"},
+    )
+
+    assert response.status_code == 404
+
+
 def test_publish_expert_manager_only(
     manager_client: TestClient,
     test_app: FastAPI,

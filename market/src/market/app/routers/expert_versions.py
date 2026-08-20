@@ -26,7 +26,10 @@ def _validate_item_exists(
 ) -> None:
     items = load_index(svc.marketplace_root, source_id)
     found = any(
-        i.item_id == item_id and i.item_type == "expert" for i in items
+        i.item_id == item_id
+        and i.item_type == "expert"
+        and i.status == "active"
+        for i in items
     )
     if not found:
         raise HTTPException(
