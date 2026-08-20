@@ -511,6 +511,44 @@ class QueryService:
         """
         return await self.db.fetch_all(query, (trace_id,))
 
+    async def _get_success_subtasks_for_traces(
+        self,
+        trace_ids: list[str],
+    ) -> dict[str, list[dict]]:
+        """Get successful list/plan subtasks grouped by trace id."""
+        if not trace_ids:
+            return {}
+
+        placeholders = ", ".join(["%s"] * len(trace_ids))
+        query = f"""
+            SELECT
+                id AS subtask_id,
+                trace_id,
+                task_id,
+                filename,
+                task_type,
+                custuid,
+                cust_nm,
+                bbk_org_id,
+                template_id,
+                result_id,
+                status,
+                created_at
+            FROM swe_cron_subtasks
+            WHERE trace_id IN ({placeholders})
+              AND status = 'SUC'
+              AND task_type IN ('list', 'plan')
+              AND template_id IS NOT NULL
+              AND template_id > 0
+              AND result_id IS NOT NULL
+              AND result_id <> ''
+        """
+        rows = await self.db.fetch_all(query, tuple(trace_ids))
+        grouped: dict[str, list[dict]] = {}
+        for row in rows:
+            grouped.setdefault(row.get("trace_id") or "", []).append(row)
+        return grouped
+
     async def _mark_previous_result_index_stale(
         self,
         row: dict,
@@ -645,6 +683,49 @@ class QueryService:
         )
         await self.db.execute(query, params)
 
+    @staticmethod
+    def _build_result_index_stale_params(row: dict) -> tuple:
+        """Build params for stale result-index updates."""
+        common_params = (
+            datetime.now(),
+            row["source_id"],
+            row["tenant_id"],
+            row["first_bbk_id"],
+            row["bbk_org_id"],
+            row["skill_id"],
+            row["job_id"],
+            row["result_type"],
+        )
+        if row["result_type"] == "plan":
+            return common_params + (row["custuid"], row["execution_id"])
+        return common_params + (row["execution_id"],)
+
+    @staticmethod
+    def _build_result_index_upsert_params(row: dict) -> tuple:
+        """Build params for result-index upserts."""
+        return (
+            row["source_id"],
+            row["tenant_id"],
+            row["first_bbk_id"],
+            row["bbk_org_id"],
+            row["custuid"],
+            row["cust_nm"],
+            row["skill_id"],
+            row["job_id"],
+            row["execution_id"],
+            row["trace_id"],
+            row["subtask_id"],
+            row["task_id"],
+            row["result_type"],
+            row["template_id"],
+            row["result_id"],
+            row["filename"],
+            row["status"],
+            row["execution_at"],
+            datetime.now(),
+            row["expire_at"],
+        )
+
     def _build_result_index_row(
         self,
         execution: dict,
@@ -689,6 +770,106 @@ class QueryService:
         """Mark older rows stale, then upsert the latest result-index row."""
         await self._mark_previous_result_index_stale(row)
         await self._upsert_result_index_row(row)
+
+    async def _write_result_index_rows(self, rows: list[dict]) -> None:
+        """Batch mark stale rows, then batch upsert latest result-index rows."""
+        if not rows:
+            return
+
+        plan_stale_query = """
+            UPDATE swe_cron_result_index
+            SET is_latest_success = 0, updated_at = %s
+            WHERE source_id = %s
+              AND tenant_id = %s
+              AND first_bbk_id = %s
+              AND bbk_org_id = %s
+              AND skill_id = %s
+              AND job_id = %s
+              AND result_type = %s
+              AND custuid = %s
+              AND is_latest_success = 1
+              AND execution_id <> %s
+        """
+        non_plan_stale_query = """
+            UPDATE swe_cron_result_index
+            SET is_latest_success = 0, updated_at = %s
+            WHERE source_id = %s
+              AND tenant_id = %s
+              AND first_bbk_id = %s
+              AND bbk_org_id = %s
+              AND skill_id = %s
+              AND job_id = %s
+              AND result_type = %s
+              AND is_latest_success = 1
+              AND execution_id <> %s
+        """
+        upsert_query = """
+            INSERT INTO swe_cron_result_index (
+                source_id,
+                tenant_id,
+                first_bbk_id,
+                bbk_org_id,
+                custuid,
+                cust_nm,
+                skill_id,
+                job_id,
+                execution_id,
+                trace_id,
+                subtask_id,
+                task_id,
+                result_type,
+                template_id,
+                result_id,
+                filename,
+                status,
+                is_latest_success,
+                execution_at,
+                updated_at,
+                expire_at
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, 1, %s, %s, %s
+            )
+            ON DUPLICATE KEY UPDATE
+                source_id = VALUES(source_id),
+                tenant_id = VALUES(tenant_id),
+                first_bbk_id = VALUES(first_bbk_id),
+                bbk_org_id = VALUES(bbk_org_id),
+                custuid = VALUES(custuid),
+                cust_nm = VALUES(cust_nm),
+                job_id = VALUES(job_id),
+                execution_id = VALUES(execution_id),
+                trace_id = VALUES(trace_id),
+                task_id = VALUES(task_id),
+                result_type = VALUES(result_type),
+                template_id = VALUES(template_id),
+                result_id = VALUES(result_id),
+                filename = VALUES(filename),
+                status = VALUES(status),
+                is_latest_success = 1,
+                execution_at = VALUES(execution_at),
+                updated_at = VALUES(updated_at),
+                expire_at = VALUES(expire_at)
+        """
+
+        plan_stale_params = [
+            self._build_result_index_stale_params(row)
+            for row in rows
+            if row["result_type"] == "plan"
+        ]
+        non_plan_stale_params = [
+            self._build_result_index_stale_params(row)
+            for row in rows
+            if row["result_type"] != "plan"
+        ]
+        upsert_params = [
+            self._build_result_index_upsert_params(row) for row in rows
+        ]
+
+        await self.db.execute_many(plan_stale_query, plan_stale_params)
+        await self.db.execute_many(non_plan_stale_query, non_plan_stale_params)
+        await self.db.execute_many(upsert_query, upsert_params)
 
     @staticmethod
     def _mask_customer_name(name: Optional[str]) -> Optional[str]:
@@ -785,45 +966,102 @@ class QueryService:
         }
         return await self._query_customer_names(custuids)
 
+    async def _get_missing_customer_names_for_traces(
+        self,
+        subtasks_by_trace: dict[str, list[dict]],
+    ) -> dict[str, str]:
+        """Query customer names for all subtasks missing cust_nm."""
+        custuids = {
+            subtask.get("custuid") or ""
+            for subtasks in subtasks_by_trace.values()
+            for subtask in subtasks
+            if not (subtask.get("cust_nm") or "").strip()
+        }
+        return await self._query_customer_names(custuids)
+
+    def _build_result_index_rows_for_execution(
+        self,
+        execution: dict,
+        subtasks: list[dict],
+        skill_ids: list[str],
+        customer_names: dict[str, str],
+    ) -> list[dict]:
+        """Build all result-index rows for one successful execution."""
+        execution_at = (
+            execution.get("actual_time")
+            or execution.get("created_at")
+            or datetime.now()
+        )
+        expire_at = execution_at + timedelta(days=30)
+        return [
+            self._build_result_index_row(
+                execution,
+                subtask,
+                skill_id,
+                execution_at,
+                expire_at,
+                customer_names,
+            )
+            for subtask in subtasks
+            for skill_id in skill_ids
+        ]
+
+    @staticmethod
+    def _build_result_index_users(
+        rows: list[dict],
+    ) -> list[dict[str, str]]:
+        """Build push user info from successfully indexed rows."""
+        return [
+            {"custUid": row["custuid"], "bbkId": row["bbk_org_id"]}
+            for row in rows
+            if row.get("custuid") and row.get("bbk_org_id")
+        ]
+
     async def _index_success_execution_results(
         self,
         executions: list[dict],
-    ) -> int:
+    ) -> tuple[int, list[dict[str, str]]]:
         """Write query-index rows for successful executions."""
-        indexed_count = 0
+        trace_ids = [
+            execution.get("trace_id") or ""
+            for execution in executions
+            if execution.get("trace_id")
+        ]
+        subtasks_by_trace = await self._get_success_subtasks_for_traces(
+            trace_ids,
+        )
+        customer_names = await self._get_missing_customer_names_for_traces(
+            subtasks_by_trace,
+        )
+
+        result_rows: list[dict] = []
         for execution in executions:
             skill_ids = self._split_skill_ids(execution.get("skill_ids"))
             if not skill_ids:
                 continue
 
-            subtasks = await self._get_success_subtasks_for_trace(
+            subtasks = subtasks_by_trace.get(
                 execution.get("trace_id") or "",
+                [],
             )
-            customer_names = await self._get_missing_customer_names(subtasks)
-            execution_at = (
-                execution.get("actual_time")
-                or execution.get("created_at")
-                or datetime.now()
-            )
-            expire_at = execution_at + timedelta(days=30)
+            if not subtasks:
+                continue
 
-            for subtask in subtasks:
-                for skill_id in skill_ids:
-                    row = self._build_result_index_row(
-                        execution,
-                        subtask,
-                        skill_id,
-                        execution_at,
-                        expire_at,
-                        customer_names,
-                    )
-                    await self._write_result_index_row(row)
-                    indexed_count += 1
-        return indexed_count
+            result_rows.extend(
+                self._build_result_index_rows_for_execution(
+                    execution,
+                    subtasks,
+                    skill_ids,
+                    customer_names,
+                ),
+            )
+
+        await self._write_result_index_rows(result_rows)
+        return len(result_rows), self._build_result_index_users(result_rows)
 
     async def batch_update_execution_async_status(
         self,
-    ) -> Tuple[int, int, int]:
+    ) -> Tuple[int, int, int, list[dict[str, str]]]:
         """Batch update execution async_status using JOIN with subtasks.
 
         使用 SQL JOIN 批量更新，高效处理大量数据。
@@ -832,10 +1070,10 @@ class QueryService:
         - 若存在子任务则按照 task_type='list' 的 need_notification 字段更新
 
         Returns:
-            Tuple of (success_count, error_count, indexed_count)
+            Tuple of (success_count, error_count, indexed_count, indexed_users)
         """
         if not self.db:
-            return 0, 0, 0
+            return 0, 0, 0, []
 
         success_executions = await self._get_success_execution_candidates()
 
@@ -875,7 +1113,10 @@ class QueryService:
             "SELECT ROW_COUNT() AS count",
         )
         success_count = success_row.get("count", 0) if success_row else 0
-        indexed_count = await self._index_success_execution_results(
+        (
+            indexed_count,
+            indexed_users,
+        ) = await self._index_success_execution_results(
             success_executions,
         )
 
@@ -920,7 +1161,7 @@ class QueryService:
             error_count,
             indexed_count,
         )
-        return success_count, error_count, indexed_count
+        return success_count, error_count, indexed_count, indexed_users
 
 
 # Global service instance

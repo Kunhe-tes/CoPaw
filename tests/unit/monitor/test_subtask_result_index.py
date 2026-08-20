@@ -13,6 +13,7 @@ class FakeDb:
         self.fetch_all_calls = []
         self.fetch_one_calls = []
         self.execute_calls = []
+        self.execute_many_calls = []
         self.fetch_all_results = [
             [
                 {
@@ -58,29 +59,42 @@ class FakeDb:
         self.execute_calls.append((sql, params))
         return 1
 
+    async def execute_many(self, sql, params_list):
+        self.execute_many_calls.append((sql, params_list))
+        return len(params_list)
+
+
+def _result_index_batch_insert_calls(db):
+    return [
+        call
+        for call in db.execute_many_calls
+        if "INSERT INTO swe_cron_result_index" in call[0]
+    ]
+
 
 def test_batch_update_indexes_success_execution_results():
     db = FakeDb()
-    success_count, error_count, indexed_count = asyncio.run(
+    success_count, error_count, indexed_count, indexed_users = asyncio.run(
         QueryService(db=db).batch_update_execution_async_status(),
     )
 
     assert success_count == 1
     assert error_count == 0
     assert indexed_count == 2
+    assert indexed_users == [
+        {"custUid": "cust-1", "bbkId": "772"},
+        {"custUid": "cust-1", "bbkId": "772"},
+    ]
 
     success_update_sql = db.execute_calls[0][0]
     assert "async_status = 'success'" in success_update_sql
     assert "AND e.status = 'success'" in success_update_sql
 
-    insert_calls = [
-        call
-        for call in db.execute_calls
-        if "INSERT INTO swe_cron_result_index" in call[0]
-    ]
-    assert len(insert_calls) == 2
+    insert_calls = _result_index_batch_insert_calls(db)
+    assert len(insert_calls) == 1
+    assert len(insert_calls[0][1]) == 2
 
-    first_insert_params = insert_calls[0][1]
+    first_insert_params = insert_calls[0][1][0]
     assert first_insert_params[0] == "source-1"
     assert first_insert_params[1] == "tenant-1"
     assert first_insert_params[2] == "771"
@@ -91,7 +105,7 @@ def test_batch_update_indexes_success_execution_results():
     assert first_insert_params[13] == 11
     assert first_insert_params[14] == "doc-1"
 
-    second_insert_params = insert_calls[1][1]
+    second_insert_params = insert_calls[0][1][1]
     assert second_insert_params[6] == "skill-b"
 
     subtask_sql = db.fetch_all_calls[1][0]
@@ -109,11 +123,7 @@ class FakeCustomerNameResponse:
             "data": [
                 {
                     "row": "0000001015FICNP",
-                    "values": {
-                        "f": {
-                            "EAC_NM": "陆建校",
-                        },
-                    },
+                    "values": {"f": {"EAC_NM": "Customer Name"}},
                 },
             ],
         }
@@ -151,13 +161,17 @@ def test_batch_update_queries_and_masks_missing_customer_name(monkeypatch):
         lambda timeout: client,
     )
 
-    success_count, error_count, indexed_count = asyncio.run(
+    success_count, error_count, indexed_count, indexed_users = asyncio.run(
         QueryService(db=db).batch_update_execution_async_status(),
     )
 
     assert success_count == 1
     assert error_count == 0
     assert indexed_count == 2
+    assert indexed_users == [
+        {"custUid": "PNCIF5101000000", "bbkId": "772"},
+        {"custUid": "PNCIF5101000000", "bbkId": "772"},
+    ]
 
     assert client.post_calls == [
         (
@@ -167,9 +181,5 @@ def test_batch_update_queries_and_masks_missing_customer_name(monkeypatch):
         ),
     ]
 
-    insert_calls = [
-        call
-        for call in db.execute_calls
-        if "INSERT INTO swe_cron_result_index" in call[0]
-    ]
-    assert insert_calls[0][1][5] == "陆*校"
+    insert_calls = _result_index_batch_insert_calls(db)
+    assert insert_calls[0][1][0][5] == "C*********e"
