@@ -317,9 +317,23 @@ export const marketApi = {
     return request<MarketSkill[]>(url, opts);
   },
 
-  listMarketExperts: async (sourceId: string): Promise<MarketExpert[]> => {
+  listMarketExperts: async (
+    sourceId: string,
+    options?: { categoryId?: number; bbkIds?: string[] },
+  ): Promise<MarketExpert[]> => {
+    const params = new URLSearchParams();
+    if (options?.categoryId !== undefined) {
+      params.set("category_id", String(options.categoryId));
+    }
+    if (options?.bbkIds?.length) {
+      params.set("bbk_ids", options.bbkIds.join(","));
+    }
+    const query = params.toString();
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
-    return request<MarketExpert[]>("/market/experts", opts);
+    return request<MarketExpert[]>(
+      `/market/experts${query ? `?${query}` : ""}`,
+      opts,
+    );
   },
 
   publishExpert: async (

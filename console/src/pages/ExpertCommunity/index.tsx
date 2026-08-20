@@ -7,13 +7,18 @@ import {
   List,
   Modal,
   Popconfirm,
+  Select,
   Space,
   Spin,
   Tag,
   Typography,
 } from "antd";
 import { ReloadOutlined, StopOutlined } from "@ant-design/icons";
-import { marketApi, type MarketExpert } from "../../api/modules/market";
+import {
+  marketApi,
+  type Category,
+  type MarketExpert,
+} from "../../api/modules/market";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import { useIframeStore } from "../../stores/iframeStore";
 import { DEFAULT_SOURCE_ID } from "../../constants/identity";
@@ -28,6 +33,9 @@ export default function ExpertCommunityPage() {
   const selectedAgent = useAgentStore((state) => state.selectedAgent);
   const [items, setItems] = useState<MarketExpert[]>([]);
   const [query, setQuery] = useState("");
+  const [categoryId, setCategoryId] = useState<number>();
+  const [bbkIds, setBbkIds] = useState("");
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -41,17 +49,29 @@ export default function ExpertCommunityPage() {
     setLoading(true);
     setError(null);
     try {
-      setItems(await marketApi.listMarketExperts(sourceId));
+      setItems(
+        await marketApi.listMarketExperts(sourceId, {
+          categoryId,
+          bbkIds: bbkIds
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean),
+        }),
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载专家社区失败");
     } finally {
       setLoading(false);
     }
-  }, [sourceId]);
+  }, [bbkIds, categoryId, sourceId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    void marketApi.listCategories(sourceId).then(setCategories).catch(() => {});
+  }, [sourceId]);
 
   const visibleItems = useMemo(() => {
     const normalized = query.trim().toLowerCase();
@@ -169,6 +189,26 @@ export default function ExpertCommunityPage() {
           value={query}
           onChange={(event) => setQuery(event.target.value)}
         />
+        <Space wrap>
+          <Select
+            allowClear
+            placeholder="全部分类"
+            style={{ minWidth: 160 }}
+            value={categoryId}
+            options={categories.map((category) => ({
+              label: category.name,
+              value: category.id,
+            }))}
+            onChange={setCategoryId}
+          />
+          <Input
+            allowClear
+            placeholder="按 BBK 筛选，逗号分隔"
+            style={{ width: 220 }}
+            value={bbkIds}
+            onChange={(event) => setBbkIds(event.target.value)}
+          />
+        </Space>
         {error ? <Alert type="error" showIcon message={error} /> : null}
         {loading ? (
           <Spin />
