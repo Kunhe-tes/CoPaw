@@ -91,6 +91,7 @@ def create_background_subagent_tools(
     workspace_dir: Path,
     request_context: dict[str, Any],
     effective_skill_names: list[str] | None = None,
+    selected_expert_id: str | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
     tool_scope = build_background_subagent_scope(
@@ -101,6 +102,7 @@ def create_background_subagent_tools(
         tool_scope=tool_scope,
         workspace_dir=workspace_dir,
         effective_skill_names=effective_skill_names,
+        selected_expert_id=selected_expert_id,
     )
     directory = _format_skill_definition_directory(definition_catalog)
 
@@ -139,6 +141,25 @@ def create_background_subagent_tools(
                 if definition_catalog is not None
                 else None
             )
+            if selected_expert_id:
+                if definition is None:
+                    return _json_response(
+                        {
+                            "status": "not_found",
+                            "reason": "selected_expert_not_available",
+                            "name": start_request.name,
+                            "selected_expert_id": selected_expert_id,
+                        },
+                    )
+                if start_request.name != definition.name:
+                    return _json_response(
+                        {
+                            "status": "failed",
+                            "reason": "selected_expert_name_mismatch",
+                            "name": start_request.name,
+                            "selected_expert_name": definition.name,
+                        },
+                    )
             if definition is None:
                 if start_request.instruction is None:
                     return _json_response(
@@ -275,6 +296,7 @@ def _build_definition_catalog(
     tool_scope: BackgroundSubAgentScope,
     workspace_dir: Path,
     effective_skill_names: list[str] | None,
+    selected_expert_id: str | None = None,
 ):
     """Build the catalog only for an explicit delegation-intent turn."""
     builtin_definitions = builtin_definition_provider().list_definitions()
@@ -283,6 +305,26 @@ def _build_definition_catalog(
         owner_scope=f"{tool_scope.tenant_id}/{tool_scope.agent_id}",
         builtin_names={definition.name for definition in builtin_definitions},
     ).list()
+    if selected_expert_id:
+        selected_package = next(
+            (
+                package
+                for package in agent_packages
+                if package.definition_id == selected_expert_id
+                and package.definition is not None
+                and package.definition.enabled
+            ),
+            None,
+        )
+        return build_definition_catalog(
+            skill_definitions=[],
+            builtin_definitions=[],
+            agent_owned_definitions=(
+                [selected_package.definition]
+                if selected_package is not None
+                else []
+            ),
+        )
     return build_definition_catalog(
         skill_definitions=load_skill_owned_definitions(
             workspace_dir=workspace_dir,

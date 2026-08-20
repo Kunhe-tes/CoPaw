@@ -775,6 +775,10 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             workspace_dir=workspace_dir,
             request_context=request_context,
             effective_skill_names=effective_skill_names,
+            selected_expert_id=str(
+                request_context.get("selected_expert_id") or "",
+            ).strip()
+            or None,
         )
         names = self._background_subagent_tool_names(True)
         for name in names:

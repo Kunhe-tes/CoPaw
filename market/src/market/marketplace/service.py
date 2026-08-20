@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import shutil
 import tomllib
 import uuid
@@ -32,6 +34,7 @@ from .fs import (
     copy_skill_to_user,
     get_expert_dir,
     get_expert_definition_path,
+    get_user_expert_dir,
     get_mcp_dir,
     get_skill_dir,
     get_user_disabled_skills_dir,
@@ -72,6 +75,11 @@ from .schemas import (
     RecallRequest,
     RecallResponse,
     RecallResultItem,
+    ExpertDistributionRequest,
+    ExpertDistributionResponse,
+    ExpertInstallRequest,
+    ExpertOperationResult,
+    ExpertRecallResponse,
     SkillUserStat,
 )
 from .expert_version_service import ExpertVersionService
@@ -290,7 +298,9 @@ def _bump_patch(version: str) -> str:
 
 def _next_expert_version(current_version: str, existing_ids: set[str]) -> str:
     """为专家生成下一个唯一补丁版本."""
-    candidate = "1.0.0" if not current_version else _bump_patch(current_version)
+    candidate = (
+        "1.0.0" if not current_version else _bump_patch(current_version)
+    )
     for _ in range(100):
         if candidate not in existing_ids:
             return candidate
@@ -359,6 +369,40 @@ def _copy_expert_package(source_dir: Path, target_dir: Path) -> None:
             shutil.copytree(entry, target)
         else:
             shutil.copy2(entry, target)
+
+
+def _community_toml(
+    toml_text: str,
+    item_id: str,
+    version: str,
+    fingerprint: str,
+) -> str:
+    """在本地专家 TOML 末尾写入社区来源元数据。"""
+    if "[community]" in toml_text:
+        return toml_text
+    suffix = "\n" if toml_text.endswith("\n") else "\n\n"
+    return (
+        toml_text
+        + suffix
+        + "[community]\n"
+        + f"item_id = {json.dumps(item_id, ensure_ascii=False)}\n"
+        + f"version = {json.dumps(version, ensure_ascii=False)}\n"
+        + f"content_fingerprint = {json.dumps(fingerprint, ensure_ascii=False)}\n"
+    )
+
+
+def _community_ref_from_toml(path: Path) -> dict[str, str] | None:
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    value = payload.get("community")
+    if not isinstance(value, dict):
+        return None
+    keys = ("item_id", "version", "content_fingerprint")
+    if not all(isinstance(value.get(key), str) for key in keys):
+        return None
+    return {key: value[key] for key in keys}
 
 
 def _decode_creator_name(value: str) -> str:
@@ -1305,7 +1349,9 @@ class MarketplaceService:
 
         if category_id is not None:
             expert_items = [
-                item for item in expert_items if item.category_id == category_id
+                item
+                for item in expert_items
+                if item.category_id == category_id
             ]
         if bbk_ids is not None and len(bbk_ids) > 0:
             expert_items = [
@@ -1383,6 +1429,7 @@ class MarketplaceService:
             definition=definition,
         )
 
+    # pylint: disable=too-many-statements
     async def publish_expert(
         self,
         source_id: str,
@@ -1415,7 +1462,9 @@ class MarketplaceService:
             else []
         )
 
-        declared_skills, declared_mcps = _extract_expert_dependencies(definition)
+        declared_skills, declared_mcps = _extract_expert_dependencies(
+            definition,
+        )
         for skill_name in declared_skills:
             skill_dir = source_dir / "skills" / skill_name
             skill_md = skill_dir / "SKILL.md"
@@ -1423,6 +1472,7 @@ class MarketplaceService:
                 raise ExpertDependencyError(
                     f"Missing declared dependency skill: {skill_name}",
                 )
+            scan_skill_directory(skill_dir, skill_name=skill_name)
         for mcp_name in declared_mcps:
             mcp_json = source_dir / "mcp" / mcp_name / "mcp.json"
             if not mcp_json.is_file():
@@ -1546,7 +1596,12 @@ class MarketplaceService:
 
         expert_root = get_expert_dir(self.marketplace_root, source_id, item_id)
         version_svc = self._get_expert_version_service()
-        version_svc.restore_version(source_id, item_id, version_id, expert_root)
+        version_svc.restore_version(
+            source_id,
+            item_id,
+            version_id,
+            expert_root,
+        )
 
         item.version = version_id
         item.status = "active"
@@ -1578,6 +1633,343 @@ class MarketplaceService:
         item.updated_at = datetime.now(timezone.utc).isoformat()
         save_index(self.marketplace_root, source_id, items)
         return True
+
+    def _expert_current_package(
+        self,
+        source_id: str,
+        item_id: str,
+    ) -> tuple[MarketItem, Path, str]:
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                entry
+                for entry in items
+                if entry.item_id == item_id and entry.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None or item.status != "active":
+            raise ValueError(f"Expert item {item_id} is not active")
+        root = get_expert_dir(self.marketplace_root, source_id, item_id)
+        definition_path = root / "definition.toml"
+        if not definition_path.is_file():
+            raise ValueError(f"Expert definition {item_id} is missing")
+        versions = self._get_expert_version_service().list_versions(
+            source_id,
+            item_id,
+        )
+        current = next(
+            (
+                entry
+                for entry in versions["versions"]
+                if entry.get("is_current")
+            ),
+            None,
+        )
+        fingerprint = str((current or {}).get("signature") or "")
+        if not fingerprint:
+            fingerprint = (
+                self._get_expert_version_service().calculate_signature(root)
+            )
+        return item, root, fingerprint
+
+    def _find_received_expert(
+        self,
+        user_id: str,
+        source_id: str,
+        agent_id: str,
+        item_id: str,
+    ) -> tuple[Path, dict[str, str]] | None:
+        root = get_user_expert_dir(self.swe_root, user_id, agent_id, source_id)
+        if not root.exists():
+            return None
+        for path in root.glob("*.toml"):
+            reference = _community_ref_from_toml(path)
+            if reference and reference["item_id"] == item_id:
+                return path, reference
+        return None
+
+    def _received_expert_paths(
+        self,
+        user_id: str,
+        source_id: str,
+        item_id: str,
+    ) -> list[tuple[Path, str]]:
+        """Find a received item across every Agent Profile for one user."""
+        effective_user_id = resolve_effective_user_id(user_id, source_id)
+        user_root = migrate_legacy_scope_dir_if_needed(
+            self.swe_root,
+            effective_user_id,
+        )
+        workspaces_root = user_root / "workspaces"
+        if not workspaces_root.exists():
+            return []
+        matches: list[tuple[Path, str]] = []
+        for profile_root in workspaces_root.iterdir():
+            if not profile_root.is_dir():
+                continue
+            agents_root = profile_root / "agents"
+            if not agents_root.exists():
+                continue
+            for definition_path in agents_root.glob("*.toml"):
+                reference = _community_ref_from_toml(definition_path)
+                if reference and reference["item_id"] == item_id:
+                    matches.append((definition_path, profile_root.name))
+        return matches
+
+    # pylint: disable=too-many-statements
+    def _install_expert_for_user(
+        self,
+        source_id: str,
+        item_id: str,
+        user_id: str,
+        agent_id: str,
+        operator_id: str,
+        *,
+        update: bool,
+    ) -> ExpertOperationResult:
+        item, package_root, fingerprint = self._expert_current_package(
+            source_id,
+            item_id,
+        )
+        target_root = get_user_expert_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        target_root.mkdir(parents=True, exist_ok=True)
+        received = self._find_received_expert(
+            user_id,
+            source_id,
+            agent_id,
+            item_id,
+        )
+        if received is None and update:
+            update = False
+        if received is not None:
+            definition_path, existing_ref = received
+            definition_id = definition_path.stem
+            enabled = False
+            try:
+                existing_payload = tomllib.loads(
+                    definition_path.read_text(encoding="utf-8"),
+                )
+                enabled = bool(existing_payload.get("enabled", False))
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                enabled = False
+        else:
+            definition_id = str(uuid.uuid4())
+            enabled = True
+            for path in target_root.glob("*.toml"):
+                try:
+                    payload = tomllib.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                    continue
+                if payload.get("name") == item.name and bool(
+                    payload.get("enabled", False),
+                ):
+                    return ExpertOperationResult(
+                        user_id=user_id,
+                        success=False,
+                        reason="expert name conflicts with local definition",
+                    )
+            definition_path = target_root / f"{definition_id}.toml"
+
+        source_definition = (package_root / "definition.toml").read_text(
+            encoding="utf-8",
+        )
+        definition_text = _community_toml(
+            source_definition,
+            item_id,
+            item.version,
+            fingerprint,
+        )
+        if "enabled =" in definition_text:
+            definition_text = re.sub(
+                r"(?m)^enabled\s*=\s*(true|false)\s*$",
+                f"enabled = {'true' if enabled else 'false'}",
+                definition_text,
+            )
+        else:
+            definition_text = (
+                f"enabled = {'true' if enabled else 'false'}\n"
+                + definition_text
+            )
+        temporary = definition_path.with_suffix(".tmp")
+        temporary.write_text(definition_text, encoding="utf-8")
+        os.replace(temporary, definition_path)
+        dependency_root = target_root / f"{definition_id}.dependencies"
+        temporary_root = dependency_root.with_name(
+            f".{dependency_root.name}.source-{uuid.uuid4().hex}",
+        )
+        try:
+            temporary_root.mkdir(parents=True, exist_ok=True)
+            for directory in ("skills", "mcp"):
+                source = package_root / directory
+                if source.exists():
+                    shutil.copytree(source, temporary_root / directory)
+            mcp_root = temporary_root / "mcp"
+            if mcp_root.exists():
+                mcp_payload: dict[str, Any] = {}
+                for mcp_dir in mcp_root.iterdir():
+                    config_path = mcp_dir / "mcp.json"
+                    if not mcp_dir.is_dir() or not config_path.is_file():
+                        continue
+                    try:
+                        config = json.loads(
+                            config_path.read_text(encoding="utf-8"),
+                        )
+                    except (
+                        OSError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        raise ExpertDependencyError(
+                            f"Invalid bundled MCP config: {mcp_dir.name}",
+                        ) from exc
+                    if not isinstance(config, dict):
+                        raise ExpertDependencyError(
+                            f"Invalid bundled MCP config: {mcp_dir.name}",
+                        )
+                    mcp_payload[mcp_dir.name] = config
+                (mcp_root / "config.json").write_text(
+                    json.dumps(mcp_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            if dependency_root.exists():
+                shutil.rmtree(dependency_root)
+            os.replace(temporary_root, dependency_root)
+        finally:
+            if temporary_root.exists():
+                shutil.rmtree(temporary_root, ignore_errors=True)
+        return ExpertOperationResult(
+            user_id=user_id,
+            success=True,
+            definition_id=definition_id,
+        )
+
+    async def install_expert(
+        self,
+        source_id: str,
+        item_id: str,
+        user_id: str,
+        agent_id: str = "default",
+        operator_id: str = "",
+    ) -> ExpertOperationResult:
+        return self._install_expert_for_user(
+            source_id,
+            item_id,
+            user_id,
+            agent_id,
+            operator_id,
+            update=False,
+        )
+
+    async def distribute_expert(
+        self,
+        source_id: str,
+        item_id: str,
+        operator_id: str,
+        req: ExpertDistributionRequest,
+    ) -> ExpertDistributionResponse:
+        target_users = await self._resolve_target_users(
+            source_id,
+            DistributeRequest(
+                target_type=req.target_type,
+                target_values=req.target_values,
+            ),
+        )
+        results: list[ExpertOperationResult] = []
+        for user in target_users:
+            try:
+                result = self._install_expert_for_user(
+                    source_id,
+                    item_id,
+                    user["tenant_id"],
+                    "default",
+                    operator_id,
+                    update=True,
+                )
+            except Exception as exc:
+                result = ExpertOperationResult(
+                    user_id=user["tenant_id"],
+                    success=False,
+                    reason=str(exc),
+                )
+            results.append(result)
+            if result.success:
+                await self._trigger_agent_reload(
+                    user["tenant_id"],
+                    "default",
+                    source_id,
+                )
+        return ExpertDistributionResponse(
+            item_id=item_id,
+            distributed_count=sum(result.success for result in results),
+            conflict_count=sum(not result.success for result in results),
+            results=results,
+        )
+
+    async def recall_expert(
+        self,
+        source_id: str,
+        item_id: str,
+        operator_id: str,
+        target_user_ids: list[str] | None = None,
+    ) -> ExpertRecallResponse:
+        users = target_user_ids
+        if users is None:
+            users = [
+                user["tenant_id"]
+                for user in await self._resolve_target_users(
+                    source_id,
+                    DistributeRequest(target_type="all"),
+                )
+            ]
+        results: list[ExpertOperationResult] = []
+        for user_id in users:
+            matched_agent_ids: set[str] = set()
+            try:
+                matches = self._received_expert_paths(
+                    user_id,
+                    source_id,
+                    item_id,
+                )
+                for definition_path, agent_id in matches:
+                    matched_agent_ids.add(agent_id)
+                    definition_path.unlink(missing_ok=True)
+                    dependency_root = definition_path.with_name(
+                        f"{definition_path.stem}.dependencies",
+                    )
+                    if dependency_root.exists():
+                        shutil.rmtree(dependency_root)
+                removed = len(matches)
+                result = ExpertOperationResult(
+                    user_id=user_id,
+                    success=bool(removed),
+                    reason=None if removed else "received expert not found",
+                )
+            except Exception as exc:
+                result = ExpertOperationResult(
+                    user_id=user_id,
+                    success=False,
+                    reason=str(exc),
+                )
+            results.append(result)
+            if result.success:
+                for agent_id in matched_agent_ids or {"default"}:
+                    await self._trigger_agent_reload(
+                        user_id,
+                        agent_id,
+                        source_id,
+                    )
+        return ExpertRecallResponse(
+            item_id=item_id,
+            recalled_count=sum(result.success for result in results),
+            failed_count=sum(not result.success for result in results),
+            results=results,
+        )
 
     async def delete_market_skill(
         self,

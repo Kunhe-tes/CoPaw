@@ -9,11 +9,19 @@ from typing import Optional
 from fastapi import APIRouter, Body, Header, HTTPException, Request, status
 
 from ...marketplace.schemas import (
+    ExpertDistributionRequest,
+    ExpertDistributionResponse,
+    ExpertInstallRequest,
+    ExpertRecallRequest,
+    ExpertRecallResponse,
     MarketExpertDetail,
     MarketExpertResponse,
     PublishExpertRequest,
 )
-from ...marketplace.service import ExpertDependencyError, ExpertNameConflictError
+from ...marketplace.service import (
+    ExpertDependencyError,
+    ExpertNameConflictError,
+)
 from ..deps import require_source_id
 
 router = APIRouter()
@@ -128,3 +136,82 @@ async def unpublish_expert(
     if not success:
         raise HTTPException(status_code=404, detail="Expert not found")
     return {"success": True}
+
+
+@router.post("/market/experts/{item_id}/install")
+async def install_expert(
+    item_id: str,
+    req: ExpertInstallRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """用户接收一个专家到当前 Agent Profile。"""
+    source_id = require_source_id(x_source_id)
+    if not x_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-Id header is required",
+        )
+    try:
+        return await request.app.state.marketplace.install_expert(
+            source_id,
+            item_id,
+            x_user_id,
+            req.agent_id,
+            x_user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market/experts/{item_id}/distribute",
+    response_model=ExpertDistributionResponse,
+)
+async def distribute_expert(
+    item_id: str,
+    req: ExpertDistributionRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """管理员静默分发并覆盖已接收专家。"""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    try:
+        return await request.app.state.marketplace.distribute_expert(
+            source_id,
+            item_id,
+            x_user_id or "manager",
+            req,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market/experts/{item_id}/recall",
+    response_model=ExpertRecallResponse,
+)
+async def recall_expert(
+    item_id: str,
+    req: ExpertRecallRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """管理员按社区 item_id 撤回已接收副本。"""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    try:
+        return await request.app.state.marketplace.recall_expert(
+            source_id,
+            item_id,
+            x_user_id or "manager",
+            req.target_user_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

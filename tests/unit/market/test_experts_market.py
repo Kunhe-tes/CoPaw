@@ -23,6 +23,9 @@ class FakeMarketplace:
         self.publish_expert = AsyncMock()
         self.restore_expert_version = AsyncMock()
         self.unpublish_expert = AsyncMock()
+        self.install_expert = AsyncMock()
+        self.distribute_expert = AsyncMock()
+        self.recall_expert = AsyncMock()
         self._get_expert_version_service = MagicMock()
         self.marketplace_root = Path("/tmp/market")
 
@@ -66,7 +69,9 @@ def _expert_item() -> dict[str, object]:
 
 def test_list_experts(client: TestClient, test_app: FastAPI) -> None:
     """Browse endpoint should return active expert items."""
-    test_app.state.marketplace.list_expert_items.return_value = [_expert_item()]
+    test_app.state.marketplace.list_expert_items.return_value = [
+        _expert_item(),
+    ]
 
     response = client.get("/market/experts", headers={"X-Source-Id": "SRC"})
 
@@ -76,24 +81,29 @@ def test_list_experts(client: TestClient, test_app: FastAPI) -> None:
 
 def test_get_expert_detail(client: TestClient, test_app: FastAPI) -> None:
     """Detail endpoint should return expert metadata and version history."""
-    test_app.state.marketplace.get_expert_detail.return_value = SimpleNamespace(
-        **_expert_item(),
-        versions=[
-            {
-                "version_id": "1.0.0",
-                "created_at": "2026-08-20T10:00:00Z",
-                "created_by": "manager",
-                "created_by_name": "Manager",
-                "description": "Initial",
-                "signature": "abc",
-                "is_current": True,
-                "is_initial": True,
-            },
-        ],
-        definition={"name": "Community Expert"},
+    test_app.state.marketplace.get_expert_detail.return_value = (
+        SimpleNamespace(
+            **_expert_item(),
+            versions=[
+                {
+                    "version_id": "1.0.0",
+                    "created_at": "2026-08-20T10:00:00Z",
+                    "created_by": "manager",
+                    "created_by_name": "Manager",
+                    "description": "Initial",
+                    "signature": "abc",
+                    "is_current": True,
+                    "is_initial": True,
+                },
+            ],
+            definition={"name": "Community Expert"},
+        )
     )
 
-    response = client.get("/market/experts/expert-1", headers={"X-Source-Id": "SRC"})
+    response = client.get(
+        "/market/experts/expert-1",
+        headers={"X-Source-Id": "SRC"},
+    )
 
     assert response.status_code == 200
     assert response.json()["definition"]["name"] == "Community Expert"
@@ -129,27 +139,32 @@ def test_list_expert_versions(
         """.strip(),
         encoding="utf-8",
     )
-    test_app.state.marketplace._get_expert_version_service.return_value = SimpleNamespace(
-        list_versions=MagicMock(
-            return_value={
-                "expert_name": "Community Expert",
-                "versions": [
-                    {
-                        "version_id": "1.0.0",
-                        "created_at": "2026-08-20T10:00:00Z",
-                        "created_by": "manager",
-                        "created_by_name": "Manager",
-                        "description": "Initial",
-                        "signature": "abc",
-                        "is_current": True,
-                        "is_initial": True,
-                    },
-                ],
-            },
-        ),
+    test_app.state.marketplace._get_expert_version_service.return_value = (
+        SimpleNamespace(
+            list_versions=MagicMock(
+                return_value={
+                    "expert_name": "Community Expert",
+                    "versions": [
+                        {
+                            "version_id": "1.0.0",
+                            "created_at": "2026-08-20T10:00:00Z",
+                            "created_by": "manager",
+                            "created_by_name": "Manager",
+                            "description": "Initial",
+                            "signature": "abc",
+                            "is_current": True,
+                            "is_initial": True,
+                        },
+                    ],
+                },
+            ),
+        )
     )
 
-    response = client.get("/market/experts/expert-1/versions", headers={"X-Source-Id": "SRC"})
+    response = client.get(
+        "/market/experts/expert-1/versions",
+        headers={"X-Source-Id": "SRC"},
+    )
 
     assert response.status_code == 200
     assert response.json()["versions"][0]["version_id"] == "1.0.0"
@@ -180,24 +195,28 @@ def test_restore_and_unpublish_expert(
     test_app: FastAPI,
 ) -> None:
     """Restore and unpublish endpoints should be manager-only."""
-    test_app.state.marketplace.restore_expert_version.return_value = SimpleNamespace(
-        **_expert_item(),
+    test_app.state.marketplace.restore_expert_version.return_value = (
+        SimpleNamespace(
+            **_expert_item(),
+        )
     )
-    test_app.state.marketplace.get_expert_detail.return_value = SimpleNamespace(
-        **_expert_item(),
-        versions=[
-            {
-                "version_id": "1.0.0",
-                "created_at": "2026-08-20T10:00:00Z",
-                "created_by": "manager",
-                "created_by_name": "Manager",
-                "description": "Initial",
-                "signature": "abc",
-                "is_current": True,
-                "is_initial": True,
-            },
-        ],
-        definition={"name": "Community Expert"},
+    test_app.state.marketplace.get_expert_detail.return_value = (
+        SimpleNamespace(
+            **_expert_item(),
+            versions=[
+                {
+                    "version_id": "1.0.0",
+                    "created_at": "2026-08-20T10:00:00Z",
+                    "created_by": "manager",
+                    "created_by_name": "Manager",
+                    "description": "Initial",
+                    "signature": "abc",
+                    "is_current": True,
+                    "is_initial": True,
+                },
+            ],
+            definition={"name": "Community Expert"},
+        )
     )
     test_app.state.marketplace.unpublish_expert.return_value = True
 
@@ -212,3 +231,68 @@ def test_restore_and_unpublish_expert(
 
     assert restore_response.status_code == 200
     assert unpublish_response.status_code == 200
+
+
+def test_user_can_install_expert_into_selected_agent(
+    client: TestClient,
+    test_app: FastAPI,
+) -> None:
+    test_app.state.marketplace.install_expert.return_value = {
+        "user_id": "alice",
+        "success": True,
+        "definition_id": "definition-1",
+    }
+
+    response = client.post(
+        "/market/experts/expert-1/install",
+        headers={"X-Source-Id": "SRC", "X-User-Id": "alice"},
+        json={"agent_id": "research"},
+    )
+
+    assert response.status_code == 200
+    test_app.state.marketplace.install_expert.assert_awaited_once_with(
+        "SRC",
+        "expert-1",
+        "alice",
+        "research",
+        "alice",
+    )
+
+
+def test_distribution_and_recall_require_manager(
+    client: TestClient,
+    manager_client: TestClient,
+    test_app: FastAPI,
+) -> None:
+    test_app.state.marketplace.distribute_expert.return_value = {
+        "item_id": "expert-1",
+        "distributed_count": 1,
+        "conflict_count": 0,
+        "results": [{"user_id": "alice", "success": True}],
+    }
+    test_app.state.marketplace.recall_expert.return_value = {
+        "item_id": "expert-1",
+        "recalled_count": 1,
+        "failed_count": 0,
+        "results": [{"user_id": "alice", "success": True}],
+    }
+
+    forbidden = client.post(
+        "/market/experts/expert-1/distribute",
+        headers={"X-Source-Id": "SRC"},
+        json={"target_type": "user_id", "target_values": ["alice"]},
+    )
+    distributed = manager_client.post(
+        "/market/experts/expert-1/distribute",
+        headers={"X-Source-Id": "SRC", "X-User-Id": "manager"},
+        json={"target_type": "user_id", "target_values": ["alice"]},
+    )
+    recalled = manager_client.post(
+        "/market/experts/expert-1/recall",
+        headers={"X-Source-Id": "SRC", "X-User-Id": "manager"},
+        json={"target_user_ids": ["alice"]},
+    )
+
+    assert forbidden.status_code == 403
+    assert distributed.status_code == 200
+    assert recalled.status_code == 200

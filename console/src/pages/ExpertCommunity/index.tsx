@@ -15,16 +15,20 @@ import { marketApi, type MarketExpert } from "../../api/modules/market";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import { useIframeStore } from "../../stores/iframeStore";
 import { DEFAULT_SOURCE_ID } from "../../constants/identity";
+import { useAgentStore } from "../../stores/agentStore";
 
 const { Title, Text } = Typography;
 
 export default function ExpertCommunityPage() {
   const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const manager = useIframeStore((state) => state.manager);
+  const userId = useIframeStore((state) => state.userId) || "default";
+  const selectedAgent = useAgentStore((state) => state.selectedAgent);
   const [items, setItems] = useState<MarketExpert[]>([]);
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [busyId, setBusyId] = useState<string | null>(null);
   const { message } = useAppMessage();
 
   const load = useCallback(async () => {
@@ -60,6 +64,58 @@ export default function ExpertCommunityPage() {
       await load();
     } catch (err) {
       message.error(err instanceof Error ? err.message : "下架失败");
+    }
+  };
+
+  const receive = async (item: MarketExpert) => {
+    setBusyId(item.item_id);
+    try {
+      await marketApi.installExpert(
+        sourceId,
+        item.item_id,
+        userId,
+        selectedAgent,
+      );
+      message.success("专家已接收");
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "接收失败");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const showVersions = async (item: MarketExpert) => {
+    try {
+      const versions = await marketApi.listExpertVersions(
+        sourceId,
+        item.item_id,
+      );
+      message.info(
+        `共 ${versions.versions.length} 个版本，当前 v${item.version}`,
+      );
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "加载版本历史失败");
+    }
+  };
+
+  const distribute = async (item: MarketExpert) => {
+    try {
+      const result = await marketApi.distributeExpert(sourceId, item.item_id, {
+        target_type: "all",
+        target_values: [],
+      });
+      message.success(`已分发 ${result.distributed_count} 个用户`);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "分发失败");
+    }
+  };
+
+  const recall = async (item: MarketExpert) => {
+    try {
+      const result = await marketApi.recallExpert(sourceId, item.item_id);
+      message.success(`已撤回 ${result.recalled_count} 个用户的专家`);
+    } catch (err) {
+      message.error(err instanceof Error ? err.message : "撤回失败");
     }
   };
 
@@ -105,6 +161,28 @@ export default function ExpertCommunityPage() {
                   manager
                     ? [
                         <Button
+                          key="versions"
+                          type="text"
+                          onClick={() => void showVersions(item)}
+                        >
+                          版本历史
+                        </Button>,
+                        <Button
+                          key="distribute"
+                          type="text"
+                          onClick={() => void distribute(item)}
+                        >
+                          分发
+                        </Button>,
+                        <Button
+                          key="recall"
+                          danger
+                          type="text"
+                          onClick={() => void recall(item)}
+                        >
+                          撤回
+                        </Button>,
+                        <Button
                           key="unpublish"
                           danger
                           type="text"
@@ -114,7 +192,24 @@ export default function ExpertCommunityPage() {
                           下架
                         </Button>,
                       ]
-                    : undefined
+                    : [
+                        <Button
+                          key="receive"
+                          type="primary"
+                          loading={busyId === item.item_id}
+                          disabled={item.status !== "active"}
+                          onClick={() => void receive(item)}
+                        >
+                          接收
+                        </Button>,
+                        <Button
+                          key="versions"
+                          type="link"
+                          onClick={() => void showVersions(item)}
+                        >
+                          版本历史
+                        </Button>,
+                      ]
                 }
               >
                 <List.Item.Meta

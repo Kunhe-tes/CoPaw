@@ -514,7 +514,7 @@ def test_background_subagent_tools_require_selected_expert(
     assert "cancel_subagent" in visible_tools
 
 
-def test_start_subagent_description_lists_enabled_skill_definitions(
+def test_start_subagent_description_lists_selected_expert_definition(
     tmp_path: Path,
 ) -> None:
     agents_dir = tmp_path / "skills" / "security" / "agents"
@@ -530,20 +530,29 @@ def test_start_subagent_description_lists_enabled_skill_definitions(
         '{"layout_version":2,"skills":{"security":{"enabled":true,"channels":["all"]}}}',
         encoding="utf-8",
     )
+    selected_id = "11111111-1111-4111-8111-111111111111"
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / f"{selected_id}.toml").write_text(
+        'name = "researcher"\n'
+        'description = "Research expert."\n'
+        'instruction = "Research the requested topic."\n'
+        "enabled = true\n",
+        encoding="utf-8",
+    )
     agent = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "selected_expert_id": "expert-1",
+            "selected_expert_id": selected_id,
         },
     )
 
     tool = SWEAgent._create_toolkit(agent).tools["start_subagent"]
     description = tool.json_schema["function"]["description"]
 
-    assert "security:reviewer" in description
-    assert "Review code for security regressions." in description
-    assert "security, review" in description
+    assert "researcher" in description
+    assert "Research expert." in description
+    assert "security:reviewer" not in description
 
 
 def test_register_subagent_definition_is_never_exposed(

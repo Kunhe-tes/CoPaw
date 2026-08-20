@@ -282,9 +282,7 @@ def get_expert_dir(
     _validate_path_segment(source_id, "source_id")
     _validate_path_segment(item_id, "item_id")
     return (
-        get_marketplace_dir(marketplace_root, source_id)
-        / "experts"
-        / item_id
+        get_marketplace_dir(marketplace_root, source_id) / "experts" / item_id
     )
 
 
@@ -314,7 +312,9 @@ def get_expert_versions_manifest_path(
     source_id: str,
     item_id: str,
 ) -> Path:
-    return get_expert_dir(marketplace_root, source_id, item_id) / "versions.json"
+    return (
+        get_expert_dir(marketplace_root, source_id, item_id) / "versions.json"
+    )
 
 
 def get_expert_definition_path(
@@ -322,7 +322,10 @@ def get_expert_definition_path(
     source_id: str,
     item_id: str,
 ) -> Path:
-    return get_expert_dir(marketplace_root, source_id, item_id) / "definition.toml"
+    return (
+        get_expert_dir(marketplace_root, source_id, item_id)
+        / "definition.toml"
+    )
 
 
 def get_expert_scan_result_path(
@@ -330,7 +333,24 @@ def get_expert_scan_result_path(
     source_id: str,
     item_id: str,
 ) -> Path:
-    return get_expert_dir(marketplace_root, source_id, item_id) / "scan_result.json"
+    return (
+        get_expert_dir(marketplace_root, source_id, item_id)
+        / "scan_result.json"
+    )
+
+
+def get_user_expert_dir(
+    swe_root: Path,
+    user_id: str,
+    agent_id: str = DEFAULT_AGENT_ID,
+    source_id: str | None = None,
+) -> Path:
+    """返回一个 Agent Profile 的本地专家目录。"""
+    effective_user_id = resolve_effective_user_id(user_id, source_id)
+    _validate_path_segment(effective_user_id, "user_id")
+    _validate_path_segment(agent_id, "agent_id")
+    user_root = migrate_legacy_scope_dir_if_needed(swe_root, effective_user_id)
+    return user_root / "workspaces" / agent_id / "agents"
 
 
 def resolve_effective_user_id(

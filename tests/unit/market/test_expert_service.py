@@ -4,11 +4,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
+import tomllib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from market.marketplace.fs import load_index
+from market.marketplace.fs import get_user_expert_dir, load_index
+from market.marketplace.schemas import ExpertDistributionRequest
 from market.marketplace.service import MarketplaceService
 
 
@@ -34,7 +37,10 @@ def mock_paths(tmp_path: Path) -> tuple[Path, Path]:
 
 
 @pytest.fixture
-def service(mock_db: MagicMock, mock_paths: tuple[Path, Path]) -> MarketplaceService:
+def service(
+    mock_db: MagicMock,
+    mock_paths: tuple[Path, Path],
+) -> MarketplaceService:
     """Create a MarketplaceService instance."""
     marketplace_root, swe_root = mock_paths
     return MarketplaceService(mock_db, marketplace_root, swe_root)
@@ -146,6 +152,26 @@ class TestPublishExpert:
         assert (snapshot_dir / "skills" / "skill_a" / "SKILL.md").is_file()
         assert (snapshot_dir / "mcp" / "mcp_a" / "mcp.json").is_file()
         assert (snapshot_dir / "scan_result.json").is_file()
+
+    @pytest.mark.asyncio
+    async def test_publish_scans_each_bundled_skill_once(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        scanned: list[Path] = []
+        monkeypatch.setattr(
+            "market.marketplace.service.scan_skill_directory",
+            lambda path, **_kwargs: scanned.append(path),
+        )
+
+        await _publish(service, "source-a", source_dir)
+
+        assert scanned == [source_dir / "skills" / "skill_a"]
 
     @pytest.mark.asyncio
     async def test_identical_republish_is_noop(
@@ -264,10 +290,231 @@ class TestPublishExpert:
         assert unpublished is True
 
         items = load_index(service.marketplace_root, "source-a")
-        saved = next(saved_item for saved_item in items if saved_item.item_id == item.item_id)
+        saved = next(
+            saved_item
+            for saved_item in items
+            if saved_item.item_id == item.item_id
+        )
         assert saved.status == "inactive"
         versions_root = (
-            service.marketplace_root / "source-a" / "experts" / item.item_id / "versions"
+            service.marketplace_root
+            / "source-a"
+            / "experts"
+            / item.item_id
+            / "versions"
         )
         assert (versions_root / "1.0.0").is_dir()
         assert (versions_root / "1.0.1").is_dir()
+
+
+class TestReceivedExpertLifecycle:
+    """Community installation keeps dependencies private and frozen."""
+
+    @pytest.mark.asyncio
+    async def test_install_copies_private_dependencies_and_community_identity(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        item, _ = await _publish(service, "source-a", source_dir)
+
+        installed = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+            "research",
+        )
+
+        assert installed.success is True
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "research",
+            "source-a",
+        )
+        definition = expert_dir / f"{installed.definition_id}.toml"
+        dependency_dir = expert_dir / f"{installed.definition_id}.dependencies"
+        assert definition.is_file()
+        assert (dependency_dir / "skills" / "skill_a" / "SKILL.md").is_file()
+        assert (dependency_dir / "mcp" / "mcp_a" / "mcp.json").is_file()
+        mcp_snapshot = json.loads(
+            (dependency_dir / "mcp" / "config.json").read_text(
+                encoding="utf-8",
+            ),
+        )
+        assert mcp_snapshot == {"mcp_a": {"name": "mcp_a"}}
+        payload = tomllib.loads(definition.read_text(encoding="utf-8"))
+        assert payload["enabled"] is True
+        assert payload["community"]["item_id"] == item.item_id
+        assert payload["community"]["version"] == "1.0.0"
+
+    @pytest.mark.asyncio
+    async def test_distribution_silently_overwrites_local_variant_and_preserves_enablement(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir, skill_content="# original\n")
+        item, _ = await _publish(service, "source-a", source_dir)
+        installed = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+        )
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+        definition = expert_dir / f"{installed.definition_id}.toml"
+        definition.write_text(
+            definition.read_text(encoding="utf-8")
+            .replace("enabled = true", "enabled = false")
+            .replace("Expert description", "Local variant"),
+            encoding="utf-8",
+        )
+        (source_dir / "skills" / "skill_a" / "SKILL.md").write_text(
+            "# updated\n",
+            encoding="utf-8",
+        )
+        updated, _ = await _publish(service, "source-a", source_dir)
+
+        result = await service.distribute_expert(
+            "source-a",
+            item.item_id,
+            "manager",
+            ExpertDistributionRequest(
+                target_type="user_id",
+                target_values=["alice"],
+            ),
+        )
+
+        assert result.distributed_count == 1
+        payload = tomllib.loads(definition.read_text(encoding="utf-8"))
+        assert payload["enabled"] is False
+        assert payload["description"] == "Expert description"
+        assert payload["community"]["version"] == updated.version
+        assert (
+            expert_dir
+            / f"{installed.definition_id}.dependencies"
+            / "skills"
+            / "skill_a"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8") == "# updated\n"
+
+    @pytest.mark.asyncio
+    async def test_recall_removes_received_definition_by_community_item_id(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        item, _ = await _publish(service, "source-a", source_dir)
+        installed = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+        )
+
+        recalled = await service.recall_expert(
+            "source-a",
+            item.item_id,
+            "manager",
+            ["alice"],
+        )
+
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+        assert recalled.recalled_count == 1
+        assert not (expert_dir / f"{installed.definition_id}.toml").exists()
+        assert not (
+            expert_dir / f"{installed.definition_id}.dependencies"
+        ).exists()
+
+    @pytest.mark.asyncio
+    async def test_distribution_installs_first_copy_to_default_profile(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        item, _ = await _publish(service, "source-a", source_dir)
+
+        distributed = await service.distribute_expert(
+            "source-a",
+            item.item_id,
+            "manager",
+            ExpertDistributionRequest(
+                target_type="user_id",
+                target_values=["alice"],
+            ),
+        )
+
+        assert distributed.distributed_count == 1
+        assert distributed.results[0].definition_id
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+        assert (
+            expert_dir / f"{distributed.results[0].definition_id}.toml"
+        ).is_file()
+
+    @pytest.mark.asyncio
+    async def test_recall_removes_received_copies_from_every_profile(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        item, _ = await _publish(service, "source-a", source_dir)
+        default_install = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+        )
+        research_install = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+            "research",
+        )
+
+        recalled = await service.recall_expert(
+            "source-a",
+            item.item_id,
+            "manager",
+            ["alice"],
+        )
+
+        assert recalled.recalled_count == 1
+        for agent_id, definition_id in (
+            ("default", default_install.definition_id),
+            ("research", research_install.definition_id),
+        ):
+            expert_dir = get_user_expert_dir(
+                service.swe_root,
+                "alice",
+                agent_id,
+                "source-a",
+            )
+            assert not (expert_dir / f"{definition_id}.toml").exists()
+            assert not (expert_dir / f"{definition_id}.dependencies").exists()
