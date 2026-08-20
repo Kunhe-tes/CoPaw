@@ -125,43 +125,57 @@ export default function ScenarioPresetsPage() {
       setPromptDraft(node.prompt_draft);
       setActive(node.is_active);
       setBindings([]);
+      setSkillOptions([]);
+      setMcpOptions([]);
       setBindingsLoaded(node.kind !== "scenario");
       setBindingsLoadFailed(false);
       setDrawerOpen(true);
       if (node.kind !== "scenario") return;
       try {
-        const [bindingResult, skills, mcps] = await Promise.all([
-          scenarioPresetApi.getBindings(node.id),
-          marketApi.listMarketSkills(sourceId),
-          marketMcpApi.listMarketMCP(undefined, undefined, sourceId),
-        ]);
+        const bindingResult = await scenarioPresetApi.getBindings(node.id);
         if (drawerRequestIdRef.current !== requestId) return;
         setBindings(bindingResult.bindings);
         setBindingsLoaded(true);
-        setSkillOptions(
-          mergeBindingOptions(
-            bindingResult.bindings,
-            "skill",
-            skills.map((skill) => ({
-              label: skill.chinese_name || skill.name,
-              value: skill.item_id,
-            })),
-          ),
-        );
-        setMcpOptions(
-          mergeBindingOptions(
-            bindingResult.bindings,
-            "mcp_service",
-            mcps.map((mcp) => ({
-              label: mcp.chinese_name || mcp.name,
-              value: mcp.item_id,
-            })),
-          ),
-        );
+        try {
+          const [skills, mcps] = await Promise.all([
+            marketApi.listMarketSkills(sourceId),
+            marketMcpApi.listMarketMCP(undefined, undefined, sourceId),
+          ]);
+          if (drawerRequestIdRef.current !== requestId) return;
+          setSkillOptions(
+            mergeBindingOptions(
+              bindingResult.bindings,
+              "skill",
+              skills.map((skill) => ({
+                label: skill.chinese_name || skill.name,
+                value: skill.item_id,
+              })),
+            ),
+          );
+          setMcpOptions(
+            mergeBindingOptions(
+              bindingResult.bindings,
+              "mcp_service",
+              mcps.map((mcp) => ({
+                label: mcp.chinese_name || mcp.name,
+                value: mcp.item_id,
+              })),
+            ),
+          );
+        } catch {
+          if (drawerRequestIdRef.current !== requestId) return;
+          setSkillOptions(
+            mergeBindingOptions(bindingResult.bindings, "skill", []),
+          );
+          setMcpOptions(
+            mergeBindingOptions(bindingResult.bindings, "mcp_service", []),
+          );
+          message.warning("市场资源暂不可加载，仍可保存或移除现有绑定");
+        }
       } catch {
         if (drawerRequestIdRef.current !== requestId) return;
         setBindingsLoadFailed(true);
-        message.warning("部分市场资源暂不可加载，可继续编辑场景文本");
+        message.error("场景关联资源加载失败，暂不能保存以避免覆盖现有绑定");
       }
     },
     [message, sourceId],
