@@ -988,23 +988,6 @@ export function ChannelDrawer({
             >
               <Input.Password />
             </Form.Item>
-            <Form.Item
-              name="session_end_push_link_prefix"
-              label={t("channels.sessionEndPushLinkPrefix")}
-              tooltip={t("channels.sessionEndPushLinkPrefixTooltip")}
-            >
-              <Input placeholder="https://example.com/push" />
-            </Form.Item>
-            <Form.Item
-              name="session_end_push_link_id_type"
-              label={t("channels.sessionEndPushLinkIdType")}
-              initialValue="session_id"
-            >
-              <Select>
-                <Select.Option value="chat_id">Chat ID</Select.Option>
-                <Select.Option value="session_id">Session ID</Select.Option>
-              </Select>
-            </Form.Item>
           </>
         );
 
@@ -1169,6 +1152,23 @@ export function ChannelDrawer({
               valuePropName="checked"
             >
               <Switch />
+            </Form.Item>
+                        <Form.Item
+              name="session_end_push_link_prefix"
+              label={t("channels.sessionEndPushLinkPrefix")}
+              tooltip={t("channels.sessionEndPushLinkPrefixTooltip")}
+            >
+              <Input placeholder="https://example.com/push" />
+            </Form.Item>
+            <Form.Item
+              name="session_end_push_link_id_type"
+              label={t("channels.sessionEndPushLinkIdType")}
+              initialValue="session_id"
+            >
+              <Select>
+                <Select.Option value="chat_id">Chat ID</Select.Option>
+                <Select.Option value="session_id">Session ID</Select.Option>
+              </Select>
             </Form.Item>
             </>
           )}
