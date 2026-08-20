@@ -14,7 +14,6 @@ import type { HistorySession } from "./historySessions";
 import { isHistorySessionActive } from "./historySessions";
 import sendIcon from "../../../../assets/icons/new_chat.svg";
 import operateIcon from "../../../../assets/icons/operate.svg";
-import guideImage from "@/assets/others/note.png";
 import shGuideImage from "@/assets/others/sh_note.png";
 import {
   ChatAnywhereSessionsContext,
@@ -32,6 +31,8 @@ import { mergeConcurrentSessions } from "./mergeConcurrentSessions";
 
 const OPERATION_GUIDE_BBK = "121";
 const OPERATION_GUIDE_SOURCE = "RMASSIST";
+// 临时占位链接，待操作指南正式地址确认后替换。
+const OPERATION_GUIDE_URL = "https://example.com";
 const SPECIAL_SOURCE = "ruice";
 
 /** Extended session type with additional backend fields */
@@ -149,10 +150,6 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const source = useIframeStore((state) => state.source);
   const isOperationGuideContext =
     bbk === OPERATION_GUIDE_BBK && source === OPERATION_GUIDE_SOURCE;
-  const currentGuideImage = isOperationGuideContext ? shGuideImage : guideImage;
-  // 临时变更：操作指南仅对指定的 BBK 和来源开放，后续取消时恢复为 showGuide。
-  const shouldShowGuide = showGuide && isOperationGuideContext;
-  const shouldUseWithoutGuideStyle = showGuide && !isOperationGuideContext;
   const isHeaderHidden = source === SPECIAL_SOURCE;
 
   const currentChatId = location.pathname.match(/^\/chat\/(.+)$/)?.[1] || null;
@@ -306,8 +303,13 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   );
 
   const handleOpenGuide = useCallback(() => {
-    setGuidePreviewVisible(true);
-  }, []);
+    if (isOperationGuideContext) {
+      setGuidePreviewVisible(true);
+      return;
+    }
+
+    window.open(OPERATION_GUIDE_URL, "_blank", "noopener,noreferrer");
+  }, [isOperationGuideContext]);
 
   const handleDeleteSession = useCallback(
     (
@@ -433,10 +435,6 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
             <div
               className={`chat-sidebar-content-record-list${
-                shouldUseWithoutGuideStyle
-                  ? " chat-sidebar-content-record-list--without-guide"
-                  : ""
-              }${
                 isHeaderHidden
                   ? " chat-sidebar-content-record-list--without-header"
                   : ""
@@ -506,7 +504,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
           </div>
 
-          {shouldShowGuide && (
+          {showGuide && (
             <div className="chat-sidebar-footer">
               {/* 暂时隐藏，后续需要时再开放
               <div className="chat-sidebar-footer-item">
@@ -544,7 +542,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
         </button>
       </div>
       {/* Guide Image Preview */}
-      {shouldShowGuide && (
+      {showGuide && isOperationGuideContext && (
         <div style={{ display: "none" }}>
           <Image.PreviewGroup
             preview={{
@@ -553,7 +551,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
               onVisibleChange: (vis) => setGuidePreviewVisible(vis),
             }}
           >
-            <Image src={currentGuideImage} />
+            <Image src={shGuideImage} />
           </Image.PreviewGroup>
         </div>
       )}
