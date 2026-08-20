@@ -177,9 +177,10 @@ export default createGlobalStyle`
   font-weight: 500;
   gap: 6px;
   justify-content: center;
-  min-height: 44px;
+  height: 36px;
+  min-height: 36px;
   min-width: 112px;
-  padding: 0 18px;
+  padding: 0 14px;
   transition: background-color 160ms ease, color 160ms ease;
 
   &:hover:not(:disabled) {
@@ -236,9 +237,9 @@ export default createGlobalStyle`
   flex: 0 0 auto;
   font: inherit;
   font-size: 13px;
-  height: 40px;
-  line-height: 20px;
-  padding: 0 18px;
+  height: 32px;
+  line-height: 18px;
+  padding: 0 14px;
   transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease;
 
   &:hover:not(:disabled) {

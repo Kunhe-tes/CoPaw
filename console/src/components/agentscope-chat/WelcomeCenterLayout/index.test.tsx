@@ -415,6 +415,40 @@ describe("WelcomeCenterLayout", () => {
     );
   });
 
+  it("renders secondary capsules with a slim height", async () => {
+    getEffectiveCatalog.mockResolvedValueOnce({
+      domains: [
+        {
+          id: "domain-a",
+          name: "文档处理",
+          capabilities: [
+            {
+              id: "capability-a",
+              name: "信息提取",
+              scenarios: [
+                {
+                  id: "scenario-a",
+                  name: "提取字段",
+                  prompt_draft: "提取",
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    });
+
+    render(<WelcomeCenterLayout greeting="你好" onSubmit={vi.fn()} />);
+
+    const capability = await screen.findByRole("tab", { name: "信息提取" });
+    const domain = screen.getByRole("tab", { name: "文档处理" });
+    const scene = screen.getByRole("button", { name: "提取字段" });
+
+    expect(getComputedStyle(domain).height).toBe("36px");
+    expect(getComputedStyle(capability).height).toBe("32px");
+    expect(getComputedStyle(scene).height).toBe("32px");
+  });
+
   it("opens the shared labelled skill menu and selects a matching skill by click", () => {
     const onChange = vi.fn();
 
