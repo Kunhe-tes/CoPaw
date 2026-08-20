@@ -194,6 +194,20 @@ class ZhaohuConfig(BaseChannelConfig):
         ),
     )
     session_end_push_enabled: bool = False
+    # 会话结束推送跳转链接前缀（使用人在招乎配置页自行配置，配置后推送附带跳转链接）
+    session_end_push_link_prefix: str = Field(
+        default_factory=lambda: EnvVarLoader.get_str(
+            "SWE_ZHAOHU_SESSION_END_PUSH_LINK_PREFIX",
+            "",
+        ),
+    )
+    # 跳转链接使用的 ID 类型："chat_id" 或 "session_id"
+    session_end_push_link_id_type: str = Field(
+        default_factory=lambda: EnvVarLoader.get_str(
+            "SWE_ZHAOHU_SESSION_END_PUSH_LINK_ID_TYPE",
+            "session_id",
+        ),
+    )
 
 
 class ConsoleConfig(BaseChannelConfig):
