@@ -34,6 +34,21 @@ export interface MarketSkillDetail extends MarketSkill {
   }>;
 }
 
+export interface MarketExpert {
+  item_id: string;
+  name: string;
+  description: string;
+  version: string;
+  creator_id: string;
+  creator_name: string;
+  category_id: number | null;
+  bbk_ids: string[];
+  status: "active" | "inactive";
+  created_at: string | null;
+  updated_at: string | null;
+  version_unchanged?: boolean;
+}
+
 // 更新统计配置请求
 export interface UpdateStatisticsConfigRequest {
   include_in_statistics: boolean;
@@ -250,6 +265,27 @@ export const marketApi = {
     }
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
     return request<MarketSkill[]>(url, opts);
+  },
+
+  listMarketExperts: async (sourceId: string): Promise<MarketExpert[]> => {
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return request<MarketExpert[]>("/market/experts", opts);
+  },
+
+  getMarketExpert: async (
+    sourceId: string,
+    itemId: string,
+  ): Promise<MarketExpert> => {
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return request<MarketExpert>(`/market/experts/${itemId}`, opts);
+  },
+
+  unpublishExpert: async (sourceId: string, itemId: string): Promise<void> => {
+    const opts: RequestInit = {
+      method: "DELETE",
+      ...mergeHeaders({ "X-Source-Id": sourceId, "X-Manager": "true" }),
+    };
+    return request<void>(`/market/experts/${itemId}`, opts);
   },
 
   getSkillDetail: async (
@@ -635,20 +671,20 @@ export const marketApi = {
   updateSkillStatisticsConfig: async (
     sourceId: string,
     itemId: string,
-    data: UpdateStatisticsConfigRequest
+    data: UpdateStatisticsConfigRequest,
   ): Promise<UpdateStatisticsConfigResponse> => {
     const opts: RequestInit = {
       method: "PATCH",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "Content-Type": "application/json",
         "X-Source-Id": sourceId,
         "X-Manager": "true",
-      })),
+      }),
       body: JSON.stringify(data),
     };
     return request<UpdateStatisticsConfigResponse>(
       `/market/skills/${itemId}/statistics`,
-      opts
+      opts,
     );
   },
 };
