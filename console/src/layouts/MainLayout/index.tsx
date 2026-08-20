@@ -139,7 +139,9 @@ export default function MainLayout() {
     <Layout className={styles.mainLayout}>
       {!hideHeader && <Header />}
       <Layout>
-        {!hideGlobalShell && <Sidebar selectedKey={selectedKey} />}
+        {!hideGlobalShell && (
+          <Sidebar selectedKey={selectedKey} withoutHeader={hideHeader} />
+        )}
         <Content
           className={`page-container${
             hideGlobalShell ? "" : " page-container--with-sidebar"

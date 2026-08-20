@@ -32,6 +32,7 @@ import { mergeConcurrentSessions } from "./mergeConcurrentSessions";
 
 const OPERATION_GUIDE_BBK = "121";
 const OPERATION_GUIDE_SOURCE = "RMASSIST";
+const SPECIAL_SOURCE = "ruice";
 
 /** Extended session type with additional backend fields */
 interface ExtendedHistorySession extends HistorySession {
@@ -151,6 +152,8 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const currentGuideImage = isOperationGuideContext ? shGuideImage : guideImage;
   // 临时变更：操作指南仅对指定的 BBK 和来源开放，后续取消时恢复为 showGuide。
   const shouldShowGuide = showGuide && isOperationGuideContext;
+  const shouldUseWithoutGuideStyle = showGuide && !isOperationGuideContext;
+  const isHeaderHidden = source === SPECIAL_SOURCE;
 
   const currentChatId = location.pathname.match(/^\/chat\/(.+)$/)?.[1] || null;
   const currentChatIdRef = useRef<string | null>(currentChatId);
@@ -430,9 +433,13 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
             <div
               className={`chat-sidebar-content-record-list${
-                shouldShowGuide
-                  ? ""
-                  : " chat-sidebar-content-record-list--without-guide"
+                shouldUseWithoutGuideStyle
+                  ? " chat-sidebar-content-record-list--without-guide"
+                  : ""
+              }${
+                isHeaderHidden
+                  ? " chat-sidebar-content-record-list--without-header"
+                  : ""
               }`}
               ref={historyScrollContainerRef}
             >

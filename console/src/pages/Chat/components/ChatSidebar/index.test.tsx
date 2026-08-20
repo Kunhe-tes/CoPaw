@@ -323,16 +323,37 @@ describe("ChatSidebar infinite history scrolling", () => {
 
     expect(container.querySelector(".chat-sidebar-footer")).toBeNull();
     expect(container.querySelector('[data-testid="guide-image"]')).toBeNull();
+    expect(
+      container.querySelector(".chat-sidebar-content-record-list"),
+    ).toHaveClass("chat-sidebar-content-record-list--without-guide");
   });
 
-  it("hides the operation guide unless it is enabled", () => {
-    mocks.iframeState.bbk = "121";
-    mocks.iframeState.source = "RMASSIST";
+  it("does not expand the record list when origin is not Y", () => {
+    mocks.iframeState.bbk = "100";
+    mocks.iframeState.source = "OTHER";
 
     const { container } = render(<ChatSidebar tasks={[]} />);
 
     expect(container.querySelector(".chat-sidebar-footer")).toBeNull();
     expect(container.querySelector('[data-testid="guide-image"]')).toBeNull();
+    expect(
+      container.querySelector(".chat-sidebar-content-record-list"),
+    ).not.toHaveClass("chat-sidebar-content-record-list--without-guide");
+  });
+
+  it("accounts for the hidden header when source is ruice", () => {
+    mocks.iframeState.bbk = "100";
+    mocks.iframeState.source = "ruice";
+
+    const { container } = render(<ChatSidebar tasks={[]} showGuide />);
+    const recordList = container.querySelector(
+      ".chat-sidebar-content-record-list",
+    );
+
+    expect(recordList).toHaveClass(
+      "chat-sidebar-content-record-list--without-guide",
+      "chat-sidebar-content-record-list--without-header",
+    );
   });
 
   it("shows the operation guide when it is enabled", () => {

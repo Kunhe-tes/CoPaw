@@ -90,10 +90,14 @@ export default createGlobalStyle`
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
 
-  &--without-guide {
-    height: calc(100vh - 79px);
-  }
+.chat-sidebar-content-record-list--without-guide {
+  height: calc(100vh - 79px);
+}
+
+.chat-sidebar-content-record-list--without-guide.chat-sidebar-content-record-list--without-header {
+  height: calc(100vh - 79px + 56px);
 }
 
 /* History section */
