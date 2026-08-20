@@ -34,37 +34,78 @@ def capture_launch_dependencies(
     effective_skill_names: list[str],
 ) -> tuple[list[str], str | None, SubAgentLaunchDiagnostics]:
     """Snapshot effective Skills and MCP configuration privately."""
-    metadata = definition.skill_owned or definition.agent_owned
+    community = getattr(definition.agent_owned, "community", None)
+    metadata = (
+        definition.agent_owned
+        if community is not None
+        else definition.skill_owned or definition.agent_owned
+    )
+    frozen_root = (
+        workspace_dir
+        / "agents"
+        / f"{definition.agent_owned.definition_id}.dependencies"
+        if community is not None and definition.agent_owned is not None
+        else None
+    )
     snapshot_root = run_store_dir / f"{run_id}.skills"
     loaded_skills: list[str] = []
     skipped_skills: list[str] = []
     freshness_tokens: dict[str, str] = {}
+    if (
+        frozen_root is not None
+        and not frozen_root.is_dir()
+        and (
+            metadata is not None
+            and (metadata.declared_skills or metadata.declared_mcps)
+        )
+    ):
+        raise OSError("frozen expert dependency directory is missing")
     if metadata is not None:
         available_skills = set(effective_skill_names)
         for skill_name in metadata.declared_skills:
-            if skill_name not in available_skills:
+            source = (
+                frozen_root / "skills" / skill_name
+                if frozen_root is not None
+                else resolve_effective_skill_dir(workspace_dir, skill_name)
+            )
+            if frozen_root is None and skill_name not in available_skills:
                 skipped_skills.append(skill_name)
                 continue
-            source = resolve_effective_skill_dir(workspace_dir, skill_name)
             target = snapshot_root / skill_name
             if (
                 source is None
                 or source.is_symlink()
                 or not skill_tree_is_regular(source)
             ):
+                if frozen_root is not None:
+                    raise OSError(
+                        f"frozen expert dependency is missing: skill {skill_name}",
+                    )
                 skipped_skills.append(skill_name)
                 continue
             try:
                 _copy_skill_tree_no_symlinks(source, target)
                 loaded_skills.append(skill_name)
-                freshness_tokens[skill_name] = get_skill_freshness_token(source)
+                freshness_tokens[skill_name] = get_skill_freshness_token(
+                    source,
+                )
             except OSError:
                 skipped_skills.append(skill_name)
     try:
-        mcp_payload, snapshotted_mcps, skipped_mcps = _snapshot_declared_mcps(
-            parent_agent_config,
-            metadata.declared_mcps if metadata is not None else None,
-        )
+        if frozen_root is not None:
+            mcp_payload, snapshotted_mcps, skipped_mcps = (
+                _snapshot_frozen_mcps(
+                    frozen_root,
+                    metadata.declared_mcps if metadata is not None else None,
+                )
+            )
+        else:
+            mcp_payload, snapshotted_mcps, skipped_mcps = (
+                _snapshot_declared_mcps(
+                    parent_agent_config,
+                    metadata.declared_mcps if metadata is not None else None,
+                )
+            )
         private_path = _write_private_mcp_snapshot(
             run_store_dir,
             run_id,
@@ -107,6 +148,32 @@ def _snapshot_declared_mcps(
         payload[name] = client.model_dump(mode="json")
         snapshotted.append(name)
     return payload, snapshotted, skipped
+
+
+def _snapshot_frozen_mcps(
+    dependency_root: Path,
+    declared_mcps: list[str] | None,
+) -> tuple[dict[str, Any], list[str], list[str]]:
+    config_path = dependency_root / "mcp" / "config.json"
+    if not config_path.is_file():
+        if declared_mcps:
+            raise OSError("frozen expert dependency is missing: MCP config")
+        return {}, [], []
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OSError(
+            "frozen expert dependency MCP config is unreadable",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise OSError("frozen expert dependency MCP config is invalid")
+    names = declared_mcps if declared_mcps is not None else sorted(payload)
+    missing = [name for name in names if name not in payload]
+    if missing:
+        raise OSError(
+            "frozen expert dependency is missing: MCP " + ", ".join(missing),
+        )
+    return {name: payload[name] for name in names}, list(names), []
 
 
 def capture_model_launch_snapshot(
@@ -414,7 +481,9 @@ def _copy_skill_directory(source_fd: int, target_fd: int) -> None:
                 os.mkdir(name, dir_fd=target_fd)
                 child_target_fd = os.open(
                     name,
-                    os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0),
+                    os.O_RDONLY
+                    | os.O_DIRECTORY
+                    | getattr(os, "O_NOFOLLOW", 0),
                     dir_fd=target_fd,
                 )
                 try:
@@ -438,7 +507,10 @@ def _copy_skill_directory(source_fd: int, target_fd: int) -> None:
                 )
             target_file_fd = os.open(
                 name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0),
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_NOFOLLOW", 0),
                 0o600,
                 dir_fd=target_fd,
             )

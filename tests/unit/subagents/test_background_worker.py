@@ -28,6 +28,7 @@ from swe.app.subagents.launch_snapshot import (
     read_and_remove_private_mcp_snapshot,
     resolve_skill_owned_model_slot,
 )
+from swe.app.subagents.models import AgentOwnedDefinitionMetadata
 from swe.config.config import MCPClientConfig, MCPConfig
 
 
@@ -592,6 +593,101 @@ def test_dependency_snapshot_copies_declared_skill_and_private_mcp(tmp_path):
         == "github"
     )
     assert not Path(private_path).exists()
+
+
+def test_received_expert_uses_only_its_frozen_private_dependencies(tmp_path):
+    definition = _definition().model_copy(
+        update={
+            "name": "received-reviewer",
+            "agent_owned": AgentOwnedDefinitionMetadata(
+                definition_id="00000000-0000-0000-0000-000000000001",
+                declared_skills=["quality"],
+                declared_mcps=["github"],
+                community={
+                    "item_id": "expert-1",
+                    "version": "1.0.0",
+                    "content_fingerprint": "fingerprint",
+                },
+            ),
+        },
+    )
+    dependency_root = (
+        tmp_path
+        / "agents"
+        / "00000000-0000-0000-0000-000000000001.dependencies"
+    )
+    (dependency_root / "skills" / "quality").mkdir(parents=True)
+    (dependency_root / "skills" / "quality" / "SKILL.md").write_text(
+        "# Frozen quality",
+        encoding="utf-8",
+    )
+    (dependency_root / "mcp").mkdir()
+    (dependency_root / "mcp" / "config.json").write_text(
+        json.dumps(
+            {
+                "github": {
+                    "name": "github",
+                    "command": "frozen-github",
+                    "env": {"TOKEN": "frozen"},
+                },
+            },
+        ),
+        encoding="utf-8",
+    )
+    config = _agent_config(tmp_path).model_copy(
+        update={
+            "mcp": MCPConfig(
+                clients={
+                    "github": MCPClientConfig(
+                        name="github",
+                        command="profile-github",
+                    ),
+                },
+            ),
+        },
+    )
+
+    dirs, private_path, diagnostics = capture_launch_dependencies(
+        run_store_dir=tmp_path / "runs",
+        run_id="run-frozen",
+        workspace_dir=tmp_path,
+        parent_agent_config=config,
+        definition=definition,
+        effective_skill_names=["quality"],
+    )
+
+    assert (Path(dirs[0]) / "SKILL.md").read_text() == "# Frozen quality"
+    assert private_path is not None
+    assert json.loads(Path(private_path).read_text())["github"]["command"] == (
+        "frozen-github"
+    )
+    assert diagnostics.skipped_skills == []
+
+
+def test_received_expert_missing_frozen_dependency_fails_closed(tmp_path):
+    definition = _definition().model_copy(
+        update={
+            "agent_owned": AgentOwnedDefinitionMetadata(
+                definition_id="00000000-0000-0000-0000-000000000002",
+                declared_skills=["quality"],
+                community={
+                    "item_id": "expert-1",
+                    "version": "1.0.0",
+                    "content_fingerprint": "fingerprint",
+                },
+            ),
+        },
+    )
+
+    with pytest.raises(OSError, match="frozen expert dependency"):
+        capture_launch_dependencies(
+            run_store_dir=tmp_path / "runs",
+            run_id="run-missing-frozen",
+            workspace_dir=tmp_path,
+            parent_agent_config=_agent_config(tmp_path),
+            definition=definition,
+            effective_skill_names=["quality"],
+        )
 
 
 def test_skill_owned_model_reference_uses_available_tenant_model(
