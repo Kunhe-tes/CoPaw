@@ -6,6 +6,8 @@ from __future__ import annotations
 import logging
 import os
 import httpx
+import json
+from copy import deepcopy
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -45,7 +47,8 @@ async def initialize_scenario_snapshot(
     )
     skill_names = _resolve_local_skill_names(workspace_dir, bindings)
     resources: list[dict[str, Any]] = [
-        _resource_snapshot(binding, skill_names, agent_config) for binding in bindings
+        _resource_snapshot(binding, skill_names, agent_config)
+        for binding in bindings
     ]
     await _freeze_persistent_mcp_tools(
         resources=resources,
@@ -103,7 +106,10 @@ async def _resolve_temporary_skill_resources(
         return
     client = market_client or HttpMarketScenarioResourceClient()
     for resource in resources:
-        if resource.get("type") != "skill" or resource.get("status") != "unresolved":
+        if (
+            resource.get("type") != "skill"
+            or resource.get("status") != "unresolved"
+        ):
             continue
         try:
             detail = await client.get_skill_detail(
@@ -131,7 +137,13 @@ async def _resolve_temporary_skill_resources(
                     "skill_path": str(skill_path),
                 },
             )
-        except Exception as exc:  # best effort; unavailable stays unresolved
+        except Exception as exc:
+            resource.update(
+                {
+                    "status": "unavailable",
+                    "unavailable_reason": type(exc).__name__,
+                },
+            )
             logger.warning(
                 "scenario_skill_resolution_failed resource_id=%s error_type=%s",
                 resource.get("id"),
@@ -167,6 +179,12 @@ async def _freeze_persistent_mcp_tools(
             resource["tools"] = tools
         except Exception as exc:
             resource["tools"] = []
+            resource.update(
+                {
+                    "status": "unavailable",
+                    "unavailable_reason": type(exc).__name__,
+                },
+            )
             logger.warning(
                 "scenario_persistent_mcp_discovery_failed resource_id=%s "
                 "error_type=%s",
@@ -201,6 +219,12 @@ async def _resolve_temporary_mcp_resources(
                 bbk_id=bbk_id,
             )
             if not isinstance(detail, dict):
+                resource.update(
+                    {
+                        "status": "unavailable",
+                        "unavailable_reason": "invalid_market_detail",
+                    },
+                )
                 continue
             from .resources import (
                 resolve_temporary_mcp_config,
@@ -211,6 +235,12 @@ async def _resolve_temporary_mcp_resources(
             config = sanitize_mcp_config(detail.get("config"))
             resolved_config = resolve_temporary_mcp_config(config)
             if resolved_config is None:
+                resource.update(
+                    {
+                        "status": "unavailable",
+                        "unavailable_reason": "tenant_credentials_unavailable",
+                    },
+                )
                 continue
             discover = mcp_tool_discoverer or _discover_snapshot_mcp_tools
             tools = await discover(resource["id"], resolved_config)
@@ -223,12 +253,20 @@ async def _resolve_temporary_mcp_resources(
                 {
                     "status": "temporary",
                     "version": str(detail.get("version") or ""),
-                    "mcp_client_key": str(detail.get("client_key") or resource["id"]),
+                    "mcp_client_key": str(
+                        detail.get("client_key") or resource["id"],
+                    ),
                     "mcp_config_path": str(config_path),
                     "tools": tools,
                 },
             )
-        except Exception as exc:  # best effort; unavailable stays unresolved
+        except Exception as exc:
+            resource.update(
+                {
+                    "status": "unavailable",
+                    "unavailable_reason": type(exc).__name__,
+                },
+            )
             logger.warning(
                 "scenario_mcp_resolution_failed resource_id=%s error_type=%s",
                 resource.get("id"),
@@ -417,7 +455,10 @@ def _resource_snapshot(
                 {"status": "persistent", "skill_name": matching_name},
             )
     elif binding.resource_type.value == "mcp_service":
-        matching_key = _resolve_local_mcp_client_key(agent_config, binding.resource_id)
+        matching_key = _resolve_local_mcp_client_key(
+            agent_config,
+            binding.resource_id,
+        )
         if matching_key is not None:
             resource.update(
                 {
@@ -467,7 +508,7 @@ def get_scenario_snapshot(
 ) -> dict[str, Any] | None:
     """Read a previously initialized snapshot without re-querying catalog data."""
     snapshot = (meta or {}).get(_SNAPSHOT_META_KEY)
-    return dict(snapshot) if isinstance(snapshot, dict) else None
+    return deepcopy(snapshot) if isinstance(snapshot, dict) else None
 
 
 def with_scenario_snapshot(
@@ -514,13 +555,18 @@ def scenario_snapshot_skill_directives(
         if not isinstance(name, str) or not isinstance(raw_path, str):
             continue
         try:
-            path = Path(raw_path).resolve()
+            path = Path(raw_path)
+            _reject_symlink_path(path, session_root)
+            path = path.resolve()
             path.relative_to(session_root)
             content = path.read_text(encoding="utf-8")
         except (OSError, ValueError, UnicodeError):
+            _mark_resource_unavailable(resource, "skill_path_unavailable")
             continue
         try:
-            description = str(frontmatter.loads(content).get("description") or "")
+            description = str(
+                frontmatter.loads(content).get("description") or "",
+            )
         except (ValueError, TypeError):
             description = ""
         directives.append(
@@ -562,13 +608,24 @@ def scenario_snapshot_mcp_configs(
                 {
                     "resource_id": str(resource.get("id") or ""),
                     "client_key": str(
-                        resource.get("mcp_client_key") or resource.get("id") or "",
+                        resource.get("mcp_client_key")
+                        or resource.get("id")
+                        or "",
                     ),
                     "config": dict(config),
                     "tools": resource.get("tools", []),
                 },
             )
-    return [item for item in result if item["resource_id"] and item["client_key"]]
+        else:
+            _mark_resource_unavailable(resource, "mcp_config_unavailable")
+    return [
+        item for item in result if item["resource_id"] and item["client_key"]
+    ]
+
+
+def _mark_resource_unavailable(resource: dict[str, Any], reason: str) -> None:
+    resource["status"] = "unavailable"
+    resource["unavailable_reason"] = reason
 
 
 def _read_temporary_mcp_config(
@@ -580,7 +637,9 @@ def _read_temporary_mcp_config(
     if not isinstance(raw_path, str):
         return None
     try:
-        path = Path(raw_path).resolve()
+        path = Path(raw_path)
+        _reject_symlink_path(path, session_root)
+        path = path.resolve()
         path.relative_to(session_root)
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
@@ -593,3 +652,18 @@ def _chat_session_root(workspace_dir: Path, chat_id: str) -> Path:
 
     UUID(str(chat_id))
     return (workspace_dir / ".scenario_sessions" / str(chat_id)).resolve()
+
+
+def _reject_symlink_path(path: Path, boundary: Path) -> None:
+    """Reject symlink components before resolving a Chat-private path."""
+    try:
+        relative = path.relative_to(boundary)
+    except ValueError as exc:
+        raise ValueError(
+            "scenario resource path escapes Chat boundary",
+        ) from exc
+    current = boundary
+    for component in relative.parts:
+        current = current / component
+        if current.is_symlink():
+            raise ValueError("scenario resource path contains symlink")

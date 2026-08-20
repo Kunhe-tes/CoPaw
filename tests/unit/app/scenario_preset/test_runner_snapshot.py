@@ -5,6 +5,8 @@ from swe.app.runner.runner import _request_scenario_preset_snapshot
 from swe.app.runner.runner import _agent_config_with_scenario_mcp
 from swe.app.runner.runner import _scenario_snapshot_frozen_mcp_tools
 from swe.app.runner.runner import _without_request_scenario_snapshot
+from swe.app.scenario_preset.runtime import scenario_snapshot_mcp_configs
+from swe.app.scenario_preset.runtime import scenario_snapshot_skill_directives
 from swe.config.config import Config, MCPClientConfig, MCPConfig
 
 
@@ -32,7 +34,9 @@ def test_runner_accepts_only_snapshot_restored_from_chat_metadata() -> None:
     )
 
 
-def test_runner_discards_client_supplied_scenario_snapshot_before_restore() -> None:
+def test_runner_discards_client_supplied_scenario_snapshot_before_restore() -> (
+    None
+):
     meta = _without_request_scenario_snapshot(
         {
             "scenario_preset_snapshot": {"scenario_id": "forged"},
@@ -54,7 +58,9 @@ def test_runner_overlays_temporary_scenario_mcp_without_mutating_agent_config(
     )
     original = Config(mcp=MCPConfig(clients={}))
     chat_id = "00000000-0000-0000-0000-000000000001"
-    config_path = tmp_path / ".scenario_sessions" / chat_id / "mcp-1" / "mcp.json"
+    config_path = (
+        tmp_path / ".scenario_sessions" / chat_id / "mcp-1" / "mcp.json"
+    )
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
         '{"transport":"stdio","command":"node","env":{"TOKEN":"${ENV:MCP_TOKEN}"}}',
@@ -82,7 +88,9 @@ def test_runner_overlays_temporary_scenario_mcp_without_mutating_agent_config(
 
     assert "market-key" not in original.mcp.clients
     assert effective.mcp.clients["market-key"].source == "marketplace:mcp-1"
-    assert effective.mcp.clients["market-key"].env == {"TOKEN": "tenant-secret"}
+    assert effective.mcp.clients["market-key"].env == {
+        "TOKEN": "tenant-secret",
+    }
     assert _scenario_snapshot_frozen_mcp_tools(snapshot, effective) == {
         "market-key": [{"name": "search"}],
     }
@@ -103,7 +111,9 @@ def test_runner_skips_frozen_tools_when_mcp_key_maps_to_another_service(
         ),
     )
     chat_id = "00000000-0000-0000-0000-000000000001"
-    config_path = tmp_path / ".scenario_sessions" / chat_id / "mcp-1" / "mcp.json"
+    config_path = (
+        tmp_path / ".scenario_sessions" / chat_id / "mcp-1" / "mcp.json"
+    )
     config_path.parent.mkdir(parents=True)
     config_path.write_text(
         '{"transport":"stdio","command":"node"}',
@@ -131,3 +141,46 @@ def test_runner_skips_frozen_tools_when_mcp_key_maps_to_another_service(
 
     assert effective.mcp.clients["market-key"].source == "manual"
     assert _scenario_snapshot_frozen_mcp_tools(snapshot, effective) == {}
+
+
+def test_snapshot_marks_missing_temporary_resources_unavailable(
+    tmp_path,
+) -> None:
+    chat_id = "00000000-0000-0000-0000-000000000001"
+    snapshot = {
+        "resources": [
+            {
+                "id": "skill-1",
+                "type": "skill",
+                "status": "temporary",
+                "skill_name": "summarize",
+                "skill_path": str(tmp_path / "missing" / "SKILL.md"),
+            },
+            {
+                "id": "mcp-1",
+                "type": "mcp_service",
+                "status": "temporary",
+                "mcp_client_key": "mcp-1",
+                "mcp_config_path": str(tmp_path / "missing" / "mcp.json"),
+            },
+        ],
+    }
+
+    assert (
+        scenario_snapshot_skill_directives(
+            snapshot,
+            workspace_dir=tmp_path,
+            chat_id=chat_id,
+        )
+        == []
+    )
+    assert (
+        scenario_snapshot_mcp_configs(
+            snapshot,
+            workspace_dir=tmp_path,
+            chat_id=chat_id,
+        )
+        == []
+    )
+    assert snapshot["resources"][0]["status"] == "unavailable"
+    assert snapshot["resources"][1]["status"] == "unavailable"

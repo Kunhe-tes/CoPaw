@@ -80,6 +80,8 @@ export default function ScenarioPresetsPage() {
   const [promptDraft, setPromptDraft] = useState("");
   const [active, setActive] = useState(true);
   const [bindings, setBindings] = useState<ScenarioPresetBinding[]>([]);
+  const [bindingsLoaded, setBindingsLoaded] = useState(false);
+  const [bindingsLoadFailed, setBindingsLoadFailed] = useState(false);
   const [skillOptions, setSkillOptions] = useState<
     { label: string; value: string }[]
   >([]);
@@ -123,6 +125,8 @@ export default function ScenarioPresetsPage() {
       setPromptDraft(node.prompt_draft);
       setActive(node.is_active);
       setBindings([]);
+      setBindingsLoaded(node.kind !== "scenario");
+      setBindingsLoadFailed(false);
       setDrawerOpen(true);
       if (node.kind !== "scenario") return;
       try {
@@ -133,6 +137,7 @@ export default function ScenarioPresetsPage() {
         ]);
         if (drawerRequestIdRef.current !== requestId) return;
         setBindings(bindingResult.bindings);
+        setBindingsLoaded(true);
         setSkillOptions(
           mergeBindingOptions(
             bindingResult.bindings,
@@ -155,6 +160,7 @@ export default function ScenarioPresetsPage() {
         );
       } catch {
         if (drawerRequestIdRef.current !== requestId) return;
+        setBindingsLoadFailed(true);
         message.warning("部分市场资源暂不可加载，可继续编辑场景文本");
       }
     },
@@ -199,7 +205,7 @@ export default function ScenarioPresetsPage() {
         is_active: active,
         ...(selected.kind === "scenario" ? { prompt_draft: promptDraft } : {}),
       });
-      if (selected.kind === "scenario")
+      if (selected.kind === "scenario" && bindingsLoaded && !bindingsLoadFailed)
         await scenarioPresetApi.replaceBindings(selected.id, bindings);
       message.success("场景预设已保存");
       setDrawerOpen(false);
@@ -207,7 +213,7 @@ export default function ScenarioPresetsPage() {
     } catch (error) {
       message.error(error instanceof Error ? error.message : "保存失败");
     }
-  }, [active, bindings, message, nodeName, promptDraft, reload, selected]);
+  }, [active, bindings, bindingsLoadFailed, bindingsLoaded, message, nodeName, promptDraft, reload, selected]);
 
   const deleteSelected = useCallback(() => {
     if (!selected) return;
@@ -401,7 +407,11 @@ export default function ScenarioPresetsPage() {
             <Button danger icon={<DeleteOutlined />} onClick={deleteSelected}>
               删除
             </Button>
-            <Button type="primary" onClick={() => void saveDrawer()}>
+            <Button
+              type="primary"
+              disabled={selected?.kind === "scenario" && (!bindingsLoaded || bindingsLoadFailed)}
+              onClick={() => void saveDrawer()}
+            >
               保存
             </Button>
           </Space>

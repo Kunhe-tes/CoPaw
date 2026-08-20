@@ -938,8 +938,11 @@ async def _start_new_chat(
         if getattr(workspace, "agent_id", None)
         else {}
     )
+    created = False
     if scenario_preset_id:
-        from ..scenario_preset.router import get_service as get_scenario_service
+        from ..scenario_preset.router import (
+            get_service as get_scenario_service,
+        )
         from ..scenario_preset.runtime import initialize_scenario_snapshot
 
         async def snapshot_factory(chat):
@@ -961,7 +964,7 @@ async def _start_new_chat(
             )
 
         try:
-            chat, _ = (
+            chat, created = (
                 await workspace.chat_manager.get_or_create_scenario_chat(
                     session_id,
                     native_payload["sender_id"],
@@ -995,12 +998,12 @@ async def _start_new_chat(
                 status_code=409,
                 detail="Scenario selection is only available for a new chat",
             )
-        elif snapshot.get("scenario_id") != scenario_preset_id:
+        if snapshot.get("scenario_id") != scenario_preset_id:
             raise HTTPException(
                 status_code=409,
                 detail="Scenario selection is locked for this chat",
             )
-        elif snapshot.get("agent_id") not in (None, workspace.agent_id):
+        if snapshot.get("agent_id") not in (None, workspace.agent_id):
             raise HTTPException(
                 status_code=409,
                 detail="Scenario chat is bound to another Agent",
@@ -1012,11 +1015,16 @@ async def _start_new_chat(
     # push) can identify the session's original channel (e.g. zhaohu).
     if chat.channel and chat.channel != "console":
         native_payload["meta"]["session_channel"] = chat.channel
-    queue, _ = await tracker.attach_or_start(
-        chat.id,
-        native_payload,
-        console_channel.stream_one,
-    )
+    try:
+        queue, _ = await tracker.attach_or_start(
+            chat.id,
+            native_payload,
+            console_channel.stream_one,
+        )
+    except BaseException:
+        if scenario_preset_id and created:
+            await workspace.chat_manager.delete_chats([chat.id])
+        raise
     return queue, chat.id, msgid
 
 
