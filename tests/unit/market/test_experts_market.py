@@ -231,6 +231,24 @@ def test_publish_expert_manager_only(
     )
 
 
+def test_publish_expert_invalid_source_returns_bad_request(
+    manager_client: TestClient,
+    test_app: FastAPI,
+) -> None:
+    test_app.state.marketplace.publish_expert_from_profile.side_effect = (
+        ValueError("expert definition not found")
+    )
+
+    response = manager_client.post(
+        "/market/experts",
+        headers={"X-Source-Id": "SRC", "X-User-Id": "alice"},
+        json={"definition_id": "missing", "agent_id": "research"},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "expert definition not found"
+
+
 def test_restore_and_unpublish_expert(
     manager_client: TestClient,
     test_app: FastAPI,
@@ -272,6 +290,23 @@ def test_restore_and_unpublish_expert(
 
     assert restore_response.status_code == 200
     assert unpublish_response.status_code == 200
+
+
+def test_restore_missing_version_returns_not_found(
+    manager_client: TestClient,
+    test_app: FastAPI,
+) -> None:
+    test_app.state.marketplace.restore_expert_version.side_effect = ValueError(
+        "Version 9.9.9 not found",
+    )
+
+    response = manager_client.post(
+        "/market/experts/expert-1/versions/9.9.9/restore",
+        headers={"X-Source-Id": "SRC"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Version 9.9.9 not found"
 
 
 def test_user_can_install_expert_into_selected_agent(

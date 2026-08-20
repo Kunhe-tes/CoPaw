@@ -56,6 +56,7 @@ from .fs import (
 )
 from .skill_registry import SkillRegistry
 from ..runtime.context import decode_scope_id
+from ..runtime.config_store import MCPClientConfig
 from .models import MarketItem
 from .schemas import (
     DistributeRequest,
@@ -350,7 +351,39 @@ def _extract_expert_dependencies(
             mcps = _as_str_list(dependencies.get("mcps")) or _as_str_list(
                 dependencies.get("mcp"),
             )
+    _validate_expert_dependency_names(skills, "skill")
+    _validate_expert_dependency_names(mcps, "MCP")
     return skills, mcps
+
+
+def _validate_expert_dependency_names(
+    names: list[str],
+    dependency_type: str,
+) -> None:
+    """Keep declared dependency names inside the package's private roots."""
+    for name in names:
+        if name in {".", ".."} or any(
+            separator in name for separator in ("/", "\\", "\x00")
+        ):
+            raise ExpertDependencyError(
+                f"Declared dependency {dependency_type} has an unsafe path: {name}",
+            )
+
+
+def _normalize_expert_mcp_config(
+    config: dict[str, Any],
+    mcp_name: str,
+) -> dict[str, Any]:
+    """Validate one frozen MCP while preserving its complete configuration."""
+    normalized = normalize_mcp_config_data(config)
+    normalized.setdefault("name", mcp_name)
+    try:
+        MCPClientConfig.model_validate(normalized)
+    except ValueError as exc:
+        raise ExpertDependencyError(
+            f"Invalid bundled MCP config: {mcp_name}",
+        ) from exc
+    return normalized
 
 
 def _copy_expert_package(source_dir: Path, target_dir: Path) -> None:
@@ -1544,10 +1577,21 @@ class MarketplaceService:
                 )
         for mcp_name in declared_mcps:
             mcp_json = source_dir / "mcp" / mcp_name / "mcp.json"
-            if not mcp_json.is_file():
+            try:
+                config = json.loads(mcp_json.read_text(encoding="utf-8"))
+            except (
+                OSError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
                 raise ExpertDependencyError(
-                    f"Missing declared dependency MCP: {mcp_name}",
+                    f"Invalid bundled MCP config: {mcp_name}",
+                ) from exc
+            if not isinstance(config, dict):
+                raise ExpertDependencyError(
+                    f"Invalid bundled MCP config: {mcp_name}",
                 )
+            _normalize_expert_mcp_config(config, mcp_name)
 
         items = load_index(self.marketplace_root, source_id)
         existing = next(
@@ -2105,9 +2149,44 @@ class MarketplaceService:
                     )
             definition_path = target_root / f"{definition_id}.toml"
 
-        source_definition = (package_root / "definition.toml").read_text(
-            encoding="utf-8",
+        try:
+            source_definition = (package_root / "definition.toml").read_text(
+                encoding="utf-8",
+            )
+            source_payload = tomllib.loads(source_definition)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ExpertDependencyError(
+                "Community expert definition is unreadable",
+            ) from exc
+        declared_skills, declared_mcps = _extract_expert_dependencies(
+            source_payload,
         )
+        for skill_name in declared_skills:
+            skill_root = package_root / "skills" / skill_name
+            if (
+                not skill_root.is_dir()
+                or not (skill_root / "SKILL.md").is_file()
+            ):
+                raise ExpertDependencyError(
+                    f"Missing declared dependency skill: {skill_name}",
+                )
+        for mcp_name in declared_mcps:
+            config_path = package_root / "mcp" / mcp_name / "mcp.json"
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+            except (
+                OSError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise ExpertDependencyError(
+                    f"Invalid bundled MCP config: {mcp_name}",
+                ) from exc
+            if not isinstance(config, dict):
+                raise ExpertDependencyError(
+                    f"Invalid bundled MCP config: {mcp_name}",
+                )
+            _normalize_expert_mcp_config(config, mcp_name)
         definition_text = _community_toml(
             source_definition,
             item_id,
@@ -2125,12 +2204,16 @@ class MarketplaceService:
                 f"enabled = {'true' if enabled else 'false'}\n"
                 + definition_text
             )
-        temporary = definition_path.with_suffix(".tmp")
+        temporary = definition_path.with_name(
+            f".{definition_path.name}.{uuid.uuid4().hex}.tmp",
+        )
         temporary.write_text(definition_text, encoding="utf-8")
-        os.replace(temporary, definition_path)
         dependency_root = target_root / f"{definition_id}.dependencies"
         temporary_root = dependency_root.with_name(
             f".{dependency_root.name}.source-{uuid.uuid4().hex}",
+        )
+        backup_root = dependency_root.with_name(
+            f".{dependency_root.name}.backup-{uuid.uuid4().hex}",
         )
         try:
             temporary_root.mkdir(parents=True, exist_ok=True)
@@ -2161,19 +2244,31 @@ class MarketplaceService:
                         raise ExpertDependencyError(
                             f"Invalid bundled MCP config: {mcp_dir.name}",
                         )
-                    mcp_payload[mcp_dir.name] = normalize_mcp_config_data(
+                    mcp_payload[mcp_dir.name] = _normalize_expert_mcp_config(
                         config,
+                        mcp_dir.name,
                     )
                 (mcp_root / "config.json").write_text(
                     json.dumps(mcp_payload, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
-            if dependency_root.exists():
-                shutil.rmtree(dependency_root)
-            os.replace(temporary_root, dependency_root)
+            try:
+                if dependency_root.exists():
+                    os.replace(dependency_root, backup_root)
+                os.replace(temporary_root, dependency_root)
+                os.replace(temporary, definition_path)
+            except BaseException:
+                if dependency_root.exists():
+                    shutil.rmtree(dependency_root, ignore_errors=True)
+                if backup_root.exists():
+                    os.replace(backup_root, dependency_root)
+                raise
         finally:
+            temporary.unlink(missing_ok=True)
             if temporary_root.exists():
                 shutil.rmtree(temporary_root, ignore_errors=True)
+            if backup_root.exists():
+                shutil.rmtree(backup_root, ignore_errors=True)
         return ExpertOperationResult(
             user_id=user_id,
             success=True,

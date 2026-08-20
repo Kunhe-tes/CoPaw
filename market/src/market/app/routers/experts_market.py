@@ -78,6 +78,8 @@ async def publish_expert(
         ) from exc
     except ExpertDependencyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     return MarketExpertResponse(
         item_id=item.item_id,
         name=item.name,
@@ -109,13 +111,16 @@ async def restore_expert_version(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
-    item = await svc.restore_expert_version(
-        source_id,
-        item_id,
-        version_id,
-        operator_id="manager",
-        operator_name="Manager",
-    )
+    try:
+        item = await svc.restore_expert_version(
+            source_id,
+            item_id,
+            version_id,
+            operator_id="manager",
+            operator_name="Manager",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     detail = await svc.get_expert_detail(source_id, item_id, "100")
     if detail is None:
         raise HTTPException(status_code=404, detail="Expert not found")

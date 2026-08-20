@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import os
 import tomllib
 from unittest.mock import AsyncMock, MagicMock
 
@@ -13,6 +14,7 @@ import pytest
 from market.marketplace.fs import get_user_expert_dir, load_index
 from market.marketplace.schemas import ExpertDistributionRequest
 from market.marketplace.service import (
+    ExpertDependencyError,
     ExpertNameConflictError,
     MarketplaceService,
 )
@@ -58,7 +60,7 @@ def _write_source_package(
     creator_name: str = "Author A",
     category_id: int = 7,
     skill_content: str = "# skill a\n",
-    mcp_config: str = '{"name": "mcp_a"}',
+    mcp_config: str = '{"name": "mcp_a", "command": "tool"}',
     scan_result: str = '{"status": "clean"}',
     declare_missing_skill: bool = False,
 ) -> None:
@@ -395,6 +397,44 @@ class TestPublishExpert:
             await _publish(service, "source-a", source_dir)
 
     @pytest.mark.asyncio
+    async def test_publish_rejects_unusable_declared_mcp_config(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        """Declared MCPs must contain a runnable transport configuration."""
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir, mcp_config='{"name": "mcp_a"}')
+
+        with pytest.raises(ExpertDependencyError, match="Invalid bundled MCP"):
+            await _publish(service, "source-a", source_dir)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["skills", "mcps"])
+    async def test_publish_rejects_dependency_path_segments(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+        field: str,
+    ) -> None:
+        """A package cannot resolve dependencies outside its frozen root."""
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        definition_path = source_dir / "definition.toml"
+        definition_path.write_text(
+            definition_path.read_text(encoding="utf-8").replace(
+                f'{field} = ["{field[:-1]}_a"]',
+                f'{field} = ["../outside"]',
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(ExpertDependencyError, match="unsafe path"):
+            await _publish(service, "source-a", source_dir)
+
+    @pytest.mark.asyncio
     async def test_same_name_without_overwrite_conflicts(
         self,
         service: MarketplaceService,
@@ -500,7 +540,13 @@ class TestReceivedExpertLifecycle:
                 encoding="utf-8",
             ),
         )
-        assert mcp_snapshot == {"mcp_a": {"name": "mcp_a"}}
+        assert mcp_snapshot == {
+            "mcp_a": {
+                "name": "mcp_a",
+                "command": "tool",
+                "transport": "stdio",
+            },
+        }
         payload = tomllib.loads(definition.read_text(encoding="utf-8"))
         assert payload["enabled"] is True
         assert payload["community"]["item_id"] == item.item_id
@@ -544,7 +590,41 @@ class TestReceivedExpertLifecycle:
         )
         assert config["mcp_a"]["env"] == {"TOKEN": "value"}
         assert config["mcp_a"]["headers"] == {"X-Test": "yes"}
+        assert config["mcp_a"]["name"] == "mcp_a"
         assert config["mcp_a"]["transport"] == "stdio"
+
+    @pytest.mark.asyncio
+    async def test_install_rejects_incomplete_package_without_creating_definition(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+    ) -> None:
+        """A corrupted published package cannot leave a partial receipt."""
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        item, _ = await _publish(service, "source-a", source_dir)
+        package_config = (
+            service.marketplace_root
+            / "source-a"
+            / "experts"
+            / item.item_id
+            / "mcp"
+            / "mcp_a"
+            / "mcp.json"
+        )
+        package_config.unlink()
+
+        with pytest.raises(ExpertDependencyError, match="Invalid bundled MCP"):
+            await service.install_expert("source-a", item.item_id, "alice")
+
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+        assert list(expert_dir.glob("*.toml")) == []
 
     @pytest.mark.asyncio
     async def test_install_does_not_overwrite_existing_received_expert(
@@ -642,6 +722,68 @@ class TestReceivedExpertLifecycle:
             / "skill_a"
             / "SKILL.md"
         ).read_text(encoding="utf-8") == "# updated\n"
+
+    @pytest.mark.asyncio
+    async def test_failed_update_restores_previous_dependencies(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failed definition commit must not leave updated dependencies."""
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir, skill_content="# original\n")
+        item, _ = await _publish(service, "source-a", source_dir)
+        installed = await service.install_expert(
+            "source-a",
+            item.item_id,
+            "alice",
+        )
+        expert_dir = get_user_expert_dir(
+            service.swe_root,
+            "alice",
+            "default",
+            "source-a",
+        )
+        definition_path = expert_dir / f"{installed.definition_id}.toml"
+        (source_dir / "skills" / "skill_a" / "SKILL.md").write_text(
+            "# updated\n",
+            encoding="utf-8",
+        )
+        await _publish(service, "source-a", source_dir)
+        original_replace = os.replace
+
+        def fail_definition_commit(
+            source: str | Path,
+            target: str | Path,
+        ) -> None:
+            if Path(target) == definition_path:
+                raise OSError("definition commit failed")
+            original_replace(source, target)
+
+        monkeypatch.setattr(
+            "market.marketplace.service.os.replace",
+            fail_definition_commit,
+        )
+
+        with pytest.raises(OSError, match="definition commit failed"):
+            service._install_expert_for_user(
+                "source-a",
+                item.item_id,
+                "alice",
+                "default",
+                "manager",
+                update=True,
+            )
+
+        assert (
+            expert_dir
+            / f"{installed.definition_id}.dependencies"
+            / "skills"
+            / "skill_a"
+            / "SKILL.md"
+        ).read_text(encoding="utf-8") == "# original\n"
 
     @pytest.mark.asyncio
     async def test_recall_removes_received_definition_by_community_item_id(
