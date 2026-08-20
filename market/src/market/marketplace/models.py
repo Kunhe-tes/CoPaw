@@ -49,3 +49,23 @@ class SkillManifest(BaseModel):
     source: str = "customized"
     distributed_by: Optional[str] = None
     received_version: Optional[str] = None
+
+
+class ExpertVersion(BaseModel):
+    """社区专家版本快照."""
+
+    version_id: str
+    created_at: str
+    created_by: str = ""
+    created_by_name: str = ""
+    description: str = ""
+    signature: str = ""
+    is_current: bool = False
+    is_initial: bool = False
+
+
+class ExpertVersionsManifest(BaseModel):
+    """社区专家版本清单."""
+
+    expert_name: str = ""
+    versions: list[ExpertVersion] = Field(default_factory=list)

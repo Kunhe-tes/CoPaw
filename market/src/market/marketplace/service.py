@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import tomllib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,6 +30,8 @@ from .fs import (
     _mask_env_value,
     copy_mcp_to_user,
     copy_skill_to_user,
+    get_expert_dir,
+    get_expert_definition_path,
     get_mcp_dir,
     get_skill_dir,
     get_user_disabled_skills_dir,
@@ -57,6 +60,8 @@ from .schemas import (
     MCPDistributionTenantResult,
     MarketMCPDetail,
     MarketMCPItem,
+    MarketExpertDetail,
+    MarketExpertResponse,
     MarketSkillDetail,
     MarketSkillResponse,
     MCPConfigDetail,
@@ -69,6 +74,7 @@ from .schemas import (
     RecallResultItem,
     SkillUserStat,
 )
+from .expert_version_service import ExpertVersionService
 from .version_service import SkillVersionService
 
 if TYPE_CHECKING:
@@ -131,6 +137,32 @@ class SkillVersionConflictError(Exception):
 
 class MCPVersionConflictError(Exception):
     """MCP 同步快照时 version_id 撞车（同 version_id 不同 signature）。"""
+
+
+class ExpertNameConflictError(ValueError):
+    """专家同名冲突异常。"""
+
+    def __init__(
+        self,
+        existing_item_id: str,
+        existing_name: str,
+        existing_creator_id: str = "",
+        existing_creator_name: str = "",
+        existing_version: str = "",
+    ) -> None:
+        self.existing_item_id = existing_item_id
+        self.existing_name = existing_name
+        self.existing_creator_id = existing_creator_id
+        self.existing_creator_name = existing_creator_name
+        self.existing_version = existing_version
+        super().__init__(
+            f"Expert with name '{existing_name}' already exists "
+            f"(created by {existing_creator_name or existing_creator_id})",
+        )
+
+
+class ExpertDependencyError(ValueError):
+    """专家声明依赖缺失异常。"""
 
 
 _BINARY_PREVIEW_SUFFIXES = {
@@ -254,6 +286,79 @@ def _sort_items_by_updated_at_desc(
 def _bump_patch(version: str) -> str:
     """Increment patch version: '1.0.0' -> '1.0.1'（委托共享工具）."""
     return _shared_bump_patch(version)
+
+
+def _next_expert_version(current_version: str, existing_ids: set[str]) -> str:
+    """为专家生成下一个唯一补丁版本."""
+    candidate = "1.0.0" if not current_version else _bump_patch(current_version)
+    for _ in range(100):
+        if candidate not in existing_ids:
+            return candidate
+        candidate = _bump_patch(candidate)
+    return candidate
+
+
+def _read_expert_definition(source_dir: Path) -> dict[str, Any]:
+    """读取专家 definition.toml."""
+    definition_path = source_dir / "definition.toml"
+    if not definition_path.exists():
+        raise ValueError("definition.toml not found")
+    try:
+        return tomllib.loads(definition_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"Invalid expert definition: {exc}") from exc
+
+
+def _as_str_list(value: object) -> list[str]:
+    """将 TOML 字段归一为字符串列表."""
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
+
+
+def _extract_expert_dependencies(
+    definition: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """提取专家声明的 Skills / MCP 依赖."""
+    skills = _as_str_list(definition.get("skills"))
+    mcps = _as_str_list(definition.get("mcps")) or _as_str_list(
+        definition.get("mcp"),
+    )
+
+    dependencies = definition.get("dependencies")
+    if isinstance(dependencies, dict):
+        if not skills:
+            skills = _as_str_list(dependencies.get("skills"))
+        if not mcps:
+            mcps = _as_str_list(dependencies.get("mcps")) or _as_str_list(
+                dependencies.get("mcp"),
+            )
+    return skills, mcps
+
+
+def _copy_expert_package(source_dir: Path, target_dir: Path) -> None:
+    """把专家包同步到目标目录，保留 versions/ 和 versions.json."""
+    preserve = {"versions", "versions.json"}
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for existing in list(target_dir.iterdir()):
+        if existing.name in preserve:
+            continue
+        if existing.is_dir():
+            shutil.rmtree(existing)
+        else:
+            existing.unlink()
+    for entry in source_dir.iterdir():
+        if entry.name in preserve:
+            continue
+        target = target_dir / entry.name
+        if entry.is_dir():
+            shutil.copytree(entry, target)
+        else:
+            shutil.copy2(entry, target)
 
 
 def _decode_creator_name(value: str) -> str:
@@ -537,6 +642,10 @@ class MarketplaceService:
         self.marketplace_root = marketplace_root
         self.swe_root = swe_root
         self.skill_registry = SkillRegistry(db)
+
+    def _get_expert_version_service(self) -> ExpertVersionService:
+        """获取社区专家版本服务."""
+        return ExpertVersionService(self.marketplace_root)
 
     async def _trigger_agent_reload(
         self,
@@ -1176,6 +1285,298 @@ class MarketplaceService:
             except Exception as e:
                 logger.warning("Failed to log unpublish operation: %s", e)
 
+        return True
+
+    async def list_expert_items(
+        self,
+        source_id: str,
+        user_bbk_id: str,
+        category_id: Optional[int] = None,
+        bbk_ids: Optional[list[str]] = None,
+    ) -> list[MarketExpertResponse]:
+        """列出市场社区专家."""
+        items = load_index(self.marketplace_root, source_id)
+        expert_items = [
+            item
+            for item in items
+            if item.item_type == "expert" and item.status == "active"
+        ]
+        expert_items = _sort_items_by_updated_at_desc(expert_items)
+
+        if category_id is not None:
+            expert_items = [
+                item for item in expert_items if item.category_id == category_id
+            ]
+        if bbk_ids is not None and len(bbk_ids) > 0:
+            expert_items = [
+                item
+                for item in expert_items
+                if item.bbk_ids and any(bbk in item.bbk_ids for bbk in bbk_ids)
+            ]
+
+        return [
+            MarketExpertResponse(
+                item_id=item.item_id,
+                name=item.name,
+                description=item.description,
+                version=item.version,
+                creator_id=item.creator_id,
+                creator_name=_decode_creator_name(item.creator_name),
+                category_id=item.category_id,
+                bbk_ids=item.bbk_ids,
+                status=item.status,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            for item in expert_items
+        ]
+
+    async def get_expert_detail(
+        self,
+        source_id: str,
+        item_id: str,
+        user_bbk_id: str,
+    ) -> MarketExpertDetail | None:
+        """获取社区专家详情."""
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                current
+                for current in items
+                if current.item_id == item_id and current.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None or not _item_visible(item, user_bbk_id):
+            return None
+
+        version_svc = self._get_expert_version_service()
+        versions = version_svc.list_versions(source_id, item_id)
+
+        definition: dict[str, Any] = {}
+        definition_path = get_expert_definition_path(
+            self.marketplace_root,
+            source_id,
+            item_id,
+        )
+        if definition_path.exists():
+            try:
+                definition = tomllib.loads(
+                    definition_path.read_text(encoding="utf-8"),
+                )
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                definition = {}
+
+        return MarketExpertDetail(
+            item_id=item.item_id,
+            name=item.name,
+            description=item.description,
+            version=item.version,
+            creator_id=item.creator_id,
+            creator_name=_decode_creator_name(item.creator_name),
+            category_id=item.category_id,
+            bbk_ids=item.bbk_ids,
+            status=item.status,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+            versions=versions.get("versions", []),
+            definition=definition,
+        )
+
+    async def publish_expert(
+        self,
+        source_id: str,
+        source_dir: Path,
+        operator_id: str = "",
+        operator_name: str = "",
+        overwrite: bool = False,
+    ) -> tuple[MarketItem, bool]:
+        """发布社区专家."""
+        source_dir = Path(source_dir)
+        definition = _read_expert_definition(source_dir)
+        expert_name = str(definition.get("name", "")).strip()
+        if not expert_name:
+            raise ValueError("Expert name is required")
+        creator_id = str(definition.get("creator_id", "")).strip()
+        if not creator_id:
+            raise ValueError("creator_id is required")
+        creator_name = str(definition.get("creator_name", "")).strip()
+        description = str(definition.get("description", "")).strip()
+        category_id = definition.get("category_id")
+        if category_id is not None and not isinstance(category_id, int):
+            raise ValueError("category_id must be an integer")
+        bbk_ids = (
+            [
+                str(value).strip()
+                for value in definition.get("bbk_ids", [])
+                if str(value).strip()
+            ]
+            if isinstance(definition.get("bbk_ids"), list)
+            else []
+        )
+
+        declared_skills, declared_mcps = _extract_expert_dependencies(definition)
+        for skill_name in declared_skills:
+            skill_dir = source_dir / "skills" / skill_name
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                raise ExpertDependencyError(
+                    f"Missing declared dependency skill: {skill_name}",
+                )
+        for mcp_name in declared_mcps:
+            mcp_json = source_dir / "mcp" / mcp_name / "mcp.json"
+            if not mcp_json.is_file():
+                raise ExpertDependencyError(
+                    f"Missing declared dependency MCP: {mcp_name}",
+                )
+
+        items = load_index(self.marketplace_root, source_id)
+        existing = next(
+            (
+                item
+                for item in items
+                if item.item_type == "expert" and item.name == expert_name
+            ),
+            None,
+        )
+        if existing is not None and not overwrite:
+            raise ExpertNameConflictError(
+                existing_item_id=existing.item_id,
+                existing_name=existing.name,
+                existing_creator_id=existing.creator_id,
+                existing_creator_name=existing.creator_name,
+                existing_version=existing.version,
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        if existing is None:
+            item = MarketItem(
+                item_id=str(uuid.uuid4()),
+                item_type="expert",
+                name=expert_name,
+                description=description,
+                version="1.0.0",
+                creator_id=creator_id,
+                creator_name=creator_name,
+                category_id=category_id,
+                bbk_ids=bbk_ids,
+                status="active",
+                created_at=now,
+                updated_at=now,
+            )
+            items.append(item)
+        else:
+            item = existing
+
+        expert_root = get_expert_dir(
+            self.marketplace_root,
+            source_id,
+            item.item_id,
+        )
+        _copy_expert_package(source_dir, expert_root)
+
+        version_svc = self._get_expert_version_service()
+        signature = version_svc.calculate_signature(source_dir)
+        manifest = version_svc._load_versions_manifest(source_id, item.item_id)
+        current_version = next(
+            (version for version in manifest.versions if version.is_current),
+            None,
+        )
+
+        if current_version and current_version.signature == signature:
+            item.version = current_version.version_id
+            item.description = description
+            item.creator_id = creator_id
+            item.creator_name = creator_name
+            item.category_id = category_id
+            item.bbk_ids = bbk_ids
+            item.status = "active"
+            item.updated_at = now
+            save_index(self.marketplace_root, source_id, items)
+            return item, True
+
+        existing_ids = {version.version_id for version in manifest.versions}
+        version_id = (
+            "1.0.0"
+            if not manifest.versions
+            else _next_expert_version(item.version, existing_ids)
+        )
+        snapshot = version_svc.create_version_snapshot(
+            source_id=source_id,
+            item_id=item.item_id,
+            source_dir=expert_root,
+            version_id=version_id,
+            expert_name=expert_name,
+            creator=operator_id or creator_id,
+            creator_name=operator_name or creator_name,
+            description="",
+            signature=signature,
+        )
+        item.version = snapshot.version_id
+        item.description = description
+        item.creator_id = creator_id
+        item.creator_name = creator_name
+        item.category_id = category_id
+        item.bbk_ids = bbk_ids
+        item.status = "active"
+        item.updated_at = now
+        save_index(self.marketplace_root, source_id, items)
+        return item, False
+
+    async def restore_expert_version(
+        self,
+        source_id: str,
+        item_id: str,
+        version_id: str,
+        operator_id: str = "",
+        operator_name: str = "",
+    ) -> MarketItem:
+        """恢复历史专家版本为当前版本."""
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                current
+                for current in items
+                if current.item_id == item_id and current.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"Expert item {item_id} not found")
+
+        expert_root = get_expert_dir(self.marketplace_root, source_id, item_id)
+        version_svc = self._get_expert_version_service()
+        version_svc.restore_version(source_id, item_id, version_id, expert_root)
+
+        item.version = version_id
+        item.status = "active"
+        item.updated_at = datetime.now(timezone.utc).isoformat()
+        save_index(self.marketplace_root, source_id, items)
+        return item
+
+    async def unpublish_expert(
+        self,
+        source_id: str,
+        item_id: str,
+        operator_id: str,
+        operator_name: str,
+    ) -> bool:
+        """下架社区专家."""
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                current
+                for current in items
+                if current.item_id == item_id and current.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None:
+            return False
+
+        item.status = "inactive"
+        item.updated_at = datetime.now(timezone.utc).isoformat()
+        save_index(self.marketplace_root, source_id, items)
         return True
 
     async def delete_market_skill(

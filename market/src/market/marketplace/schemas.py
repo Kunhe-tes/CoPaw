@@ -6,6 +6,8 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
+from .models import ExpertVersion, ExpertVersionsManifest
+
 
 class PublishSkillRequest(BaseModel):
     """上架技能请求体."""
@@ -73,6 +75,41 @@ class MarketSkillDetail(MarketSkillResponse):
     """技能详情（含调用客户明细）."""
 
     user_stats: list[SkillUserStat] = Field(default_factory=list)
+
+
+class PublishExpertRequest(BaseModel):
+    """上架社区专家请求体."""
+
+    source_dir: str
+    overwrite: bool = False
+
+
+class MarketExpertResponse(BaseModel):
+    """社区专家列表/详情响应."""
+
+    item_id: str
+    name: str
+    description: str = ""
+    version: str = "1.0.0"
+    creator_id: str
+    creator_name: str = ""
+    category_id: Optional[int] = None
+    bbk_ids: list[str] = Field(default_factory=list)
+    status: str = "active"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    version_unchanged: bool = False
+
+
+class MarketExpertDetail(MarketExpertResponse):
+    """社区专家详情."""
+
+    versions: list[ExpertVersion] = Field(default_factory=list)
+    definition: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExpertVersionListResponse(ExpertVersionsManifest):
+    """社区专家版本列表响应."""
 
 
 class MySkillItem(BaseModel):

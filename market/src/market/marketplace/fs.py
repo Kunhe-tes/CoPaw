@@ -274,6 +274,65 @@ def get_skill_dir(
     )
 
 
+def get_expert_dir(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    _validate_path_segment(source_id, "source_id")
+    _validate_path_segment(item_id, "item_id")
+    return (
+        get_marketplace_dir(marketplace_root, source_id)
+        / "experts"
+        / item_id
+    )
+
+
+def get_expert_versions_root(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    return get_expert_dir(marketplace_root, source_id, item_id) / "versions"
+
+
+def get_expert_version_dir(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+    version_id: str,
+) -> Path:
+    _validate_path_segment(version_id, "version_id")
+    return (
+        get_expert_versions_root(marketplace_root, source_id, item_id)
+        / version_id
+    )
+
+
+def get_expert_versions_manifest_path(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    return get_expert_dir(marketplace_root, source_id, item_id) / "versions.json"
+
+
+def get_expert_definition_path(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    return get_expert_dir(marketplace_root, source_id, item_id) / "definition.toml"
+
+
+def get_expert_scan_result_path(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    return get_expert_dir(marketplace_root, source_id, item_id) / "scan_result.json"
+
+
 def resolve_effective_user_id(
     user_id: str,
     source_id: str | None = None,
