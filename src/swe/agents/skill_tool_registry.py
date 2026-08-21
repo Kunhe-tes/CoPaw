@@ -186,6 +186,7 @@ def reset_skill_tool_registry() -> None:
 def build_skill_tool_registry(
     workspace_dir: Path,
     enabled_skills: list[str],
+    registry: SkillToolRegistry | None = None,
 ) -> SkillToolRegistry:
     """Build skill-tool registry from enabled workspace skills.
 
@@ -196,6 +197,8 @@ def build_skill_tool_registry(
     Args:
         workspace_dir: Workspace directory containing skills
         enabled_skills: List of enabled skill names
+        registry: Optional registry to populate. A new registry is created
+            when omitted.
 
     Returns:
         Populated SkillToolRegistry
@@ -204,7 +207,7 @@ def build_skill_tool_registry(
     from .skill_feature_inferencer import get_skill_feature_inferencer
     from .skills_manager import get_workspace_skills_dir
 
-    registry = get_skill_tool_registry()
+    registry = registry or SkillToolRegistry()
     registry.clear()
 
     skills_dir = get_workspace_skills_dir(workspace_dir)

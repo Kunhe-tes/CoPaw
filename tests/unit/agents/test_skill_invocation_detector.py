@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock
 
 from swe.agents.skill_tool_registry import (
     SkillToolRegistry,
+    build_skill_tool_registry,
     get_skill_tool_registry,
     reset_skill_tool_registry,
 )
@@ -161,6 +162,39 @@ class TestSkillToolRegistry:
         registry3 = get_skill_tool_registry()
 
         assert registry3 is not registry1
+
+    def test_build_skill_tool_registry_returns_independent_snapshots(
+        self,
+        tmp_path,
+    ):
+        """Building one workspace registry must not overwrite another one."""
+        first_skill = tmp_path / "first" / "skills" / "alpha"
+        first_skill.mkdir(parents=True)
+        (first_skill / "SKILL.md").write_text(
+            "---\nmetadata:\n  swe:\n    uses_tools:\n      - read_file\n---\n",
+            encoding="utf-8",
+        )
+        second_skill = tmp_path / "second" / "skills" / "beta"
+        second_skill.mkdir(parents=True)
+        (second_skill / "SKILL.md").write_text(
+            "---\nmetadata:\n  swe:\n    uses_tools:\n      - write_file\n---\n",
+            encoding="utf-8",
+        )
+
+        first_registry = build_skill_tool_registry(
+            tmp_path / "first",
+            ["alpha"],
+        )
+        second_registry = build_skill_tool_registry(
+            tmp_path / "second",
+            ["beta"],
+        )
+
+        assert first_registry is not second_registry
+        assert first_registry.get_skills_for_tool("read_file") == ["alpha"]
+        assert first_registry.get_skills_for_tool("write_file") == []
+        assert second_registry.get_skills_for_tool("read_file") == []
+        assert second_registry.get_skills_for_tool("write_file") == ["beta"]
 
 
 # =============================================================================

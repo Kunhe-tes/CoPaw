@@ -15,8 +15,8 @@ from swe.agents import react_agent as react_agent_module
 from swe.agents.hook_runtime.models import MergedHookResult
 from swe.agents.react_agent import SWEAgent
 from swe.agents.skill_tool_registry import (
-    get_skill_tool_registry,
     reset_skill_tool_registry,
+    SkillToolRegistry,
 )
 from swe.agents.tool_guard_mixin import ToolGuardMixin
 from swe.app.subagents import PermissionPolicy
@@ -541,9 +541,57 @@ def test_explicit_snapshot_skills_build_tool_attribution_from_copied_roots(
         {"quality": copied_skill},
     )
 
-    registry = get_skill_tool_registry()
+    registry = agent.get_skill_tool_registry()
     assert registry.get_skills_for_tool("read_file") == ["quality"]
     assert registry.get_skills_for_tool("write_file") == []
+
+
+def test_explicit_snapshot_skill_registries_are_agent_local(
+    tmp_path: Path,
+) -> None:
+    """A later Agent skill build must not overwrite an earlier Agent registry."""
+
+    class _Toolkit:
+        def __init__(self) -> None:
+            self.skills: dict[str, dict[str, str]] = {}
+
+        def register_agent_skill(self, skill_dir: str) -> None:
+            self.skills[Path(skill_dir).name] = {"dir": skill_dir}
+
+    first_skill = tmp_path / "first.skills" / "quality"
+    first_skill.mkdir(parents=True)
+    (first_skill / "SKILL.md").write_text(
+        "---\nmetadata:\n  swe:\n    uses_tools:\n      - read_file\n---\n",
+        encoding="utf-8",
+    )
+    second_skill = tmp_path / "second.skills" / "quality"
+    second_skill.mkdir(parents=True)
+    (second_skill / "SKILL.md").write_text(
+        "---\nmetadata:\n  swe:\n    uses_tools:\n      - write_file\n---\n",
+        encoding="utf-8",
+    )
+    first_agent = _bare_agent(tmp_path)
+    second_agent = _bare_agent(tmp_path)
+
+    SWEAgent._register_explicit_workspace_skills(
+        first_agent,
+        _Toolkit(),
+        {"quality": first_skill},
+    )
+    SWEAgent._register_explicit_workspace_skills(
+        second_agent,
+        _Toolkit(),
+        {"quality": second_skill},
+    )
+
+    first_registry = first_agent.get_skill_tool_registry()
+    second_registry = second_agent.get_skill_tool_registry()
+
+    assert first_registry is not second_registry
+    assert first_registry.get_skills_for_tool("read_file") == ["quality"]
+    assert first_registry.get_skills_for_tool("write_file") == []
+    assert second_registry.get_skills_for_tool("read_file") == []
+    assert second_registry.get_skills_for_tool("write_file") == ["quality"]
 
 
 @pytest.mark.asyncio
@@ -589,6 +637,49 @@ async def test_snapshot_skill_agent_does_not_setup_workspace_detector(
     await SWEAgent.setup_skill_detector(agent, "trace-1")
 
     assert setup_calls == []
+
+
+@pytest.mark.asyncio
+async def test_agent_setup_skill_detector_passes_agent_local_registry(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Trace detector setup must receive the Agent's own skill registry."""
+    from swe.tracing import manager as trace_manager_module
+
+    registry = SkillToolRegistry()
+    agent = _bare_agent(tmp_path)
+    agent._skill_tool_registry = registry
+    agent._runtime_skills = ["quality"]
+    agent._skill_runtime_profiles = {}
+    setup_calls: list[dict[str, object]] = []
+
+    async def setup_skill_detector(**kwargs: object) -> None:
+        setup_calls.append(kwargs)
+
+    manager = SimpleNamespace(
+        enabled=True,
+        setup_skill_detector=setup_skill_detector,
+    )
+    monkeypatch.setattr(
+        trace_manager_module,
+        "has_trace_manager",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        trace_manager_module,
+        "get_trace_manager",
+        lambda: manager,
+    )
+    monkeypatch.setattr(
+        trace_manager_module,
+        "get_current_trace",
+        lambda: SimpleNamespace(skill_detector=None),
+    )
+
+    await SWEAgent.setup_skill_detector(agent, "trace-1")
+
+    assert setup_calls[0]["skill_tool_registry"] is registry
 
 
 def test_subagent_toolkit_filters_builtins_and_excludes_delegate(

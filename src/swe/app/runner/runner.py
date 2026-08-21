@@ -784,6 +784,7 @@ def _create_session_skill_detector(
     set_hook_state: Callable[[HookSessionState], None],
     approved_http_urls: Collection[str] | None = None,
     confirmed_skill_callback: Callable[[str], Any] | None = None,
+    skill_tool_registry: Any | None = None,
 ) -> SkillInvocationDetector:
     workspace = Path(workspace_dir)
     approvals = (
@@ -814,6 +815,7 @@ def _create_session_skill_detector(
         set_hook_state(next_state)
 
     detector = SkillInvocationDetector(
+        registry=skill_tool_registry,
         user_id=user_id,
         session_id=session_id,
         channel=channel,
@@ -3273,6 +3275,11 @@ class AgentRunner(Runner):
             get_hook_state=_get_session_hook_state,
             set_hook_state=_set_session_hook_state,
             confirmed_skill_callback=(_queue_confirmed_skill_snapshot_update),
+            skill_tool_registry=(
+                runtime.agent.get_skill_tool_registry()
+                if hasattr(runtime.agent, "get_skill_tool_registry")
+                else None
+            ),
         )
         if not hasattr(runtime.agent, "_request_context"):
             runtime.agent._request_context = {}

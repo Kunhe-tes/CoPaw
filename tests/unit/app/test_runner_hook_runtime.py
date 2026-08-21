@@ -39,6 +39,7 @@ from swe.app.runner.runner import (
     _emit_runner_hook,
 )
 from swe.app.runner.session import SafeJSONSession
+from swe.agents.skill_tool_registry import SkillToolRegistry
 from swe.config.config import SuggestionMode
 from swe.tracing.manager import (
     TraceContext,
@@ -436,9 +437,11 @@ async def test_attach_session_skill_detector_reuses_trace_detector_and_tracing(
     tmp_path,
 ) -> None:
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    skill_tool_registry = SkillToolRegistry()
     fake_agent = SimpleNamespace(
         _request_context={},
         get_effective_skills=lambda: ["xlsx"],
+        get_skill_tool_registry=lambda: skill_tool_registry,
     )
     runtime = _QueryRuntime(
         agent=fake_agent,
@@ -477,6 +480,7 @@ async def test_attach_session_skill_detector_reuses_trace_detector_and_tracing(
     ):
         runner._attach_session_skill_detector(runtime=runtime, request=request)
         detector = runtime.session_skill_detector
+        assert detector._registry is skill_tool_registry
         assert (
             detector
             is fake_agent._request_context["_skill_invocation_detector"]

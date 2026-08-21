@@ -43,6 +43,7 @@ from .skills_manager import (
     get_workspace_skills_dir,
     resolve_effective_skills,
 )
+from .skill_tool_registry import SkillToolRegistry
 from .tool_failure import normalize_tool_function_errors
 from .tool_guard_mixin import (
     PLAN_INTERACTION_SUMMARIZING_SHORT_CIRCUIT_METADATA_KEY,
@@ -450,6 +451,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._resolved_model_slot: dict[str, str] = {}
         self._system_prompt_override = system_prompt_override
         self._source_tool_versions = tuple(source_tool_versions)
+        self._skill_tool_registry = SkillToolRegistry()
         self._init_agent_phase_state()
 
         # Extract configuration from agent_config
@@ -1053,7 +1055,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     exc,
                 )
         self._sanitize_registered_skill_dirs(toolkit)
-        self._build_explicit_skill_tool_registry(profiles)
+        self._skill_tool_registry = self._build_explicit_skill_tool_registry(
+            profiles,
+        )
         self._runtime_skills = effective_skills
         self._effective_skills = effective_skills
         self._skill_runtime_profiles = profiles
@@ -1061,16 +1065,14 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     @staticmethod
     def _build_explicit_skill_tool_registry(
         profiles: dict[str, object],
-    ) -> None:
+    ) -> SkillToolRegistry:
         """Register copied Skill declarations without consulting a workspace."""
-        from .skill_tool_registry import get_skill_tool_registry
-
-        registry = get_skill_tool_registry()
-        registry.clear()
+        registry = SkillToolRegistry()
         for skill_name, profile in profiles.items():
             declared_tools = getattr(profile, "declared_tools", [])
             if declared_tools:
                 registry.register_skill_tools(skill_name, declared_tools)
+        return registry
 
     def get_effective_skills(self) -> list[str]:
         """Get the list of effective skills for this agent.
@@ -1088,6 +1090,14 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """Get cached skill runtime profiles for this agent."""
         return getattr(self, "_skill_runtime_profiles", {})
 
+    def get_skill_tool_registry(self) -> SkillToolRegistry:
+        """Get this Agent's request-local skill-tool registry."""
+        registry = getattr(self, "_skill_tool_registry", None)
+        if registry is None:
+            registry = SkillToolRegistry()
+            self._skill_tool_registry = registry
+        return registry
+
     def _build_skill_tool_registry(
         self,
         workspace_dir: Path,
@@ -1102,7 +1112,10 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         from .skill_tool_registry import build_skill_tool_registry
 
         try:
-            build_skill_tool_registry(workspace_dir, effective_skills)
+            self._skill_tool_registry = build_skill_tool_registry(
+                workspace_dir,
+                effective_skills,
+            )
         except Exception as e:
             logger.warning("Failed to build skill-tool registry: %s", e)
 
@@ -1147,6 +1160,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 enabled_skills=self.get_runtime_skills(),
                 skill_runtime_profiles=self.get_skill_runtime_profiles(),
                 workspace_dir=workspace_dir,
+                skill_tool_registry=self.get_skill_tool_registry(),
             )
         except Exception as e:
             logger.debug("Failed to setup skill detector: %s", e)
