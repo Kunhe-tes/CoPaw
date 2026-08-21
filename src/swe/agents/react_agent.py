@@ -67,6 +67,7 @@ from .tools import (
     update_task_progress,
     ask_plan_clarification,
     create_submit_proposed_plan_tool,
+    build_background_subagent_scope,
     create_background_subagent_tools,
     get_default_background_subagent_supervisor,
 )
@@ -2458,6 +2459,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         If the reply task does not finish within
         ``AGENT_INTERRUPT_TIMEOUT`` seconds, the wait is abandoned.
         """
+        await self._cancel_selected_expert_run()
         self._stop_watchdog()
         if self._reply_task and not self._reply_task.done():
             task = self._reply_task
@@ -2479,3 +2481,35 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     "Exception occurred during interrupt cleanup",
                     exc_info=True,
                 )
+
+    async def _cancel_selected_expert_run(self) -> None:
+        """Best-effort cancellation for the expert synchronously awaiting this turn."""
+        request_context = getattr(self, "_request_context", {}) or {}
+        if not request_context.get("selected_expert_execution"):
+            return
+        run_id = str(
+            request_context.get("selected_expert_run_id") or "",
+        ).strip()
+        if not run_id:
+            return
+        agent_config = getattr(self, "_agent_config", None)
+        if agent_config is None:
+            return
+        supervisor = (
+            request_context.get("_subagent_supervisor")
+            or get_default_background_subagent_supervisor()
+        )
+        try:
+            scope = build_background_subagent_scope(
+                parent_agent_config=agent_config,
+                request_context=request_context,
+            )
+            await supervisor.cancel(scope, run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Failed to cancel selected expert run %s during interrupt",
+                run_id,
+                exc_info=True,
+            )

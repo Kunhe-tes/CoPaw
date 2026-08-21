@@ -219,7 +219,7 @@ def normalize_skill_name(name: str) -> str:
 
 def _validate_path_segment(value: str, name: str = "segment") -> None:
     """校验系统标识符（source_id, item_id, user_id, agent_id）仅包含 ASCII 安全字符."""
-    if not _SAFE_SYSTEM_SEGMENT_RE.match(value):
+    if value in {".", ".."} or not _SAFE_SYSTEM_SEGMENT_RE.match(value):
         raise ValueError(
             f"Invalid {name} {value!r}: only alphanumerics, underscores, hyphens, and dots are allowed",
         )

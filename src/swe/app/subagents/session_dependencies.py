@@ -61,7 +61,12 @@ def initialize_community_expert_dependency_view(
         / definition_id
     )
     binding = _binding_payload(definition)
-    if _view_matches(target, binding):
+    if _view_matches_definition(target, definition_id, community.item_id):
+        _validate_frozen_dependency_root(
+            target,
+            definition,
+            dependency_names=_view_dependency_names(target, definition),
+        )
         return target
 
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -112,9 +117,17 @@ def resolve_community_expert_dependency_view(
             return None
     except OSError:
         return None
-    if not _view_matches(expected, _binding_payload(definition)):
+    if not _view_matches_definition(
+        expected,
+        definition_id,
+        community.item_id,
+    ):
         return None
-    _validate_frozen_dependency_root(expected, definition)
+    _validate_frozen_dependency_root(
+        expected,
+        definition,
+        dependency_names=_view_dependency_names(expected, definition),
+    )
     return expected
 
 
@@ -168,12 +181,17 @@ def capture_community_expert_session_dependencies(
         raise ExpertDependencyViewError(
             "expert is not a received community expert",
         )
-    _validate_frozen_dependency_root(dependency_view_root, definition)
+    dependency_names = _view_dependency_names(dependency_view_root, definition)
+    _validate_frozen_dependency_root(
+        dependency_view_root,
+        definition,
+        dependency_names=dependency_names,
+    )
     snapshot_root = run_store_dir / f"{run_id}.skills"
     loaded_skills: list[str] = []
     freshness_tokens: dict[str, str] = {}
     try:
-        for skill_name in metadata.declared_skills:
+        for skill_name in dependency_names[0]:
             source = dependency_view_root / "skills" / skill_name
             target = snapshot_root / skill_name
             _copy_skill_tree_no_symlinks(source, target)
@@ -181,7 +199,7 @@ def capture_community_expert_session_dependencies(
             freshness_tokens[skill_name] = get_skill_freshness_token(source)
         mcp_payload, snapshotted_mcps, skipped_mcps = _snapshot_frozen_mcps(
             dependency_view_root,
-            metadata.declared_mcps,
+            dependency_names[1],
         )
         private_path = _write_private_mcp_snapshot(
             run_store_dir,
@@ -218,7 +236,7 @@ def _canonical_uuid(value: str, field_name: str) -> str:
     return str(parsed)
 
 
-def _binding_payload(definition: SubAgentDefinition) -> dict[str, str]:
+def _binding_payload(definition: SubAgentDefinition) -> dict[str, Any]:
     metadata = definition.agent_owned
     assert metadata is not None and metadata.community is not None
     return {
@@ -226,10 +244,50 @@ def _binding_payload(definition: SubAgentDefinition) -> dict[str, str]:
         "item_id": metadata.community.item_id,
         "version": metadata.community.version,
         "content_fingerprint": metadata.community.content_fingerprint,
+        "declared_skills": list(metadata.declared_skills),
+        "declared_mcps": list(metadata.declared_mcps or []),
     }
 
 
-def _view_matches(root: Path, expected: dict[str, str]) -> bool:
+def _view_dependency_names(
+    root: Path,
+    definition: SubAgentDefinition,
+) -> tuple[list[str], list[str]]:
+    metadata = definition.agent_owned
+    fallback = (
+        list(metadata.declared_skills if metadata else []),
+        list(
+            (
+                metadata.declared_mcps
+                if metadata and metadata.declared_mcps
+                else []
+            ),
+        ),
+    )
+    try:
+        payload = json.loads(
+            (root / _BINDING_FILE_NAME).read_text(encoding="utf-8"),
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return fallback
+    skills = payload.get("declared_skills")
+    mcps = payload.get("declared_mcps")
+    if not isinstance(skills, list) or not all(
+        isinstance(item, str) for item in skills
+    ):
+        return fallback
+    if not isinstance(mcps, list) or not all(
+        isinstance(item, str) for item in mcps
+    ):
+        return fallback
+    return list(skills), list(mcps)
+
+
+def _view_matches_definition(
+    root: Path,
+    definition_id: str,
+    item_id: str,
+) -> bool:
     if not root.is_dir() or root.is_symlink():
         return False
     path = root / _BINDING_FILE_NAME
@@ -239,7 +297,11 @@ def _view_matches(root: Path, expected: dict[str, str]) -> bool:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
-    return payload == expected
+    return (
+        isinstance(payload, dict)
+        and payload.get("definition_id") == definition_id
+        and payload.get("item_id") == item_id
+    )
 
 
 def _write_binding(path: Path, payload: dict[str, str]) -> None:
@@ -252,6 +314,8 @@ def _write_binding(path: Path, payload: dict[str, str]) -> None:
 def _validate_frozen_dependency_root(
     root: Path,
     definition: SubAgentDefinition,
+    *,
+    dependency_names: tuple[list[str], list[str]] | None = None,
 ) -> None:
     metadata = definition.agent_owned
     assert metadata is not None
@@ -263,7 +327,12 @@ def _validate_frozen_dependency_root(
         raise ExpertDependencyViewError(
             "frozen expert dependency directory is missing or invalid",
         )
-    for skill_name in metadata.declared_skills:
+    declared_skills, declared_mcps = dependency_names or (
+        list(metadata.declared_skills),
+        list(metadata.declared_mcps or []),
+    )
+    for skill_name in declared_skills:
+        _validate_dependency_name(skill_name, "skill")
         skill_root = root / "skills" / skill_name
         if (
             not skill_root.is_dir()
@@ -273,7 +342,20 @@ def _validate_frozen_dependency_root(
             raise ExpertDependencyViewError(
                 f"frozen expert dependency is missing: skill {skill_name}",
             )
-    _snapshot_frozen_mcps(root, metadata.declared_mcps)
+    for mcp_name in declared_mcps:
+        _validate_dependency_name(mcp_name, "MCP")
+    _snapshot_frozen_mcps(root, declared_mcps)
+
+
+def _validate_dependency_name(name: str, dependency_type: str) -> None:
+    if not isinstance(name, str) or not name or name in {".", ".."}:
+        raise ExpertDependencyViewError(
+            f"frozen expert {dependency_type} name is unsafe: {name!r}",
+        )
+    if any(separator in name for separator in ("/", "\\", "\x00")):
+        raise ExpertDependencyViewError(
+            f"frozen expert {dependency_type} name is unsafe: {name!r}",
+        )
 
 
 def _copy_regular_tree(source: Path, target: Path) -> None:

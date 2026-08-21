@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .fs import _atomic_write_json
+from .fs import _atomic_write_json, _validate_path_segment
 from .models import ExpertVersion, ExpertVersionsManifest
 
 logger = logging.getLogger(__name__)
@@ -25,6 +25,7 @@ _IGNORED_ARTIFACTS = {
     ".git",
     "versions",
     "versions.json",
+    "scan_result.json",
 }
 
 _TEXT_EXTENSIONS = {
@@ -176,6 +177,8 @@ class ExpertVersionService:
         return digest.hexdigest()
 
     def _get_version_root(self, source_id: str, item_id: str) -> Path:
+        _validate_path_segment(source_id, "source_id")
+        _validate_path_segment(item_id, "item_id")
         return (
             self.marketplace_root
             / source_id
@@ -190,9 +193,12 @@ class ExpertVersionService:
         item_id: str,
         version_id: str,
     ) -> Path:
+        _validate_path_segment(version_id, "version_id")
         return self._get_version_root(source_id, item_id) / version_id
 
     def _get_versions_json_path(self, source_id: str, item_id: str) -> Path:
+        _validate_path_segment(source_id, "source_id")
+        _validate_path_segment(item_id, "item_id")
         return (
             self.marketplace_root
             / source_id

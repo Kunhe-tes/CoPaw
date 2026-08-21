@@ -14,7 +14,7 @@ from ...agents.skills_manager import (
     get_skill_freshness_token,
     resolve_effective_skill_dir,
 )
-from ...config.config import AgentProfileConfig
+from ...config.config import AgentProfileConfig, MCPClientConfig
 from ...providers import ProviderManager
 from ...providers.models import ModelSlotConfig
 from .models import SubAgentDefinition, SubAgentLaunchDiagnostics
@@ -173,7 +173,17 @@ def _snapshot_frozen_mcps(
         raise OSError(
             "frozen expert dependency is missing: MCP " + ", ".join(missing),
         )
-    return {name: payload[name] for name in names}, list(names), []
+    normalized = {}
+    for name in names:
+        try:
+            normalized[name] = MCPClientConfig.model_validate(
+                payload[name],
+            ).model_dump(mode="json")
+        except (TypeError, ValueError) as exc:
+            raise OSError(
+                f"frozen expert dependency MCP is invalid: {name}",
+            ) from exc
+    return normalized, list(names), []
 
 
 def capture_model_launch_snapshot(

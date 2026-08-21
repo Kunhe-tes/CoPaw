@@ -3070,6 +3070,8 @@ class AgentRunner(Runner):
                 _ACCEPTED_PLAN_SERVER_SOURCE
             )
         selected_expert_id = _request_selected_expert_id(request)
+        if plan_mode_enabled:
+            selected_expert_id = None
         if selected_expert_id is not None:
             request_context["selected_expert_id"] = selected_expert_id
             try:

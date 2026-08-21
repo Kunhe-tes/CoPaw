@@ -7,6 +7,9 @@ from pathlib import Path
 
 from swe.app.subagents.models import AgentOwnedDefinitionMetadata
 from swe.app.subagents import AgentRegistry, builtin_definition_provider
+from swe.app.subagents.session_dependencies import (
+    initialize_community_expert_dependency_view,
+)
 
 
 def test_selected_received_expert_initializes_its_chat_dependency_view(
@@ -69,3 +72,64 @@ def test_selected_received_expert_initializes_its_chat_dependency_view(
         tmp_path / ".expert_sessions" / chat_id / definition_id
     )
     assert view_root.is_dir()
+
+
+def test_chat_dependency_view_remains_frozen_after_received_update(
+    tmp_path: Path,
+) -> None:
+    definition_id = "00000000-0000-0000-0000-000000000052"
+    chat_id = "00000000-0000-0000-0000-000000000053"
+    source = (
+        tmp_path
+        / "agents"
+        / f"{definition_id}.dependencies"
+        / "skills"
+        / "frozen"
+    )
+    source.mkdir(parents=True)
+    (source / "SKILL.md").write_text("v1", encoding="utf-8")
+    base = AgentRegistry([builtin_definition_provider()]).resolve(
+        "plan-researcher"
+    )
+    first = base.model_copy(
+        update={
+            "agent_owned": AgentOwnedDefinitionMetadata(
+                definition_id=definition_id,
+                declared_skills=["frozen"],
+                community={
+                    "item_id": "expert-1",
+                    "version": "1.0.0",
+                    "content_fingerprint": "one",
+                },
+            ),
+        },
+    )
+    view = initialize_community_expert_dependency_view(
+        workspace_dir=tmp_path,
+        chat_id=chat_id,
+        definition=first,
+    )
+    assert view is not None
+    (source / "SKILL.md").write_text("v2", encoding="utf-8")
+    second = first.model_copy(
+        update={
+            "agent_owned": AgentOwnedDefinitionMetadata(
+                definition_id=definition_id,
+                declared_skills=["frozen"],
+                community={
+                    "item_id": "expert-1",
+                    "version": "2.0.0",
+                    "content_fingerprint": "two",
+                },
+            ),
+        },
+    )
+    assert (
+        initialize_community_expert_dependency_view(
+            workspace_dir=tmp_path,
+            chat_id=chat_id,
+            definition=second,
+        )
+        == view
+    )
+    assert (view / "skills" / "frozen" / "SKILL.md").read_text() == "v1"

@@ -615,7 +615,10 @@ class TestReceivedExpertLifecycle:
         )
         package_config.unlink()
 
-        with pytest.raises(ExpertDependencyError, match="Invalid bundled MCP"):
+        with pytest.raises(
+            ExpertDependencyError,
+            match="failed integrity verification",
+        ):
             await service.install_expert("source-a", item.item_id, "alice")
 
         expert_dir = get_user_expert_dir(

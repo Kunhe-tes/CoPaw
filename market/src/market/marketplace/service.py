@@ -1975,8 +1975,15 @@ class MarketplaceService:
         )
         fingerprint = str((current or {}).get("signature") or "")
         if not fingerprint:
-            fingerprint = (
-                self._get_expert_version_service().calculate_signature(root)
+            raise ExpertDependencyError(
+                f"Expert package {item_id} has no current version signature",
+            )
+        current_signature = (
+            self._get_expert_version_service().calculate_signature(root)
+        )
+        if current_signature != fingerprint:
+            raise ExpertDependencyError(
+                f"Expert package {item_id} failed integrity verification",
             )
         return item, root, fingerprint
 
@@ -2252,13 +2259,15 @@ class MarketplaceService:
                     json.dumps(mcp_payload, ensure_ascii=False, indent=2),
                     encoding="utf-8",
                 )
+            dependency_swapped = False
             try:
                 if dependency_root.exists():
                     os.replace(dependency_root, backup_root)
                 os.replace(temporary_root, dependency_root)
+                dependency_swapped = True
                 os.replace(temporary, definition_path)
             except BaseException:
-                if dependency_root.exists():
+                if dependency_swapped and dependency_root.exists():
                     shutil.rmtree(dependency_root, ignore_errors=True)
                 if backup_root.exists():
                     os.replace(backup_root, dependency_root)
@@ -2292,6 +2301,14 @@ class MarketplaceService:
             update=False,
         )
         if result.success:
+            await self._log_expert_operation(
+                source_id,
+                operator_id,
+                "",
+                "receive",
+                self._expert_item(source_id, item_id),
+                target_user_id=user_id,
+            )
             await self._trigger_agent_reload(user_id, agent_id, source_id)
         return result
 
@@ -2361,15 +2378,16 @@ class MarketplaceService:
         item = self._expert_item(source_id, item_id)
         users = target_user_ids
         if users is None:
-            users = [
+            db_users = [
                 user["tenant_id"]
                 for user in await self._resolve_target_users(
                     source_id,
                     DistributeRequest(target_type="all"),
                 )
             ]
-            if not users:
-                users = self._received_expert_user_ids(source_id)
+            users = sorted(
+                set(db_users) | set(self._received_expert_user_ids(source_id)),
+            )
         results: list[ExpertOperationResult] = []
         for user_id in users:
             matched_agent_ids: set[str] = set()

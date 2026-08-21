@@ -42,6 +42,14 @@ class _Memory:
         self.content.append((msg, marks or []))
 
 
+class _SelectedExpertSupervisor:
+    def __init__(self) -> None:
+        self.cancelled: list[tuple[object, str]] = []
+
+    async def cancel(self, scope, run_id: str) -> None:
+        self.cancelled.append((scope, run_id))
+
+
 class _BaseAgent:
     async def _acting(self, tool_call):
         return {"content": tool_call["input"]}
@@ -300,6 +308,35 @@ async def test_unavailable_selected_expert_stops_before_main_agent_reasoning(
     reply = await agent._reasoning()
 
     assert reply.get_text_content() == "The selected expert is unavailable."
+
+
+@pytest.mark.asyncio
+async def test_interrupt_cancels_the_active_selected_expert_run(
+    tmp_path: Path,
+) -> None:
+    """Stopping the synchronous parent turn also stops its selected expert."""
+    supervisor = _SelectedExpertSupervisor()
+    agent = SWEAgent.__new__(SWEAgent)
+    agent._agent_config = SimpleNamespace(id="agent-1")
+    agent._reply_task = None
+    agent._stop_watchdog = lambda: None
+    agent._request_context = {
+        "selected_expert_execution": True,
+        "selected_expert_run_id": "subagent-1",
+        "tenant_id": "tenant-1",
+        "agent_id": "agent-1",
+        "_subagent_run_store_dir": str(tmp_path / "runs"),
+        "_subagent_supervisor": supervisor,
+    }
+
+    await agent.interrupt()
+
+    assert len(supervisor.cancelled) == 1
+    scope, run_id = supervisor.cancelled[0]
+    assert run_id == "subagent-1"
+    assert scope.tenant_id == "tenant-1"
+    assert scope.agent_id == "agent-1"
+    assert scope.run_store_dir == tmp_path / "runs"
 
 
 class _FakePlanGuardAgent(ToolGuardMixin, _BaseAgent):
