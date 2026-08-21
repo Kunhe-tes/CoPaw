@@ -598,9 +598,6 @@ export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
-  const [isOriginY] = useState(
-    () => new URLSearchParams(location.search).get("origin") === "Y",
-  );
   const { isDark } = useTheme();
   const showContentOnly = useChatPresentationStore(
     (state) => state.showContentOnly,
@@ -1000,6 +997,7 @@ export default function ChatPage() {
   const [feedbackItems, setFeedbackItems] = useState<FeedbackRecord[]>([]);
   const [feedbackLoading, setFeedbackLoading] = useState(false);
   const feedbackUserId = useIframeStore((state) => state.userId);
+  const isOriginY = useIframeStore((state) => state.isOriginY);
   const voiceRecorderEnabled = shouldShowGlobalVoiceRecorder(
     feedbackUserId,
     showContentOnly,
@@ -2325,7 +2323,6 @@ export default function ChatPage() {
               {!isContentOnly && (
                 <ChatSidebar
                   tasks={tasks}
-                  showGuide={isOriginY}
                   selectedTaskId={currentTask?.id}
                   onCreateSession={handleCreateSessionFromSidebar}
                   onTaskClick={handleTaskOpen}

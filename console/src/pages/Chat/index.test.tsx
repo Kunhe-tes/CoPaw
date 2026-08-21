@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => {
     capturedOptions: null as Record<string, any> | null,
     planModeEnabledHistory: [] as boolean[],
     showContentOnly: false,
+    isOriginY: false,
     createChat: vi.fn(async () => ({
       id: "chat-real-created",
       meta: { plan_mode_enabled: true },
@@ -285,8 +286,12 @@ vi.mock("../../stores/sourceSystemConfigStore", () => ({
 }));
 
 vi.mock("../../stores/iframeStore", () => {
-  const useIframeStore = (selector?: (value: { userId: string }) => unknown) =>
-    selector ? selector({ userId: "test-user" }) : { userId: "test-user" };
+  const useIframeStore = (
+    selector?: (value: { userId: string; isOriginY: boolean }) => unknown,
+  ) =>
+    selector
+      ? selector({ userId: "test-user", isOriginY: mocks.isOriginY })
+      : { userId: "test-user", isOriginY: mocks.isOriginY };
 
   useIframeStore.getState = () => ({
     sessionId: mocks.navigationSessionId,
@@ -392,7 +397,6 @@ vi.mock("./sessionApi", () => {
 vi.mock("./components/ChatSidebar", () => {
   function ChatSidebar(props: {
     tasks: Array<{ id: string; name?: string }>;
-    showGuide?: boolean;
     selectedTaskId?: string;
     onTaskClick?: (task: { id: string; name?: string }) => void;
   }) {
@@ -400,7 +404,6 @@ vi.mock("./components/ChatSidebar", () => {
       <div
         data-testid="chat-sidebar"
         data-selected-task-id={props.selectedTaskId || ""}
-        data-show-guide={String(Boolean(props.showGuide))}
       >
         {props.tasks.map((task) => (
           <button
@@ -592,6 +595,7 @@ describe("ChatPage plan mode wiring", () => {
     mocks.capturedOptions = null;
     mocks.planModeEnabledHistory = [];
     mocks.showContentOnly = false;
+    mocks.isOriginY = false;
     mocks.inputDisabled = true;
     mocks.pathname = "/chat/chat-1";
     mocks.search = "";
@@ -649,24 +653,6 @@ describe("ChatPage plan mode wiring", () => {
     const monitor = screen.getByTestId("subagent-run-monitor");
     expect(screen.getByTestId("chat-sender-before-ui")).not.toContainElement(
       monitor,
-    );
-  });
-
-  it("enables the operation guide only when origin is Y", () => {
-    const defaultRender = render(<ChatPage />);
-
-    expect(screen.getByTestId("chat-sidebar")).toHaveAttribute(
-      "data-show-guide",
-      "false",
-    );
-
-    defaultRender.unmount();
-    mocks.search = "?origin=Y";
-    render(<ChatPage />);
-
-    expect(screen.getByTestId("chat-sidebar")).toHaveAttribute(
-      "data-show-guide",
-      "true",
     );
   });
 
