@@ -389,22 +389,39 @@ def _normalize_expert_mcp_config(
 def _copy_expert_package(source_dir: Path, target_dir: Path) -> None:
     """把专家包同步到目标目录，保留 versions/ 和 versions.json."""
     preserve = {"versions", "versions.json"}
-    target_dir.mkdir(parents=True, exist_ok=True)
-    for existing in list(target_dir.iterdir()):
-        if existing.name in preserve:
-            continue
-        if existing.is_dir():
-            shutil.rmtree(existing)
-        else:
-            existing.unlink()
-    for entry in source_dir.iterdir():
-        if entry.name in preserve:
-            continue
-        target = target_dir / entry.name
-        if entry.is_dir():
-            shutil.copytree(entry, target)
-        else:
-            shutil.copy2(entry, target)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{target_dir.name}-", dir=target_dir.parent),
+    )
+    backup = target_dir.with_name(f".{target_dir.name}.backup")
+    try:
+        for entry in source_dir.iterdir():
+            if entry.name in preserve:
+                continue
+            target = staging / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, target)
+            else:
+                shutil.copy2(entry, target)
+        if target_dir.is_dir():
+            for name in preserve:
+                existing = target_dir / name
+                if existing.is_dir():
+                    shutil.copytree(existing, staging / name)
+                elif existing.is_file():
+                    shutil.copy2(existing, staging / name)
+        if backup.exists():
+            shutil.rmtree(backup)
+        if target_dir.exists():
+            os.replace(target_dir, backup)
+        os.replace(staging, target_dir)
+        if backup.exists():
+            shutil.rmtree(backup)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        if not target_dir.exists() and backup.exists():
+            os.replace(backup, target_dir)
+        raise
 
 
 def _community_toml(
@@ -777,7 +794,7 @@ class MarketplaceService:
         user_id: str,
         agent_id: str = "default",
         source_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """通过 HTTP 回调触发 src/swe 的 Agent 重载."""
         url = f"{SWE_INTERNAL_URL}/api/internal/agents/{agent_id}/reload"
         headers = {}
@@ -803,7 +820,7 @@ class MarketplaceService:
                             user_id,
                             source_id,
                         )
-                        return
+                        return True
                     logger.warning(
                         "Agent reload failed on attempt %s: %s - %s",
                         attempt + 1,
@@ -821,6 +838,7 @@ class MarketplaceService:
             user_id,
             source_id,
         )
+        return False
 
     def _scan_skill_or_raise(
         self,
@@ -2460,11 +2478,14 @@ class MarketplaceService:
             )
             if result.success:
                 for agent_id in matched_agent_ids or {"default"}:
-                    await self._trigger_agent_reload(
+                    reloaded = await self._trigger_agent_reload(
                         user_id,
                         agent_id,
                         source_id,
                     )
+                    if not reloaded:
+                        result.success = False
+                        result.reason = "agent reload failed; withdrawal is pending retry"
         return ExpertRecallResponse(
             item_id=item_id,
             recalled_count=sum(result.success for result in results),

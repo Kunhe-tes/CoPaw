@@ -122,6 +122,29 @@ def _publish(
     )
 
 
+def test_copy_expert_package_keeps_previous_root_when_staging_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from market.marketplace.service import _copy_expert_package
+
+    source = tmp_path / "source"
+    target = tmp_path / "target"
+    source.mkdir()
+    target.mkdir()
+    (source / "definition.toml").write_text("new", encoding="utf-8")
+    (target / "definition.toml").write_text("old", encoding="utf-8")
+
+    def fail_copy(*_args, **_kwargs):
+        raise OSError("copy failed")
+
+    monkeypatch.setattr("market.marketplace.service.shutil.copy2", fail_copy)
+    with pytest.raises(OSError, match="copy failed"):
+        _copy_expert_package(source, target)
+
+    assert (target / "definition.toml").read_text(encoding="utf-8") == "old"
+
+
 class TestPublishExpert:
     """Expert publication lifecycle tests."""
 
@@ -837,6 +860,35 @@ class TestReceivedExpertLifecycle:
             expert_dir / f"{installed.definition_id}.dependencies"
         ).exists()
         assert not session_view.exists()
+
+    @pytest.mark.asyncio
+    async def test_recall_reports_pending_when_agent_reload_fails(
+        self,
+        service: MarketplaceService,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        source_dir = tmp_path / "source"
+        source_dir.mkdir()
+        _write_source_package(source_dir)
+        item, _ = await _publish(service, "source-a", source_dir)
+        await service.install_expert("source-a", item.item_id, "alice")
+
+        monkeypatch.setattr(
+            service,
+            "_trigger_agent_reload",
+            AsyncMock(return_value=False),
+        )
+        recalled = await service.recall_expert(
+            "source-a",
+            item.item_id,
+            "manager",
+            ["alice"],
+        )
+
+        assert recalled.recalled_count == 0
+        assert recalled.failed_count == 1
+        assert "pending retry" in recalled.results[0].reason
 
     @pytest.mark.asyncio
     async def test_distribution_installs_first_copy_to_default_profile(
