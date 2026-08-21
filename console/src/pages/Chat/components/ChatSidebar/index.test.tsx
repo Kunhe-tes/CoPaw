@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { Modal } from "antd";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatSidebar from ".";
@@ -50,6 +50,7 @@ vi.mock("react-router-dom", () => ({
 }));
 
 vi.mock("antd", () => ({
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
   Image: Object.assign(
     ({ src }: { src?: string }) =>
       src ? (
@@ -214,6 +215,22 @@ describe("ChatSidebar infinite history scrolling", () => {
     const { getAllByText } = render(<ChatSidebar tasks={[]} />);
 
     expect(getAllByText("历史记录(120)").length).toBeGreaterThan(0);
+  });
+
+  it("restores the sidebar from the collapsed toolbar", () => {
+    const { container } = render(<ChatSidebar tasks={[]} />);
+    const view = within(container);
+    const collapseButton = view.getByRole("button", { name: "收起导航" });
+
+    expect(collapseButton).toHaveClass(
+      "chat-sidebar-collapse-toggle--expanded",
+    );
+    expect(collapseButton.closest(".chat-sidebar-new-topic")).not.toBeNull();
+
+    fireEvent.click(collapseButton);
+
+    expect(view.getByRole("button", { name: "展开导航" })).toBeInTheDocument();
+    expect(container.querySelector(".chat-sidebar")).toBeNull();
   });
 
   it("subtracts visible task count from the history total", () => {
