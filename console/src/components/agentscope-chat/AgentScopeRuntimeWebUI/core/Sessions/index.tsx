@@ -3,17 +3,12 @@ import {
   ChatAnywhereSessionsContext,
   useChatAnywhereSessions,
 } from "../Context/ChatAnywhereSessionsContext";
-import { Button, IconButton } from "@agentscope-ai/design";
+import { Button } from "@agentscope-ai/design";
 import { ChatAnywhereInputContext } from "../Context/ChatAnywhereInputContext";
 import { useProviderContext } from "@/components/agentscope-chat";
 import { useChatAnywhereOptions } from "../Context/ChatAnywhereOptionsContext";
 import React, { useContext, useMemo } from "react";
-import {
-  SparkDeleteLine,
-  SparkOperateLeftLine,
-  SparkOperateRightLine,
-  SparkPlusLine,
-} from "@agentscope-ai/icons";
+import { SparkDeleteLine, SparkPlusLine } from "@agentscope-ai/icons";
 import { HistoryPanel } from "@/components/agentscope-chat";
 import { ChatAnyWhereLayoutContext } from "../Context/ChatAnywhereLayoutContext";
 import cls from "classnames";
@@ -43,11 +38,11 @@ export default function Sessions() {
 export function InnerHeader({ className }: { className?: string }) {
   const leftHeader = useChatAnywhereOptions((v) => v.theme?.leftHeader) || {};
   const prefixCls = useProviderContext().getPrefixCls("chat-anywhere-sessions");
-  const { toggleCollapsed, collapsed } = useContext(ChatAnyWhereLayoutContext);
-  const multiple = useChatAnywhereOptions((v) => v.session.multiple);
 
-  const { logo = agentDefaultLogo, title = "Runtime WebUI" } =
-    leftHeader as { logo?: string; title?: string };
+  const { logo = agentDefaultLogo, title = "Runtime WebUI" } = leftHeader as {
+    logo?: string;
+    title?: string;
+  };
 
   return (
     <>
@@ -56,17 +51,6 @@ export function InnerHeader({ className }: { className?: string }) {
           {logo && <img src={logo} alt="logo" height={32} />}
           <span>{title}</span>
         </div>
-
-        {multiple && (
-          <IconButton
-            className={`${prefixCls}-header-collapse`}
-            bordered={false}
-            icon={
-              !collapsed ? <SparkOperateLeftLine /> : <SparkOperateRightLine />
-            }
-            onClick={toggleCollapsed}
-          />
-        )}
       </div>
     </>
   );
