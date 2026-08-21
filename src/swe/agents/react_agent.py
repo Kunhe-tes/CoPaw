@@ -33,6 +33,7 @@ from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
 from .hooks import BootstrapHook, MemoryCompactionHook
 from .model_factory import create_model_and_formatter
 from .prompt import (
+    PromptConfig,
     build_multimodal_hint,
     build_system_prompt_from_working_dir,
     get_active_model_supports_multimodal,
@@ -514,6 +515,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             memory=InMemoryMemory(),
             formatter=formatter,
             max_iters=running_config.max_iters,
+        )
+        self._sys_prompt_freshness_token = (
+            self._current_system_prompt_freshness_token()
         )
 
         # Setup memory manager
@@ -1175,6 +1179,114 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             sanitized = sanitize_text_for_json(skill_dir)
             skill["dir"] = sanitized.value
 
+    def _heartbeat_enabled_for_prompt(self) -> bool:
+        heartbeat = getattr(
+            getattr(self, "_agent_config", None),
+            "heartbeat",
+            None,
+        )
+        return bool(getattr(heartbeat, "enabled", False))
+
+    def _system_prompt_enabled_files(self) -> tuple[str, ...]:
+        files = getattr(
+            getattr(self, "_agent_config", None),
+            "system_prompt_files",
+            None,
+        )
+        if files is None:
+            files = PromptConfig.DEFAULT_FILES
+        return tuple(str(filename) for filename in files)
+
+    def _system_prompt_file_snapshot(self) -> tuple[tuple[Any, ...], ...]:
+        workspace_dir = Path(
+            getattr(self, "_workspace_dir", None) or WORKING_DIR,
+        )
+        snapshots: list[tuple[Any, ...]] = []
+        for filename in self._system_prompt_enabled_files():
+            file_path = workspace_dir / filename
+            try:
+                stat_result = file_path.stat()
+            except FileNotFoundError:
+                snapshots.append((filename, "missing"))
+            except OSError as exc:
+                snapshots.append((filename, "error", type(exc).__name__))
+            else:
+                snapshots.append(
+                    (
+                        filename,
+                        "present",
+                        stat_result.st_mtime_ns,
+                        stat_result.st_size,
+                    ),
+                )
+        return tuple(snapshots)
+
+    @staticmethod
+    def _source_system_config_prompt_token() -> tuple[Any, ...] | None:
+        from ..app.source_system_config import (
+            is_chat_task_progress_enabled,
+        )
+        from ..app.source_system_config.runtime import (
+            get_current_source_system_config,
+        )
+
+        source_config = get_current_source_system_config()
+        if source_config is None:
+            return None
+        return (
+            getattr(source_config, "source_id", None),
+            getattr(source_config, "version", None),
+            is_chat_task_progress_enabled(source_config),
+        )
+
+    @staticmethod
+    def _active_model_prompt_token() -> tuple[Any, ...] | None:
+        try:
+            from ..config.context import get_current_effective_tenant_id
+            from ..providers.provider_manager import ProviderManager
+
+            tenant_id = get_current_effective_tenant_id()
+            manager = ProviderManager.get_instance(tenant_id)
+            active = manager.get_active_model()
+            if active is None:
+                return None
+            provider = manager.get_provider(active.provider_id)
+            model_info = None
+            if provider is not None:
+                for model in provider.models + provider.extra_models:
+                    if model.id == active.model:
+                        model_info = model
+                        break
+            return (
+                active.provider_id,
+                active.model,
+                getattr(model_info, "supports_image", None),
+                getattr(model_info, "supports_video", None),
+                getattr(model_info, "supports_multimodal", None),
+            )
+        except Exception as exc:
+            return ("error", type(exc).__name__)
+
+    def _current_system_prompt_freshness_token(self) -> tuple[Any, ...]:
+        system_prompt_override = getattr(self, "_system_prompt_override", None)
+        if system_prompt_override is not None:
+            return ("override", system_prompt_override)
+
+        request_context = getattr(self, "_request_context", {}) or {}
+        resolved_model_slot = getattr(self, "_resolved_model_slot", {}) or {}
+        return (
+            str(Path(getattr(self, "_workspace_dir", None) or WORKING_DIR)),
+            self._system_prompt_enabled_files(),
+            self._system_prompt_file_snapshot(),
+            request_context.get("agent_id"),
+            bool(request_context.get("plan_mode_enabled")),
+            self._heartbeat_enabled_for_prompt(),
+            getattr(self, "_env_context", None),
+            tuple(sorted(resolved_model_slot.items())),
+            self._active_model_prompt_token(),
+            self._source_system_config_prompt_token(),
+        )
+
     def _build_sys_prompt(self) -> str:
         """Build system prompt from working dir files and env context.
 
@@ -1193,17 +1305,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         )
 
         # Check if heartbeat is enabled in agent config
-        heartbeat_enabled = False
-        if (
-            hasattr(self._agent_config, "heartbeat")
-            and self._agent_config.heartbeat is not None
-        ):
-            heartbeat_enabled = self._agent_config.heartbeat.enabled
-
         sys_prompt = build_system_prompt_from_working_dir(
             working_dir=self._workspace_dir,
+            enabled_files=list(self._system_prompt_enabled_files()),
             agent_id=agent_id,
-            heartbeat_enabled=heartbeat_enabled,
+            heartbeat_enabled=self._heartbeat_enabled_for_prompt(),
         )
         logger.debug("System prompt:\n%s...", sys_prompt[:100])
 
@@ -1358,7 +1464,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Updates both self._sys_prompt and the first system-role
         message stored in self.memory.content (if one exists).
         """
-        self._sys_prompt = self._build_sys_prompt()
+        current_token = self._current_system_prompt_freshness_token()
+        if (
+            getattr(self, "_sys_prompt", None) is None
+            or getattr(self, "_sys_prompt_freshness_token", None)
+            != current_token
+        ):
+            self._sys_prompt = self._build_sys_prompt()
+            current_token = self._current_system_prompt_freshness_token()
+            self._sys_prompt_freshness_token = current_token
 
         if self.memory is None:
             logger.warning(
@@ -1369,7 +1483,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         for msg, _marks in self.memory.content:
             if msg.role == "system":
-                msg.content = self.sys_prompt
+                msg.content = (
+                    self.sys_prompt
+                    if hasattr(self, "toolkit")
+                    else self._sys_prompt
+                )
             break
 
     async def register_mcp_clients(
