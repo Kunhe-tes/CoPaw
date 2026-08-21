@@ -433,13 +433,18 @@ export default function ExpertsPage() {
             <Input placeholder="用逗号分隔" />
           </Form.Item>
           <Form.Item name="skillsText" label="Skills">
-            <Select mode="multiple" options={skillOptions} />
+            <Select
+              mode="multiple"
+              options={skillOptions}
+              disabled={Boolean(selected?.definition?.agent_owned?.community)}
+            />
           </Form.Item>
           <Form.Item name="mcpsText" label="MCP">
             <Select
               mode="multiple"
               options={mcpOptions}
               placeholder="留空将继承主 Agent 已启用 MCP"
+              disabled={Boolean(selected?.definition?.agent_owned?.community)}
             />
           </Form.Item>
           <Form.Item name="model" label="模型">

@@ -1841,17 +1841,29 @@ def _selected_expert_start_tool_call(
     mapping server-side so a submitted composer selection cannot be silently
     skipped or changed by the Main Agent.
     """
-    from ..subagents import AgentOwnedDefinitionRepository
+    from ..subagents import (
+        AgentOwnedDefinitionRepository,
+        builtin_definition_provider,
+    )
 
     try:
+        builtin_names = {
+            item.name
+            for item in builtin_definition_provider().list_definitions()
+        }
         package = AgentOwnedDefinitionRepository(
             workspace_dir / "agents",
             owner_scope=f"{tenant_id or 'default'}/{agent_id}",
+            builtin_names=builtin_names,
         ).get(selected_expert_id)
     except ValueError:
         return None
     definition = package.definition if package is not None else None
-    if definition is None or not definition.enabled:
+    if (
+        definition is None
+        or not definition.enabled
+        or definition.name in builtin_names
+    ):
         return None
     normalized_objective = objective.strip()
     if not normalized_objective:

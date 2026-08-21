@@ -73,6 +73,10 @@ export default function ExpertCommunityPage() {
   }, [load]);
 
   useEffect(() => {
+    setReceivedIds(new Set());
+  }, [selectedAgent, sourceId, userId]);
+
+  useEffect(() => {
     void marketApi.listCategories(sourceId).then(setCategories).catch(() => {});
   }, [sourceId]);
 

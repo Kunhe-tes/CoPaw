@@ -21,6 +21,7 @@ from ...marketplace.service import (
     ExpertDependencyError,
     ExpertNameConflictError,
 )
+from ...security import SkillScanError
 from ..deps import decode_user_name, require_source_id
 
 router = APIRouter()
@@ -77,6 +78,8 @@ async def publish_expert(
             },
         ) from exc
     except ExpertDependencyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SkillScanError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

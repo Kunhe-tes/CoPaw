@@ -788,23 +788,39 @@ class MarketplaceService:
         if source_id:
             params["source_id"] = source_id
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    url,
-                    params=params,
-                    headers=headers,
-                )
-                if response.status_code == 200:
-                    logger.info(
-                        f"Agent reload triggered for '{agent_id}' (tenant={user_id}, source={source_id})",
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        url,
+                        params=params,
+                        headers=headers,
                     )
-                else:
+                    if response.status_code == 200:
+                        logger.info(
+                            "Agent reload triggered for '%s' (tenant=%s, source=%s)",
+                            agent_id,
+                            user_id,
+                            source_id,
+                        )
+                        return
                     logger.warning(
-                        f"Agent reload failed: {response.status_code} - {response.text}",
+                        "Agent reload failed on attempt %s: %s - %s",
+                        attempt + 1,
+                        response.status_code,
+                        response.text,
                     )
-        except Exception as e:
-            logger.warning(f"Failed to trigger agent reload: {e}")
+            except Exception as exc:
+                logger.warning(
+                    "Failed to trigger agent reload on attempt %s: %s",
+                    attempt + 1,
+                    exc,
+                )
+        logger.error(
+            "Agent reload remained unavailable after retries (tenant=%s, source=%s)",
+            user_id,
+            source_id,
+        )
 
     def _scan_skill_or_raise(
         self,
@@ -2141,14 +2157,24 @@ class MarketplaceService:
         else:
             definition_id = str(uuid.uuid4())
             enabled = True
+            from swe.app.subagents import builtin_definition_provider
+
+            builtin_names = {
+                definition.name
+                for definition in builtin_definition_provider().list_definitions()
+            }
+            if item.name in builtin_names:
+                return ExpertOperationResult(
+                    user_id=user_id,
+                    success=False,
+                    reason="expert name conflicts with builtin definition",
+                )
             for path in target_root.glob("*.toml"):
                 try:
                     payload = tomllib.loads(path.read_text(encoding="utf-8"))
                 except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
                     continue
-                if payload.get("name") == item.name and bool(
-                    payload.get("enabled", False),
-                ):
+                if payload.get("name") == item.name:
                     return ExpertOperationResult(
                         user_id=user_id,
                         success=False,

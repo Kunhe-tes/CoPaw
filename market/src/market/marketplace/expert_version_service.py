@@ -6,7 +6,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -234,22 +236,38 @@ class ExpertVersionService:
 
     def _copy_package_tree(self, source_dir: Path, target_dir: Path) -> None:
         preserve = {"versions", "versions.json"}
-        target_dir.mkdir(parents=True, exist_ok=True)
-        for existing in list(target_dir.iterdir()):
-            if existing.name in preserve:
-                continue
-            if existing.is_dir():
-                shutil.rmtree(existing)
-            else:
-                existing.unlink()
-        for entry in source_dir.iterdir():
-            if entry.name in preserve:
-                continue
-            target = target_dir / entry.name
-            if entry.is_dir():
-                shutil.copytree(entry, target)
-            else:
-                shutil.copy2(entry, target)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}-", dir=target_dir.parent))
+        backup = target_dir.with_name(f".{target_dir.name}.backup")
+        try:
+            for entry in source_dir.iterdir():
+                if entry.name in preserve:
+                    continue
+                target = staging / entry.name
+                if entry.is_dir():
+                    shutil.copytree(entry, target)
+                else:
+                    shutil.copy2(entry, target)
+            if target_dir.is_dir():
+                for name in preserve:
+                    existing = target_dir / name
+                    if existing.is_dir():
+                        shutil.copytree(existing, staging / name)
+                    elif existing.is_file():
+                        shutil.copy2(existing, staging / name)
+            if backup.exists():
+                shutil.rmtree(backup)
+            if target_dir.exists():
+                os.replace(target_dir, backup)
+            os.replace(staging, target_dir)
+            if backup.exists():
+                shutil.rmtree(backup)
+        except BaseException:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            if not target_dir.exists() and backup.exists():
+                os.replace(backup, target_dir)
+            raise
 
     def _is_ignored(self, path: Path) -> bool:
         return bool(_IGNORED_ARTIFACTS & set(path.parts))
