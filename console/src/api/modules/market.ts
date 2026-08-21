@@ -49,6 +49,11 @@ export interface MarketExpert {
   version_unchanged?: boolean;
 }
 
+export interface MarketExpertDetail extends MarketExpert {
+  versions: ExpertVersion[];
+  definition: Record<string, unknown>;
+}
+
 export interface ExpertVersion {
   version_id: string;
   created_at: string;
@@ -354,9 +359,9 @@ export const marketApi = {
   getMarketExpert: async (
     sourceId: string,
     itemId: string,
-  ): Promise<MarketExpert> => {
+  ): Promise<MarketExpertDetail> => {
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
-    return request<MarketExpert>(`/market/experts/${itemId}`, opts);
+    return request<MarketExpertDetail>(`/market/experts/${itemId}`, opts);
   },
 
   listExpertVersions: async (
@@ -375,7 +380,9 @@ export const marketApi = {
     versionId: string,
   ): Promise<MarketExpert> => {
     return request<MarketExpert>(
-      `/market/experts/${itemId}/versions/${encodeURIComponent(versionId)}/restore`,
+      `/market/experts/${itemId}/versions/${encodeURIComponent(
+        versionId,
+      )}/restore`,
       {
         method: "POST",
         ...mergeHeaders({
