@@ -2485,7 +2485,9 @@ class MarketplaceService:
                     )
                     if not reloaded:
                         result.success = False
-                        result.reason = "agent reload failed; withdrawal is pending retry"
+                        result.reason = (
+                            "agent reload failed; withdrawal is pending retry"
+                        )
         return ExpertRecallResponse(
             item_id=item_id,
             recalled_count=sum(result.success for result in results),

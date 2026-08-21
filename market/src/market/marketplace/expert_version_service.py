@@ -237,7 +237,11 @@ class ExpertVersionService:
     def _copy_package_tree(self, source_dir: Path, target_dir: Path) -> None:
         preserve = {"versions", "versions.json"}
         target_dir.parent.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(prefix=f".{target_dir.name}-", dir=target_dir.parent))
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{target_dir.name}-", dir=target_dir.parent
+            )
+        )
         backup = target_dir.with_name(f".{target_dir.name}.backup")
         try:
             for entry in source_dir.iterdir():

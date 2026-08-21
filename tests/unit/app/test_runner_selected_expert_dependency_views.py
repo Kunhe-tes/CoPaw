@@ -89,7 +89,7 @@ def test_chat_dependency_view_remains_frozen_after_received_update(
     source.mkdir(parents=True)
     (source / "SKILL.md").write_text("v1", encoding="utf-8")
     base = AgentRegistry([builtin_definition_provider()]).resolve(
-        "plan-researcher"
+        "plan-researcher",
     )
     first = base.model_copy(
         update={
