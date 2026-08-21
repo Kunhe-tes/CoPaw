@@ -13,7 +13,7 @@ import logging
 import os
 from pathlib import Path
 import time
-from typing import Any, List, Literal, Optional, Type, TYPE_CHECKING
+from typing import Any, List, Literal, Mapping, Optional, Type, TYPE_CHECKING
 from uuid import uuid4
 
 from agentscope.agent import ReActAgent
@@ -1021,10 +1021,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._sanitize_registered_skill_dirs(toolkit)
 
         # Build skill-tool registry for multi-skill attribution
-        self._build_skill_tool_registry(
-            Path(workspace_dir),
-            effective_skills,
-        )
+        self._build_skill_tool_registry(skill_runtime_profiles)
 
         # Store effective skills for later detector setup
         self._runtime_skills = effective_skills
@@ -1104,21 +1101,20 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
     def _build_skill_tool_registry(
         self,
-        workspace_dir: Path,
-        effective_skills: list[str],
+        profiles: Mapping[str, object],
     ) -> None:
         """Build skill-tool registry for tool attribution.
 
         Args:
-            workspace_dir: Workspace directory
-            effective_skills: List of enabled skill names
+            profiles: Runtime profiles already parsed from enabled skills.
         """
-        from .skill_tool_registry import build_skill_tool_registry
+        from .skill_tool_registry import (
+            build_skill_tool_registry_from_profiles,
+        )
 
         try:
-            self._skill_tool_registry = build_skill_tool_registry(
-                workspace_dir,
-                effective_skills,
+            self._skill_tool_registry = (
+                build_skill_tool_registry_from_profiles(profiles)
             )
         except Exception as e:
             logger.warning("Failed to build skill-tool registry: %s", e)

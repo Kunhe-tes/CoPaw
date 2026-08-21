@@ -10,7 +10,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import frontmatter
 
@@ -273,6 +273,28 @@ def build_skill_tool_registry(
         len(enabled_skills),
         registry.skill_count,
     )
+
+    return registry
+
+
+def build_skill_tool_registry_from_profiles(
+    profiles: Mapping[str, Any],
+    registry: SkillToolRegistry | None = None,
+) -> SkillToolRegistry:
+    """Build skill-tool registry from already parsed runtime profiles."""
+    from .skill_feature_inferencer import get_skill_feature_inferencer
+
+    registry = registry or SkillToolRegistry()
+    registry.clear()
+    inferencer = get_skill_feature_inferencer()
+
+    for skill_name, profile in profiles.items():
+        declared_tools = getattr(profile, "declared_tools", [])
+        if declared_tools:
+            registry.register_skill_tools(skill_name, declared_tools)
+        skill_feature = getattr(profile, "skill_feature", None)
+        if skill_feature is not None:
+            inferencer.register_feature(skill_feature)
 
     return registry
 
