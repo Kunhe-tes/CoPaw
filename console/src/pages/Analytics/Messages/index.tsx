@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
+import type { CSSProperties } from "react";
 import { useTranslation } from "react-i18next";
 import {
   Table,
@@ -9,13 +10,25 @@ import {
   Tooltip,
   message,
   Select,
+  Modal,
+  Alert,
+  Empty,
+  Segmented,
+  Spin,
 } from "antd";
-import { Download } from "lucide-react";
+import { BarChart3, Clock3, Download, RefreshCw } from "lucide-react";
 import type { ColumnsType } from "antd/es/table";
 import dayjs from "dayjs";
+import type { Dayjs } from "dayjs";
 import { PageHeader } from "@/components/PageHeader";
 import { tracingApi, UserMessageItem } from "../../../api/modules/tracing";
-import { getBbkDisplayName, BBK_ID_MAP } from "../../../constants/bbk";
+import {
+  monitorApi,
+  type AsyncTaskRecord,
+  type HighFrequencyQuestionCriteria,
+  type HighFrequencyQuestionResult,
+} from "../../../api/modules/monitor";
+import { getBbkDisplayName } from "../../../constants/bbk";
 import {
   ensureBranchOptions,
   getScopedBranchFilter,
@@ -24,6 +37,144 @@ import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
 
 const { RangePicker } = DatePicker;
+const HIGH_FREQUENCY_QUESTION_TASK_TYPE = "monitor.high.freq.question";
+
+function getDefaultAnalysisRange(): [Dayjs, Dayjs] {
+  return [dayjs().subtract(6, "day").startOf("day"), dayjs().endOf("day")];
+}
+
+function toHighFrequencyCriteria(
+  range: [Dayjs, Dayjs],
+  bbkId?: string,
+): HighFrequencyQuestionCriteria {
+  return {
+    start_time: range[0].startOf("day").format("YYYY-MM-DD HH:mm:ss"),
+    end_time: range[1].endOf("day").format("YYYY-MM-DD HH:mm:ss"),
+    bbk_id: bbkId || null,
+  };
+}
+
+function getTopicPercent(topic: HighFrequencyQuestionResult["topics"][number]) {
+  if (!topic.valid_message_count) {
+    return "0.0%";
+  }
+  return `${((topic.message_count / topic.valid_message_count) * 100).toFixed(
+    1,
+  )}%`;
+}
+
+function getTopicMetricText(
+  topic: HighFrequencyQuestionResult["topics"][number],
+) {
+  return `${topic.message_count.toLocaleString("zh-CN")}条（${getTopicPercent(
+    topic,
+  )}）`;
+}
+
+function getTopicBbkDistribution(
+  topic: HighFrequencyQuestionResult["topics"][number],
+) {
+  const entries = Object.entries(topic.bbk_dis || {})
+    .map(([bbkId, value]) => ({
+      bbkId,
+      value: Number(value),
+    }))
+    .filter((item) => Number.isFinite(item.value) && item.value > 0)
+    .sort((a, b) => b.value - a.value);
+
+  if (entries.length === 0) {
+    return [];
+  }
+
+  const total = entries.reduce((sum, item) => sum + item.value, 0);
+
+  return entries.slice(0, 5).map((item) => {
+    const name = getBbkDisplayName(item.bbkId);
+    const width =
+      entries.length === 1
+        ? 100
+        : total > 0
+        ? Math.max((item.value / total) * 100, 10)
+        : 0;
+    return {
+      bbkId: item.bbkId,
+      name,
+      valueText:
+        topic.message_count > 0
+          ? `${((item.value / topic.message_count) * 100).toFixed(1)}%`
+          : "0.0%",
+      width,
+    };
+  });
+}
+
+function getCriteriaTaskRequest(criteria: HighFrequencyQuestionCriteria) {
+  const bbkId = criteria.bbk_id?.trim();
+  return {
+    start_date: dayjs(criteria.start_time).format("YYYY-MM-DD"),
+    end_date: dayjs(criteria.end_time).format("YYYY-MM-DD"),
+    scope_type: bbkId ? "ORG" : "ALL",
+    bbk_id: bbkId || "ALL",
+  };
+}
+
+function isMatchingRunningAnalysisTask(
+  task: AsyncTaskRecord,
+  criteria: HighFrequencyQuestionCriteria,
+) {
+  if (
+    task.task_type !== HIGH_FREQUENCY_QUESTION_TASK_TYPE ||
+    String(task.status || "").toLowerCase() !== "running"
+  ) {
+    return false;
+  }
+
+  const resultJson = task.result_json;
+  if (!resultJson || typeof resultJson !== "object") {
+    return false;
+  }
+
+  const request = (resultJson as { request?: Record<string, unknown> }).request;
+  if (!request) {
+    return false;
+  }
+
+  const expected = getCriteriaTaskRequest(criteria);
+  return (
+    request.start_date === expected.start_date &&
+    request.end_date === expected.end_date &&
+    request.scope_type === expected.scope_type &&
+    request.bbk_id === expected.bbk_id
+  );
+}
+
+function formatAnalysisTime(value?: string | null) {
+  if (!value) {
+    return "-";
+  }
+  return dayjs(value).format("YYYY-MM-DD HH:mm:ss");
+}
+
+function getPercentClassName(rankNo: number) {
+  if (rankNo === 1) return styles.analysisPercentFirst;
+  if (rankNo === 2) return styles.analysisPercentSecond;
+  if (rankNo === 3) return styles.analysisPercentThird;
+  return styles.analysisPercentDefault;
+}
+
+function getRankClassName(rankNo: number) {
+  if (rankNo === 1) return styles.analysisRankGold;
+  if (rankNo === 2) return styles.analysisRankSilver;
+  if (rankNo === 3) return styles.analysisRankBronze;
+  return styles.analysisRank;
+}
+
+function getTopicAccentColor(rankNo: number) {
+  if (rankNo === 1) return "#f97316";
+  if (rankNo === 2) return "#1d4ed8";
+  if (rankNo === 3) return "#16a34a";
+  return "#2563eb";
+}
 
 export default function MessagesPage() {
   const { t } = useTranslation();
@@ -33,7 +184,7 @@ export default function MessagesPage() {
     [currentBbkId],
   );
   const branchOptions = useMemo(
-    () => ensureBranchOptions(branchScope.lockedBbkId, BBK_ID_MAP),
+    () => ensureBranchOptions(branchScope.lockedBbkId),
     [branchScope.lockedBbkId],
   );
   const [loading, setLoading] = useState(true);
@@ -51,6 +202,32 @@ export default function MessagesPage() {
     [dayjs().subtract(7, "day"), dayjs()],
   );
   const [exporting, setExporting] = useState(false);
+  const [analysisOpen, setAnalysisOpen] = useState(false);
+  const [analysisRange, setAnalysisRange] = useState<[Dayjs, Dayjs]>(
+    getDefaultAnalysisRange,
+  );
+  const [analysisQuickRange, setAnalysisQuickRange] = useState("7");
+  const [analysisBbkId, setAnalysisBbkId] = useState<string | undefined>(
+    branchScope.lockedBbkId,
+  );
+  const [analysisResult, setAnalysisResult] =
+    useState<HighFrequencyQuestionResult | null>(null);
+  const [analysisLoading, setAnalysisLoading] = useState(false);
+  const [analysisSubmitting, setAnalysisSubmitting] = useState(false);
+  const [analysisTaskId, setAnalysisTaskId] = useState<string | null>(null);
+  const [analysisTaskStatus, setAnalysisTaskStatus] = useState<
+    "idle" | "running" | "failed"
+  >("idle");
+  const [analysisQueried, setAnalysisQueried] = useState(false);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const analysisQuerySeqRef = useRef(0);
+
+  useEffect(() => {
+    if (branchScope.lockedBbkId) {
+      setBbkIdFilter(branchScope.lockedBbkId);
+      setAnalysisBbkId(branchScope.lockedBbkId);
+    }
+  }, [branchScope.lockedBbkId]);
 
   useEffect(() => {
     if (branchScope.lockedBbkId) {
@@ -150,6 +327,332 @@ export default function MessagesPage() {
     } finally {
       setExporting(false);
     }
+  };
+
+  const resetAnalysisResultState = () => {
+    setAnalysisResult(null);
+    setAnalysisError(null);
+    setAnalysisTaskId(null);
+    setAnalysisTaskStatus("idle");
+    setAnalysisQueried(false);
+  };
+
+  const queryAnalysisResult = useCallback(
+    async (range = analysisRange, bbkId = analysisBbkId) => {
+      const querySeq = analysisQuerySeqRef.current + 1;
+      analysisQuerySeqRef.current = querySeq;
+      setAnalysisLoading(true);
+      setAnalysisError(null);
+      setAnalysisTaskId(null);
+      setAnalysisTaskStatus("idle");
+      try {
+        const criteria = toHighFrequencyCriteria(range, bbkId);
+        const data = await monitorApi.getHighFrequencyQuestionResults(criteria);
+        if (querySeq !== analysisQuerySeqRef.current) {
+          return;
+        }
+        if (data.state === "EMPTY") {
+          const tasks = await monitorApi.getAsyncTasks({
+            task_type: HIGH_FREQUENCY_QUESTION_TASK_TYPE,
+            status: "running",
+            page: 1,
+            page_size: 100,
+          });
+          if (querySeq !== analysisQuerySeqRef.current) {
+            return;
+          }
+          const runningTask = tasks.items.find((task) =>
+            isMatchingRunningAnalysisTask(task, criteria),
+          );
+          if (runningTask) {
+            setAnalysisResult(null);
+            setAnalysisTaskId(runningTask.task_id);
+            setAnalysisTaskStatus("running");
+            setAnalysisQueried(true);
+            return;
+          }
+        }
+        setAnalysisResult(data);
+        setAnalysisQueried(true);
+      } catch (error) {
+        if (querySeq !== analysisQuerySeqRef.current) {
+          return;
+        }
+        const errorMsg =
+          error instanceof Error ? error.message : "查询高频问题结果失败";
+        setAnalysisError(errorMsg);
+        message.error(errorMsg);
+      } finally {
+        if (querySeq === analysisQuerySeqRef.current) {
+          setAnalysisLoading(false);
+        }
+      }
+    },
+    [analysisRange, analysisBbkId],
+  );
+
+  useEffect(() => {
+    if (!analysisOpen) {
+      return;
+    }
+    void queryAnalysisResult();
+  }, [analysisOpen, queryAnalysisResult]);
+
+  const openAnalysisModal = () => {
+    setAnalysisOpen(true);
+  };
+
+  const handleAnalysisQuickRangeChange = (value: string | number) => {
+    const days = Number(value);
+    setAnalysisQuickRange(String(value));
+    setAnalysisRange([
+      dayjs()
+        .subtract(days - 1, "day")
+        .startOf("day"),
+      dayjs().endOf("day"),
+    ]);
+    resetAnalysisResultState();
+  };
+
+  const handleAnalysisRangeChange = (
+    dates: null | [Dayjs | null, Dayjs | null],
+  ) => {
+    if (!dates?.[0] || !dates?.[1]) {
+      return;
+    }
+    if (dates[1].startOf("day").diff(dates[0].startOf("day"), "day") > 6) {
+      message.warning("高频问题分析最多支持 7 天的数据范围");
+      return;
+    }
+    setAnalysisRange([dates[0], dates[1]]);
+    setAnalysisQuickRange("custom");
+    resetAnalysisResultState();
+  };
+
+  const handleAnalysisBbkChange = (value?: string) => {
+    if (!branchScope.lockedBbkId) {
+      setAnalysisBbkId(value);
+      resetAnalysisResultState();
+    }
+  };
+
+  const submitAnalysisTask = async () => {
+    setAnalysisSubmitting(true);
+    setAnalysisError(null);
+    try {
+      const shouldForceRegenerate =
+        analysisResult?.state === "AVAILABLE" ||
+        analysisResult?.state === "AVAILABLE_STALE";
+      const data = await monitorApi.submitHighFrequencyQuestionTask({
+        ...toHighFrequencyCriteria(analysisRange, analysisBbkId),
+        force: shouldForceRegenerate,
+      });
+      if (data.state === "AVAILABLE") {
+        setAnalysisResult({ ...data, state: "AVAILABLE" });
+        setAnalysisTaskId(null);
+        setAnalysisTaskStatus("idle");
+        setAnalysisQueried(true);
+        return;
+      }
+      setAnalysisResult(null);
+      setAnalysisQueried(true);
+      setAnalysisTaskId(data.task_id || null);
+      setAnalysisTaskStatus("running");
+    } catch (error) {
+      const errorMsg =
+        error instanceof Error ? error.message : "提交高频问题分析任务失败";
+      setAnalysisError(errorMsg);
+      message.error(errorMsg);
+    } finally {
+      setAnalysisSubmitting(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!analysisOpen || !analysisTaskId || analysisTaskStatus !== "running") {
+      return;
+    }
+
+    let cancelled = false;
+    const timer = window.setInterval(() => {
+      monitorApi
+        .getAsyncTaskDetail(analysisTaskId)
+        .then((task) => {
+          if (cancelled) {
+            return;
+          }
+          const status = String(task.status || "").toLowerCase();
+          if (status === "succeeded" || status === "success") {
+            window.clearInterval(timer);
+            setAnalysisTaskStatus("idle");
+            setAnalysisTaskId(null);
+            void queryAnalysisResult();
+          } else if (status === "failed" || status === "error") {
+            window.clearInterval(timer);
+            setAnalysisTaskStatus("failed");
+            setAnalysisError(
+              task.error_message || "高频问题分析生成失败，请稍后重新生成",
+            );
+          }
+        })
+        .catch((error) => {
+          if (cancelled) {
+            return;
+          }
+          const errorMsg =
+            error instanceof Error ? error.message : "查询任务状态失败";
+          setAnalysisError(errorMsg);
+        });
+    }, 5000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [analysisOpen, analysisTaskId, analysisTaskStatus, queryAnalysisResult]);
+
+  const renderAnalysisContent = () => {
+    if (analysisLoading) {
+      return (
+        <div className={styles.analysisCenterState}>
+          <Spin />
+          <span>正在查询高频问题结果</span>
+        </div>
+      );
+    }
+
+    if (analysisTaskStatus === "running") {
+      return (
+        <div className={styles.analysisCenterState}>
+          <Spin />
+          <strong>高频问题分析生成中</strong>
+          <span>结果生成后将自动刷新，你也可以关闭弹窗稍后再看。</span>
+        </div>
+      );
+    }
+
+    if (
+      analysisResult?.state === "AVAILABLE" ||
+      analysisResult?.state === "AVAILABLE_STALE"
+    ) {
+      return (
+        <>
+          <div className={styles.analysisStatusBar}>
+            <div className={styles.analysisStatusMain}>
+              <span className={styles.analysisStatusIcon}>
+                <Clock3 size={18} />
+              </span>
+              <div>
+                <strong>当前结果已生成</strong>
+                <span>
+                  本结果更新于{" "}
+                  {formatAnalysisTime(analysisResult.result_updated_at)}
+                </span>
+              </div>
+            </div>
+          </div>
+          <section className={styles.analysisResults}>
+            <h3>高频问题 TOP10</h3>
+            <div className={styles.analysisTopicList}>
+              {analysisResult.topics.map((topic) => {
+                const bbkDistribution = getTopicBbkDistribution(topic);
+
+                return (
+                  <article
+                    className={styles.analysisTopic}
+                    key={topic.rank_no}
+                    style={
+                      {
+                        "--analysis-topic-accent": getTopicAccentColor(
+                          topic.rank_no,
+                        ),
+                      } as CSSProperties &
+                        Record<"--analysis-topic-accent", string>
+                    }
+                  >
+                    <div className={getRankClassName(topic.rank_no)}>
+                      {topic.rank_no}
+                    </div>
+                    <div className={styles.analysisTopicContent}>
+                      <strong>{topic.topic_name}</strong>
+                      <div className={styles.analysisQuestions}>
+                        {topic.sample_questions.slice(0, 3).map((question) => (
+                          <Tooltip key={question} title={`“${question}”`}>
+                            <span>{`“${question}”`}</span>
+                          </Tooltip>
+                        ))}
+                      </div>
+                    </div>
+                    <div className={styles.analysisBbkDistribution}>
+                      {bbkDistribution.length > 0 ? (
+                        <div className={styles.analysisBbkDistributionList}>
+                          {bbkDistribution.map((item) => (
+                            <div
+                              className={styles.analysisBbkDistributionRow}
+                              key={item.bbkId}
+                            >
+                              <Tooltip title={item.name}>
+                                <span
+                                  className={styles.analysisBbkDistributionName}
+                                >
+                                  {item.name}
+                                </span>
+                              </Tooltip>
+                              <div
+                                className={styles.analysisBbkDistributionTrack}
+                              >
+                                <div
+                                  className={styles.analysisBbkDistributionBar}
+                                  style={{ width: `${item.width}%` }}
+                                />
+                              </div>
+                              <span
+                                className={styles.analysisBbkDistributionValue}
+                              >
+                                {item.valueText}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <span
+                          className={styles.analysisBbkDistributionEmpty}
+                        ></span>
+                      )}
+                    </div>
+                    <span
+                      className={`${
+                        styles.analysisPercent
+                      } ${getPercentClassName(topic.rank_no)}`}
+                    >
+                      {getTopicMetricText(topic)}
+                    </span>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        </>
+      );
+    }
+
+    if (analysisQueried && analysisResult?.state === "EMPTY") {
+      return (
+        <Empty
+          className={styles.analysisEmpty}
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="当前筛选条件暂无分析结果"
+        />
+      );
+    }
+
+    return (
+      <Empty
+        className={styles.analysisEmpty}
+        image={Empty.PRESENTED_IMAGE_SIMPLE}
+        description="请先查询当前筛选条件下的分析结果"
+      />
+    );
   };
 
   const formatDuration = (ms: number | null) => {
@@ -259,13 +762,22 @@ export default function MessagesPage() {
           { title: t("nav.analyticsMessages", "用户消息") },
         ]}
         extra={
-          <RangePicker
-            value={dateRange}
-            onChange={(dates) =>
-              setDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)
-            }
-            allowClear
-          />
+          <div className={styles.headerActions}>
+            <RangePicker
+              value={dateRange}
+              onChange={(dates) =>
+                setDateRange(dates as [dayjs.Dayjs, dayjs.Dayjs] | null)
+              }
+              allowClear
+            />
+            <Button
+              type="primary"
+              icon={<BarChart3 size={16} />}
+              onClick={openAnalysisModal}
+            >
+              高频问题分析
+            </Button>
+          </div>
         }
       />
 
@@ -292,6 +804,8 @@ export default function MessagesPage() {
               }}
               allowClear={branchScope.isHeadOffice}
               disabled={!branchScope.isHeadOffice}
+              showSearch
+              optionFilterProp="label"
               style={{ width: 150 }}
               options={branchOptions}
             />
@@ -347,6 +861,109 @@ export default function MessagesPage() {
           />
         </Card>
       </div>
+
+      <Modal
+        open={analysisOpen}
+        title={
+          <div className={styles.analysisTitle}>
+            <span className={styles.analysisTitleIcon}>
+              <BarChart3 size={22} />
+            </span>
+            <div className={styles.analysisTitleText}>
+              <h2>高频问题分析</h2>
+              <p>
+                基于所选时间范围和机构的数据，分析用户咨询的高频问题及其分布情况
+              </p>
+            </div>
+          </div>
+        }
+        width="80vw"
+        centered
+        destroyOnClose={false}
+        onCancel={() => setAnalysisOpen(false)}
+        className={styles.analysisModal}
+        styles={{ body: { padding: 0 } }}
+        footer={[
+          <Button key="close" onClick={() => setAnalysisOpen(false)}>
+            关闭
+          </Button>,
+          <Button
+            key="query"
+            icon={<RefreshCw size={16} />}
+            onClick={() => void queryAnalysisResult()}
+            loading={analysisLoading}
+            disabled={analysisTaskStatus === "running"}
+          >
+            刷新
+          </Button>,
+          <Button
+            key="generate"
+            type="primary"
+            onClick={submitAnalysisTask}
+            loading={analysisSubmitting}
+            disabled={analysisLoading || analysisTaskStatus === "running"}
+          >
+            {analysisTaskStatus === "running"
+              ? "生成中..."
+              : analysisResult?.state === "AVAILABLE" ||
+                analysisResult?.state === "AVAILABLE_STALE"
+              ? "重新生成分析"
+              : "生成分析"}
+          </Button>,
+        ]}
+      >
+        <div className={styles.analysisDialog}>
+          <div className={styles.analysisFilters}>
+            <label>
+              <span>时间范围</span>
+              <RangePicker
+                value={analysisRange}
+                onChange={(dates) =>
+                  handleAnalysisRangeChange(
+                    dates as null | [Dayjs | null, Dayjs | null],
+                  )
+                }
+                allowClear={false}
+              />
+            </label>
+            <label>
+              <span>所属机构</span>
+              <Select
+                value={analysisBbkId}
+                onChange={handleAnalysisBbkChange}
+                allowClear={branchScope.isHeadOffice}
+                disabled={!branchScope.isHeadOffice}
+                showSearch
+                optionFilterProp="label"
+                placeholder="全部机构（ALL）"
+                className={styles.analysisBbkSelect}
+                options={branchOptions}
+              />
+            </label>
+            <label>
+              <span>快捷选择</span>
+              <Segmented
+                value={analysisQuickRange}
+                onChange={handleAnalysisQuickRangeChange}
+                options={[
+                  { label: "最近 1 天", value: "1" },
+                  { label: "最近 3 天", value: "3" },
+                  { label: "最近 7 天", value: "7" },
+                ]}
+              />
+            </label>
+          </div>
+          {analysisError && (
+            <Alert
+              className={styles.analysisAlert}
+              type="error"
+              showIcon
+              message={analysisError}
+            />
+          )}
+          <div className={styles.analysisBody}>{renderAnalysisContent()}</div>
+        </div>
+      </Modal>
     </div>
   );
 }

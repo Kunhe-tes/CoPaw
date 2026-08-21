@@ -220,6 +220,28 @@ class AsyncTaskStore:
                 target_id,
             ),
         )
+        await self._refresh_task_progress(task_id)
+
+    async def _refresh_task_progress(self, task_id: str) -> None:
+        """按明细状态刷新主任务进度，供列表页实时展示。"""
+        await self.db.execute(
+            """
+            UPDATE swe_async_tasks
+            SET done_count = (
+                    SELECT COUNT(*)
+                    FROM swe_async_task_items
+                    WHERE task_id = %s
+                      AND status IN ('succeeded', 'created', 'skipped', 'failed')
+                ),
+                failed_count = (
+                    SELECT COUNT(*)
+                    FROM swe_async_task_items
+                    WHERE task_id = %s AND status = 'failed'
+                )
+            WHERE task_id = %s
+            """,
+            (task_id, task_id, task_id),
+        )
 
     async def finish_task(
         self,

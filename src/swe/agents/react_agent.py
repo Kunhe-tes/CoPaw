@@ -65,6 +65,7 @@ from .tools import (
     create_recover_evidence_tool,
     copy_file_to_static,
     update_task_progress,
+    emit_wplus_sop_event,
     ask_plan_clarification,
     create_submit_proposed_plan_tool,
     build_background_subagent_scope,
@@ -678,6 +679,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             "get_current_time": get_current_time,
             "copy_file_to_static": copy_file_to_static,
             "update_task_progress": update_task_progress,
+            "emit_wplus_sop_event": emit_wplus_sop_event,
         }
         if request_context.get("agent_role", "main") != "subagent":
             _add_main_agent_tools(

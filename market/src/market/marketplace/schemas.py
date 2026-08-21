@@ -206,12 +206,24 @@ class DistributeConflictItem(BaseModel):
     reason: str
 
 
+class DistributeTenantResult(BaseModel):
+    """单个用户的技能分发结果。"""
+
+    user_id: str
+    success: bool
+    status: str
+    skill_name: str = ""
+    error: str | None = None
+
+
 class DistributeResponse(BaseModel):
     """分发结果."""
 
     distributed_count: int
     conflict_count: int = 0
+    failed_count: int = 0
     conflicts: list[DistributeConflictItem] = []
+    results: list[DistributeTenantResult] = []
     item_id: str
 
 

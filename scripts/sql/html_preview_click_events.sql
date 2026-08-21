@@ -22,6 +22,15 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
   customer_name VARCHAR(255) NULL COMMENT '客户展示名称',
   customer_info JSON NULL COMMENT '点击按钮所在行的客户扩展信息',
 
+  event_type VARCHAR(32) NOT NULL DEFAULT 'button_click'
+    COMMENT '事件类型：button_click/preview_view/module_exposure',
+  template_type VARCHAR(16) NULL COMMENT '模板类型：main/sub',
+  template_id BIGINT NULL COMMENT '当前事件所在模板ID',
+  result_id VARCHAR(128) NULL COMMENT '当前模板生成结果ID',
+  event_target_id VARCHAR(255) NULL COMMENT '模块的稳定标识',
+  event_target_name VARCHAR(512) NULL COMMENT '模块的展示名称',
+  trace_id VARCHAR(128) NULL COMMENT '方案生成与浏览链路标识',
+
   clicked_at DATETIME NOT NULL COMMENT '前端点击时间',
   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '入库时间',
 
@@ -32,8 +41,18 @@ CREATE TABLE IF NOT EXISTS swe_html_preview_click_events (
   INDEX idx_customer_clicked (customer_id, clicked_at),
   INDEX idx_list_clicked (list_key(255), clicked_at),
   INDEX idx_bbk_clicked (bbk_id, clicked_at),
-  INDEX idx_source_clicked (source_id, clicked_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='HTML 预览按钮点击明细';
+  INDEX idx_source_clicked (source_id, clicked_at),
+  INDEX idx_source_event_target_clicked (
+    source_id, event_type, event_target_id, clicked_at
+  ),
+  INDEX idx_source_template_type_event_clicked (
+    source_id, template_type, event_type, clicked_at
+  ),
+  INDEX idx_source_template_result_clicked (
+    source_id, template_id, result_id, clicked_at
+  ),
+  INDEX idx_trace_clicked (trace_id, clicked_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='HTML 预览行为事件明细';
 
 CREATE TABLE IF NOT EXISTS swe_html_preview_list_snapshots (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,

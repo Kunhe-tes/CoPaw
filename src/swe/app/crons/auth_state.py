@@ -372,6 +372,20 @@ def _normalize_user_info_payload(
     return {"value": payload}, utc_now() + DEFAULT_USER_INFO_TTL
 
 
+def _normalize_auth_token_payload(auth_token: str) -> str:
+    try:
+        payload = json.loads(auth_token)
+    except (TypeError, ValueError):
+        return auth_token
+    if (
+        isinstance(payload, Mapping)
+        and set(payload.keys()) == {"value"}
+        and isinstance(payload["value"], str)
+    ):
+        return payload["value"]
+    return auth_token
+
+
 def _raise_if_user_info_expired(state: CronAuthState) -> None:
     if not state.user_info:
         return
@@ -503,10 +517,15 @@ def issue_auth_token(
     if not state.user_info:
         raise ValueError("cron auth user_info is not configured")
 
-    auth_token = get_auth_token(state.user_info)
+    auth_token = _normalize_auth_token_payload(get_auth_token(state.user_info))
     expires_at = utc_now() + DEFAULT_AUTH_TOKEN_TTL
+    cookie_header = merge_auth_token_into_cookie(
+        state.cookie_header,
+        auth_token,
+    )
     state.auth_token = auth_token
     state.auth_token_expires_at = expires_at
+    state.cookie_header = cookie_header
     state.last_error = None
     save_cron_auth_state(
         state,
@@ -517,10 +536,7 @@ def issue_auth_token(
         token=auth_token,
         expires_at=expires_at,
         reused=False,
-        cookie_header=merge_auth_token_into_cookie(
-            state.cookie_header,
-            auth_token,
-        ),
+        cookie_header=cookie_header,
     )
 
 

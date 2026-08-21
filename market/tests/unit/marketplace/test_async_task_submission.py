@@ -15,6 +15,9 @@ from market.app.routers import mcp_market as mcp_router
 from market.app.routers import skills_market as skills_router
 from market.database.connection import DatabaseConnection
 from market.marketplace.schemas import (
+    DistributeRequest,
+    DistributeResponse,
+    DistributeTenantResult,
     MCPDistributionRequest,
     MCPDistributionResponse,
     MCPDistributionTenantResult,
@@ -334,3 +337,82 @@ async def test_mcp_distribution_records_failed_item_target_name() -> None:
 
     assert store.items[0]["result"]["tenant_name"] == "用户A"
     assert store.items[0]["error_message"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_skill_distribution_records_failed_item_per_result() -> None:
+    """技能分发明细应使用逐用户结果，避免复制异常用户被标为成功。"""
+
+    class FakeStore:
+        """记录后台任务写入参数的任务表替身。"""
+
+        def __init__(self) -> None:
+            self.items: list[dict[str, Any]] = []
+            self.finished: dict[str, Any] | None = None
+
+        async def mark_running(self, task_id: str) -> None:
+            assert task_id == "task-1"
+
+        async def record_item_result(self, **kwargs: Any) -> None:
+            self.items.append(kwargs)
+
+        async def finish_task(self, **kwargs: Any) -> None:
+            self.finished = kwargs
+
+    class FakeService:
+        """返回一成一败的技能分发结果。"""
+
+        async def distribute_skill(
+            self,
+            *args: Any,
+            **kwargs: Any,
+        ) -> DistributeResponse:
+            del args, kwargs
+            return DistributeResponse(
+                distributed_count=1,
+                failed_count=1,
+                conflict_count=0,
+                item_id="skill-a",
+                results=[
+                    DistributeTenantResult(
+                        user_id="tenant-a",
+                        success=True,
+                        status="distributed",
+                    ),
+                    DistributeTenantResult(
+                        user_id="tenant-b",
+                        success=False,
+                        status="failed",
+                        error="copy failed",
+                    ),
+                ],
+            )
+
+    store = FakeStore()
+
+    await skills_router._run_skill_distribution_task(  # noqa: SLF001
+        task_id="task-1",
+        store=store,
+        svc=FakeService(),
+        source_id="src1",
+        item_id="skill-a",
+        operator_id="admin",
+        operator_name="admin",
+        req=DistributeRequest(
+            target_type="user_id",
+            target_values=["tenant-a"],
+        ),
+        target_user_ids=["tenant-a", "tenant-b"],
+    )
+
+    assert [item["success"] for item in store.items] == [True, False]
+    assert [item["item_status"] for item in store.items] == [
+        "succeeded",
+        "failed",
+    ]
+    assert store.items[1]["target_id"] == "tenant-b"
+    assert store.items[1]["error_message"] == "copy failed"
+    assert store.finished is not None
+    assert store.finished["status"] == "partial_failed"
+    assert store.finished["done_count"] == 2
+    assert store.finished["failed_count"] == 1

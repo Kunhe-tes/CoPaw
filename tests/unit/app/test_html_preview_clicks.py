@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
 from swe.app.html_preview_clicks.models import (
     HtmlPreviewClickEventCreate,
@@ -21,11 +22,76 @@ from swe.app.html_preview_clicks.models import (
 from swe.app.html_preview_clicks.router import (
     router as html_preview_click_router,
 )
+from swe.app.html_preview_clicks.service import HtmlPreviewClickService
 from swe.app.html_preview_clicks.store import HtmlPreviewClickStore
 
 html_preview_router_module = importlib.import_module(
     "swe.app.html_preview_clicks.router",
 )
+
+
+def test_event_model_validates_event_type_and_template_association():
+    """旧点击保持兼容，新事件必须携带当前模板和模板类型。"""
+    legacy_event = HtmlPreviewClickEventCreate(
+        file_url="https://example.com/a.html",
+    )
+
+    assert legacy_event.event_type == "button_click"
+
+    with pytest.raises(ValidationError):
+        HtmlPreviewClickEventCreate(
+            file_url="https://example.com/a.html",
+            event_type="unknown_event",
+        )
+
+    with pytest.raises(ValidationError):
+        HtmlPreviewClickEventCreate(
+            file_url="https://example.com/a.html",
+            event_type="preview_view",
+        )
+
+    main_view = HtmlPreviewClickEventCreate(
+        file_url="https://example.com/a.html",
+        event_type="preview_view",
+        template_type="main",
+        template_id=11,
+        result_id="result-main",
+    )
+
+    assert main_view.template_type == "main"
+
+    with pytest.raises(ValidationError):
+        HtmlPreviewClickEventCreate(
+            file_url="https://example.com/sub.html",
+            event_type="preview_view",
+            template_id=12,
+            result_id="result-sub",
+        )
+
+    sub_view = HtmlPreviewClickEventCreate(
+        file_url="https://example.com/sub.html",
+        event_type="preview_view",
+        template_type="sub",
+        template_id=12,
+        result_id="result-sub",
+    )
+
+    assert sub_view.event_target_id is None
+
+    with pytest.raises(ValidationError):
+        HtmlPreviewClickEventCreate(
+            file_url="https://example.com/sub.html",
+            event_type="module_exposure",
+            template_type="sub",
+            template_id=12,
+            result_id="result-sub",
+        )
+
+    with pytest.raises(ValidationError):
+        HtmlPreviewClickEventCreate(
+            file_url="https://example.com/a.html",
+            template_type="main",
+        )
 
 
 @pytest.fixture
@@ -85,6 +151,55 @@ async def test_create_event_writes_click_detail(mock_db):
         "祝话",
         '{"客户姓名": "祝话", "到期金额": "18.00万元"}',
         datetime(2026, 5, 30, 18, 0, 0),
+        "button_click",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_event_writes_view_event_metadata(mock_db):
+    """模块埋点应保存当前模板、模板类型、事件对象与链路标识。"""
+    store = HtmlPreviewClickStore(mock_db)
+
+    await store.create_event(
+        HtmlPreviewClickEventCreate(
+            file_url="https://example.com/plan.html",
+            event_type="module_exposure",
+            template_type="sub",
+            template_id=12,
+            result_id="result-sub",
+            event_target_id="module-customer-profile",
+            event_target_name="客户核心信息",
+            trace_id="trace-001",
+        ),
+    )
+
+    query, params = mock_db.execute.call_args[0]
+    assert "event_type" in query
+    assert "template_id" in query
+    assert "result_id" in query
+    assert "template_type" in query
+    assert "root_template_id" not in query
+    assert "root_result_id" not in query
+    assert "event_target_id" in query
+    assert "event_target_name" in query
+    assert "parent_target_id" not in query
+    assert "parent_target_name" not in query
+    assert "trace_id" in query
+    assert params[13] is None
+    assert params[-7:] == (
+        "module_exposure",
+        "sub",
+        12,
+        "result-sub",
+        "module-customer-profile",
+        "客户核心信息",
+        "trace-001",
     )
 
 
@@ -258,10 +373,12 @@ async def test_list_summary_filters_by_source_and_time(mock_db):
     assert "clicked_at >= %s" in query
     assert "clicked_at <= %s" in query
     assert "bbk_id IN (%s, %s)" in query
+    assert "event_type = %s" in query
     assert "ORDER BY click_count DESC, last_clicked_at DESC" in query
     assert params[0] == "copaw"
     assert "branch-1" in params
     assert "branch-2" in params
+    assert "button_click" in params
     assert len(items) == 1
     assert items[0].click_count == 3
     assert items[0].last_clicked_at == clicked_at
@@ -291,6 +408,13 @@ async def test_list_events_returns_customer_info(mock_db):
             "customer_id": "CUST-001",
             "customer_name": "祝话",
             "customer_info": '{"客户姓名": "祝话"}',
+            "event_type": "module_exposure",
+            "template_type": "sub",
+            "template_id": 12,
+            "result_id": "result-sub",
+            "event_target_id": "module-customer-profile",
+            "event_target_name": "客户核心信息",
+            "trace_id": "trace-001",
             "clicked_at": clicked_at,
         },
     ]
@@ -300,19 +424,104 @@ async def test_list_events_returns_customer_info(mock_db):
         source_id="copaw",
         start_time=datetime(2026, 5, 30, 0, 0, 0),
         end_time=datetime(2026, 5, 30, 23, 59, 59),
+        event_type="module_exposure",
         limit=20,
     )
 
     query, params = mock_db.fetch_all.call_args[0]
     assert "customer_info" in query
     assert "ORDER BY clicked_at DESC, id DESC" in query
+    assert "event_type = %s" in query
     assert params[0] == "copaw"
+    assert "module_exposure" in params
     assert items[0].button_name == "洞察页面"
     assert items[0].user_name == "张经理"
     assert items[0].button_type == "insight"
     assert items[0].customer_id == "CUST-001"
     assert items[0].customer_name == "祝话"
     assert items[0].customer_info == {"客户姓名": "祝话"}
+    assert items[0].event_type == "module_exposure"
+    assert items[0].template_type == "sub"
+    assert items[0].template_id == 12
+    assert items[0].result_id == "result-sub"
+    assert items[0].event_target_id == "module-customer-profile"
+    assert items[0].event_target_name == "客户核心信息"
+    assert items[0].trace_id == "trace-001"
+
+
+@pytest.mark.asyncio
+async def test_service_passes_event_type_to_event_list_store():
+    """事件明细筛选应完整穿透 service 层。"""
+    store = MagicMock()
+    store.list_events = AsyncMock(return_value=[])
+    service = HtmlPreviewClickService(store)
+
+    await service.list_events(
+        source_id="copaw",
+        event_type="preview_view",
+    )
+
+    assert store.list_events.await_args.kwargs["event_type"] == "preview_view"
+
+
+@pytest.mark.asyncio
+async def test_event_list_defaults_to_legacy_button_click_scope(mock_db):
+    """未指定事件类型时，store 与 service 都应保持旧点击明细语义。"""
+    store = HtmlPreviewClickStore(mock_db)
+    mock_db.fetch_all.return_value = []
+
+    await store.list_events(source_id="copaw")
+
+    query, params = mock_db.fetch_all.call_args[0]
+    assert "event_type = %s" in query
+    assert params[-1] == "button_click"
+
+    service_store = MagicMock()
+    service_store.list_events = AsyncMock(return_value=[])
+    service = HtmlPreviewClickService(service_store)
+
+    await service.list_events(source_id="copaw")
+
+    assert (
+        service_store.list_events.await_args.kwargs["event_type"]
+        == "button_click"
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_list_supports_all_types_dimensions_and_offset(mock_db):
+    """可视化查询应支持全事件、模板维度筛选和分批读取。"""
+    store = HtmlPreviewClickStore(mock_db)
+    mock_db.fetch_all.return_value = []
+
+    await store.list_events(
+        source_id="copaw",
+        event_type=None,
+        template_type="sub",
+        template_id=12,
+        result_id="result-sub",
+        event_target_id="module-customer-profile",
+        trace_id="trace-001",
+        limit=20,
+        offset=40,
+    )
+
+    query, params = mock_db.fetch_all.call_args[0]
+    assert "event_type = %s" not in query
+    assert "template_type = %s" in query
+    assert "template_id = %s" in query
+    assert "result_id = %s" in query
+    assert "event_target_id = %s" in query
+    assert "trace_id = %s" in query
+    assert "LIMIT 20 OFFSET 40" in query
+    assert params == (
+        "copaw",
+        "sub",
+        12,
+        "result-sub",
+        "module-customer-profile",
+        "trace-001",
+    )
 
 
 @pytest.mark.asyncio
@@ -1201,10 +1410,17 @@ def test_event_list_route_returns_customer_items(monkeypatch):
         async def list_events(self, **kwargs):
             assert kwargs["source_id"] == "copaw"
             assert kwargs["limit"] == 20
+            assert kwargs["event_type"] == "module_exposure"
             return [
                 {
                     "id": 1,
                     "file_url": "https://example.com/a.html",
+                    "event_type": "module_exposure",
+                    "template_type": "sub",
+                    "template_id": 12,
+                    "result_id": "result-sub",
+                    "event_target_id": "module-customer-profile",
+                    "event_target_name": "客户核心信息",
                     "button_name": "洞察页面",
                     "customer_info": {"客户姓名": "祝话"},
                     "clicked_at": datetime(2026, 5, 30, 11, 0, 0),
@@ -1222,9 +1438,94 @@ def test_event_list_route_returns_customer_items(monkeypatch):
     monkeypatch.setattr(html_preview_router_module, "_service", _FakeService())
 
     client = TestClient(app)
-    response = client.get("/html-preview/events", params={"limit": 20})
+    response = client.get(
+        "/html-preview/events",
+        params={"limit": 20, "event_type": "module_exposure"},
+    )
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["success"] is True
+    assert payload["items"][0]["event_type"] == "module_exposure"
+    assert payload["items"][0]["template_type"] == "sub"
+    assert payload["items"][0]["template_id"] == 12
+    assert payload["items"][0]["event_target_id"] == "module-customer-profile"
     assert payload["items"][0]["customer_info"]["客户姓名"] == "祝话"
+
+
+def test_event_list_route_defaults_to_legacy_button_click_scope(monkeypatch):
+    """旧客户端不传 event_type 时应继续只查询按钮点击。"""
+
+    class _FakeService:
+        async def list_events(self, **kwargs):
+            assert kwargs["event_type"] == "button_click"
+            return []
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _inject_state(request: Request, call_next):
+        request.state.source_id = "copaw"
+        return await call_next(request)
+
+    app.include_router(html_preview_click_router)
+    monkeypatch.setattr(html_preview_router_module, "_service", _FakeService())
+
+    client = TestClient(app)
+    response = client.get("/html-preview/events")
+
+    assert response.status_code == 200
+
+
+def test_event_list_route_supports_all_types_dimensions_and_offset(
+    monkeypatch,
+):
+    """event_type=all 应取消类型限制并透传可视化筛选参数。"""
+
+    class _FakeService:
+        async def list_events(self, **kwargs):
+            assert kwargs == {
+                "source_id": "copaw",
+                "start_time": None,
+                "end_time": None,
+                "bbk_ids": None,
+                "cron_task_id": None,
+                "file_url": None,
+                "list_key": None,
+                "event_type": None,
+                "template_type": "sub",
+                "template_id": 12,
+                "result_id": "result-sub",
+                "event_target_id": "module-customer-profile",
+                "trace_id": "trace-001",
+                "limit": 20,
+                "offset": 40,
+            }
+            return []
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _inject_state(request: Request, call_next):
+        request.state.source_id = "copaw"
+        return await call_next(request)
+
+    app.include_router(html_preview_click_router)
+    monkeypatch.setattr(html_preview_router_module, "_service", _FakeService())
+
+    client = TestClient(app)
+    response = client.get(
+        "/html-preview/events",
+        params={
+            "event_type": "all",
+            "template_type": "sub",
+            "template_id": 12,
+            "result_id": "result-sub",
+            "event_target_id": "module-customer-profile",
+            "trace_id": "trace-001",
+            "limit": 20,
+            "offset": 40,
+        },
+    )
+
+    assert response.status_code == 200

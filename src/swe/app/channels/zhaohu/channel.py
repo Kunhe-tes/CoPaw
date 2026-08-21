@@ -22,11 +22,13 @@ import ssl
 import httpx
 from agentscope_runtime.engine.schemas.agent_schemas import (
     ContentType,
+    MessageType,
     TextContent,
 )
 
 from ....config.config import ZhaohuConfig as ZhaohuChannelConfig
 from ..base import BaseChannel, OnReplySent, ProcessHandler
+from ..renderer import MessageRenderer, RenderStyle
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +200,22 @@ class ZhaohuChannel(BaseChannel):
         # Per-user route lock for /new session switching
         self._user_route_locks: Dict[str, asyncio.Lock] = {}
         self._route_lock_guard = asyncio.Lock()
+
+        # 简洁模式（filter_thinking=True，前端"显示思考过程"禁用）下，
+        # 按接收方缓冲最后一条完成消息，流程结束时只推送最终结果
+        # （思考/工具等中间消息只在 Console 展示）。
+        self._zhaohu_pending: Dict[str, Any] = {}
+        # 详细模式（filter_thinking=False，前端"显示思考过程"启用）下
+        # 思考内容也要推送，用不受过滤的独立渲染器
+        # （MessageRenderer 无状态，可安全共享）。
+        self._verbose_renderer = MessageRenderer(
+            RenderStyle(
+                show_tool_details=self._show_tool_details,
+                filter_tool_messages=self._filter_tool_messages,
+                filter_thinking=False,
+                internal_tools=self._render_style.internal_tools,
+            ),
+        )
 
         # OAuth token cache: token string and creation timestamp
         self._oauth_token: Optional[str] = None
@@ -2292,6 +2310,56 @@ class ZhaohuChannel(BaseChannel):
                 "zhaohu no response text: msgId=%s",
                 msg_id,
             )
+
+    async def on_event_message_completed(
+        self,
+        request,
+        to_handle: str,
+        event: Any,
+        send_meta: Dict[str, Any],
+    ) -> None:
+        """按 filter_thinking 控制推送策略：
+        - True（过滤思考，前端"显示思考过程"禁用）：只推最终结果 1 条，
+          思考/工具等中间消息只在 Console 流式展示，流程结束时推送
+          保留的最后一条完成消息；
+        - False（不过滤，前端"显示思考过程"启用）：思考/工具/最终
+          结果全部推送到 Zhaohu。"""
+        if self._filter_thinking:
+            # 简洁模式：跳过思考，缓冲最后一条完成消息待流程结束推送
+            if getattr(event, "type", None) == MessageType.REASONING:
+                return
+            self._zhaohu_pending[to_handle] = (event, send_meta)
+            return
+        # 详细模式：思考内容用不受过滤的渲染器渲染后立即推送
+        if getattr(event, "type", None) == MessageType.REASONING:
+            parts = self._verbose_renderer.message_to_parts(event)
+            if parts:
+                await self.send_content_parts(to_handle, parts, send_meta)
+            return
+        await super().on_event_message_completed(
+            request,
+            to_handle,
+            event,
+            send_meta,
+        )
+
+    async def _on_process_completed(
+        self,
+        request,
+        to_handle: str,
+        send_meta: Dict[str, Any],
+    ) -> None:
+        """简洁模式下流程结束：推送该回话保留的最后一条完成消息。"""
+        if self._filter_thinking:
+            pending = self._zhaohu_pending.pop(to_handle, None)
+            if pending is not None:
+                event, meta = pending
+                await self.send_message_content(
+                    to_handle,
+                    event,
+                    meta or send_meta,
+                )
+        await super()._on_process_completed(request, to_handle, send_meta)
 
     async def start(self) -> None:
         if not self.enabled:

@@ -378,6 +378,41 @@ def test_publish_skill_upload_reactivates_inactive_skill(tmp_path):
     assert reactivated_item.version == "1.0.1"  # patch 版本递增
 
 
+def test_publish_upload_rejects_nested_zip_path_traversal(tmp_path):
+    import io
+    import zipfile
+
+    app = _make_app(tmp_path)
+    client = TestClient(app)
+
+    nested_buffer = io.BytesIO()
+    with zipfile.ZipFile(nested_buffer, "w") as nested:
+        nested.writestr("../escape.txt", "owned")
+
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr(
+            "bad_skill/SKILL.md",
+            "---\nname: bad_skill\n---\n# Bad Skill\n",
+        )
+        zf.writestr("bad_skill/payload.zip", nested_buffer.getvalue())
+
+    zip_buffer.seek(0)
+    resp = client.post(
+        "/api/market/skills/publish-upload",
+        files={"file": ("bad_skill.zip", zip_buffer, "application/zip")},
+        headers={
+            "X-Source-Id": "src_a",
+            "X-Manager": "true",
+            "X-User-Id": "u1",
+            "X-User-Name": "User",
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "Security scan" in resp.json()["detail"]
+
+
 def test_switch_version_updates_market_item_creator(tmp_path):
     """T4 R8：switch_version 同步更新 MarketItem.creator_id/creator_name 到目标快照来源."""
     import json as _json

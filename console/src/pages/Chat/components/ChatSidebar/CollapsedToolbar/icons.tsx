@@ -12,7 +12,7 @@ const INACTIVE_COLOR = DESIGN_TOKENS.colorIconInactive;
 export function NewChatIcon({ active = false }: IconProps) {
   const color = active ? ACTIVE_COLOR : INACTIVE_COLOR;
   return (
-    <svg width="21" height="21" viewBox="0 0 21 21" fill="none">
+    <svg width="18" height="18" viewBox="0 0 21 21" fill="none">
       <path
         d="M10.5 1V20M1 10.5H20"
         stroke={color}
@@ -27,7 +27,7 @@ export function NewChatIcon({ active = false }: IconProps) {
 export function TasksIcon({ active = false }: IconProps) {
   const color = active ? ACTIVE_COLOR : INACTIVE_COLOR;
   return (
-    <svg width="20" height="24" viewBox="0 0 20 24" fill="none">
+    <svg width="18" height="18" viewBox="0 0 20 24" fill="none">
       <circle cx="10" cy="14" r="9" stroke={color} strokeWidth="1.5" />
       <path
         d="M10 9V14L13 16"
@@ -56,7 +56,7 @@ export function TasksIcon({ active = false }: IconProps) {
 export function HistoryIcon({ active = false }: IconProps) {
   const color = active ? ACTIVE_COLOR : INACTIVE_COLOR;
   return (
-    <svg width="21" height="20" viewBox="0 0 21 20" fill="none">
+    <svg width="18" height="18" viewBox="0 0 21 20" fill="none">
       <path
         d="M3.5 4C5.1 1.8 7.7 0.5 10.5 0.5C15.5 0.5 19.5 4.5 19.5 9.5C19.5 14.5 15.5 18.5 10.5 18.5C6.3 18.5 2.8 15.6 1.8 11.7"
         stroke={color}

@@ -400,6 +400,42 @@ export interface AsyncTaskQueryFilters {
   page_size?: number;
 }
 
+export interface HighFrequencyQuestionCriteria {
+  start_time: string;
+  end_time: string;
+  bbk_id?: string | null;
+  force?: boolean;
+}
+
+export interface HighFrequencyQuestionTopic {
+  rank_no: number;
+  topic_name: string;
+  message_count: number;
+  valid_message_count: number;
+  bbk_dis?: Record<string, number>;
+  sample_questions: string[];
+}
+
+export interface HighFrequencyQuestionResult {
+  state: "AVAILABLE" | "AVAILABLE_STALE" | "EMPTY";
+  task_id?: string | null;
+  batch_id?: string | null;
+  status?: string | null;
+  source_id: string;
+  stat_start_time?: string | null;
+  stat_end_time?: string | null;
+  scope_type?: "ALL" | "ORG" | null;
+  bbk_id?: string | null;
+  result_updated_at?: string | null;
+  topics: HighFrequencyQuestionTopic[];
+  message?: string | null;
+}
+
+export interface HighFrequencyQuestionTaskResult
+  extends Omit<HighFrequencyQuestionResult, "state"> {
+  state: "AVAILABLE" | "RUNNING";
+}
+
 export interface CronDispatchDateFilters {
   start_time?: string;
   end_time?: string;
@@ -1238,5 +1274,28 @@ export const monitorApi = {
     }
     const query = params.toString() ? `?${params.toString()}` : "";
     return request(`/monitor/tasks/${encodeURIComponent(taskId)}${query}`);
+  },
+
+  getHighFrequencyQuestionResults: async (
+    criteria: HighFrequencyQuestionCriteria,
+  ): Promise<HighFrequencyQuestionResult> => {
+    const params = new URLSearchParams();
+    params.append("start_time", criteria.start_time);
+    params.append("end_time", criteria.end_time);
+    if (criteria.bbk_id) {
+      params.append("bbk_id", criteria.bbk_id);
+    }
+    return request(
+      `/monitor/high-frequency-question/results?${params.toString()}`,
+    );
+  },
+
+  submitHighFrequencyQuestionTask: async (
+    criteria: HighFrequencyQuestionCriteria,
+  ): Promise<HighFrequencyQuestionTaskResult> => {
+    return request("/monitor/high-frequency-question/tasks", {
+      method: "POST",
+      body: JSON.stringify(criteria),
+    });
   },
 };

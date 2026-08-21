@@ -275,8 +275,20 @@ describe("fetchAndSetUserName", () => {
 
     await handleUrlOriginParam();
 
+    expect(useIframeStore.getState().isOriginY).toBe(true);
+    expect(
+      JSON.parse(sessionStorage.getItem("swe-iframe-context") || "null")?.state,
+    ).not.toHaveProperty("isOriginY");
     expect(useIframeStore.getState().userId).toBe("80000002");
     expect(useIframeStore.getState().userName).toBeNull();
+  });
+
+  it("非 origin=Y 入口会清除本次页面的 origin 标记", async () => {
+    useIframeStore.getState().setOriginY(true);
+
+    await handleUrlOriginParam();
+
+    expect(useIframeStore.getState().isOriginY).toBe(false);
   });
 
   it("origin=Y 时从 cookie 读取 subBranchId", async () => {

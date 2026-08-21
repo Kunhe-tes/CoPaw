@@ -13,6 +13,8 @@ from swe.security.python_runtime_path_guard import (
     prepare_python_runtime_path_guard_env,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def test_runtime_guard_starts_python_without_sitecustomize_error(
     tmp_path: Path,
@@ -165,6 +167,7 @@ def test_runtime_guard_allows_trusted_swe_entrypoint_to_bootstrap_envs_json(
     env = os.environ.copy()
     env["SWE_WORKING_DIR"] = str(working_dir)
     env["SWE_SECRET_DIR"] = str(secret_dir)
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
     guard_dir = prepare_python_runtime_path_guard_env(
         env,
         tenant_root=tenant_root,
@@ -226,3 +229,41 @@ def test_runtime_guard_denies_untrusted_python_access_to_trusted_file(
 
     assert result.returncode != 0
     assert "outside the allowed workspace" in result.stderr
+
+
+def test_runtime_guard_denies_direct_workspace_skill_write(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "Path('skills/uploaded/SKILL.md').parent.mkdir(parents=True, exist_ok=True); "
+                    "Path('skills/uploaded/SKILL.md').write_text('# Uploaded\\n')"
+                ),
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "workspace skill directory" in result.stderr
+    assert not (workspace_dir / "skills" / "uploaded" / "SKILL.md").exists()

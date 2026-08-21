@@ -1003,8 +1003,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
         return str(meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "")
 
     def _get_batch_dispatch_offset_window_hours(
-        self, spec: CronJobSpec
-    ,
+        self,
+        spec: CronJobSpec,
     ) -> int:
         meta = spec.meta or {}
         return self._normalize_batch_dispatch_offset_window_hours(
@@ -1051,8 +1051,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             return {}
 
         provider_id = str(
-            getattr(active_model, "provider_id", "") or ""
-        ,
+            getattr(active_model, "provider_id", "") or "",
         ).strip()
         model_id = str(getattr(active_model, "model", "") or "").strip()
         if provider_id and model_id:
@@ -1081,8 +1080,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         )
         meta = dict(spec.meta or {})
         batch_ext_id = str(
-            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or ""
-        ,
+            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "",
         )
         tenant_id, source_id = self._get_external_scheduler_business_identity(
             spec,
@@ -1187,8 +1185,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             raise KeyError(job_id)
         if (job.meta or {}).get(BROADCAST_SOURCE_JOB_ID_META_KEY):
             raise RuntimeError(
-                "batch dispatch cannot be enabled from a broadcast child"
-            ,
+                "batch dispatch cannot be enabled from a broadcast child",
             )
 
         meta = dict(job.meta or {})
@@ -1217,11 +1214,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
             updated.id,
             normal_ext_id,
             (updated.meta or {}).get(
-                BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY, "",
+                BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY,
+                "",
             ),
             (updated.meta or {}).get(
-                BATCH_DISPATCH_OFFSET_MINUTES_META_KEY, 0
-            ,
+                BATCH_DISPATCH_OFFSET_MINUTES_META_KEY,
+                0,
             ),
         )
         return await self._persist_job_definition(updated)
@@ -1235,14 +1233,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
             raise KeyError(job_id)
         if (job.meta or {}).get(BROADCAST_SOURCE_JOB_ID_META_KEY):
             raise RuntimeError(
-                "batch dispatch cannot be disabled from a broadcast child"
-            ,
+                "batch dispatch cannot be disabled from a broadcast child",
             )
 
         meta = dict(job.meta or {})
         batch_ext_id = str(
-            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or ""
-        ,
+            meta.get(BATCH_DISPATCH_EXTERNAL_JOB_ID_META_KEY) or "",
         )
         for key in (
             BROADCAST_DISPATCH_INTENTS_ENABLED_META_KEY,
@@ -1839,7 +1835,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         job = await self._ensure_persisted_task_binding(job)
         dispatch_meta = dict(dispatch_meta or {})
         persisted_headers = (job.dispatch.meta or {}).get(
-            PASSTHROUGH_HEADERS_META_KEY
+            PASSTHROUGH_HEADERS_META_KEY,
         )
         passthrough_headers = (
             dict(persisted_headers)
@@ -2551,6 +2547,60 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
         return urllib.parse.quote(text, safe="")
 
+    def _get_zhaohu_push_config(self) -> Any:
+        """Read the zhaohu channel config for session-end push links.
+
+        Prefer the tenant agent config (where the prefix is distributed via
+        console / inherited from template); fall back to global config.json
+        so the call never fails.
+        """
+        from ...config.utils import load_config
+
+        try:
+            from ...config.config import load_agent_config
+
+            agent_cfg = load_agent_config(
+                self._agent_id or "default",
+                tenant_id=self._tenant_id,
+            )
+            channels = getattr(agent_cfg, "channels", None)
+            if channels is not None:
+                zhaohu = getattr(channels, "zhaohu", None)
+                if zhaohu is not None:
+                    return zhaohu
+        except Exception:
+            logger.info(
+                "zhaohu push config from agent failed, fallback to global",
+            )
+        return load_config().channels.zhaohu
+
+    def _build_session_end_push_link(self, job: CronJobSpec) -> str:
+        """非 RMASSIST 来源的定时任务通知跳转链接。
+
+        链接前缀与 ID 类型来自 zhaohu 渠道配置
+        （session_end_push_link_prefix / session_end_push_link_id_type）：
+        - id_type=chat_id    -> {prefix}?chatId={job.id}
+        - id_type=session_id -> {prefix}?sessionId={job.meta.task_chat_id}
+        前缀为空或对应 ID 值为空时返回空串（不附加链接）。
+        """
+        zhaohu_cfg = self._get_zhaohu_push_config()
+        prefix = getattr(zhaohu_cfg, "session_end_push_link_prefix", "") or ""
+        if not prefix:
+            return ""
+        sep = "&" if "?" in prefix else "?"
+        id_type = (
+            getattr(zhaohu_cfg, "session_end_push_link_id_type", "")
+            or "session_id"
+        )
+        if id_type == "chat_id":
+            chat_id = str(getattr(job, "id", "") or "")
+            return f"{prefix}{sep}chatId={chat_id}" if chat_id else ""
+        session_id = (getattr(job, "meta", None) or {}).get(
+            "task_chat_id",
+            "",
+        ) or ""
+        return f"{prefix}{sep}sessionId={session_id}" if session_id else ""
+
     def _build_wplus_pc_link(self, session_id: str) -> str:
         """Build W+ PC menu HTTPS link for notification jump.
 
@@ -2720,23 +2770,21 @@ class CronManager:  # pylint: disable=too-many-public-methods
             session_id,
         )
 
-        # 构建 W+ 跳转链接
-        wplus_link = self._build_wplus_link(session_id)
-        logger.debug("Generated W+ link: %s", wplus_link)
-
         # 构建 meta，包含 link 和 summary
         meta = dict(job.dispatch.meta or {})
 
-        # 仅 RMASSIST 来源的租户包含跳转链接
-        from ..workspace.tenant_init_source_store import is_tenant_source
-
-        is_rmassist = creator_id and await is_tenant_source(
-            str(creator_id),
-            "RMASSIST",
-        )
+        # RMASSIST 使用 W+ 深链；其他来源从 zhaohu 配置生成跳转链接
+        is_rmassist = job.source_id == "RMASSIST"
         if is_rmassist:
+            wplus_link = self._build_wplus_link(session_id)
+            logger.debug("Generated W+ link: %s", wplus_link)
             meta["link_url"] = wplus_link
             meta["link_text"] = "点击跳转小助claw版查看"
+        else:
+            link_url = self._build_session_end_push_link(job)
+            if link_url:
+                meta["link_url"] = link_url
+                meta["link_text"] = "点击查看详情"
         meta["notification_summary"] = "小助claw定时任务完成提醒"
 
         await self.push_message(
@@ -3670,7 +3718,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 existing=job,
             )
             synced_ext_id = (synced.meta or {}).get(
-                "external_job_id", "",
+                "external_job_id",
+                "",
             ) or ext_id
             self._remember_external_job_id(job.id, synced_ext_id)
             await self._restore_batch_dispatch_parent_external_job(

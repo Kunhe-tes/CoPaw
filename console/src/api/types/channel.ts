@@ -130,6 +130,8 @@ export interface ZhaohuConfig extends BaseChannelConfig {
   client_id: string;
   client_secret: string;
   session_end_push_enabled?: boolean;
+  session_end_push_link_prefix?: string;
+  session_end_push_link_id_type?: "chat_id" | "session_id";
 }
 
 export interface ChannelConfig {

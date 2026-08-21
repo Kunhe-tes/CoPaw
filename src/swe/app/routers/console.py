@@ -3,12 +3,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import mimetypes
 import os
 import re
-import asyncio
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +23,7 @@ from typing import (
 )
 from urllib.parse import quote, unquote, urlparse
 
+from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 from fastapi import (
     APIRouter,
     File,
@@ -34,7 +35,7 @@ from fastapi import (
 from pydantic import BaseModel, Field
 from starlette.responses import Response, StreamingResponse
 
-from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+from ...config.context import resolve_request_effective_tenant_id
 from ..agent_context import (
     get_agent_and_config_for_request,
     get_agent_for_request,
@@ -781,6 +782,25 @@ async def _append_uploaded_attachment_references(
         ]
 
 
+def _extract_wplus_user_scope(
+    request_data: Union[AgentRequest, dict],
+) -> object | None:
+    """Read only caller-owned structured metadata, never visible message text."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        direct = getattr(request_data, "user_scope", None)
+    else:
+        channel_meta = request_data.get("channel_meta") or {}
+        direct = request_data.get("user_scope")
+    if direct is not None:
+        return direct
+    return (
+        channel_meta.get("user_scope")
+        if isinstance(channel_meta, dict)
+        else None
+    )
+
+
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     """Extract run_key (ChatSpec.id), session_id, and native payload.
 
@@ -845,6 +865,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     scenario_preset_id = _extract_scenario_preset_id(request_data)
     if scenario_preset_id is not None:
         native_payload["meta"]["scenario_preset_id"] = scenario_preset_id
+    memory_user_scope = _extract_wplus_user_scope(request_data)
+    if memory_user_scope is not None:
+        native_payload["meta"]["wplus_user_scope"] = memory_user_scope
     if user_name:
         native_payload["meta"]["user_name"] = user_name
     if bbk_id:
@@ -954,6 +977,9 @@ async def _start_new_chat(
     console_channel,
     session_id,
     native_payload,
+    *,
+    before_start: Callable[[], None] | None = None,
+    include_run_status: bool = False,
 ):
     """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
     msgid = str(uuid.uuid4())
@@ -1042,15 +1068,25 @@ async def _start_new_chat(
     if chat.channel and chat.channel != "console":
         native_payload["meta"]["session_channel"] = chat.channel
     try:
-        queue, _ = await tracker.attach_or_start(
-            chat.id,
-            native_payload,
-            console_channel.stream_one,
-        )
+        if before_start is None:
+            queue, is_new_run = await tracker.attach_or_start(
+                chat.id,
+                native_payload,
+                console_channel.stream_one,
+            )
+        else:
+            queue, is_new_run = await tracker.attach_or_start(
+                chat.id,
+                native_payload,
+                console_channel.stream_one,
+                before_start=before_start,
+            )
     except BaseException:
         if scenario_preset_id and created:
             await workspace.chat_manager.delete_chats([chat.id])
         raise
+    if include_run_status:
+        return queue, chat.id, msgid, is_new_run
     return queue, chat.id, msgid
 
 
@@ -1113,11 +1149,85 @@ async def post_console_chat(
         raise HTTPException(status_code=400, detail=str(e)) from e
     await _append_uploaded_attachment_references(native_payload, workspace)
 
+    _inject_request_metadata(request, native_payload)
+    identity = _resolve_console_identity(request, native_payload, workspace)
+    _inject_user_context(request, native_payload)
+
+    session_id = console_channel.resolve_session_id(
+        sender_id=native_payload["sender_id"],
+        channel_meta=native_payload["meta"],
+    )
+    logger.debug("Console chat: resolved session_id=%s", session_id)
+
+    request_mapping = (
+        request_data
+        if isinstance(request_data, dict)
+        else request_data.model_dump()
+    )
+    is_reconnect = request_mapping.get("reconnect") is True
+
+    if not is_reconnect:
+        wplus_result, suppression_ctx = await _try_wplus_entry_intercept(
+            workspace=workspace,
+            native_payload=native_payload,
+            identity=identity,
+            session_id=session_id,
+            request_mapping=request_mapping,
+        )
+        if wplus_result is not None:
+            return wplus_result
+    else:
+        suppression_ctx = None
+
+    return await _dispatch_console_stream(
+        workspace=workspace,
+        console_channel=console_channel,
+        native_payload=native_payload,
+        session_id=session_id,
+        identity=identity,
+        request_mapping=request_mapping,
+        is_reconnect=is_reconnect,
+        suppression_ctx=suppression_ctx,
+    )
+
+
+# ---------------------------------------------------------------------------
+# post_console_chat helpers
+# ---------------------------------------------------------------------------
+
+
+class _SuppressionContext:
+    __slots__ = (
+        "suppress_implicit",
+        "service",
+        "proposal_id",
+        "token",
+        "entry_text",
+    )
+
+    def __init__(
+        self,
+        *,
+        suppress_implicit: bool,
+        service: Any,
+        proposal_id: str,
+        token: str,
+        entry_text: str,
+    ) -> None:
+        self.suppress_implicit = suppress_implicit
+        self.service = service
+        self.proposal_id = proposal_id
+        self.token = token
+        self.entry_text = entry_text
+
+
+def _inject_request_metadata(
+    request: Request,
+    native_payload: dict[str, Any],
+) -> None:
     b3_trace_id = _extract_b3_trace_id(request)
     if b3_trace_id:
         native_payload["meta"]["b3_trace_id"] = b3_trace_id
-
-    # Inject source_id from resolved request state for data isolation
     source_id = getattr(
         request.state,
         "source_id",
@@ -1132,41 +1242,393 @@ async def post_console_chat(
         )
     native_payload["meta"]["source_id"] = source_id
 
+
+def _resolve_console_identity(
+    request: Request,
+    native_payload: dict[str, Any],
+    workspace: Any,
+) -> dict[str, str]:
+    """Extract and validate authenticated identity from request state."""
     _validate_console_chat_identity(request, workspace, native_payload)
+    identity = {
+        "tenant_id": str(
+            getattr(request.state, "tenant_id", None) or "",
+        ).strip(),
+        "source_id": str(
+            getattr(request.state, "source_id", None) or "",
+        ).strip(),
+        "user_id": str(
+            getattr(request.state, "user_id", None) or "",
+        ).strip(),
+        "agent_id": str(
+            getattr(request.state, "agent_id", None) or "",
+        ).strip(),
+    }
+    workspace_agent_id = str(
+        getattr(workspace, "agent_id", None) or "",
+    ).strip()
+    identity["agent_id"] = identity["agent_id"] or workspace_agent_id
+    return identity
 
-    # 从 request.state 获取 user_name 和 bbk_id（由 TenantIdentityMiddleware 设置）
+
+def _inject_user_context(
+    request: Request,
+    native_payload: dict[str, Any],
+) -> None:
     request_state = getattr(request, "state", None)
-    if request_state:
-        user_name = getattr(request_state, "user_name", None)
-        bbk_id = getattr(request_state, "bbk_id", None)
-        if user_name:
-            native_payload["meta"]["user_name"] = user_name
-        if bbk_id:
-            native_payload["meta"]["bbk_id"] = bbk_id
+    if not request_state:
+        return
+    user_name = getattr(request_state, "user_name", None)
+    bbk_id = getattr(request_state, "bbk_id", None)
+    if user_name:
+        native_payload["meta"]["user_name"] = user_name
+    if bbk_id:
+        native_payload["meta"]["bbk_id"] = bbk_id
 
-    # Debug: log the session_id from frontend
-    logger.debug(
-        "Console chat: native_payload.meta.session_id=%s",
-        native_payload.get("meta", {}).get("session_id"),
+
+def _build_suppression_before_start(
+    ctx: _SuppressionContext | None,
+    native_payload: dict[str, Any],
+) -> Callable[[], None] | None:
+    if ctx is None or not ctx.suppress_implicit:
+        return None
+    assert ctx.service is not None
+    claim_id = (
+        ctx.service.claim_suppression(
+            proposal_id=ctx.proposal_id,
+            suppression_token=ctx.token,
+            original_text=ctx.entry_text,
+        )
+        or ""
     )
-    session_id = console_channel.resolve_session_id(
-        sender_id=native_payload["sender_id"],
-        channel_meta=native_payload["meta"],
+    if not claim_id:
+        raise HTTPException(
+            status_code=409,
+            detail="The original Chat request was already replayed",
+        )
+    native_payload["meta"]["wplus_sop_replay_claim_id"] = claim_id
+
+    def consume_replay_claim() -> None:
+        assert ctx.service is not None
+        consumed = ctx.service.consume_suppression(
+            proposal_id=ctx.proposal_id,
+            claim_id=claim_id,
+            suppression_token=ctx.token,
+            original_text=ctx.entry_text,
+        )
+        if not consumed:
+            raise HTTPException(
+                status_code=409,
+                detail="The original Chat request was already replayed",
+            )
+
+    return consume_replay_claim
+
+
+def _release_suppression_on_failure(
+    ctx: _SuppressionContext | None,
+    native_payload: dict[str, Any],
+) -> None:
+    if ctx is None or not ctx.suppress_implicit:
+        return
+    claim_id = str(
+        native_payload.get("meta", {}).get("wplus_sop_replay_claim_id", ""),
     )
-    logger.debug(
-        "Console chat: resolved session_id=%s",
-        session_id,
+    try:
+        ctx.service.release_suppression_claim(
+            proposal_id=ctx.proposal_id,
+            claim_id=claim_id,
+        )
+    except Exception:
+        pass
+
+
+def _validate_suppression_new_run(
+    ctx: _SuppressionContext | None,
+    tracker: Any,
+    run_key: str,
+    queue: Any,
+    is_new_run: bool,
+    native_payload: dict[str, Any],
+) -> None:
+    if ctx is None or not ctx.suppress_implicit:
+        return
+    if is_new_run:
+        return
+    claim_id = str(
+        native_payload.get("meta", {}).get("wplus_sop_replay_claim_id", ""),
     )
+    assert ctx.service is not None
+    ctx.service.release_suppression_claim(
+        proposal_id=ctx.proposal_id,
+        claim_id=claim_id,
+    )
+    raise HTTPException(
+        status_code=409,
+        detail="The original Chat request is already running",
+    )
+
+
+def _check_wplus_active_session_lock(
+    workspace: Any,
+    chat: Any,
+    tid: str,
+    sid: str,
+    uid: str,
+    aid: str,
+) -> Any:
+    """Return active session if chat has identity, or raise if locked."""
+    from ..wplus_sop.models import OwnershipTuple
+    from ..wplus_sop.service import WPlusSopService
+
+    if chat is None or not all((tid, sid, uid, aid)):
+        return None
+    ownership = OwnershipTuple(
+        tenant_id=tid,
+        source_id=sid,
+        user_id=uid,
+        agent_id=aid,
+        chat_id=chat.id,
+        logical_chat_session_id=chat.session_id,
+    )
+    wplus_service = WPlusSopService(workspace=workspace, ownership=ownership)
+    active_session = wplus_service.get_active_session()
+    if (
+        active_session is not None
+        and active_session.projection.locks_chat_input
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This Chat is locked by an active W+ SOP Session; "
+                "continue in the W+ workspace"
+            ),
+        )
+    return active_session
+
+
+def _resolve_wplus_suppression(
+    request_mapping: dict[str, Any],
+    chat: Any,
+    entry_text: str,
+    tid: str,
+    sid: str,
+    uid: str,
+    aid: str,
+    workspace: Any,
+) -> tuple[bool, Any, str, str]:
+    """Validate suppression request and return (suppress, service, proposal_id, token)."""
+    from ..wplus_sop.models import OwnershipTuple
+    from ..wplus_sop.service import WPlusSopService
+
+    suppression = request_mapping.get("wplus_sop_suppression")
+    if not isinstance(suppression, dict) or chat is None:
+        return False, None, "", ""
+    if not all((tid, sid, uid, aid)):
+        raise HTTPException(status_code=400, detail="Identity required")
+    ownership = OwnershipTuple(
+        tenant_id=tid,
+        source_id=sid,
+        user_id=uid,
+        agent_id=aid,
+        chat_id=chat.id,
+        logical_chat_session_id=chat.session_id,
+    )
+    wplus_service = WPlusSopService(workspace=workspace, ownership=ownership)
+    suppress_implicit = wplus_service.validate_suppression(
+        proposal_id=str(suppression.get("proposal_id") or ""),
+        suppression_token=str(suppression.get("token") or ""),
+        original_text=entry_text,
+    )
+    if not suppress_implicit:
+        raise HTTPException(
+            status_code=404,
+            detail="W+ SOP proposal not found",
+        )
+    return (
+        True,
+        wplus_service,
+        str(suppression.get("proposal_id") or ""),
+        str(suppression.get("token") or ""),
+    )
+
+
+async def _try_wplus_entry_intercept(
+    *,
+    workspace: Any,
+    native_payload: dict[str, Any],
+    identity: dict[str, str],
+    session_id: str,
+    request_mapping: dict[str, Any],
+) -> tuple[StreamingResponse | None, _SuppressionContext | None]:
+    """Intercept W+ SOP entry. Returns (response, suppression_ctx)."""
+    from ..wplus_sop.entry import classify_wplus_entry, extract_entry_text
+    from ..wplus_sop.models import OwnershipTuple
+    from ..wplus_sop.memory_policy import (
+        WPlusMemoryPolicyError,
+        normalize_anonymous_user_scope,
+    )
+    from ..wplus_sop.service import WPlusSopService
+
+    get_chat_by_session = getattr(
+        workspace.chat_manager,
+        "get_chat_by_session",
+        None,
+    )
+    tid = identity["tenant_id"]
+    sid = identity["source_id"]
+    uid = identity["user_id"]
+    aid = identity["agent_id"]
+    has_identity = all((tid, sid, uid, aid))
+    chat = (
+        await get_chat_by_session(
+            session_id,
+            channel=native_payload["channel_id"],
+            user_id=uid,
+        )
+        if callable(get_chat_by_session) and has_identity
+        else None
+    )
+    entry_text = extract_entry_text(native_payload["content_parts"])
+
+    active_session = _check_wplus_active_session_lock(
+        workspace,
+        chat,
+        tid,
+        sid,
+        uid,
+        aid,
+    )
+
+    (
+        suppress_implicit,
+        suppression_service,
+        suppression_proposal_id,
+        suppression_token,
+    ) = _resolve_wplus_suppression(
+        request_mapping,
+        chat,
+        entry_text,
+        tid,
+        sid,
+        uid,
+        aid,
+        workspace,
+    )
+
+    classification = classify_wplus_entry(
+        selected_skill_names=native_payload["meta"].get(
+            "selected_skill_names",
+        ),
+        message_text=entry_text,
+        suppress_entry=suppress_implicit,
+    )
+    if not classification.should_offer:
+        return None, (
+            _SuppressionContext(
+                suppress_implicit=suppress_implicit,
+                service=suppression_service,
+                proposal_id=suppression_proposal_id,
+                token=suppression_token,
+                entry_text=entry_text,
+            )
+            if suppress_implicit
+            else None
+        )
+
+    if active_session is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "This Chat already has a paused W+ SOP Session; "
+                "resume it in the W+ workspace"
+            ),
+        )
+    if not all((tid, sid, uid, aid)):
+        raise HTTPException(
+            status_code=400,
+            detail="W+ SOP entry requires tenant/source/user/agent",
+        )
+    if chat is None:
+        chat = await workspace.chat_manager.get_or_create_chat(
+            session_id,
+            uid,
+            native_payload["channel_id"],
+            name=_derive_chat_name(native_payload),
+            meta={"agent_id": aid},
+        )
+    ownership = OwnershipTuple(
+        tenant_id=tid,
+        source_id=sid,
+        user_id=uid,
+        agent_id=aid,
+        chat_id=chat.id,
+        logical_chat_session_id=chat.session_id,
+    )
+    wplus_service = WPlusSopService(workspace=workspace, ownership=ownership)
+    try:
+        memory_user_scope = normalize_anonymous_user_scope(
+            native_payload["meta"].get("wplus_user_scope"),
+        )
+        proposal = wplus_service.create_entry_proposal(
+            original_text=entry_text,
+            mode=classification.mode or "explicit",
+            memory_user_scope=memory_user_scope,
+        )
+    except WPlusMemoryPolicyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    chat.meta = {
+        **(chat.meta or {}),
+        "wplus_sop_entry_proposal": {
+            "proposal_id": proposal.proposal_id,
+            "mode": proposal.detection_mode.value,
+            "status": proposal.status.value,
+        },
+    }
+    await workspace.chat_manager.update_chat(chat)
+
+    async def entry_event_generator() -> AsyncGenerator[str, None]:
+        data = {
+            "object": "wplus_sop_entry_proposal",
+            "status": "completed",
+            "proposal_id": proposal.proposal_id,
+            "mode": proposal.detection_mode.value,
+            "confidence": classification.confidence,
+            "chat_id": chat.id,
+            "session_id": chat.session_id,
+            "title": "进入 W+ SOP 工作台",
+            "message": "CoPaw 将替你完成逐环节澄清、系统预跑和反馈重跑。",
+        }
+        yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+    return (
+        StreamingResponse(
+            entry_event_generator(),
+            media_type="text/event-stream",
+            headers=_console_chat_stream_headers(
+                session_id=session_id,
+                msgid=None,
+            ),
+        ),
+        None,
+    )
+
+
+async def _dispatch_console_stream(
+    *,
+    workspace: Any,
+    console_channel: Any,
+    native_payload: dict[str, Any],
+    session_id: str,
+    identity: dict[str, str],
+    request_mapping: dict[str, Any],
+    is_reconnect: bool,
+    suppression_ctx: _SuppressionContext | None = None,
+) -> StreamingResponse:
+    """Execute the actual chat run and stream the response."""
     tracker = workspace.task_tracker
-
-    request_mapping = (
-        request_data
-        if isinstance(request_data, dict)
-        else request_data.model_dump()
-    )
-    is_reconnect = request_mapping.get("reconnect") is True
-
     msgid: str | None = None
+
     if is_reconnect:
         queue, run_key = await _attach_reconnect_queue(
             workspace,
@@ -1180,17 +1642,33 @@ async def post_console_chat(
                 detail="No running chat for this session",
             )
     else:
-        queue, run_key, msgid = await _start_new_chat(
-            workspace,
+        before_start = _build_suppression_before_start(
+            suppression_ctx,
+            native_payload,
+        )
+        try:
+            queue, run_key, msgid, is_new_run = await _start_new_chat(
+                workspace,
+                tracker,
+                console_channel,
+                session_id,
+                native_payload,
+                before_start=before_start,
+                include_run_status=True,
+            )
+        except Exception:
+            _release_suppression_on_failure(suppression_ctx, native_payload)
+            raise
+        _validate_suppression_new_run(
+            suppression_ctx,
             tracker,
-            console_channel,
-            session_id,
+            run_key,
+            queue,
+            is_new_run,
             native_payload,
         )
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        # Hold iterator so finally can aclose(); guarantees stream_from_queue's
-        # finally (detach_subscriber) on client abort / generator teardown.
         stream_it = tracker.stream_from_queue(queue, run_key)
         yield ": keep-alive\n\n"
         try:

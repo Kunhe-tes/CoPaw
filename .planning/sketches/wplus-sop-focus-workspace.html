@@ -1,0 +1,1471 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>W+ SOP 工作台 · 专注工作区</title>
+  <style>
+    :root {
+      --canvas: #f7f9fc;
+      --surface: #ffffff;
+      --surface-subtle: #f3f6fb;
+      --surface-blue: #eef4ff;
+      --border: #e5e7eb;
+      --border-strong: #d0d7e2;
+      --ink: #111827;
+      --ink-secondary: #4b5563;
+      --ink-muted: #8a94a6;
+      --primary: #3769fc;
+      --primary-hover: #2957dc;
+      --success: #2f7d5b;
+      --success-soft: #edf8f2;
+      --warning: #a56a24;
+      --warning-soft: #fff7e8;
+      --danger: #b94a4f;
+      --radius-control: 8px;
+      --radius-panel: 12px;
+      --shadow: 0 1px 2px rgba(29, 36, 51, 0.05);
+      --shadow-raised: 0 14px 36px rgba(29, 36, 51, 0.14);
+      --font: "Segoe UI", "Microsoft YaHei", "PingFang SC", "Helvetica Neue", sans-serif;
+      --mono: SFMono-Regular, Consolas, "Liberation Mono", monospace;
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      min-height: 100%;
+      margin: 0;
+      color: var(--ink);
+      font-family: var(--font);
+      background: var(--canvas);
+    }
+
+    button, input, textarea { font: inherit; }
+
+    button {
+      min-height: 40px;
+      border: 0;
+      border-radius: var(--radius-control);
+      cursor: pointer;
+      transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, transform 160ms ease;
+    }
+
+    button:focus-visible,
+    input:focus-visible,
+    textarea:focus-visible,
+    summary:focus-visible {
+      outline: 3px solid rgba(55, 105, 252, 0.24);
+      outline-offset: 2px;
+    }
+
+    button:active { transform: translateY(1px); }
+    button:disabled { cursor: not-allowed; opacity: 0.46; transform: none; }
+
+    .app {
+      min-height: 100vh;
+      display: grid;
+      grid-template-rows: 56px minmax(0, 1fr);
+    }
+
+    .global-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      height: 56px;
+      padding: 0 22px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .brand,
+    .header-actions,
+    .workspace-title,
+    .session-meta,
+    .inline,
+    .question-title,
+    .toast {
+      display: flex;
+      align-items: center;
+    }
+
+    .brand { gap: 12px; min-width: 220px; }
+
+    .brand-mark {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-weight: 700;
+      background: var(--primary);
+      border-radius: 9px;
+      box-shadow: 0 7px 16px rgba(55, 105, 252, 0.22);
+    }
+
+    .brand-name { font-size: 15px; font-weight: 650; }
+    .brand-context { color: var(--ink-muted); font-size: 12px; }
+    .header-actions { gap: 8px; }
+
+    .ghost-button,
+    .secondary-button {
+      padding: 0 13px;
+      color: var(--ink-secondary);
+      background: transparent;
+      border: 1px solid transparent;
+    }
+
+    .ghost-button:hover { background: var(--surface-subtle); color: var(--ink); }
+
+    .secondary-button {
+      background: var(--surface);
+      border-color: var(--border-strong);
+    }
+
+    .secondary-button:hover { border-color: #9eabc0; color: var(--ink); }
+
+    .primary-button {
+      padding: 0 17px;
+      color: #fff;
+      font-weight: 600;
+      background: var(--primary);
+      border: 1px solid var(--primary);
+      box-shadow: 0 8px 18px rgba(55, 105, 252, 0.18);
+    }
+
+    .primary-button:hover { background: var(--primary-hover); border-color: var(--primary-hover); }
+
+    .danger-button {
+      padding: 0 15px;
+      color: var(--danger);
+      background: #fff;
+      border: 1px solid #e5b8bb;
+    }
+
+    .workspace-shell {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 68px minmax(0, 1fr);
+    }
+
+    .global-rail {
+      padding: 14px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      background: var(--surface);
+      border-right: 1px solid var(--border);
+    }
+
+    .rail-button {
+      width: 42px;
+      height: 42px;
+      display: grid;
+      place-items: center;
+      color: var(--ink-muted);
+      background: transparent;
+      border-radius: 9px;
+    }
+
+    .rail-button svg { width: 19px; height: 19px; }
+    .rail-button:hover { color: var(--ink); background: var(--surface-subtle); }
+    .rail-button.active { color: var(--primary); background: var(--surface-blue); }
+    .rail-spacer { flex: 1; }
+
+    .workspace {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-rows: 72px minmax(0, 1fr);
+    }
+
+    .workspace-bar {
+      min-width: 0;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .workspace-title { min-width: 0; gap: 12px; }
+
+    .back-button {
+      width: 36px;
+      height: 36px;
+      flex: 0 0 auto;
+      color: var(--ink-secondary);
+      background: transparent;
+      font-size: 22px;
+    }
+
+    .back-button:hover { color: var(--ink); background: var(--surface-subtle); }
+    .title-copy { min-width: 0; }
+
+    h1, h2, h3, p { margin: 0; }
+    h1 { overflow: hidden; font-size: 17px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+
+    .session-meta {
+      gap: 7px;
+      margin-top: 4px;
+      color: var(--ink-muted);
+      font-size: 12px;
+    }
+
+    .state-dot {
+      width: 7px;
+      height: 7px;
+      background: var(--success);
+      border-radius: 50%;
+      box-shadow: 0 0 0 4px rgba(47, 125, 91, 0.1);
+    }
+
+    .prototype-switcher {
+      padding: 4px;
+      display: flex;
+      gap: 3px;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+    }
+
+    .prototype-switcher button {
+      min-height: 32px;
+      padding: 0 11px;
+      color: var(--ink-muted);
+      font-size: 12px;
+      background: transparent;
+    }
+
+    .prototype-switcher button.active {
+      color: var(--primary);
+      font-weight: 600;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+    }
+
+    .work-grid {
+      min-width: 0;
+      min-height: 0;
+      display: grid;
+      grid-template-columns: 252px minmax(440px, 1fr) 326px;
+      overflow: hidden;
+    }
+
+    .stage-rail,
+    .evidence-panel {
+      min-height: 0;
+      overflow: auto;
+      background: var(--surface);
+    }
+
+    .stage-rail {
+      padding: 22px 18px;
+      border-right: 1px solid var(--border);
+    }
+
+    .rail-kicker,
+    .eyebrow {
+      color: var(--ink-muted);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .stage-summary {
+      margin: 7px 0 20px;
+      color: var(--ink-secondary);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .stage-list {
+      position: relative;
+      display: grid;
+      gap: 5px;
+    }
+
+    .stage-item {
+      position: relative;
+      width: 100%;
+      min-height: 72px;
+      padding: 11px 10px 11px 43px;
+      text-align: left;
+      color: var(--ink-secondary);
+      background: transparent;
+      border: 1px solid transparent;
+    }
+
+    .stage-item::before {
+      position: absolute;
+      top: 18px;
+      left: 16px;
+      width: 17px;
+      height: 17px;
+      display: grid;
+      place-items: center;
+      content: attr(data-index);
+      color: var(--ink-muted);
+      font-size: 10px;
+      font-weight: 700;
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 50%;
+      z-index: 2;
+    }
+
+    .stage-item:not(:last-child)::after {
+      position: absolute;
+      top: 35px;
+      bottom: -14px;
+      left: 24px;
+      width: 1px;
+      content: "";
+      background: var(--border);
+    }
+
+    .stage-item:hover { background: var(--surface-subtle); }
+    .stage-item.active { color: var(--ink); background: var(--surface-blue); border-color: rgba(55, 105, 252, 0.16); }
+    .stage-item.active::before { color: #fff; background: var(--primary); border-color: var(--primary); }
+    .stage-item.done::before { content: "✓"; color: #fff; background: var(--success); border-color: var(--success); }
+    .stage-name { display: block; font-size: 13px; font-weight: 650; }
+    .stage-state { display: block; margin-top: 5px; color: var(--ink-muted); font-size: 11px; }
+    .stage-item.active .stage-state { color: var(--primary); }
+
+    .rail-foot {
+      margin-top: 24px;
+      padding-top: 17px;
+      border-top: 1px solid var(--border);
+    }
+
+    .rail-foot-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      color: var(--ink-muted);
+      font-size: 11px;
+    }
+
+    .progress-track {
+      height: 5px;
+      margin-top: 9px;
+      overflow: hidden;
+      background: #edf0f5;
+      border-radius: 999px;
+    }
+
+    .progress-track span {
+      display: block;
+      width: 32%;
+      height: 100%;
+      background: var(--primary);
+      border-radius: inherit;
+      transition: width 240ms ease;
+    }
+
+    .work-canvas {
+      min-width: 0;
+      min-height: 0;
+      padding: 30px clamp(22px, 4vw, 56px) 110px;
+      overflow: auto;
+      background:
+        linear-gradient(rgba(55, 105, 252, 0.025) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(55, 105, 252, 0.025) 1px, transparent 1px),
+        var(--canvas);
+      background-size: 28px 28px;
+    }
+
+    .canvas-inner { width: min(820px, 100%); margin: 0 auto; }
+
+    .screen { display: none; animation: screen-in 220ms ease both; }
+    .screen.active { display: block; }
+
+    @keyframes screen-in {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .eyebrow { color: var(--primary); }
+
+    .screen-heading {
+      margin-top: 9px;
+      font-size: clamp(24px, 3vw, 34px);
+      font-weight: 650;
+      letter-spacing: -0.025em;
+      line-height: 1.18;
+    }
+
+    .screen-lede {
+      max-width: 650px;
+      margin-top: 10px;
+      color: var(--ink-secondary);
+      font-size: 14px;
+      line-height: 1.72;
+    }
+
+    .notice {
+      margin-top: 20px;
+      padding: 12px 14px;
+      display: flex;
+      gap: 10px;
+      color: #31539f;
+      font-size: 12px;
+      line-height: 1.5;
+      background: var(--surface-blue);
+      border: 1px solid rgba(55, 105, 252, 0.14);
+      border-radius: 9px;
+    }
+
+    .notice-mark {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      color: #fff;
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--primary);
+      border-radius: 50%;
+    }
+
+    .queue-list { margin-top: 22px; display: grid; gap: 10px; }
+
+    .queue-row {
+      min-height: 76px;
+      padding: 14px 15px;
+      display: grid;
+      grid-template-columns: 32px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-panel);
+      box-shadow: var(--shadow);
+    }
+
+    .queue-index {
+      width: 30px;
+      height: 30px;
+      display: grid;
+      place-items: center;
+      color: var(--primary);
+      font-size: 12px;
+      font-weight: 700;
+      background: var(--surface-blue);
+      border-radius: 8px;
+    }
+
+    .queue-name { font-size: 14px; font-weight: 650; }
+    .queue-detail { margin-top: 5px; color: var(--ink-muted); font-size: 12px; }
+    .queue-actions { display: flex; gap: 3px; }
+
+    .queue-actions button {
+      width: 32px;
+      min-height: 32px;
+      color: var(--ink-muted);
+      background: transparent;
+    }
+
+    .queue-actions button:hover { color: var(--ink); background: var(--surface-subtle); }
+
+    .question-card,
+    .trial-card,
+    .result-card {
+      margin-top: 22px;
+      padding: 22px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-panel);
+      box-shadow: var(--shadow);
+    }
+
+    .question-card + .question-card { margin-top: 12px; }
+    .question-title { align-items: flex-start; gap: 11px; }
+
+    .question-number {
+      width: 26px;
+      height: 26px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      color: var(--primary);
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--surface-blue);
+      border-radius: 7px;
+    }
+
+    .question-title h3 { font-size: 14px; font-weight: 650; line-height: 1.5; }
+    .question-help { margin-top: 4px; color: var(--ink-muted); font-size: 12px; line-height: 1.5; }
+    .options { margin-top: 15px; display: grid; gap: 8px; }
+
+    .option {
+      min-height: 48px;
+      padding: 11px 12px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      text-align: left;
+      color: var(--ink-secondary);
+      background: var(--surface);
+      border: 1px solid var(--border);
+    }
+
+    .option:hover { color: var(--ink); border-color: #aeb9cb; }
+    .option.selected { color: #244fc8; background: var(--surface-blue); border-color: rgba(55, 105, 252, 0.48); }
+
+    .option-dot {
+      width: 17px;
+      height: 17px;
+      flex: 0 0 auto;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--border-strong);
+      border-radius: 50%;
+    }
+
+    .option.selected .option-dot { border: 5px solid var(--primary); background: #fff; }
+
+    .trial-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+    }
+
+    .trial-badge {
+      height: 26px;
+      padding: 0 9px;
+      display: inline-flex;
+      align-items: center;
+      color: var(--warning);
+      font-size: 11px;
+      font-weight: 650;
+      background: var(--warning-soft);
+      border-radius: 999px;
+    }
+
+    .trial-badge.running { color: var(--primary); background: var(--surface-blue); }
+    .trial-badge.complete { color: var(--success); background: var(--success-soft); }
+
+    .trial-grid {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: 120px 1fr;
+      gap: 12px 18px;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .trial-label { color: var(--ink-muted); }
+    .trial-value { color: var(--ink-secondary); }
+
+    .run-progress {
+      margin-top: 18px;
+      display: grid;
+      background: #fbfcfe;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+      overflow: hidden;
+    }
+
+    .run-step {
+      min-height: 54px;
+      padding: 10px 12px;
+      display: grid;
+      grid-template-columns: 26px minmax(0, 1fr) auto;
+      align-items: center;
+      gap: 10px;
+      color: var(--ink-muted);
+      font-size: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .run-step:last-child { border-bottom: 0; }
+    .run-step strong { display: block; color: var(--ink-secondary); font-weight: 650; }
+    .run-step small { display: block; margin-top: 3px; color: var(--ink-muted); }
+
+    .step-mark {
+      width: 24px;
+      height: 24px;
+      display: grid;
+      place-items: center;
+      color: var(--ink-muted);
+      font-size: 11px;
+      font-weight: 700;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border);
+      border-radius: 50%;
+    }
+
+    .run-step.done .step-mark {
+      color: #fff;
+      background: var(--success);
+      border-color: var(--success);
+    }
+
+    .run-step.running {
+      color: var(--primary);
+      background: var(--surface-blue);
+    }
+
+    .run-step.running .step-mark {
+      color: var(--primary);
+      background: #fff;
+      border-color: rgba(55, 105, 252, 0.45);
+      box-shadow: 0 0 0 4px rgba(55, 105, 252, 0.09);
+    }
+
+    .run-step-status { font-family: var(--mono); font-size: 10px; }
+
+    .run-result {
+      margin-top: 18px;
+      padding: 14px;
+      background: #f4fbf7;
+      border: 1px solid rgba(31, 138, 86, 0.2);
+      border-radius: 9px;
+    }
+
+    .result-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .result-metric {
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.82);
+      border-radius: 8px;
+    }
+
+    .result-metric strong { display: block; font-size: 17px; }
+    .result-metric span { color: var(--ink-muted); font-size: 11px; }
+
+    .sample-result {
+      margin-top: 10px;
+      color: var(--ink-secondary);
+      font-size: 12px;
+      line-height: 1.6;
+    }
+
+    .feedback-label {
+      display: block;
+      margin-top: 18px;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 650;
+    }
+
+    .feedback-box {
+      width: 100%;
+      min-height: 100px;
+      margin-top: 14px;
+      padding: 12px 13px;
+      resize: vertical;
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--border-strong);
+      border-radius: 9px;
+    }
+
+    .feedback-help { margin-top: 7px; color: var(--ink-muted); font-size: 11px; line-height: 1.5; }
+
+    .result-list { margin-top: 18px; display: grid; gap: 8px; }
+
+    .result-file {
+      padding: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      background: var(--surface-subtle);
+      border: 1px solid var(--border);
+      border-radius: 9px;
+    }
+
+    .file-name { font-family: var(--mono); font-size: 12px; }
+    .file-meta { margin-top: 4px; color: var(--ink-muted); font-size: 11px; }
+    .file-status { color: var(--success); font-size: 12px; font-weight: 650; }
+
+    .action-dock {
+      position: fixed;
+      right: 326px;
+      bottom: 0;
+      left: 320px;
+      z-index: 12;
+      min-height: 76px;
+      padding: 14px clamp(22px, 4vw, 56px);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: rgba(255, 255, 255, 0.96);
+      border-top: 1px solid var(--border);
+      backdrop-filter: blur(10px);
+    }
+
+    .dock-context { color: var(--ink-muted); font-size: 12px; }
+    .dock-actions { display: flex; gap: 9px; }
+
+    .evidence-panel {
+      padding: 22px 18px;
+      border-left: 1px solid var(--border);
+    }
+
+    .panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .panel-header h2 { font-size: 14px; font-weight: 650; }
+
+    .tiny-badge {
+      padding: 4px 7px;
+      color: var(--success);
+      font-size: 10px;
+      font-weight: 700;
+      background: var(--success-soft);
+      border-radius: 999px;
+    }
+
+    .evidence-section { margin-top: 18px; }
+    .evidence-section h3 { color: var(--ink-muted); font-size: 11px; font-weight: 700; letter-spacing: 0.05em; }
+
+    .fact-list { margin-top: 9px; display: grid; gap: 7px; }
+
+    .fact {
+      padding: 10px;
+      color: var(--ink-secondary);
+      font-size: 12px;
+      line-height: 1.5;
+      background: var(--surface-subtle);
+      border-radius: 8px;
+    }
+
+    .fact strong { color: var(--ink); font-weight: 650; }
+
+    details.schema {
+      margin-top: 9px;
+      background: #fbfcfe;
+      border: 1px solid var(--border);
+      border-radius: 9px;
+    }
+
+    details.schema summary {
+      min-height: 42px;
+      padding: 10px 11px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--ink-secondary);
+      font-size: 12px;
+      cursor: pointer;
+      list-style: none;
+    }
+
+    details.schema summary::-webkit-details-marker { display: none; }
+    details.schema summary::before { content: "›"; color: var(--ink-muted); font-size: 17px; transition: transform 160ms ease; }
+    details.schema[open] summary::before { transform: rotate(90deg); }
+
+    .schema-tree {
+      padding: 0 11px 11px 22px;
+      color: var(--ink-secondary);
+      font-family: var(--mono);
+      font-size: 11px;
+      line-height: 1.85;
+      border-top: 1px solid var(--border);
+    }
+
+    .schema-node { position: relative; padding-left: 12px; }
+    .schema-node::before { position: absolute; left: 0; content: "└"; color: #aab3c2; }
+    .type { color: #7a4bb5; }
+    .required { color: var(--danger); }
+
+    .panel-action {
+      width: 100%;
+      margin-top: 10px;
+      color: var(--primary);
+      background: var(--surface-blue);
+      border: 1px solid rgba(55, 105, 252, 0.16);
+    }
+
+    .scrim {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      display: none;
+      place-items: center;
+      padding: 20px;
+      background: rgba(17, 24, 39, 0.42);
+    }
+
+    .scrim.open { display: grid; }
+
+    .modal {
+      width: min(470px, 100%);
+      padding: 24px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      box-shadow: var(--shadow-raised);
+      animation: screen-in 180ms ease both;
+    }
+
+    .modal h2 { font-size: 18px; }
+    .modal p { margin-top: 8px; color: var(--ink-secondary); font-size: 13px; line-height: 1.65; }
+    .modal-actions { margin-top: 20px; display: flex; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+
+    .toast {
+      position: fixed;
+      right: 24px;
+      bottom: 92px;
+      z-index: 60;
+      max-width: 360px;
+      padding: 11px 14px;
+      gap: 9px;
+      color: #fff;
+      font-size: 12px;
+      background: #24334f;
+      border-radius: 9px;
+      box-shadow: var(--shadow-raised);
+      opacity: 0;
+      pointer-events: none;
+      transform: translateY(8px);
+      transition: opacity 180ms ease, transform 180ms ease;
+    }
+
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    .mobile-panel-button { display: none; }
+
+    @media (max-width: 1180px) {
+      .work-grid { grid-template-columns: 232px minmax(420px, 1fr); }
+      .evidence-panel {
+        position: fixed;
+        top: 128px;
+        right: 0;
+        bottom: 0;
+        z-index: 30;
+        width: min(360px, calc(100vw - 36px));
+        box-shadow: var(--shadow-raised);
+        transform: translateX(105%);
+        transition: transform 220ms ease;
+      }
+      .evidence-panel.open { transform: translateX(0); }
+      .action-dock { right: 0; left: 300px; }
+      .mobile-panel-button { display: inline-flex; }
+    }
+
+    @media (max-width: 820px) {
+      .app { grid-template-rows: 52px minmax(0, 1fr); }
+      .global-header { height: 52px; padding: 0 14px; }
+      .brand { min-width: 0; }
+      .header-actions { flex-shrink: 0; gap: 4px; }
+      .header-actions button { padding: 0 9px; white-space: nowrap; }
+      .brand-context, .header-actions .ghost-button:not(.mobile-panel-button) { display: none; }
+      .workspace-shell { grid-template-columns: 1fr; }
+      .global-rail { display: none; }
+      .workspace { grid-template-rows: auto minmax(0, 1fr); }
+      .workspace-bar { min-height: 70px; padding: 10px 14px; align-items: flex-start; }
+      .prototype-switcher { overflow-x: auto; max-width: 48vw; }
+      .prototype-switcher,
+      .stage-rail { scrollbar-width: none; }
+      .prototype-switcher::-webkit-scrollbar,
+      .stage-rail::-webkit-scrollbar { display: none; }
+      .work-grid { display: block; overflow: visible; }
+      .stage-rail {
+        padding: 12px 14px;
+        overflow-x: auto;
+        border-right: 0;
+        border-bottom: 1px solid var(--border);
+      }
+      .rail-kicker, .stage-summary, .rail-foot { display: none; }
+      .stage-list { min-width: 650px; display: flex; }
+      .stage-item { min-width: 150px; min-height: 58px; padding: 9px 10px 9px 37px; }
+      .stage-item::before { top: 12px; left: 10px; }
+      .stage-item::after { display: none; }
+      .work-canvas { min-height: calc(100vh - 180px); padding: 24px 16px 104px; }
+      .action-dock { left: 0; min-height: 70px; padding: 11px 14px; }
+      .dock-context { display: none; }
+      .dock-actions { width: 100%; }
+      .dock-actions button { flex: 1; min-height: 44px; }
+      .queue-row { grid-template-columns: 30px minmax(0, 1fr); }
+      .queue-actions { display: none; }
+      .trial-grid { grid-template-columns: 1fr; gap: 4px; }
+      .trial-label { margin-top: 8px; font-weight: 650; }
+      .result-metrics { grid-template-columns: 1fr; }
+      .run-step { grid-template-columns: 26px minmax(0, 1fr); }
+      .run-step-status { grid-column: 2; }
+      .toast { right: 14px; bottom: 84px; left: 14px; max-width: none; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header class="global-header">
+      <div class="brand">
+        <div class="brand-mark">C</div>
+        <div>
+          <div class="brand-name">CoPaw</div>
+          <div class="brand-context">W+ SOP 专用工作台原型</div>
+        </div>
+      </div>
+      <div class="header-actions">
+        <button class="ghost-button" data-action="history">修订历史</button>
+        <button class="ghost-button mobile-panel-button" data-action="evidence">能力证据</button>
+        <button class="secondary-button" data-action="exit">保存并退出</button>
+      </div>
+    </header>
+
+    <section class="workspace-shell">
+      <nav class="global-rail" aria-label="CoPaw 主导航">
+        <button class="rail-button" aria-label="Chat" title="Chat" data-action="back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 5.5h14v10H9l-4 3v-13Z"/></svg>
+        </button>
+        <button class="rail-button active" aria-label="W+ SOP 工作台" title="W+ SOP 工作台">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M7 3h8l3 3v15H7z"/><path d="M15 3v4h4M10 11h5M10 15h5"/></svg>
+        </button>
+        <button class="rail-button" aria-label="技能" title="技能">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2z"/><path d="m4.8 7.4 7.2 4.1 7.2-4.1M12 11.5V21"/></svg>
+        </button>
+        <div class="rail-spacer"></div>
+        <button class="rail-button" aria-label="帮助" title="帮助">?</button>
+      </nav>
+
+      <div class="workspace">
+        <header class="workspace-bar">
+          <div class="workspace-title">
+            <button class="back-button" aria-label="返回所属 Chat" data-action="back">‹</button>
+            <div class="title-copy">
+              <h1>产品到期客户筛选与跟进 SOP</h1>
+              <div class="session-meta">
+                <span class="state-dot"></span>
+                <span>进行中</span>
+                <span>·</span>
+                <span>所属 Chat：产品到期筛选</span>
+                <span>·</span>
+                <span>SOP-0728-04</span>
+              </div>
+            </div>
+          </div>
+          <div class="prototype-switcher" aria-label="原型演示状态">
+            <button class="active" data-screen-target="queue">队列</button>
+            <button data-screen-target="clarify">澄清</button>
+            <button data-screen-target="trial">预跑</button>
+            <button data-screen-target="result">结果</button>
+          </div>
+        </header>
+
+        <div class="work-grid">
+          <aside class="stage-rail">
+            <div class="rail-kicker">Workflow</div>
+            <p class="stage-summary">先确认环节，再逐环节澄清、预跑和确认。未确认环节不会被提前执行。</p>
+            <div class="stage-list">
+              <button class="stage-item active" data-index="1">
+                <span class="stage-name">产品到期名单</span>
+                <span class="stage-state">等待队列确认</span>
+              </button>
+              <button class="stage-item" data-index="2">
+                <span class="stage-name">资产变化复核</span>
+                <span class="stage-state">未开始</span>
+              </button>
+              <button class="stage-item" data-index="3">
+                <span class="stage-name">收益与持仓分析</span>
+                <span class="stage-state">未开始</span>
+              </button>
+              <button class="stage-item" data-index="4">
+                <span class="stage-name">跟进建议</span>
+                <span class="stage-state">未开始</span>
+              </button>
+            </div>
+            <div class="rail-foot">
+              <div class="rail-foot-row"><span>总体进度</span><strong id="progress-label">0 / 4</strong></div>
+              <div class="progress-track"><span id="progress-bar"></span></div>
+            </div>
+          </aside>
+
+          <section class="work-canvas">
+            <div class="canvas-inner">
+              <section class="screen active" data-screen="queue">
+                <div class="eyebrow">首次响应 · 只确认环节</div>
+                <h2 class="screen-heading">先确认这套工作流程</h2>
+                <p class="screen-lede">根据你的原始需求，我把流程拆成 4 个可以独立澄清和预跑的环节。确认顺序后，才会进入第一个问题。</p>
+                <div class="notice">
+                  <span class="notice-mark">i</span>
+                  <span>当前不会调用 W+ 或 OpenCLI，也不会读取真实客户数据。环节内容来自需求与能力目录，只作为待确认提议。</span>
+                </div>
+                <div class="queue-list">
+                  <article class="queue-row">
+                    <span class="queue-index">01</span>
+                    <div><div class="queue-name">产品到期名单</div><div class="queue-detail">确认产品范围、到期区间和名单状态</div></div>
+                    <div class="queue-actions"><button aria-label="上移">↑</button><button aria-label="下移">↓</button></div>
+                  </article>
+                  <article class="queue-row">
+                    <span class="queue-index">02</span>
+                    <div><div class="queue-name">资产变化复核</div><div class="queue-detail">核对资产走势、时点口径与变化阈值</div></div>
+                    <div class="queue-actions"><button aria-label="上移">↑</button><button aria-label="下移">↓</button></div>
+                  </article>
+                  <article class="queue-row">
+                    <span class="queue-index">03</span>
+                    <div><div class="queue-name">收益与持仓分析</div><div class="queue-detail">确认收益区间、产品层级和分析口径</div></div>
+                    <div class="queue-actions"><button aria-label="上移">↑</button><button aria-label="下移">↓</button></div>
+                  </article>
+                  <article class="queue-row">
+                    <span class="queue-index">04</span>
+                    <div><div class="queue-name">跟进建议</div><div class="queue-detail">整理优先级、人工动作和下一步交接</div></div>
+                    <div class="queue-actions"><button aria-label="上移">↑</button><button aria-label="下移">↓</button></div>
+                  </article>
+                </div>
+              </section>
+
+              <section class="screen" data-screen="clarify">
+                <div class="eyebrow">环节 1 / 4 · 澄清</div>
+                <h2 class="screen-heading">产品到期名单</h2>
+                <p class="screen-lede">已澄清 2 / 4 个问题，本轮 2 题。整组填写完成后统一提交，只触发一次 Agent 回合。</p>
+                <article class="question-card" data-question="1">
+                  <div class="question-title">
+                    <span class="question-number">01</span>
+                    <div><h3>本次优先关注哪些产品到期类型？</h3><p class="question-help">将决定名单入口和 `thdLvlCd` 的候选范围。</p></div>
+                  </div>
+                  <div class="options">
+                    <button class="option" data-option="deposit"><span class="option-dot"></span><span>存款到期</span></button>
+                    <button class="option" data-option="fund"><span class="option-dot"></span><span>基金到期</span></button>
+                    <button class="option" data-option="all"><span class="option-dot"></span><span>先查看全部已支持类型，再决定</span></button>
+                  </div>
+                </article>
+                <article class="question-card" data-question="2">
+                  <div class="question-title">
+                    <span class="question-number">02</span>
+                    <div><h3>到期时间窗口按什么范围筛选？</h3><p class="question-help">只确认业务口径，不写入具体客户信息。</p></div>
+                  </div>
+                  <div class="options">
+                    <button class="option" data-option="7"><span class="option-dot"></span><span>未来 7 天</span></button>
+                    <button class="option" data-option="30"><span class="option-dot"></span><span>未来 30 天</span></button>
+                    <button class="option" data-option="custom"><span class="option-dot"></span><span>自定义日期区间</span></button>
+                  </div>
+                </article>
+              </section>
+
+              <section class="screen" data-screen="trial">
+                <div class="eyebrow">环节 1 / 4 · 系统预跑</div>
+                <h2 class="screen-heading" id="trial-heading">CoPaw 正在代你执行完整预跑</h2>
+                <p class="screen-lede" id="trial-lede">系统会在当前授权范围内调用能力、校验对象列表出参并生成脱敏结果。你不需要复制命令或切换到外部环境。</p>
+                <article class="trial-card">
+                  <div class="trial-top">
+                    <div><h3>产品到期名单预跑</h3><p class="question-help">Run SOP-0728-04-R03 · 由 CoPaw Agent 执行</p></div>
+                    <span class="trial-badge running" id="trial-badge">执行中</span>
+                  </div>
+                  <div class="trial-grid">
+                    <div class="trial-label">能力</div><div class="trial-value">查询产品到期客户 · `product-expire-list`</div>
+                    <div class="trial-label">已确认输入</div><div class="trial-value">存款到期；未来 30 天；待处理</div>
+                    <div class="trial-label">执行范围</div><div class="trial-value">只读查询 → 对象列表 schema 校验 → 脱敏结果摘要</div>
+                    <div class="trial-label">授权边界</div><div class="trial-value">复用当前 CoPaw 工具权限；写入或不可逆步骤仍需单独确认</div>
+                  </div>
+                  <div id="trial-running">
+                    <div class="run-progress" aria-label="预跑执行进度">
+                      <div class="run-step running" data-run-step="0">
+                        <span class="step-mark">1</span>
+                        <span><strong>冻结本轮输入并加载能力契约</strong><small>校验 verification_status 与输入 schema</small></span>
+                        <span class="run-step-status">RUNNING</span>
+                      </div>
+                      <div class="run-step" data-run-step="1">
+                        <span class="step-mark">2</span>
+                        <span><strong>调用产品到期客户查询</strong><small>由后端 Agent 调用已授权的只读能力</small></span>
+                        <span class="run-step-status">PENDING</span>
+                      </div>
+                      <div class="run-step" data-run-step="2">
+                        <span class="step-mark">3</span>
+                        <span><strong>校验对象列表并执行脱敏</strong><small>保留 records[] 的父子结构，不投影原始客户值</small></span>
+                        <span class="run-step-status">PENDING</span>
+                      </div>
+                      <div class="run-step" data-run-step="3">
+                        <span class="step-mark">4</span>
+                        <span><strong>生成预跑摘要</strong><small>准备可确认结果和用户反馈入口</small></span>
+                        <span class="run-step-status">PENDING</span>
+                      </div>
+                    </div>
+                  </div>
+                  <div id="trial-complete" hidden>
+                    <div class="run-result">
+                      <div class="result-metrics">
+                        <div class="result-metric"><strong>12</strong><span>脱敏示例记录</span></div>
+                        <div class="result-metric"><strong>7 / 7</strong><span>字段校验通过</span></div>
+                        <div class="result-metric"><strong>0</strong><span>写操作与敏感值</span></div>
+                      </div>
+                      <p class="sample-result"><strong>预跑摘要：</strong>已完成产品到期名单查询、对象列表结构校验和脱敏。12 条示例记录均包含产品名称、到期日期与剩余天数；2 条记录缺少任务截止日期，已标记为结果警告。</p>
+                    </div>
+                    <label class="feedback-label" for="trial-feedback">告诉我这次预跑哪里需要调整</label>
+                    <textarea class="feedback-box" id="trial-feedback" aria-label="预跑反馈" placeholder="例如：需要把缺少任务截止日期的记录排除；资产变化阈值应改成 20%……"></textarea>
+                    <p class="feedback-help">反馈会写回当前环节。系统只重新执行受影响的步骤，不要求你粘贴客户姓名、UID、卡号或原始响应。</p>
+                  </div>
+                </article>
+              </section>
+
+              <section class="screen" data-screen="result">
+                <div class="eyebrow">最终结果 · 待处理记忆候选</div>
+                <h2 class="screen-heading">SOP 已通过结构与隐私校验</h2>
+                <p class="screen-lede">结果文件已经生成。处理完记忆候选后，会话才会正式完成；第一版不会自动调用技能构建器。</p>
+                <article class="result-card">
+                  <div class="inline" style="justify-content:space-between;gap:16px">
+                    <div><h3>结果包</h3><p class="question-help">版本 3 · 4 个环节全部由用户确认</p></div>
+                    <span class="tiny-badge">校验通过</span>
+                  </div>
+                  <div class="result-list">
+                    <div class="result-file"><div><div class="file-name">sop_spec.json</div><div class="file-meta">机器可读 · 14.8 KB</div></div><span class="file-status">可查看</span></div>
+                    <div class="result-file"><div><div class="file-name">sop_render.md</div><div class="file-meta">可读 SOP · 9.2 KB</div></div><span class="file-status">可查看</span></div>
+                    <div class="result-file"><div><div class="file-name">sop_render.html</div><div class="file-meta">静态视图 · 31.4 KB</div></div><span class="file-status">可查看</span></div>
+                  </div>
+                </article>
+                <article class="question-card">
+                  <div class="question-title">
+                    <span class="question-number">M</span>
+                    <div><h3>记忆候选：默认到期窗口为未来 30 天</h3><p class="question-help">仅保存为个人工作偏好，不包含任何客户信息。</p></div>
+                  </div>
+                  <div class="options">
+                    <button class="option" data-memory><span class="option-dot"></span><span>同意保存这条偏好</span></button>
+                    <button class="option" data-memory><span class="option-dot"></span><span>本次不保存</span></button>
+                  </div>
+                </article>
+              </section>
+            </div>
+          </section>
+
+          <aside class="evidence-panel" id="evidence-panel">
+            <div class="panel-header">
+              <h2>能力证据</h2>
+              <span class="tiny-badge">verified</span>
+            </div>
+            <section class="evidence-section">
+              <h3>当前能力</h3>
+              <div class="fact-list">
+                <div class="fact"><strong>查询产品到期客户</strong><br />`product-expire-list` · 只读</div>
+                <div class="fact"><strong>页面证据</strong><br />商机 → 商机中心 → 重要商机 → 产品到期</div>
+                <div class="fact"><strong>输出契约</strong><br />documented · 对象列表结构可展开</div>
+              </div>
+            </section>
+            <section class="evidence-section">
+              <h3>出参结构</h3>
+              <details class="schema" open>
+                <summary><code>records[]</code> · object list</summary>
+                <div class="schema-tree">
+                  <div class="schema-node">custNmSm <span class="type">string</span></div>
+                  <div class="schema-node">remainDays <span class="type">number</span></div>
+                  <div class="schema-node">product <span class="type">object</span>
+                    <div class="schema-node">prodName <span class="type">string</span></div>
+                    <div class="schema-node">expiry <span class="type">object</span>
+                      <div class="schema-node">date <span class="type">date</span> <span class="required">*</span></div>
+                      <div class="schema-node">amount <span class="type">number</span></div>
+                    </div>
+                  </div>
+                </div>
+              </details>
+              <details class="schema">
+                <summary><code>paging</code> · object</summary>
+                <div class="schema-tree">
+                  <div class="schema-node">total <span class="type">integer</span></div>
+                  <div class="schema-node">hasNext <span class="type">boolean</span></div>
+                </div>
+              </details>
+            </section>
+            <section class="evidence-section">
+              <h3>已确认事实</h3>
+              <div class="fact-list">
+                <div class="fact">名单状态使用“待处理”。</div>
+                <div class="fact">本轮不包含真实客户值。</div>
+              </div>
+              <button class="panel-action" data-action="history">查看修订与失效记录</button>
+            </section>
+          </aside>
+        </div>
+      </div>
+    </section>
+
+    <footer class="action-dock">
+      <div class="dock-context" id="dock-context">等待确认环节队列 · 不会同时提问</div>
+      <div class="dock-actions">
+        <button class="secondary-button" id="secondary-action">调整环节</button>
+        <button class="primary-button" id="primary-action">确认这 4 个环节</button>
+      </div>
+    </footer>
+
+    <div class="scrim" id="exit-modal" role="dialog" aria-modal="true" aria-labelledby="exit-title">
+      <div class="modal">
+        <h2 id="exit-title">离开 W+ SOP 工作台</h2>
+        <p>普通导航离开不会暂停会话。请选择是否保存并退出，或彻底结束当前流程。</p>
+        <div class="modal-actions">
+          <button class="ghost-button" data-action="close-modal">取消，继续 SOP</button>
+          <button class="danger-button" data-action="terminate">彻底结束</button>
+          <button class="primary-button" data-action="pause">保存并退出</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="scrim" id="history-modal" role="dialog" aria-modal="true" aria-labelledby="history-title">
+      <div class="modal">
+        <h2 id="history-title">修订历史</h2>
+        <p><strong>Revision 2</strong>：到期窗口由未来 7 天改为未来 30 天。环节 1 的旧预跑结果已失效，后续环节尚未开始。</p>
+        <div class="modal-actions">
+          <button class="primary-button" data-action="close-modal">知道了</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast" id="toast"><span>✓</span><span id="toast-copy">状态已更新</span></div>
+  </main>
+
+  <script>
+    const state = {
+      screen: localStorage.getItem("wplus-prototype-screen") || "queue",
+      answers: {},
+      trialStatus: localStorage.getItem("wplus-prototype-trial-status") || "idle",
+      trialTimers: [],
+    };
+
+    const screens = [...document.querySelectorAll("[data-screen]")];
+    const screenButtons = [...document.querySelectorAll("[data-screen-target]")];
+    const stageItems = [...document.querySelectorAll(".stage-item")];
+    const primaryAction = document.getElementById("primary-action");
+    const secondaryAction = document.getElementById("secondary-action");
+    const dockContext = document.getElementById("dock-context");
+    const evidencePanel = document.getElementById("evidence-panel");
+    const progressBar = document.getElementById("progress-bar");
+    const progressLabel = document.getElementById("progress-label");
+    const toast = document.getElementById("toast");
+    const toastCopy = document.getElementById("toast-copy");
+    const trialHeading = document.getElementById("trial-heading");
+    const trialLede = document.getElementById("trial-lede");
+    const trialBadge = document.getElementById("trial-badge");
+    const trialRunning = document.getElementById("trial-running");
+    const trialComplete = document.getElementById("trial-complete");
+    const trialFeedback = document.getElementById("trial-feedback");
+    const runSteps = [...document.querySelectorAll("[data-run-step]")];
+
+    const screenConfig = {
+      queue: {
+        primary: "确认这 4 个环节",
+        secondary: "调整环节",
+        context: "等待确认环节队列 · 不会同时提问",
+        completed: 0,
+        activeIndex: 0,
+      },
+      clarify: {
+        primary: "提交本轮答案",
+        secondary: "保存草稿",
+        context: "环节 1 / 4 · 2 题原子提交",
+        completed: 0,
+        activeIndex: 0,
+      },
+      trial: {
+        primary: "预跑执行中…",
+        secondary: "查看运行详情",
+        context: "环节 1 / 4 · CoPaw 正在执行预跑",
+        completed: 0,
+        activeIndex: 0,
+      },
+      result: {
+        primary: "处理候选并完成",
+        secondary: "返回所属 Chat",
+        context: "最终结果 · 还需处理 1 条记忆候选",
+        completed: 4,
+        activeIndex: null,
+      },
+    };
+
+    function showToast(message) {
+      toastCopy.textContent = message;
+      toast.classList.add("show");
+      window.clearTimeout(showToast.timer);
+      showToast.timer = window.setTimeout(() => toast.classList.remove("show"), 2200);
+    }
+
+    function updateRunSteps(activeIndex) {
+      runSteps.forEach((step, index) => {
+        const status = step.querySelector(".run-step-status");
+        step.classList.toggle("done", index < activeIndex || activeIndex >= runSteps.length);
+        step.classList.toggle("running", index === activeIndex && activeIndex < runSteps.length);
+        step.querySelector(".step-mark").textContent = index < activeIndex || activeIndex >= runSteps.length ? "✓" : String(index + 1);
+        status.textContent = index < activeIndex || activeIndex >= runSteps.length ? "DONE" : index === activeIndex ? "RUNNING" : "PENDING";
+      });
+    }
+
+    function renderTrialState() {
+      const complete = state.trialStatus === "complete";
+      trialRunning.hidden = complete;
+      trialComplete.hidden = !complete;
+      trialBadge.classList.toggle("running", !complete);
+      trialBadge.classList.toggle("complete", complete);
+      trialBadge.textContent = complete ? "预跑完成" : "执行中";
+      trialHeading.textContent = complete ? "预跑已完成，请检查结果并反馈" : "CoPaw 正在代你执行完整预跑";
+      trialLede.textContent = complete
+        ? "系统已经完成能力调用、对象列表校验和脱敏。你可以直接确认，也可以在下方描述偏差并让系统重新预跑。"
+        : "系统会在当前授权范围内调用能力、校验对象列表出参并生成脱敏结果。你不需要复制命令或切换到外部环境。";
+      primaryAction.textContent = complete ? "结果符合预期，确认环节" : "预跑执行中…";
+      primaryAction.disabled = !complete;
+      secondaryAction.textContent = complete ? "提交反馈并重新预跑" : "查看运行详情";
+      secondaryAction.disabled = false;
+      dockContext.textContent = complete ? "环节 1 / 4 · 等待反馈或确认" : "环节 1 / 4 · CoPaw 正在执行预跑";
+    }
+
+    function finishTrialRun() {
+      state.trialStatus = "complete";
+      localStorage.setItem("wplus-prototype-trial-status", "complete");
+      updateRunSteps(runSteps.length);
+      if (state.screen === "trial") renderTrialState();
+      showToast("预跑完成：结果已脱敏并通过对象列表结构校验");
+    }
+
+    function startTrialRun() {
+      state.trialTimers.forEach((timer) => window.clearTimeout(timer));
+      state.trialTimers = [];
+      state.trialStatus = "running";
+      localStorage.setItem("wplus-prototype-trial-status", "running");
+      trialFeedback.value = "";
+      updateRunSteps(0);
+      renderTrialState();
+
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const delays = reduceMotion ? [80, 160, 240, 320] : [520, 1040, 1560, 2080];
+      delays.slice(0, 3).forEach((delay, index) => {
+        state.trialTimers.push(window.setTimeout(() => updateRunSteps(index + 1), delay));
+      });
+      state.trialTimers.push(window.setTimeout(finishTrialRun, delays[3]));
+    }
+
+    function setScreen(name) {
+      if (!screenConfig[name]) return;
+      state.screen = name;
+      localStorage.setItem("wplus-prototype-screen", name);
+      screens.forEach((screen) => screen.classList.toggle("active", screen.dataset.screen === name));
+      screenButtons.forEach((button) => button.classList.toggle("active", button.dataset.screenTarget === name));
+
+      const config = screenConfig[name];
+      primaryAction.textContent = config.primary;
+      secondaryAction.textContent = config.secondary;
+      dockContext.textContent = config.context;
+      progressLabel.textContent = `${config.completed} / 4`;
+      progressBar.style.width = name === "result" ? "100%" : name === "queue" ? "8%" : "18%";
+
+      stageItems.forEach((item, index) => {
+        const done = index < config.completed;
+        const active = !done && index === config.activeIndex;
+        item.classList.toggle("done", done);
+        item.classList.toggle("active", active);
+        const label = item.querySelector(".stage-state");
+        if (done) label.textContent = "已确认";
+        else if (active) {
+          label.textContent = name === "queue" ? "等待队列确认" : "当前环节";
+        } else label.textContent = "未开始";
+      });
+
+      if (name === "clarify") updateSubmitState();
+      else if (name === "trial") {
+        if (state.trialStatus !== "complete") startTrialRun();
+        else renderTrialState();
+      } else primaryAction.disabled = false;
+    }
+
+    function updateSubmitState() {
+      const answered = Object.keys(state.answers).length >= 2;
+      primaryAction.disabled = !answered;
+      dockContext.textContent = answered ? "本轮 2 题已填写完整 · 可统一提交" : "环节 1 / 4 · 请完成本轮 2 题";
+    }
+
+    document.addEventListener("click", (event) => {
+      const target = event.target.closest("button, summary");
+      if (!target) return;
+
+      if (target.dataset.screenTarget) {
+        setScreen(target.dataset.screenTarget);
+        return;
+      }
+
+      if (target.classList.contains("option")) {
+        const card = target.closest("[data-question]");
+        if (card) {
+          card.querySelectorAll(".option").forEach((option) => option.classList.remove("selected"));
+          target.classList.add("selected");
+          state.answers[card.dataset.question] = target.dataset.option;
+          updateSubmitState();
+        } else if (target.hasAttribute("data-memory")) {
+          document.querySelectorAll("[data-memory]").forEach((option) => option.classList.remove("selected"));
+          target.classList.add("selected");
+          showToast("记忆候选选择已暂存");
+        }
+        return;
+      }
+
+      const action = target.dataset.action;
+      if (action === "exit") document.getElementById("exit-modal").classList.add("open");
+      if (action === "history") document.getElementById("history-modal").classList.add("open");
+      if (action === "evidence") evidencePanel.classList.toggle("open");
+      if (action === "back") window.location.href = "wplus-sop-chat-entry.html?resume=1";
+      if (action === "close-modal") target.closest(".scrim").classList.remove("open");
+      if (action === "pause") {
+        target.closest(".scrim").classList.remove("open");
+        showToast("会话已保存为 Paused，Chat 输入已恢复");
+      }
+      if (action === "terminate") {
+        target.closest(".scrim").classList.remove("open");
+        showToast("原型：会话将结束，并生成“不是有效 SOP”的摘要");
+      }
+    });
+
+    primaryAction.addEventListener("click", () => {
+      if (state.screen === "queue") {
+        setScreen("clarify");
+        showToast("环节队列已确认，开始环节 1 澄清");
+      } else if (state.screen === "clarify") {
+        setScreen("trial");
+        showToast("整组答案已原子提交，仅触发一次 Agent 回合");
+      } else if (state.screen === "trial") {
+        if (state.trialStatus === "complete") {
+          setScreen("clarify");
+          showToast("环节 1 已确认，原子切换到环节 2");
+        }
+      } else {
+        showToast("记忆候选处理完成后，会话进入 Completed");
+      }
+    });
+
+    secondaryAction.addEventListener("click", () => {
+      if (state.screen === "queue") showToast("可在正式实现中支持重排、改名或删减环节");
+      if (state.screen === "clarify") showToast("答案只保存在当前页面草稿，不会触发 Agent 回合");
+      if (state.screen === "trial") {
+        if (state.trialStatus === "running") {
+          showToast("执行详情已在当前卡片中实时更新");
+        } else if (!trialFeedback.value.trim()) {
+          showToast("请先填写需要调整的内容");
+          trialFeedback.focus();
+        } else {
+          showToast("反馈已保存，正在重新执行受影响步骤");
+          startTrialRun();
+        }
+      }
+      if (state.screen === "result") window.location.href = "wplus-sop-chat-entry.html?resume=1";
+    });
+
+    document.querySelectorAll(".scrim").forEach((scrim) => {
+      scrim.addEventListener("click", (event) => {
+        if (event.target === scrim) scrim.classList.remove("open");
+      });
+    });
+
+    setScreen(state.screen);
+  </script>
+</body>
+</html>

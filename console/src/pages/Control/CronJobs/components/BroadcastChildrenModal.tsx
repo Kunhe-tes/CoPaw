@@ -10,6 +10,7 @@ import type {
   CronBroadcastChildrenResponse,
   CronJobSpecOutput,
 } from "../../../../api/types";
+import styles from "./BroadcastChildrenModal.module.less";
 
 type CronJob = CronJobSpecOutput;
 const { Text } = Typography;
@@ -385,7 +386,10 @@ export function BroadcastChildrenModal({
       style={{ maxWidth: MODAL_MAX_WIDTH }}
       width={MODAL_WIDTH}
     >
-      <div style={{ display: "grid", gap: 12, minWidth: 0 }}>
+      <div
+        className={styles.content}
+        style={{ display: "grid", gap: 12, minWidth: 0 }}
+      >
         {duplicateTenantNameSummaries.length > 0 && (
           <Alert
             type="warning"

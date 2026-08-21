@@ -32,6 +32,8 @@ from ...marketplace.fs import (
 )
 from ...marketplace.service import load_index
 from ...marketplace.zip_download import build_skill_zip
+from ...security import SkillScanError, scan_skill_directory
+from ...security.skill_scanner.safe_unpack import safe_unpack_skill_zip
 from ...marketplace.schemas import (
     BatchOperationRequest,
     BatchOperationResponse,
@@ -132,63 +134,9 @@ def _decode_zip_filename(filename: str, info: zipfile.ZipInfo) -> str:
 _MAX_UNCOMPRESSED_SIZE = 200 * 1024 * 1024  # 200MB
 
 
-def _validate_zip_archive(data: bytes) -> zipfile.ZipFile:
-    """Validate zip data and return ZipFile object."""
-    if not zipfile.is_zipfile(io.BytesIO(data)):
-        raise ValueError("Uploaded file is not a valid zip archive")
-    return zipfile.ZipFile(io.BytesIO(data))
-
-
-def _check_zip_size(zf: zipfile.ZipFile) -> None:
-    """Check uncompressed zip size limit."""
-    total = sum(info.file_size for info in zf.infolist())
-    if total > _MAX_UNCOMPRESSED_SIZE:
-        raise ValueError("Uncompressed zip exceeds 200MB limit")
-
-
-def _validate_zip_paths(zf: zipfile.ZipFile, tmp_dir: Path) -> None:
-    """Zip 路径安全检查：拒绝危险字符，允许 Unicode 目录名。
-
-    只拒绝 Windows/NTFS 真正保留的字符和控制字符，
-    中文等 Unicode 目录名在后续步骤会通过 normalize_skill_name 保留原样。
-    """
-    import re
-
-    root_path = tmp_dir.resolve()
-    # Windows/NTFS 保留字符 + 控制字符（禁止用于目录/文件名）
-    _UNSAFE_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
-
-    for info in zf.infolist():
-        decoded_name = _decode_zip_filename(info.filename, info)
-        target = (tmp_dir / decoded_name).resolve()
-
-        # 检查路径遍历
-        if not target.is_relative_to(root_path):
-            raise ValueError(f"Unsafe path in zip: {info.filename}")
-
-        # 检查目录段是否包含非法字符（仅拒绝真正危险的字符）
-        path_parts = decoded_name.split("/")
-        for i, part in enumerate(
-            path_parts[:-1],
-        ):  # 检查所有目录段，不检查最后一段（可能是文件名）
-            if part and _UNSAFE_CHARS_RE.search(part):
-                raise ValueError(
-                    f"Zip 文件中的目录名 '{part}' 包含非法字符（空格、斜杠等）。"
-                    "请修改 zip 文件中的目录名。",
-                )
-
-
-def _extract_zip_entries(zf: zipfile.ZipFile, tmp_dir: Path) -> None:
-    """Extract zip entries with corrected encoding."""
-    for info in zf.infolist():
-        decoded_name = _decode_zip_filename(info.filename, info)
-        target = tmp_dir / decoded_name
-
-        if info.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(zf.read(info))
+def _decode_zip_member_name(info: zipfile.ZipInfo) -> str:
+    """按 Market 兼容逻辑解码 ZIP 成员名."""
+    return _decode_zip_filename(info.filename, info)
 
 
 def _find_skill_directories(
@@ -234,11 +182,12 @@ def _extract_zip_skills(
     tmp_dir = Path(tempfile.mkdtemp(prefix="copaw_myskill_upload_"))
 
     try:
-        zf = _validate_zip_archive(data)
-        with zf:
-            _check_zip_size(zf)
-            _validate_zip_paths(zf, tmp_dir)
-            _extract_zip_entries(zf, tmp_dir)
+        safe_unpack_skill_zip(
+            data,
+            tmp_dir,
+            max_uncompressed_bytes=_MAX_UNCOMPRESSED_SIZE,
+            decode_member_name=_decode_zip_member_name,
+        )
 
         found = _find_skill_directories(tmp_dir, zip_filename)
         if not found:
@@ -249,6 +198,14 @@ def _extract_zip_skills(
     except Exception:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
+
+
+def _scan_found_skills_or_raise(
+    found_skills: list[tuple[Path, str]],
+) -> None:
+    """强制扫描解包后的技能目录，命中高危时阻断导入."""
+    for skill_dir, skill_name in found_skills:
+        scan_skill_directory(skill_dir, skill_name=skill_name, block=True)
 
 
 def _infer_skill_name_from_zip_filename(filename: str) -> str:
@@ -591,6 +548,7 @@ def _import_skill_from_zip(
 
     try:
         tmp_dir, found_skills = _extract_zip_skills(data, zip_filename)
+        _scan_found_skills_or_raise(found_skills)
         existing_names = _get_existing_skill_names(skills_dir)
 
         for skill_dir, original_name in found_skills:
@@ -646,6 +604,8 @@ def _import_skill_from_zip(
             detail=f"Invalid zip file: {e}",
         ) from e
     except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    except SkillScanError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     finally:
         if tmp_dir and tmp_dir.exists():
