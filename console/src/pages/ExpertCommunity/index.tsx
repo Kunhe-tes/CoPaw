@@ -39,6 +39,9 @@ export default function ExpertCommunityPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [receivedIds, setReceivedIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [versionItem, setVersionItem] = useState<MarketExpert | null>(null);
   const [versions, setVersions] = useState<Awaited<
     ReturnType<typeof marketApi.listExpertVersions>
@@ -84,24 +87,32 @@ export default function ExpertCommunityPage() {
   }, [items, query]);
 
   const unpublish = async (item: MarketExpert) => {
+    setBusyId(item.item_id);
     try {
       await marketApi.unpublishExpert(sourceId, item.item_id);
       message.success("专家已下架");
       await load();
     } catch (err) {
       message.error(err instanceof Error ? err.message : "下架失败");
+    } finally {
+      setBusyId(null);
     }
   };
 
   const receive = async (item: MarketExpert) => {
     setBusyId(item.item_id);
     try {
-      await marketApi.installExpert(
+      const result = await marketApi.installExpert(
         sourceId,
         item.item_id,
         userId,
         selectedAgent,
       );
+      if (!result.success) {
+        message.error(result.reason || "专家已接收，不能重复安装");
+        return;
+      }
+      setReceivedIds((current) => new Set(current).add(item.item_id));
       message.success("专家已接收");
     } catch (err) {
       message.error(err instanceof Error ? err.message : "接收失败");
@@ -124,23 +135,31 @@ export default function ExpertCommunityPage() {
   };
 
   const distribute = async (item: MarketExpert) => {
+    setBusyId(item.item_id);
     try {
       const result = await marketApi.distributeExpert(sourceId, item.item_id, {
         target_type: "all",
         target_values: [],
       });
       message.success(`已分发 ${result.distributed_count} 个用户`);
+      await load();
     } catch (err) {
       message.error(err instanceof Error ? err.message : "分发失败");
+    } finally {
+      setBusyId(null);
     }
   };
 
   const recall = async (item: MarketExpert) => {
+    setBusyId(item.item_id);
     try {
       const result = await marketApi.recallExpert(sourceId, item.item_id);
       message.success(`已撤回 ${result.recalled_count} 个用户的专家`);
+      await load();
     } catch (err) {
       message.error(err instanceof Error ? err.message : "撤回失败");
+    } finally {
+      setBusyId(null);
     }
   };
 
@@ -173,7 +192,9 @@ export default function ExpertCommunityPage() {
             <Title level={3} style={{ margin: 0 }}>
               专家社区
             </Title>
-            <Text type="secondary">浏览当前来源发布的专家包和冻结版本。</Text>
+            <Text type="secondary">
+              来源：{sourceId} · 浏览当前来源发布的专家包和冻结版本。
+            </Text>
           </div>
           <Button
             icon={<ReloadOutlined />}
@@ -230,40 +251,70 @@ export default function ExpertCommunityPage() {
                         >
                           版本历史
                         </Button>,
-                        <Button
+                        <Popconfirm
                           key="distribute"
-                          type="text"
-                          onClick={() => void distribute(item)}
+                          title="确认分发此专家？"
+                          description="管理员分发会静默覆盖同一社区来源的本地变体。"
+                          onConfirm={() => void distribute(item)}
                         >
-                          分发
-                        </Button>,
-                        <Button
+                          <Button
+                            type="text"
+                            loading={busyId === item.item_id}
+                            disabled={
+                              busyId !== null && busyId !== item.item_id
+                            }
+                          >
+                            分发
+                          </Button>
+                        </Popconfirm>,
+                        <Popconfirm
                           key="recall"
-                          danger
-                          type="text"
-                          onClick={() => void recall(item)}
+                          title="确认撤回此专家？"
+                          description="将删除用户已接收副本，并立即释放会话依赖视图。"
+                          onConfirm={() => void recall(item)}
                         >
-                          撤回
-                        </Button>,
-                        <Button
+                          <Button
+                            danger
+                            type="text"
+                            loading={busyId === item.item_id}
+                            disabled={
+                              busyId !== null && busyId !== item.item_id
+                            }
+                          >
+                            撤回
+                          </Button>
+                        </Popconfirm>,
+                        <Popconfirm
                           key="unpublish"
-                          danger
-                          type="text"
-                          icon={<StopOutlined />}
-                          onClick={() => void unpublish(item)}
+                          title="确认下架此专家？"
+                          description="下架只会停止新的浏览、接收和分发，已接收副本仍可使用。"
+                          onConfirm={() => void unpublish(item)}
                         >
-                          下架
-                        </Button>,
+                          <Button
+                            danger
+                            type="text"
+                            icon={<StopOutlined />}
+                            loading={busyId === item.item_id}
+                            disabled={
+                              busyId !== null && busyId !== item.item_id
+                            }
+                          >
+                            下架
+                          </Button>
+                        </Popconfirm>,
                       ]
                     : [
                         <Button
                           key="receive"
                           type="primary"
                           loading={busyId === item.item_id}
-                          disabled={item.status !== "active"}
+                          disabled={
+                            item.status !== "active" ||
+                            receivedIds.has(item.item_id)
+                          }
                           onClick={() => void receive(item)}
                         >
-                          接收
+                          {receivedIds.has(item.item_id) ? "已接收" : "接收"}
                         </Button>,
                         <Button
                           key="versions"

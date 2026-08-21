@@ -1220,6 +1220,7 @@ export default function ChatPage() {
 
   const persistPlanMode = useCallback(
     async (enabled: boolean) => {
+      const previousSelectedExpertId = selectedExpertId;
       if (enabled) {
         setSelectedExpertId(null);
       }
@@ -1253,6 +1254,11 @@ export default function ChatPage() {
           },
         });
         persistSucceeded = true;
+      } catch (error) {
+        if (enabled) {
+          setSelectedExpertId(previousSelectedExpertId);
+        }
+        throw error;
       } finally {
         const resolvedScopeKey =
           resolvedPlanModePersistScopesRef.current.get(scopeKey);
@@ -1269,7 +1275,9 @@ export default function ChatPage() {
       activePlanModeMetadataEnabled,
       ensurePlanModeChatId,
       message,
+      selectedExpertId,
       setPlanModeEnabledForScope,
+      setSelectedExpertId,
       setSessions,
       t,
     ],
@@ -1823,6 +1831,10 @@ export default function ChatPage() {
       }
 
       const timeoutSignal = createTimedAbortSignal(data.signal);
+      // The expert is a one-turn selection. Clear it as soon as the request
+      // has been submitted so aborts/network failures cannot leave stale UI
+      // state for the next turn.
+      setSelectedExpertId(null);
       try {
         setSubAgentMonitorResetKey((value) => value + 1);
         const response = await fetch(getApiUrl("/console/chat"), {
@@ -1836,7 +1848,6 @@ export default function ChatPage() {
           pendingScenarioPresetIdRef.current = null;
         }
 
-        setSelectedExpertId(null);
         return response;
       } catch (error) {
         if (shouldStopBackendForFetchAbort(error, timeoutSignal.signal)) {
