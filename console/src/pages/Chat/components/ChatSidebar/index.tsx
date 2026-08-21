@@ -89,7 +89,6 @@ function ToggleIcon({ collapsed }: { collapsed: boolean }) {
 
 export interface ChatSidebarProps {
   tasks: CronJobSpecOutput[];
-  showGuide?: boolean;
   selectedTaskId?: string;
   onCreateSession?: () => void;
   onTaskClick?: (task: CronJobSpecOutput) => void;
@@ -103,7 +102,6 @@ export interface ChatSidebarProps {
 export default function ChatSidebar(props: ChatSidebarProps) {
   const {
     tasks,
-    showGuide = false,
     selectedTaskId,
     onCreateSession,
     onTaskClick,
@@ -148,6 +146,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const { selectedAgent, setSelectedAgent } = useAgentStore();
   const bbk = useIframeStore((state) => state.bbk);
   const source = useIframeStore((state) => state.source);
+  const isOriginY = useIframeStore((state) => state.isOriginY);
   const isOperationGuideContext =
     bbk === OPERATION_GUIDE_BBK && source === OPERATION_GUIDE_SOURCE;
   const isHeaderHidden = source === SPECIAL_SOURCE;
@@ -504,7 +503,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
           </div>
 
-          {showGuide && (
+          {isOriginY && (
             <div className="chat-sidebar-footer">
               {/* 暂时隐藏，后续需要时再开放
               <div className="chat-sidebar-footer-item">
@@ -542,7 +541,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
         </button>
       </div>
       {/* Guide Image Preview */}
-      {showGuide && isOperationGuideContext && (
+      {isOriginY && isOperationGuideContext && (
         <div style={{ display: "none" }}>
           <Image.PreviewGroup
             preview={{

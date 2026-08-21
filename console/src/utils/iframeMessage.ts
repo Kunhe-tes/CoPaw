@@ -340,9 +340,11 @@ export function resetIframeContextForStandalone(): void {
  */
 export async function handleUrlOriginParam(): Promise<void> {
   const urlParams = new URLSearchParams(window.location.search);
-  const originParam = urlParams.get("origin");
+  const isOriginY = urlParams.get("origin") === "Y";
+  const store = useIframeStore.getState();
+  store.setOriginY(isOriginY);
 
-  if (originParam !== "Y") {
+  if (!isOriginY) {
     return;
   }
 
@@ -361,8 +363,6 @@ export async function handleUrlOriginParam(): Promise<void> {
   if (!userId) {
     return;
   }
-
-  const store = useIframeStore.getState();
 
   // 设置初始上下文，hideMenu=true 隐藏 MainLayout 侧边栏
   store.setContext({
