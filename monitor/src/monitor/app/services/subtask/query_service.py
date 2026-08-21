@@ -1108,11 +1108,7 @@ class QueryService:
                 AND s.status IN ('FAIL', 'PART_SUC', 'TIMEOUT')
             )
         """
-        await self.db.execute(success_query)
-        success_row = await self.db.fetch_one(
-            "SELECT ROW_COUNT() AS count",
-        )
-        success_count = success_row.get("count", 0) if success_row else 0
+        success_count = await self.db.execute(success_query)
         (
             indexed_count,
             indexed_users,
@@ -1148,11 +1144,7 @@ class QueryService:
                 AND (s.status IS NULL OR s.status = '')
             )
         """
-        await self.db.execute(error_query)
-        error_row = await self.db.fetch_one(
-            "SELECT ROW_COUNT() AS count",
-        )
-        error_count = error_row.get("count", 0) if error_row else 0
+        error_count = await self.db.execute(error_query)
 
         logger.info(
             "Batch updated execution async_status and need_notification: "

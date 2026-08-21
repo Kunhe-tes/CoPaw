@@ -11,7 +11,6 @@ from monitor.app.services.subtask.query_service import QueryService
 class FakeDb:
     def __init__(self):
         self.fetch_all_calls = []
-        self.fetch_one_calls = []
         self.execute_calls = []
         self.execute_many_calls = []
         self.fetch_all_results = [
@@ -45,18 +44,17 @@ class FakeDb:
                 },
             ],
         ]
-        self.fetch_one_results = [{"count": 1}, {"count": 0}]
 
     async def fetch_all(self, sql, params=None):
         self.fetch_all_calls.append((sql, params))
         return self.fetch_all_results.pop(0)
 
-    async def fetch_one(self, sql, params=None):
-        self.fetch_one_calls.append((sql, params))
-        return self.fetch_one_results.pop(0)
-
     async def execute(self, sql, params=None):
         self.execute_calls.append((sql, params))
+        if "async_status = 'success'" in sql:
+            return 1
+        if "async_status = 'error'" in sql:
+            return 0
         return 1
 
     async def execute_many(self, sql, params_list):
