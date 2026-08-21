@@ -433,6 +433,7 @@ def test_get_active_model_refreshes_external_file_changes(
         json.dumps({"provider_id": "openai", "model": "gpt-5"}),
         encoding="utf-8",
     )
+    manager._next_freshness_check_at = 0.0
 
     assert manager.get_active_model() == ModelSlotConfig(
         provider_id="openai",
@@ -450,6 +451,7 @@ async def test_get_active_model_returns_none_after_external_delete(
     await manager.activate_model("openai", "gpt-5")
 
     (manager.root_path / "active_model.json").unlink()
+    await manager.refresh_if_due()
 
     assert manager.get_active_model() is None
 
@@ -467,6 +469,7 @@ async def test_get_active_model_returns_none_for_invalid_external_file(
         "{invalid-json",
         encoding="utf-8",
     )
+    await manager.refresh_if_due()
 
     assert manager.get_active_model() is None
 

@@ -19,6 +19,7 @@ from ...config.context import (
     resolve_runtime_identity,
     resolve_storage_tenant_id,
 )
+from ...runtime_workers import run_runtime_state_work
 from .bootstrap_lock import (
     AsyncFlock,
     BootstrapLockFailure,
@@ -35,6 +36,8 @@ from .workspace import Workspace
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_BOOTSTRAP_VALIDATION_TTL_SECONDS = 300.0
+
 
 @dataclass
 class TenantWorkspaceEntry:
@@ -48,6 +51,9 @@ class TenantWorkspaceEntry:
     created_at: float = field(default_factory=time.monotonic)
     last_accessed_at: float = field(default_factory=time.monotonic)
     access_count: int = 0
+    bootstrap_ready: bool = False
+    bootstrap_generation: int = 0
+    validated_at: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -81,6 +87,9 @@ class TenantWorkspacePool:
         *,
         source_system_config_service: object | None = None,
         continuous_governance_service: object | None = None,
+        bootstrap_validation_ttl_seconds: float = (
+            DEFAULT_BOOTSTRAP_VALIDATION_TTL_SECONDS
+        ),
     ):
         """Initialize the tenant workspace pool.
 
@@ -88,10 +97,18 @@ class TenantWorkspacePool:
             base_working_dir: Base directory where tenant workspaces are created.
                 Each tenant gets a subdirectory: base_working_dir / tenant_id
         """
+        if bootstrap_validation_ttl_seconds < 0:
+            raise ValueError(
+                "bootstrap_validation_ttl_seconds must be non-negative",
+            )
+
         self._base_working_dir = Path(base_working_dir).expanduser().resolve()
         self._base_working_dir.mkdir(parents=True, exist_ok=True)
         self._source_system_config_service = source_system_config_service
         self._continuous_governance_service = continuous_governance_service
+        self._bootstrap_validation_ttl_seconds = (
+            bootstrap_validation_ttl_seconds
+        )
 
         # Tenant workspace registry: tenant_id -> TenantWorkspaceEntry
         self._workspaces: dict[str, TenantWorkspaceEntry] = {}
@@ -183,6 +200,8 @@ class TenantWorkspacePool:
         tenant_id: str,
         source_id: str | None,
         scope_id: str | None,
+        *,
+        expected_generation: int | None = None,
     ) -> bool:
         """Check if tenant already has a complete bootstrap.
 
@@ -195,6 +214,53 @@ class TenantWorkspacePool:
         Returns:
             True if already bootstrapped and complete, False otherwise.
         """
+        persisted_ready = await run_runtime_state_work(
+            self._has_persisted_bootstrap,
+            bootstrap_tenant_id,
+            tenant_id,
+            source_id,
+            scope_id,
+        )
+
+        async with self._registry_lock:
+            entry = self._workspaces.get(bootstrap_tenant_id)
+            if (
+                expected_generation is not None
+                and entry is not None
+                and entry.bootstrap_generation != expected_generation
+            ):
+                return False
+            if persisted_ready:
+                if entry is None:
+                    entry = TenantWorkspaceEntry(
+                        tenant_id=bootstrap_tenant_id,
+                        bootstrap_generation=expected_generation or 0,
+                    )
+                    self._workspaces[bootstrap_tenant_id] = entry
+                if not entry.bootstrap_ready:
+                    entry.bootstrap_ready = True
+                entry.validated_at = time.monotonic()
+                self._mark_access(entry)
+                return True
+
+            if entry is not None:
+                entry.bootstrap_ready = False
+                entry.validated_at = 0.0
+                logger.warning(
+                    "Tenant %s cached in pool but scaffold is incomplete. "
+                    "Running self-heal bootstrap.",
+                    bootstrap_tenant_id,
+                )
+            return False
+
+    def _has_persisted_bootstrap(
+        self,
+        bootstrap_tenant_id: str,
+        tenant_id: str,
+        source_id: str | None,
+        scope_id: str | None,
+    ) -> bool:
+        """Synchronously inspect the persisted bootstrap state."""
         initializer = TenantInitializer(
             self._base_working_dir,
             tenant_id,
@@ -202,31 +268,111 @@ class TenantWorkspacePool:
             scope_id=scope_id,
         )
         if source_id and bootstrap_tenant_id == f"default_{source_id}":
-            persisted_ready = inspect_source_template_readiness(
+            return inspect_source_template_readiness(
                 self._base_working_dir,
                 source_id,
             ).ready
-        else:
-            persisted_ready = initializer.has_seeded_bootstrap()
+        return initializer.has_seeded_bootstrap()
 
+    async def _get_ready_entry(
+        self,
+        bootstrap_tenant_id: str,
+    ) -> TenantWorkspaceEntry | None:
+        """Return a recently validated ready entry, if one is available."""
         async with self._registry_lock:
             entry = self._workspaces.get(bootstrap_tenant_id)
-            if persisted_ready:
-                if entry is None:
-                    entry = TenantWorkspaceEntry(
-                        tenant_id=bootstrap_tenant_id,
-                    )
-                    self._workspaces[bootstrap_tenant_id] = entry
+            if (
+                entry is not None
+                and entry.bootstrap_ready
+                and self._bootstrap_validation_ttl_seconds > 0
+                and time.monotonic() - entry.validated_at
+                < self._bootstrap_validation_ttl_seconds
+            ):
                 self._mark_access(entry)
-                return True
+                return entry
+            return None
 
-            if entry is not None:
-                logger.warning(
-                    "Tenant %s cached in pool but scaffold is incomplete. "
-                    "Running self-heal bootstrap.",
-                    bootstrap_tenant_id,
+    async def _get_bootstrap_generation(
+        self,
+        bootstrap_tenant_id: str,
+    ) -> int:
+        """Return the generation an in-flight bootstrap must publish against."""
+        async with self._registry_lock:
+            entry = self._workspaces.get(bootstrap_tenant_id)
+            return entry.bootstrap_generation if entry is not None else 0
+
+    async def _generation_matches(
+        self,
+        bootstrap_tenant_id: str,
+        expected_generation: int,
+    ) -> bool:
+        """Check whether an in-flight bootstrap still owns its generation."""
+        return expected_generation == await self._get_bootstrap_generation(
+            bootstrap_tenant_id,
+        )
+
+    async def _mark_bootstrap_ready(
+        self,
+        bootstrap_tenant_id: str,
+        *,
+        expected_generation: int | None = None,
+    ) -> bool:
+        """Record a successful bootstrap without creating a runtime."""
+        async with self._registry_lock:
+            entry = self._workspaces.get(bootstrap_tenant_id)
+            if entry is None:
+                entry = TenantWorkspaceEntry(
+                    tenant_id=bootstrap_tenant_id,
+                    bootstrap_generation=expected_generation or 0,
                 )
-            return False
+                self._workspaces[bootstrap_tenant_id] = entry
+            if (
+                expected_generation is not None
+                and entry.bootstrap_generation != expected_generation
+            ):
+                logger.info(
+                    "tenant_bootstrap_ready_publish_rejected tenant_id=%s "
+                    "expected_generation=%d current_generation=%d",
+                    bootstrap_tenant_id,
+                    expected_generation,
+                    entry.bootstrap_generation,
+                )
+                return False
+            if not entry.bootstrap_ready:
+                entry.bootstrap_ready = True
+            entry.validated_at = time.monotonic()
+            self._mark_access(entry)
+            return True
+
+    async def invalidate_bootstrap(
+        self,
+        bootstrap_tenant_id: str,
+        *,
+        reason: str,
+    ) -> None:
+        """Invalidate a ready entry so the next access rechecks persistence."""
+        async with self._registry_lock:
+            entry = self._workspaces.get(bootstrap_tenant_id)
+            if entry is not None:
+                entry.bootstrap_ready = False
+                entry.validated_at = 0.0
+                entry.bootstrap_generation += 1
+                logger.info(
+                    "tenant_bootstrap_invalidated tenant_id=%s reason=%s",
+                    bootstrap_tenant_id,
+                    reason,
+                )
+                return
+            entry = TenantWorkspaceEntry(
+                tenant_id=bootstrap_tenant_id,
+                bootstrap_generation=1,
+            )
+            self._workspaces[bootstrap_tenant_id] = entry
+            logger.info(
+                "tenant_bootstrap_invalidation_tombstone tenant_id=%s reason=%s",
+                bootstrap_tenant_id,
+                reason,
+            )
 
     def _log_seeding_results(
         self,
@@ -472,13 +618,8 @@ class TenantWorkspacePool:
                 duration_ms=duration_ms,
             )
 
-        # Fast path: check if already bootstrapped
-        if await self._check_existing_bootstrap(
-            bootstrap_tenant_id,
-            tenant_id,
-            source_id,
-            scope_id,
-        ):
+        # Fast path: avoid persisted I/O for a recently validated entry.
+        if await self._get_ready_entry(bootstrap_tenant_id):
             result = outcome("already_ready")
             logger.debug(
                 "bootstrap_fast_path_hit tenant_id=%s duration_ms=%d",
@@ -487,6 +628,33 @@ class TenantWorkspacePool:
             )
             return result
 
+        expected_generation = await self._get_bootstrap_generation(
+            bootstrap_tenant_id,
+        )
+
+        # Strict path: validate persisted state before trusting it.
+        if await self._check_existing_bootstrap(
+            bootstrap_tenant_id,
+            tenant_id,
+            source_id,
+            scope_id,
+            expected_generation=expected_generation,
+        ):
+            result = outcome("already_ready")
+            logger.debug(
+                "bootstrap_fast_path_hit tenant_id=%s duration_ms=%d",
+                bootstrap_tenant_id,
+                result.duration_ms,
+            )
+            return result
+        if not await self._generation_matches(
+            bootstrap_tenant_id,
+            expected_generation,
+        ):
+            raise TenantBootstrapUnavailable(
+                "tenant bootstrap state changed; retry shortly",
+            )
+
         # Slow path: bootstrap with cross-process file lock.
         try:
             async with AsyncFlock(
@@ -494,11 +662,20 @@ class TenantWorkspacePool:
                 / ".bootstrap.lock",
             ):
                 # Double-check after acquiring the cross-process lock.
+                if await self._get_ready_entry(bootstrap_tenant_id):
+                    result = outcome("already_ready")
+                    logger.debug(
+                        "bootstrap_fast_path_hit tenant_id=%s duration_ms=%d",
+                        bootstrap_tenant_id,
+                        result.duration_ms,
+                    )
+                    return result
                 if await self._check_existing_bootstrap(
                     bootstrap_tenant_id,
                     tenant_id,
                     source_id,
                     scope_id,
+                    expected_generation=expected_generation,
                 ):
                     result = outcome("already_ready")
                     logger.debug(
@@ -507,6 +684,13 @@ class TenantWorkspacePool:
                         result.duration_ms,
                     )
                     return result
+                if not await self._generation_matches(
+                    bootstrap_tenant_id,
+                    expected_generation,
+                ):
+                    raise TenantBootstrapUnavailable(
+                        "tenant bootstrap state changed; retry shortly",
+                    )
 
                 self._require_ready_source_template(source_id)
                 logger.info(
@@ -522,6 +706,14 @@ class TenantWorkspacePool:
                     bbk_id,
                     enable_bootstrap_chat,
                 )
+                published_ready = await self._mark_bootstrap_ready(
+                    bootstrap_tenant_id,
+                    expected_generation=expected_generation,
+                )
+                if not published_ready:
+                    raise TenantBootstrapUnavailable(
+                        "tenant bootstrap state changed; retry shortly",
+                    )
                 result = outcome("bootstrapped")
                 logger.debug(
                     "bootstrap_fast_path_miss tenant_id=%s duration_ms=%d",

@@ -15,7 +15,7 @@ from swe.providers.provider_manager import ProviderManager
 def test_reset_instance_cache_resets_scope_bound_model_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed = []
+    observed: list[Any] = []
 
     monkeypatch.setattr(
         provider_manager_module,
@@ -35,7 +35,7 @@ def test_reset_instance_cache_resets_scope_bound_model_caches(
 def test_refresh_if_stale_resets_scope_bound_model_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed = []
+    observed: list[Any] = []
     manager = object.__new__(ProviderManager)
     manager._record_mtimes = lambda: observed.append("record")
     manager._apply_builtin_refresh = lambda changed: observed.append("builtin")
@@ -43,6 +43,11 @@ def test_refresh_if_stale_resets_scope_bound_model_caches(
         lambda changed, new, removed: observed.append("custom")
     )
     manager._apply_active_model_refresh = lambda: observed.append("active")
+    manager.tenant_id = "scope-a"
+    manager.root_path = None
+    manager.builtin_providers = {}
+    manager.custom_providers = {}
+    manager._file_freshness_tokens = {}
     manager._detect_changed_builtins = lambda: ["openai"]
     manager._detect_custom_changes = lambda: ([], [], [])
     manager._detect_active_model_change = lambda: False
@@ -50,25 +55,26 @@ def test_refresh_if_stale_resets_scope_bound_model_caches(
     monkeypatch.setattr(
         provider_manager_module,
         "reset_scope_bound_model_caches",
-        lambda: observed.append("reset"),
+        lambda scope=None: observed.append(("reset", scope)),
     )
 
     manager._refresh_if_stale()
 
-    assert observed == ["builtin", "custom", "reset", "record"]
+    assert observed == ["builtin", "custom", ("reset", "scope-a"), "record"]
 
 
 @pytest.mark.asyncio
 async def test_activate_model_resets_scope_bound_model_caches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed: list[tuple[str, Any, Any] | str] = []
+    observed: list[Any] = []
     provider = SimpleNamespace(
         has_model=lambda model_id: True,
         models=[],
         extra_models=[],
     )
     manager = object.__new__(ProviderManager)
+    manager.tenant_id = "scope-a"
     manager.get_provider = lambda provider_id: provider
     manager.save_active_model = lambda active_model: observed.append(
         ("save", active_model.provider_id, active_model.model),
@@ -82,13 +88,13 @@ async def test_activate_model_resets_scope_bound_model_caches(
     monkeypatch.setattr(
         provider_manager_module,
         "reset_scope_bound_model_caches",
-        lambda: observed.append("reset"),
+        lambda scope=None: observed.append(("reset", scope)),
     )
 
     await manager.activate_model("openai", "gpt-5.4")
 
     assert observed == [
         ("save", "openai", "gpt-5.4"),
-        "reset",
+        ("reset", "scope-a"),
         ("probe", "openai", "gpt-5.4"),
     ]
