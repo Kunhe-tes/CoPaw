@@ -239,8 +239,9 @@ class ExpertVersionService:
         target_dir.parent.mkdir(parents=True, exist_ok=True)
         staging = Path(
             tempfile.mkdtemp(
-                prefix=f".{target_dir.name}-", dir=target_dir.parent
-            )
+                prefix=f".{target_dir.name}-",
+                dir=target_dir.parent,
+            ),
         )
         backup = target_dir.with_name(f".{target_dir.name}.backup")
         try:

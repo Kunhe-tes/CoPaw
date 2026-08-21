@@ -127,14 +127,16 @@ class AgentOwnedDefinitionRepository:
             normalized = _merge_update_payload(current.raw_payload, payload)
             if current.definition is not None:
                 community = getattr(
-                    current.definition.agent_owned, "community", None
+                    current.definition.agent_owned,
+                    "community",
+                    None,
                 )
                 if community is not None:
                     old_skills = list(
-                        current.definition.agent_owned.declared_skills
+                        current.definition.agent_owned.declared_skills,
                     )
                     old_mcps = list(
-                        current.definition.agent_owned.declared_mcps or []
+                        current.definition.agent_owned.declared_mcps or [],
                     )
                     new_skills = list(normalized.get("skills") or [])
                     new_mcps = list(normalized.get("mcps") or [])
