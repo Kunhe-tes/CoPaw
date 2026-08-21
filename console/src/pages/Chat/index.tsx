@@ -48,6 +48,7 @@ import type {
 } from "../../api/types";
 import type { FeedbackRecord } from "../../api/types/feedback";
 import ModelSelector from "./ModelSelector";
+import ExpertSelector from "./ExpertSelector";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSourceSystemConfigStore } from "../../stores/sourceSystemConfigStore";
@@ -127,9 +128,7 @@ import RuntimeResponseCard, {
 } from "./components/RuntimeResponseCard";
 import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard/whitelist";
 import ApprovalActionCard from "./components/ApprovalActionCard";
-import {
-  ActivePlanInteractionComposer,
-} from "./components/PlanInteractionCards";
+import { ActivePlanInteractionComposer } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
 import {
@@ -617,6 +616,7 @@ export default function ChatPage() {
   );
   const [subAgentMonitorResetKey, setSubAgentMonitorResetKey] = useState(0);
   const { selectedAgent } = useAgentStore();
+  const [selectedExpertId, setSelectedExpertId] = useState<string | null>(null);
   const [modelRefreshKey, setModelRefreshKey] = useState(0);
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
@@ -656,6 +656,10 @@ export default function ChatPage() {
     setSelectedContextReferences([]);
     pendingContextReferencesRef.current = [];
   }, [activeSessionId, chatId]);
+
+  useEffect(() => {
+    setSelectedExpertId(null);
+  }, [selectedAgent]);
   const sourceSystemConfig = useSourceSystemConfigStore(
     (state) => state.config,
   );
@@ -1216,6 +1220,10 @@ export default function ChatPage() {
 
   const persistPlanMode = useCallback(
     async (enabled: boolean) => {
+      const previousSelectedExpertId = selectedExpertId;
+      if (enabled) {
+        setSelectedExpertId(null);
+      }
       const scopeKey = activePlanModeScopeKeyRef.current;
       const retainBlankScope =
         enabled && scopeKey === "" && !activePlanModeMetadataEnabled;
@@ -1246,6 +1254,11 @@ export default function ChatPage() {
           },
         });
         persistSucceeded = true;
+      } catch (error) {
+        if (enabled) {
+          setSelectedExpertId(previousSelectedExpertId);
+        }
+        throw error;
       } finally {
         const resolvedScopeKey =
           resolvedPlanModePersistScopesRef.current.get(scopeKey);
@@ -1262,7 +1275,9 @@ export default function ChatPage() {
       activePlanModeMetadataEnabled,
       ensurePlanModeChatId,
       message,
+      selectedExpertId,
       setPlanModeEnabledForScope,
+      setSelectedExpertId,
       setSessions,
       t,
     ],
@@ -1797,6 +1812,7 @@ export default function ChatPage() {
             : pendingContextReferencesRef.current,
         scenario_preset_id: pendingScenarioPresetIdRef.current || undefined,
         file_url_network: resolveCurrentFileUrlNetwork(),
+        selected_expert_id: selectedExpertId || undefined,
       };
       pendingContextReferencesRef.current = [];
 
@@ -1815,6 +1831,10 @@ export default function ChatPage() {
       }
 
       const timeoutSignal = createTimedAbortSignal(data.signal);
+      // The expert is a one-turn selection. Clear it as soon as the request
+      // has been submitted so aborts/network failures cannot leave stale UI
+      // state for the next turn.
+      setSelectedExpertId(null);
       try {
         setSubAgentMonitorResetKey((value) => value + 1);
         const response = await fetch(getApiUrl("/console/chat"), {
@@ -1856,6 +1876,7 @@ export default function ChatPage() {
       resolveLogicalRequestSessionId,
       resolveRequestChatId,
       selectedAgent,
+      selectedExpertId,
     ],
   );
 
@@ -2103,6 +2124,17 @@ export default function ChatPage() {
             <span style={{ flex: 1 }} />
             {!isContentOnly && <FileManager />}
             {!isContentOnly && <ModelSelector />}
+            {!isContentOnly && (
+              <ExpertSelector
+                planModeEnabled={planModeEnabled}
+                selectedExpertId={selectedExpertId}
+                onChange={setSelectedExpertId}
+                onDisablePlanMode={() => {
+                  void persistPlanMode(false);
+                }}
+                disabled={composerDisabled}
+              />
+            )}
             {/* <ChatActionGroup /> */}
           </>
         ),
@@ -2277,6 +2309,7 @@ export default function ChatPage() {
     resolveRequestChatId,
     runtimeLocale,
     setPlanModeEnabledForActiveScope,
+    selectedExpertId,
     selectedContextReferences,
     contextReferences,
     contextReferencesError,

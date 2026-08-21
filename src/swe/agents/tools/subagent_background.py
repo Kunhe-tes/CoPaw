@@ -30,15 +30,6 @@ from ...app.subagents import (
 from ...config.config import AgentProfileConfig
 from ...config.utils import get_tenant_working_dir
 
-_SUBAGENT_INTENT_TERMS = (
-    "subagent",
-    "SubAgent",
-    "subAgent",
-    "子代理",
-    "子 agent",
-    "子Agent",
-    "后台子代理",
-)
 _RUN_ID_CONTEXT_KEYS = (
     "subagent_run_id",
     "requested_subagent_run_id",
@@ -51,21 +42,18 @@ _START_SUBAGENT_DESCRIPTION = (
 )
 
 
-def get_default_background_subagent_supervisor() -> BackgroundSubAgentSupervisor:
+def get_default_background_subagent_supervisor() -> (
+    BackgroundSubAgentSupervisor
+):
     """Return the process-local default Background SubAgent supervisor."""
     return _DEFAULT_SUPERVISOR
-
-
-def has_subagent_intent(request_context: dict[str, Any]) -> bool:
-    """Return whether the current turn explicitly asks for SubAgents."""
-    text = str(request_context.get("current_user_text") or "")
-    return any(term in text for term in _SUBAGENT_INTENT_TERMS)
 
 
 def has_explicit_subagent_run_id(request_context: dict[str, Any]) -> bool:
     """Return whether this request explicitly carries a Background Run id."""
     return any(
-        str(request_context.get(key) or "").strip() for key in _RUN_ID_CONTEXT_KEYS
+        str(request_context.get(key) or "").strip()
+        for key in _RUN_ID_CONTEXT_KEYS
     )
 
 
@@ -103,6 +91,7 @@ def create_background_subagent_tools(
     workspace_dir: Path,
     request_context: dict[str, Any],
     effective_skill_names: list[str] | None = None,
+    selected_expert_id: str | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
     tool_scope = build_background_subagent_scope(
@@ -113,6 +102,7 @@ def create_background_subagent_tools(
         tool_scope=tool_scope,
         workspace_dir=workspace_dir,
         effective_skill_names=effective_skill_names,
+        selected_expert_id=selected_expert_id,
     )
     directory = _format_skill_definition_directory(definition_catalog)
 
@@ -151,6 +141,25 @@ def create_background_subagent_tools(
                 if definition_catalog is not None
                 else None
             )
+            if selected_expert_id:
+                if definition is None:
+                    return _json_response(
+                        {
+                            "status": "not_found",
+                            "reason": "selected_expert_not_available",
+                            "name": start_request.name,
+                            "selected_expert_id": selected_expert_id,
+                        },
+                    )
+                if start_request.name != definition.name:
+                    return _json_response(
+                        {
+                            "status": "failed",
+                            "reason": "selected_expert_name_mismatch",
+                            "name": start_request.name,
+                            "selected_expert_name": definition.name,
+                        },
+                    )
             if definition is None:
                 if start_request.instruction is None:
                     return _json_response(
@@ -167,7 +176,9 @@ def create_background_subagent_tools(
                 definition = SubAgentDefinition(
                     name=start_request.name,
                     source="run_scoped",
-                    owner_scope=(f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"),
+                    owner_scope=(
+                        f"run:{tool_scope.tenant_id}:{tool_scope.agent_id}"
+                    ),
                     description="Temporary caller-defined SubAgent.",
                     instruction=start_request.instruction,
                 )
@@ -285,6 +296,7 @@ def _build_definition_catalog(
     tool_scope: BackgroundSubAgentScope,
     workspace_dir: Path,
     effective_skill_names: list[str] | None,
+    selected_expert_id: str | None = None,
 ):
     """Build the catalog only for an explicit delegation-intent turn."""
     builtin_definitions = builtin_definition_provider().list_definitions()
@@ -293,6 +305,26 @@ def _build_definition_catalog(
         owner_scope=f"{tool_scope.tenant_id}/{tool_scope.agent_id}",
         builtin_names={definition.name for definition in builtin_definitions},
     ).list()
+    if selected_expert_id:
+        selected_package = next(
+            (
+                package
+                for package in agent_packages
+                if package.definition_id == selected_expert_id
+                and package.definition is not None
+                and package.definition.enabled
+            ),
+            None,
+        )
+        return build_definition_catalog(
+            skill_definitions=[],
+            builtin_definitions=[],
+            agent_owned_definitions=(
+                [selected_package.definition]
+                if selected_package is not None
+                else []
+            ),
+        )
     return build_definition_catalog(
         skill_definitions=load_skill_owned_definitions(
             workspace_dir=workspace_dir,
@@ -316,7 +348,8 @@ def _format_skill_definition_directory(catalog) -> str:
     for definition in definitions:
         keywords = ", ".join(definition.trigger_keywords) or "(none)"
         lines.append(
-            f"- {definition.name}: {definition.description} " f"[keywords: {keywords}]",
+            f"- {definition.name}: {definition.description} "
+            f"[keywords: {keywords}]",
         )
     return "\n".join(lines)
 
@@ -408,7 +441,8 @@ def _compact_agent_result(result: Any) -> dict[str, Any]:
     payload = {"summary": result.summary}
     errors = getattr(result, "errors", []) or []
     if any(
-        getattr(error, "code", "") == "text_finalization_failed" for error in errors
+        getattr(error, "code", "") == "text_finalization_failed"
+        for error in errors
     ):
         payload["error_code"] = "text_finalization_failed"
     return payload

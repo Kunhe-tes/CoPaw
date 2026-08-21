@@ -80,8 +80,49 @@ class MarketSkillDetail(MarketSkillResponse):
 class PublishExpertRequest(BaseModel):
     """上架社区专家请求体."""
 
-    source_dir: str
+    definition_id: str
+    agent_id: str = "default"
+    category_id: int | None = None
+    bbk_ids: list[str] = Field(default_factory=list)
     overwrite: bool = False
+
+
+class ExpertInstallRequest(BaseModel):
+    """接收专家到一个 Agent Profile。"""
+
+    agent_id: str = "default"
+
+
+class ExpertDistributionRequest(BaseModel):
+    """管理员分发专家。"""
+
+    target_type: Literal["all", "bbk_id", "user_id"]
+    target_values: list[str] = Field(default_factory=list)
+
+
+class ExpertOperationResult(BaseModel):
+    user_id: str
+    success: bool
+    definition_id: str | None = None
+    reason: str | None = None
+
+
+class ExpertDistributionResponse(BaseModel):
+    item_id: str
+    distributed_count: int
+    conflict_count: int = 0
+    results: list[ExpertOperationResult] = Field(default_factory=list)
+
+
+class ExpertRecallRequest(BaseModel):
+    target_user_ids: list[str] | None = None
+
+
+class ExpertRecallResponse(BaseModel):
+    item_id: str
+    recalled_count: int
+    failed_count: int = 0
+    results: list[ExpertOperationResult] = Field(default_factory=list)
 
 
 class MarketExpertResponse(BaseModel):

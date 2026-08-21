@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,14 @@ class _Memory:
 
     async def add(self, msg, marks=None):
         self.content.append((msg, marks or []))
+
+
+class _SelectedExpertSupervisor:
+    def __init__(self) -> None:
+        self.cancelled: list[tuple[object, str]] = []
+
+    async def cancel(self, scope, run_id: str) -> None:
+        self.cancelled.append((scope, run_id))
 
 
 class _BaseAgent:
@@ -135,6 +144,199 @@ class _FakeGuardAgent(ToolGuardMixin, _BaseAgent):
 
     async def print(self, msg, *args, **kwargs):
         self.printed.append(msg)
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_forced_start_waits_for_its_terminal_result(
+    tmp_path: Path,
+) -> None:
+    """Selected-expert replay cannot fall through to Main Agent early."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution"] = True
+    agent._tool_guard_replay_done = {
+        "tool_name": "start_subagent",
+        "tool_call_id": "start-1",
+        "tool_input": {"name": "researcher", "objective": "Inspect"},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"accepted": True, "run_id": "subagent-1"},
+        )
+    )
+
+    reply = await agent._reason_about_replay_done()
+
+    assert reply is not None
+    tool_call = reply.get_content_blocks("tool_use")[0]
+    assert tool_call["name"] == "wait_subagent"
+    assert tool_call["input"] == {"timeout_ms": 3000}
+    assert agent._request_context["selected_expert_run_id"] == "subagent-1"
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_start_rejection_does_not_fall_back_to_main_agent(
+    tmp_path: Path,
+) -> None:
+    """A rejected selected run remains an explicit failure, never rerouting."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution"] = True
+    agent._tool_guard_replay_done = {
+        "tool_name": "start_subagent",
+        "tool_call_id": "start-1",
+        "tool_input": {"name": "researcher", "objective": "Inspect"},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"accepted": False, "reason": "concurrency_limit"},
+        )
+    )
+
+    reply = await agent._reason_about_replay_done()
+
+    assert "could not be started" in reply.get_text_content()
+    assert agent._request_context["selected_expert_execution"] is False
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_wait_replays_until_the_run_is_terminal(
+    tmp_path: Path,
+) -> None:
+    """A timed-out observation remains synchronous rather than optional."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "subagent-1",
+        },
+    )
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_subagent",
+        "tool_call_id": "wait-1",
+        "tool_input": {"timeout_ms": 3000},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"timed_out": True, "active_runs": [{"run_id": "subagent-1"}]},
+        )
+    )
+
+    reply = await agent._reason_about_replay_done()
+
+    assert reply is not None
+    assert reply.get_content_blocks("tool_use")[0]["name"] == "wait_subagent"
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_fetches_a_cancelled_run_before_summarizing(
+    tmp_path: Path,
+) -> None:
+    """A cancellation from the monitor is visible to the same turn."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "subagent-1",
+        },
+    )
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_subagent",
+        "tool_call_id": "wait-1",
+        "tool_input": {"timeout_ms": 3000},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {"timed_out": False, "active_runs": [], "terminal_runs": []},
+        )
+    )
+
+    follow_up = await agent._reason_about_replay_done()
+
+    assert follow_up is not None
+    tool_call = follow_up.get_content_blocks("tool_use")[0]
+    assert tool_call["name"] == "get_subagent"
+    assert tool_call["input"] == {"run_id": "subagent-1"}
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_execution_gate_closes_after_terminal_result(
+    tmp_path: Path,
+) -> None:
+    """Terminal completion prevents a duplicate expert launch in the turn."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context.update(
+        {
+            "selected_expert_execution": True,
+            "selected_expert_run_id": "subagent-1",
+        },
+    )
+    agent._tool_guard_replay_done = {
+        "tool_name": "wait_subagent",
+        "tool_call_id": "wait-1",
+        "tool_input": {"timeout_ms": 3000},
+        "remaining_queue": [],
+    }
+    agent._extract_current_tool_response = (
+        lambda *_args, **_kwargs: json.dumps(
+            {
+                "timed_out": False,
+                "active_runs": [],
+                "terminal_runs": [
+                    {"run_id": "subagent-1", "status": "completed"},
+                ],
+            },
+        )
+    )
+
+    assert await agent._reason_about_replay_done() is None
+    assert agent._request_context["selected_expert_execution"] is False
+
+
+@pytest.mark.asyncio
+async def test_unavailable_selected_expert_stops_before_main_agent_reasoning(
+    tmp_path: Path,
+) -> None:
+    """An invalid explicit selection cannot degrade into normal routing."""
+    agent = _FakeGuardAgent(tmp_path, PermissionPolicy.readonly())
+    agent._request_context["selected_expert_execution_error"] = (
+        "The selected expert is unavailable."
+    )
+
+    reply = await agent._reasoning()
+
+    assert reply.get_text_content() == "The selected expert is unavailable."
+
+
+@pytest.mark.asyncio
+async def test_interrupt_cancels_the_active_selected_expert_run(
+    tmp_path: Path,
+) -> None:
+    """Stopping the synchronous parent turn also stops its selected expert."""
+    supervisor = _SelectedExpertSupervisor()
+    agent = SWEAgent.__new__(SWEAgent)
+    agent._agent_config = SimpleNamespace(id="agent-1")
+    agent._reply_task = None
+    agent._stop_watchdog = lambda: None
+    agent._request_context = {
+        "selected_expert_execution": True,
+        "selected_expert_run_id": "subagent-1",
+        "tenant_id": "tenant-1",
+        "agent_id": "agent-1",
+        "_subagent_run_store_dir": str(tmp_path / "runs"),
+        "_subagent_supervisor": supervisor,
+    }
+
+    await agent.interrupt()
+
+    assert len(supervisor.cancelled) == 1
+    scope, run_id = supervisor.cancelled[0]
+    assert run_id == "subagent-1"
+    assert scope.tenant_id == "tenant-1"
+    assert scope.agent_id == "agent-1"
+    assert scope.run_store_dir == tmp_path / "runs"
 
 
 class _FakePlanGuardAgent(ToolGuardMixin, _BaseAgent):
@@ -458,19 +660,18 @@ def test_main_agent_registers_plan_interaction_tools_by_mode_and_source_config(
 def test_background_subagent_tools_require_explicit_intent(
     tmp_path: Path,
 ) -> None:
-    """Main Agent sees start_subagent only after explicit SubAgent intent."""
+    """Main Agent sees start_subagent only after explicit expert selection."""
     hidden = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请分析这个模块",
         },
     )
     visible = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请用子代理分析这个模块",
+            "selected_expert_id": "expert-1",
         },
     )
 
@@ -483,7 +684,39 @@ def test_background_subagent_tools_require_explicit_intent(
     assert "delegate_to_subagent" not in visible_tools
 
 
-def test_start_subagent_description_lists_enabled_skill_definitions(
+def test_background_subagent_tools_require_selected_expert(
+    tmp_path: Path,
+) -> None:
+    """Only an explicit expert selection should unlock background subagents."""
+    hidden = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "current_user_text": "请用子代理分析这个模块",
+        },
+    )
+    visible = _bare_agent(
+        tmp_path,
+        request_context={
+            "agent_role": "main",
+            "selected_expert_id": "expert-1",
+        },
+    )
+
+    hidden_tools = SWEAgent._create_toolkit(hidden).tools
+    assert "start_subagent" not in hidden_tools
+    assert "wait_subagent" not in hidden_tools
+    assert "get_subagent" not in hidden_tools
+    assert "cancel_subagent" not in hidden_tools
+
+    visible_tools = SWEAgent._create_toolkit(visible).tools
+    assert "start_subagent" in visible_tools
+    assert "wait_subagent" in visible_tools
+    assert "get_subagent" in visible_tools
+    assert "cancel_subagent" in visible_tools
+
+
+def test_start_subagent_description_lists_selected_expert_definition(
     tmp_path: Path,
 ) -> None:
     agents_dir = tmp_path / "skills" / "security" / "agents"
@@ -499,31 +732,40 @@ def test_start_subagent_description_lists_enabled_skill_definitions(
         '{"layout_version":2,"skills":{"security":{"enabled":true,"channels":["all"]}}}',
         encoding="utf-8",
     )
+    selected_id = "11111111-1111-4111-8111-111111111111"
+    (tmp_path / "agents").mkdir()
+    (tmp_path / "agents" / f"{selected_id}.toml").write_text(
+        'name = "researcher"\n'
+        'description = "Research expert."\n'
+        'instruction = "Research the requested topic."\n'
+        "enabled = true\n",
+        encoding="utf-8",
+    )
     agent = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请使用子代理检查变更",
+            "selected_expert_id": selected_id,
         },
     )
 
     tool = SWEAgent._create_toolkit(agent).tools["start_subagent"]
     description = tool.json_schema["function"]["description"]
 
-    assert "security:reviewer" in description
-    assert "Review code for security regressions." in description
-    assert "security, review" in description
+    assert "researcher" in description
+    assert "Research expert." in description
+    assert "security:reviewer" not in description
 
 
 def test_register_subagent_definition_is_never_exposed(
     tmp_path: Path,
 ) -> None:
-    """Registration tool is not exposed for ordinary SubAgent intent."""
+    """Registration tool is not exposed for explicit expert selection."""
     normal = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请用子代理分析这个模块",
+            "selected_expert_id": "expert-1",
         },
     )
     normal_tools = SWEAgent._create_toolkit(normal).tools
@@ -633,12 +875,12 @@ def test_background_subagent_observe_tools_visible_with_active_runs(
 def test_background_subagent_management_tools_require_fresh_intent(
     tmp_path: Path,
 ) -> None:
-    """A new explicit SubAgent turn exposes all management tools."""
+    """A new explicit expert turn exposes all management tools."""
     agent = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
-            "current_user_text": "请继续管理这个子代理任务",
+            "selected_expert_id": "expert-1",
         },
     )
 
@@ -866,14 +1108,14 @@ def test_plan_mode_toolkit_excludes_synchronous_delegation(
 def test_plan_mode_toolkit_allows_background_subagent_intent(
     tmp_path: Path,
 ) -> None:
-    """Plan Mode may use readonly background SubAgent tools."""
+    """Plan Mode may use readonly background SubAgent tools when selected."""
     agent = _bare_agent(
         tmp_path,
         request_context={
             "agent_role": "main",
             "plan_mode_enabled": True,
             "enable_subagents": True,
-            "current_user_text": "请用 subAgent 检查计划风险",
+            "selected_expert_id": "expert-1",
         },
     )
 

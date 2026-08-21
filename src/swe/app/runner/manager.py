@@ -68,6 +68,7 @@ class ChatManager:
         repo: BaseChatRepository,
         archive_store: ConversationArchiveStore | None = None,
         resource_root: Path | None = None,
+        expert_dependency_root: Path | None = None,
     ):
         """Initialize chat manager.
 
@@ -78,6 +79,11 @@ class ChatManager:
         self._archive_store = archive_store
         self._resource_root = (
             resource_root.resolve() if resource_root else None
+        )
+        self._expert_dependency_root = (
+            Path(expert_dependency_root).resolve()
+            if expert_dependency_root is not None
+            else None
         )
         self._lock = asyncio.Lock()
         repo_path = getattr(repo, "path", "<unknown>")
@@ -416,28 +422,43 @@ class ChatManager:
             return deleted
 
     def _delete_session_resources(self, chat_ids: list[str]) -> None:
-        if self._resource_root is None:
+        if (
+            self._resource_root is None
+            and self._expert_dependency_root is None
+        ):
             return
         for chat_id in chat_ids:
             if not _is_valid_chat_id(chat_id):
                 continue
-            target = self._resource_root / chat_id
-            try:
-                target.relative_to(self._resource_root)
-            except ValueError:
-                continue
-            if target == self._resource_root:
-                continue
-            try:
-                if target.is_symlink():
-                    logger.warning(
-                        "Refusing to delete symlinked chat resources: %s",
-                        target,
-                    )
-                    continue
-            except OSError:
-                continue
-            shutil.rmtree(target, ignore_errors=True)
+            if self._resource_root is not None:
+                target = self._resource_root / chat_id
+                safe_to_remove = True
+                try:
+                    target.relative_to(self._resource_root)
+                except ValueError:
+                    safe_to_remove = False
+                if target == self._resource_root:
+                    safe_to_remove = False
+                try:
+                    if target.is_symlink():
+                        logger.warning(
+                            "Refusing to delete symlinked chat resources: %s",
+                            target,
+                        )
+                        safe_to_remove = False
+                except OSError:
+                    safe_to_remove = False
+                if safe_to_remove:
+                    shutil.rmtree(target, ignore_errors=True)
+            if self._expert_dependency_root is not None:
+                from ..subagents import (
+                    release_community_expert_dependency_view_for_chat,
+                )
+
+                release_community_expert_dependency_view_for_chat(
+                    workspace_dir=self._expert_dependency_root,
+                    chat_id=chat_id,
+                )
 
     async def count_chats(
         self,

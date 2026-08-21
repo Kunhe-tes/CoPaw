@@ -3,18 +3,26 @@
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, Body, Header, HTTPException, Request, status
 
 from ...marketplace.schemas import (
+    ExpertDistributionRequest,
+    ExpertDistributionResponse,
+    ExpertInstallRequest,
+    ExpertRecallRequest,
+    ExpertRecallResponse,
     MarketExpertDetail,
     MarketExpertResponse,
     PublishExpertRequest,
 )
-from ...marketplace.service import ExpertDependencyError, ExpertNameConflictError
-from ..deps import require_source_id
+from ...marketplace.service import (
+    ExpertDependencyError,
+    ExpertNameConflictError,
+)
+from ...security import SkillScanError
+from ..deps import decode_user_name, require_source_id
 
 router = APIRouter()
 
@@ -34,18 +42,28 @@ async def publish_expert(
     request: Request,
     x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
     x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+    x_user_name: Optional[str] = Header(default=None, alias="X-User-Name"),
 ):
     """Publish a community expert."""
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
+    if not x_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-Id header is required",
+        )
     svc = request.app.state.marketplace
     try:
-        item, version_unchanged = await svc.publish_expert(
+        item, version_unchanged = await svc.publish_expert_from_profile(
             source_id,
-            Path(req.source_dir),
+            x_user_id,
+            req.agent_id,
+            req.definition_id,
+            category_id=req.category_id,
+            bbk_ids=req.bbk_ids,
+            creator_name=decode_user_name(x_user_name) or "",
             overwrite=req.overwrite,
-            operator_id="manager",
-            operator_name="Manager",
         )
     except ExpertNameConflictError as exc:
         raise HTTPException(
@@ -60,6 +78,10 @@ async def publish_expert(
             },
         ) from exc
     except ExpertDependencyError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except SkillScanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return MarketExpertResponse(
         item_id=item.item_id,
@@ -92,13 +114,16 @@ async def restore_expert_version(
     source_id = require_source_id(x_source_id)
     _require_manager(x_manager)
     svc = request.app.state.marketplace
-    item = await svc.restore_expert_version(
-        source_id,
-        item_id,
-        version_id,
-        operator_id="manager",
-        operator_name="Manager",
-    )
+    try:
+        item = await svc.restore_expert_version(
+            source_id,
+            item_id,
+            version_id,
+            operator_id="manager",
+            operator_name="Manager",
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     detail = await svc.get_expert_detail(source_id, item_id, "100")
     if detail is None:
         raise HTTPException(status_code=404, detail="Expert not found")
@@ -128,3 +153,82 @@ async def unpublish_expert(
     if not success:
         raise HTTPException(status_code=404, detail="Expert not found")
     return {"success": True}
+
+
+@router.post("/market/experts/{item_id}/install")
+async def install_expert(
+    item_id: str,
+    req: ExpertInstallRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """用户接收一个专家到当前 Agent Profile。"""
+    source_id = require_source_id(x_source_id)
+    if not x_user_id:
+        raise HTTPException(
+            status_code=400,
+            detail="X-User-Id header is required",
+        )
+    try:
+        return await request.app.state.marketplace.install_expert(
+            source_id,
+            item_id,
+            x_user_id,
+            req.agent_id,
+            x_user_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market/experts/{item_id}/distribute",
+    response_model=ExpertDistributionResponse,
+)
+async def distribute_expert(
+    item_id: str,
+    req: ExpertDistributionRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """管理员静默分发并覆盖已接收专家。"""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    try:
+        return await request.app.state.marketplace.distribute_expert(
+            source_id,
+            item_id,
+            x_user_id or "manager",
+            req,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/market/experts/{item_id}/recall",
+    response_model=ExpertRecallResponse,
+)
+async def recall_expert(
+    item_id: str,
+    req: ExpertRecallRequest,
+    request: Request,
+    x_source_id: Optional[str] = Header(default=None, alias="X-Source-Id"),
+    x_manager: Optional[str] = Header(default=None, alias="X-Manager"),
+    x_user_id: Optional[str] = Header(default=None, alias="X-User-Id"),
+):
+    """管理员按社区 item_id 撤回已接收副本。"""
+    source_id = require_source_id(x_source_id)
+    _require_manager(x_manager)
+    try:
+        return await request.app.state.marketplace.recall_expert(
+            source_id,
+            item_id,
+            x_user_id or "manager",
+            req.target_user_ids,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

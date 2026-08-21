@@ -18,6 +18,7 @@ from swe.app.subagents.models import AgentError
 from swe.app.subagents import (
     AgentResult,
     AgentRegistry,
+    AgentOwnedDefinitionRepository,
     BackgroundSubAgentScope,
     BackgroundSubAgentSupervisor,
     DelegationSpec,
@@ -510,6 +511,67 @@ async def test_start_subagent_resolves_skill_owned_definition_without_instructio
     assert captured["definition_match"].reason == "exact_name"
     assert "security:reviewer" in tools["start_subagent"].__doc__
     assert "security, review" in tools["start_subagent"].__doc__
+
+
+@pytest.mark.asyncio
+async def test_selected_expert_restricts_catalog_to_one_agent_owned_definition(
+    tmp_path: Path,
+):
+    captured = {}
+
+    async def _start(**kwargs):
+        captured.update(kwargs)
+        return BackgroundSubAgentStartBlocked(limit=1)
+
+    repository = AgentOwnedDefinitionRepository(
+        tmp_path / "agents",
+        owner_scope="tenant-1/agent-1",
+    )
+    package = repository.create(
+        {
+            "name": "researcher",
+            "description": "Research expert.",
+            "instruction": "Research the requested topic.",
+            "enabled": True,
+        },
+    )
+    repository.enable(
+        package.definition_id,
+        expected_revision=package.revision,
+    )
+    tools = create_background_subagent_tools(
+        supervisor=SimpleNamespace(start=_start),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        request_context={
+            "tenant_id": "tenant-1",
+            "agent_id": "agent-1",
+        },
+        selected_expert_id=package.definition_id,
+    )
+
+    response = await tools["start_subagent"](
+        name="researcher",
+        objective="Research this topic.",
+    )
+    payload = json.loads(response.content[0]["text"])
+
+    assert payload["status"] == "blocked"
+    assert captured["definition"].name == "researcher"
+    assert "researcher" in tools["start_subagent"].__doc__
+    assert "plan-researcher" not in tools["start_subagent"].__doc__
+
+    response = await tools["start_subagent"](
+        name="plan-researcher",
+        objective="Use a different expert.",
+    )
+    payload = json.loads(response.content[0]["text"])
+    assert payload == {
+        "status": "not_found",
+        "reason": "selected_expert_not_available",
+        "name": "plan-researcher",
+        "selected_expert_id": package.definition_id,
+    }
 
 
 @pytest.mark.asyncio

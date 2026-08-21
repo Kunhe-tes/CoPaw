@@ -715,7 +715,10 @@ def _hook_config_enabled(
     return bool(
         (tenant_hooks is not None and tenant_hooks.enabled)
         or (agent_hooks is not None and agent_hooks.enabled)
-        or (session_state is not None and session_state.has_loaded_skill_sources()),
+        or (
+            session_state is not None
+            and session_state.has_loaded_skill_sources()
+        ),
     )
 
 
@@ -736,7 +739,9 @@ async def _load_session_hook_overlay(
     except Exception:
         logger.debug("Failed to load hook overlay from session", exc_info=True)
         return HookSessionOverlay()
-    raw_overlay = state.get("hook_overlay") if isinstance(state, dict) else None
+    raw_overlay = (
+        state.get("hook_overlay") if isinstance(state, dict) else None
+    )
     if not isinstance(raw_overlay, dict):
         return HookSessionOverlay()
     try:
@@ -854,7 +859,9 @@ def _build_runner_hook_context(
     try:
         from ...config.context import get_current_effective_tenant_id
 
-        effective_tenant_id = get_current_effective_tenant_id() or effective_tenant_id
+        effective_tenant_id = (
+            get_current_effective_tenant_id() or effective_tenant_id
+        )
     except Exception:
         pass
 
@@ -868,7 +875,8 @@ def _build_runner_hook_context(
         user_id=user_id,
         agent_id=runner.agent_id,
         channel=channel,
-        source_id=getattr(request, "source_id", None) or channel_meta.get("source_id"),
+        source_id=getattr(request, "source_id", None)
+        or channel_meta.get("source_id"),
         trace_id=getattr(request, "trace_id", None),
         workspace_dir=str(workspace_dir),
         chat_id=channel_meta.get("chat_id"),
@@ -1412,7 +1420,9 @@ def _remove_session_skill_snapshot_entry(
 def _skill_freshness_notice_text(
     changes: list[str],
 ) -> str:
-    return _SKILL_FRESHNESS_NOTICE_HEADER + "\n".join(f"- {item}" for item in changes)
+    return _SKILL_FRESHNESS_NOTICE_HEADER + "\n".join(
+        f"- {item}" for item in changes
+    )
 
 
 def _build_skill_freshness_notice_msg(text: str) -> Msg:
@@ -1507,7 +1517,11 @@ def _refresh_switched_session_skill_snapshot_entry(
     current_dir: Path | None,
     confirmed_at: Any | None = None,
 ) -> str | None:
-    if current_dir is None or not current_dir.exists() or current_dir == stored_dir:
+    if (
+        current_dir is None
+        or not current_dir.exists()
+        or current_dir == stored_dir
+    ):
         return None
 
     current_token = get_skill_freshness_token(current_dir)
@@ -1674,7 +1688,9 @@ def _resolve_max_automatic_follow_up_turns(
             "max_automatic_follow_up_turns",
             default_limit,
         )
-    aggregate_turns = default_limit if configured_turns is None else configured_turns
+    aggregate_turns = (
+        default_limit if configured_turns is None else configured_turns
+    )
     try:
         return max(int(aggregate_turns), 0)
     except (TypeError, ValueError):
@@ -1698,7 +1714,9 @@ def _strip_internal_follow_up_messages_from_state(
     for entry in content:
         msg_payload = entry[0] if isinstance(entry, list) and entry else None
         metadata = (
-            msg_payload.get("metadata") if isinstance(msg_payload, dict) else None
+            msg_payload.get("metadata")
+            if isinstance(msg_payload, dict)
+            else None
         )
         if isinstance(metadata, dict) and (
             metadata.get(_INTERNAL_FOLLOW_UP_METADATA_KEY)
@@ -1798,6 +1816,117 @@ def _request_selected_skill_names(request: AgentRequest) -> list[object]:
     return list(value) if isinstance(value, list) else []
 
 
+def _request_selected_expert_id(request: AgentRequest) -> str | None:
+    channel_meta = getattr(request, "channel_meta", None) or {}
+    value = getattr(request, "selected_expert_id", None)
+    if value is None and isinstance(channel_meta, dict):
+        value = channel_meta.get("selected_expert_id")
+    if isinstance(value, str):
+        value = value.strip()
+    return value or None
+
+
+def _selected_expert_start_tool_call(
+    *,
+    workspace_dir: Path,
+    tenant_id: str | None,
+    agent_id: str,
+    selected_expert_id: str,
+    objective: str,
+) -> dict[str, Any] | None:
+    """Build the exact forced start call for one enabled local expert.
+
+    The Definition ID is a management identity, whereas the Background
+    SubAgent tool deliberately accepts only its runtime name.  Resolve that
+    mapping server-side so a submitted composer selection cannot be silently
+    skipped or changed by the Main Agent.
+    """
+    from ..subagents import (
+        AgentOwnedDefinitionRepository,
+        builtin_definition_provider,
+    )
+
+    try:
+        builtin_names = {
+            item.name
+            for item in builtin_definition_provider().list_definitions()
+        }
+        package = AgentOwnedDefinitionRepository(
+            workspace_dir / "agents",
+            owner_scope=f"{tenant_id or 'default'}/{agent_id}",
+            builtin_names=builtin_names,
+        ).get(selected_expert_id)
+    except ValueError:
+        return None
+    definition = package.definition if package is not None else None
+    if (
+        definition is None
+        or not definition.enabled
+        or definition.name in builtin_names
+    ):
+        return None
+    normalized_objective = objective.strip()
+    if not normalized_objective:
+        return None
+    return {
+        "id": f"selected-expert-{uuid4().hex}",
+        "name": "start_subagent",
+        "input": {
+            "name": definition.name,
+            "objective": normalized_objective,
+        },
+    }
+
+
+def _is_selected_expert_start_approval(
+    approved_tool_call: dict[str, Any] | None,
+    selected_expert_call: dict[str, Any],
+) -> bool:
+    """Keep a matching approved start call's identity and hook replay."""
+    if not isinstance(approved_tool_call, dict):
+        return False
+    if approved_tool_call.get("name") != "start_subagent":
+        return False
+    approved_input = approved_tool_call.get("input")
+    selected_input = selected_expert_call.get("input")
+    return (
+        isinstance(approved_input, dict)
+        and isinstance(selected_input, dict)
+        and approved_input.get("name") == selected_input.get("name")
+    )
+
+
+def _initialize_selected_expert_dependency_view(
+    *,
+    workspace_dir: Path,
+    tenant_id: str | None,
+    agent_id: str,
+    selected_expert_id: str,
+    chat_id: str,
+) -> Path | None:
+    """Bind a received expert's frozen dependencies to this Chat once."""
+    from ..subagents import (
+        AgentOwnedDefinitionRepository,
+        initialize_community_expert_dependency_view,
+    )
+
+    try:
+        package = AgentOwnedDefinitionRepository(
+            workspace_dir / "agents",
+            owner_scope=f"{tenant_id or 'default'}/{agent_id}",
+        ).get(selected_expert_id)
+    except ValueError:
+        return None
+    definition = package.definition if package is not None else None
+    if definition is None or not definition.enabled:
+        return None
+    return initialize_community_expert_dependency_view(
+        workspace_dir=workspace_dir,
+        chat_id=chat_id,
+        definition=definition,
+    )
+
+
 def _request_context_references(request: AgentRequest) -> list[object]:
     """Read the Console's typed, one-turn context references."""
     channel_meta = getattr(request, "channel_meta", None) or {}
@@ -1864,7 +1993,9 @@ def _agent_config_with_scenario_mcp(
         for entry in entries:
             key = entry["client_key"]
             if key in clients:
-                existing_source = str(getattr(clients[key], "source", "") or "")
+                existing_source = str(
+                    getattr(clients[key], "source", "") or "",
+                )
                 if existing_source == f"marketplace:{entry['resource_id']}":
                     continue
                 logger.warning(
@@ -2123,7 +2254,9 @@ def _session_name_from_messages(msgs: list[Any]) -> str | None:
 
 def _has_automatic_follow_up_budget(outcome: _QueryTurnOutcome) -> bool:
     """判断本请求级自动续跑总预算是否仍可消耗。"""
-    return outcome.automatic_follow_up_turns < (outcome.max_automatic_follow_up_turns)
+    return outcome.automatic_follow_up_turns < (
+        outcome.max_automatic_follow_up_turns
+    )
 
 
 def _should_stop_follow_up(outcome: _QueryTurnOutcome) -> bool:
@@ -2238,7 +2371,9 @@ class AgentRunner(Runner):
         super().__init__()
         self.framework_type = "agentscope"
         self.agent_id = agent_id  # Store agent_id for config loading
-        self.workspace_dir = workspace_dir  # Store workspace_dir for prompt building
+        self.workspace_dir = (
+            workspace_dir  # Store workspace_dir for prompt building
+        )
         self.tenant_id = (
             resolve_runtime_tenant_id(tenant_id, None)
             if tenant_id is not None
@@ -2374,7 +2509,9 @@ class AgentRunner(Runner):
 
         explicit_deny = _is_denial(normalized)
         denial_decision = (
-            ApprovalDecision.DENIED if explicit_deny else ApprovalDecision.DENIED
+            ApprovalDecision.DENIED
+            if explicit_deny
+            else ApprovalDecision.DENIED
         )
         resolved = await svc.resolve_request(
             pending.request_id,
@@ -2437,7 +2574,8 @@ class AgentRunner(Runner):
             )
         except Exception:
             logger.exception(
-                "zhaohu console approval result notification failed: " "request_id=%s",
+                "zhaohu console approval result notification failed: "
+                "request_id=%s",
                 getattr(pending, "request_id", None),
             )
 
@@ -2556,7 +2694,9 @@ class AgentRunner(Runner):
                 user_name=resolved_identity.user_name,
                 bbk_id=resolved_identity.bbk_id,
                 session_name=_session_name_from_messages(msgs),
-                trace_id=(existing_trace_id if attach_existing else b3_trace_id),
+                trace_id=(
+                    existing_trace_id if attach_existing else b3_trace_id
+                ),
                 attach_existing=attach_existing,
                 b3_trace_id=b3_trace_id,
             )
@@ -2819,8 +2959,12 @@ class AgentRunner(Runner):
 
         scenario_snapshot = get_scenario_snapshot(getattr(chat, "meta", None))
         if scenario_snapshot is not None:
-            request.channel_meta["scenario_preset_snapshot"] = scenario_snapshot
-            request.channel_meta["scenario_preset_snapshot_source"] = "chat_meta"
+            request.channel_meta["scenario_preset_snapshot"] = (
+                scenario_snapshot
+            )
+            request.channel_meta["scenario_preset_snapshot_source"] = (
+                "chat_meta"
+            )
         return chat
 
     async def _emit_session_start_hook(
@@ -2879,11 +3023,14 @@ class AgentRunner(Runner):
         """创建 SWEAgent，并注入本轮请求上下文。"""
         request_enable_subagents = getattr(request, "enable_subagents", False)
         if isinstance(request_enable_subagents, str):
-            request_enable_subagents = request_enable_subagents.strip().lower() in {
-                "true",
-                "1",
-                "yes",
-            }
+            request_enable_subagents = (
+                request_enable_subagents.strip().lower()
+                in {
+                    "true",
+                    "1",
+                    "yes",
+                }
+            )
         request_context = {
             "session_id": session_id,
             "user_id": user_id,
@@ -2934,9 +3081,60 @@ class AgentRunner(Runner):
             request_context[_ACCEPTED_PLAN_SOURCE_META_KEY] = (
                 _ACCEPTED_PLAN_SERVER_SOURCE
             )
+        selected_expert_id = _request_selected_expert_id(request)
+        if plan_mode_enabled:
+            selected_expert_id = None
+        if selected_expert_id is not None:
+            request_context["selected_expert_id"] = selected_expert_id
+            try:
+                dependency_view_root = (
+                    _initialize_selected_expert_dependency_view(
+                        workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                        tenant_id=self.tenant_id,
+                        agent_id=self.agent_id,
+                        selected_expert_id=selected_expert_id,
+                        chat_id=chat.id if chat is not None else "",
+                    )
+                )
+            except OSError as exc:
+                dependency_view_root = None
+                request_context["selected_expert_execution_error"] = str(exc)
+            if dependency_view_root is not None:
+                request_context["_expert_dependency_view_root"] = str(
+                    dependency_view_root,
+                )
+            selected_expert_call = _selected_expert_start_tool_call(
+                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                tenant_id=self.tenant_id,
+                agent_id=self.agent_id,
+                selected_expert_id=selected_expert_id,
+                objective=current_user_text,
+            )
+            if selected_expert_call is not None:
+                request_context["selected_expert_execution"] = True
+                approved_selected_start = (
+                    approved_tool_call
+                    if _is_selected_expert_start_approval(
+                        approved_tool_call,
+                        selected_expert_call,
+                    )
+                    else None
+                )
+                request_context["forced_tool_call_json"] = json.dumps(
+                    approved_selected_start or selected_expert_call,
+                    ensure_ascii=False,
+                )
+            elif "selected_expert_execution_error" not in request_context:
+                request_context["selected_expert_execution_error"] = (
+                    "The selected expert is unavailable or disabled. "
+                    "Choose an enabled expert and try again."
+                )
         if auth_token:
             request_context["auth_token"] = auth_token
-        if approved_tool_call:
+        if (
+            approved_tool_call
+            and "forced_tool_call_json" not in request_context
+        ):
             request_context["forced_tool_call_json"] = json.dumps(
                 approved_tool_call,
                 ensure_ascii=False,
@@ -2988,7 +3186,9 @@ class AgentRunner(Runner):
                 mode="json",
                 by_alias=True,
             )
-            runtime.agent._request_context["_hook_overlay_model"] = runtime.hook_overlay
+            runtime.agent._request_context["_hook_overlay_model"] = (
+                runtime.hook_overlay
+            )
             runtime.agent._request_context["hook_overlay"] = dumped
 
         async def _queue_confirmed_skill_snapshot_update(
@@ -3159,7 +3359,9 @@ class AgentRunner(Runner):
             effective_skill_dirs=effective_skill_dirs,
         )
 
-        notice_text = _skill_freshness_notice_text(changes) if changes else None
+        notice_text = (
+            _skill_freshness_notice_text(changes) if changes else None
+        )
         return _SkillFreshnessRefreshResult(
             notice_text=notice_text,
             stored_snapshot=stored_snapshot,
@@ -3254,11 +3456,13 @@ class AgentRunner(Runner):
         )
         mcp_clients: list[Any] = []
         try:
-            resources, block_result = await self._start_query_runtime_resources(
-                request=request,
-                msgs=msgs,
-                inputs=inputs,
-                mcp_clients=mcp_clients,
+            resources, block_result = (
+                await self._start_query_runtime_resources(
+                    request=request,
+                    msgs=msgs,
+                    inputs=inputs,
+                    mcp_clients=mcp_clients,
+                )
             )
             if block_result is not None:
                 return block_result
@@ -3394,7 +3598,9 @@ class AgentRunner(Runner):
             )
 
             scenario_snapshot = (
-                _request_scenario_preset_snapshot(request) if chat is not None else None
+                _request_scenario_preset_snapshot(request)
+                if chat is not None
+                else None
             )
             inputs.agent_config = _agent_config_with_scenario_mcp(
                 inputs.agent_config,
@@ -3403,11 +3609,13 @@ class AgentRunner(Runner):
                 chat_id=chat.id if chat is not None else "",
             )
 
-            context_reference_directives = await build_context_reference_directives(
-                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                channel=inputs.channel,
-                agent_config=inputs.agent_config,
-                references=_request_context_references(request),
+            context_reference_directives = (
+                await build_context_reference_directives(
+                    workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+                    channel=inputs.channel,
+                    agent_config=inputs.agent_config,
+                    references=_request_context_references(request),
+                )
             )
             selected_context_skill_names = {
                 directive.name
@@ -3624,9 +3832,11 @@ class AgentRunner(Runner):
             runtime.agent_config,
         )
         outcome.max_stop_turns = stop_turns
-        outcome.max_automatic_follow_up_turns = _resolve_max_automatic_follow_up_turns(
-            runtime.agent_config,
-            stop_turns,
+        outcome.max_automatic_follow_up_turns = (
+            _resolve_max_automatic_follow_up_turns(
+                runtime.agent_config,
+                stop_turns,
+            )
         )
         reset_terminal_stop = getattr(
             runtime.agent,
@@ -3644,7 +3854,9 @@ class AgentRunner(Runner):
                 ),
                 session_id=runtime.session_id,
                 agent=runtime.agent,
-                run_key=(runtime.chat.id if runtime.chat is not None else None),
+                run_key=(
+                    runtime.chat.id if runtime.chat is not None else None
+                ),
             ):
                 metadata = getattr(msg, "metadata", None)
                 if isinstance(metadata, dict) and isinstance(
@@ -3660,7 +3872,9 @@ class AgentRunner(Runner):
                 None,
             )
             reason = (
-                consume_terminal_stop() if callable(consume_terminal_stop) else None
+                consume_terminal_stop()
+                if callable(consume_terminal_stop)
+                else None
             )
             reason = (reason or exc.reason or "Hook requested stop").strip()
             outcome.task_completed = False
@@ -3744,14 +3958,20 @@ class AgentRunner(Runner):
                 plan=plan,
                 outcome=outcome,
             )
-            if stop_result is not None and stop_result.decision == HookDecision.BLOCK:
+            if (
+                stop_result is not None
+                and stop_result.decision == HookDecision.BLOCK
+            ):
                 reason = (
                     stop_result.blocking_failure_reason
                     if stop_result.has_blocking_failure
                     else stop_result.reason
                 ) or "Stop blocked completion"
-                if not stop_result.has_blocking_failure and _should_stop_follow_up(
-                    outcome,
+                if (
+                    not stop_result.has_blocking_failure
+                    and _should_stop_follow_up(
+                        outcome,
+                    )
                 ):
                     outcome.stop_follow_up_turns += 1
                     outcome.automatic_follow_up_turns += 1
@@ -3891,7 +4111,9 @@ class AgentRunner(Runner):
             exc=exc,
             locals_=locals_snapshot,
         )
-        path_hint = f"\n(Details:  {debug_dump_path})" if debug_dump_path else ""
+        path_hint = (
+            f"\n(Details:  {debug_dump_path})" if debug_dump_path else ""
+        )
         logger.exception(f"Error in query handler: {exc}{path_hint}")
         await self._end_trace_if_needed(
             trace_id,
@@ -4065,7 +4287,11 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime | None,
     ) -> None:
         """在 finally 阶段写回 chat 状态。"""
-        if runtime is None or self._chat_manager is None or runtime.chat is None:
+        if (
+            runtime is None
+            or self._chat_manager is None
+            or runtime.chat is None
+        ):
             return
 
         try:
@@ -4134,7 +4360,8 @@ class AgentRunner(Runner):
             )
         except asyncio.CancelledError:
             logger.debug(
-                "Runner finally: skill detector cleanup cancelled " "(session_id=%s)",
+                "Runner finally: skill detector cleanup cancelled "
+                "(session_id=%s)",
                 runtime.session_id,
             )
 
@@ -4187,7 +4414,8 @@ class AgentRunner(Runner):
                 )
             except asyncio.CancelledError:
                 logger.debug(
-                    "Runner finally: blocked chat update cancelled " "(session_id=%s)",
+                    "Runner finally: blocked chat update cancelled "
+                    "(session_id=%s)",
                     session_id,
                 )
 
@@ -4208,7 +4436,8 @@ class AgentRunner(Runner):
             )
         except asyncio.CancelledError:
             logger.debug(
-                "Runner finally: blocked MCP cleanup cancelled " "(session_id=%s)",
+                "Runner finally: blocked MCP cleanup cancelled "
+                "(session_id=%s)",
                 session_id,
             )
 
@@ -4220,7 +4449,11 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ) -> None:
         """按 QA_EXTRACTION_ONLY 模式保存本轮问答内容。"""
-        if runtime is None or runtime.chat is None or not outcome.task_completed:
+        if (
+            runtime is None
+            or runtime.chat is None
+            or not outcome.task_completed
+        ):
             return
 
         suggestions_config = runtime.agent_config.running.suggestions
@@ -4244,11 +4477,14 @@ class AgentRunner(Runner):
         from ..suggestions.service import extract_key_content
         from ..suggestions.store import store_qa_content
 
-        extracted_user = user_message[: suggestions_config.user_message_max_length]
+        extracted_user = user_message[
+            : suggestions_config.user_message_max_length
+        ]
         extracted_assistant = extract_key_content(
             assistant_response,
             max_length=min(
-                suggestions_config.qa_content_total_max_length - len(extracted_user),
+                suggestions_config.qa_content_total_max_length
+                - len(extracted_user),
                 suggestions_config.assistant_response_max_length,
             ),
         )
@@ -4508,14 +4744,16 @@ class AgentRunner(Runner):
         """处理可重试异常，保持先提示用户再保存状态的顺序。"""
         error_summary = self._summarize_retry_error(exc)
         logger.warning(
-            "Query failed with retryable error (attempt %d/%d): %s " "(summary: %s)",
+            "Query failed with retryable error (attempt %d/%d): %s "
+            "(summary: %s)",
             retry_attempt + 1,
             max_retry_attempts,
             exc,
             error_summary,
         )
         retry_msg = self._build_retry_status_msg(
-            f"{error_summary}，" f"正在重试 ({retry_attempt + 1}/{max_retries})...",
+            f"{error_summary}，"
+            f"正在重试 ({retry_attempt + 1}/{max_retries})...",
         )
         yield retry_msg, False
         await self._add_retry_notice_to_memory(retry_state.agent, retry_msg)
@@ -4624,7 +4862,10 @@ class AgentRunner(Runner):
                 runtime=runtime,
                 trace_id=attempt_input.trace_id,
             )
-            if attempt_input.trace_id and runtime.session_skill_detector is None:
+            if (
+                attempt_input.trace_id
+                and runtime.session_skill_detector is None
+            ):
                 await runtime.agent.setup_skill_detector(
                     attempt_input.trace_id,
                 )
@@ -4638,10 +4879,14 @@ class AgentRunner(Runner):
                 runtime.user_id,
             )
             retry_state.agent = runtime.agent
-            retry_state.session_state_loaded = attempt_state.session_state_loaded
+            retry_state.session_state_loaded = (
+                attempt_state.session_state_loaded
+            )
 
-            skill_freshness_refresh = await self._refresh_session_skill_freshness(
-                runtime=runtime,
+            skill_freshness_refresh = (
+                await self._refresh_session_skill_freshness(
+                    runtime=runtime,
+                )
             )
 
             # 会话状态可能保存了旧提示词，执行前强制刷新文件态上下文。
@@ -4667,9 +4912,11 @@ class AgentRunner(Runner):
             ):
                 yield msg, last
 
-            skill_snapshot_to_persist = await self._build_skill_snapshot_to_persist(
-                runtime=runtime,
-                refresh_result=skill_freshness_refresh,
+            skill_snapshot_to_persist = (
+                await self._build_skill_snapshot_to_persist(
+                    runtime=runtime,
+                    refresh_result=skill_freshness_refresh,
+                )
             )
 
             if outcome.completion_blocked:
@@ -4743,7 +4990,9 @@ class AgentRunner(Runner):
         try:
             for retry_attempt in range(max_retry_attempts):
                 retry_state.prev_agent = retry_state.agent
-                retry_state.prev_session_state_loaded = retry_state.session_state_loaded
+                retry_state.prev_session_state_loaded = (
+                    retry_state.session_state_loaded
+                )
                 retry_state.agent = None
                 retry_state.session_state_loaded = False
                 attempt_state = _QueryAttemptState()
@@ -5037,7 +5286,9 @@ class AgentRunner(Runner):
             await self.session.mutate_session_state(
                 session_id=storage_session_id,
                 mutator=lambda state: {
-                    key: value for key, value in state.items() if key != "hook_overlay"
+                    key: value
+                    for key, value in state.items()
+                    if key != "hook_overlay"
                 },
                 user_id=storage_user_id,
                 create_if_not_exist=True,
@@ -5077,7 +5328,9 @@ class AgentRunner(Runner):
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
             nonlocal stripped_count, deduped_external_approvals
             state_modules: dict[str, Any] = (
-                dict(existing_state) if isinstance(existing_state, dict) else {}
+                dict(existing_state)
+                if isinstance(existing_state, dict)
+                else {}
             )
             if SESSION_SKILL_SNAPSHOT_STATE_KEY in state_modules:
                 state_modules[SESSION_SKILL_SNAPSHOT_STATE_KEY] = (
@@ -5098,8 +5351,10 @@ class AgentRunner(Runner):
             stripped_count = _strip_internal_follow_up_messages_from_state(
                 state_modules["agent"],
             )
-            deduped_external_approvals = _dedupe_external_approval_messages_from_state(
-                state_modules["agent"],
+            deduped_external_approvals = (
+                _dedupe_external_approval_messages_from_state(
+                    state_modules["agent"],
+                )
             )
             return state_modules
 
@@ -5278,12 +5533,14 @@ class AgentRunner(Runner):
                     try:
                         await agent.interrupt()
                         logger.info(
-                            "Agent interrupted after query timeout for " "session %s",
+                            "Agent interrupted after query timeout for "
+                            "session %s",
                             session_id,
                         )
                     except Exception as interrupt_err:
                         logger.warning(
-                            "Failed to interrupt agent on query timeout: " "%s",
+                            "Failed to interrupt agent on query timeout: "
+                            "%s",
                             interrupt_err,
                         )
                 yield (
@@ -5357,7 +5614,8 @@ class AgentRunner(Runner):
             )
 
         session_dir = str(
-            (self.workspace_dir if self.workspace_dir else WORKING_DIR) / "sessions",
+            (self.workspace_dir if self.workspace_dir else WORKING_DIR)
+            / "sessions",
         )
         self.session = SafeJSONSession(save_dir=session_dir)
 

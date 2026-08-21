@@ -67,9 +67,9 @@ from .tools import (
     update_task_progress,
     ask_plan_clarification,
     create_submit_proposed_plan_tool,
+    build_background_subagent_scope,
     create_background_subagent_tools,
     get_default_background_subagent_supervisor,
-    has_subagent_intent,
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
@@ -269,7 +269,9 @@ def _build_accepted_plan_tool_result_text(
         if not items:
             continue
         lines.append(f"- {field}:")
-        lines.extend(f"  {index}. {item}" for index, item in enumerate(items, 1))
+        lines.extend(
+            f"  {index}. {item}" for index, item in enumerate(items, 1)
+        )
 
     return "\n".join(lines)
 
@@ -603,12 +605,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             if builtin_tools is not None:
                 enabled_tools.update(
-                    {name: tool.enabled for name, tool in builtin_tools.items()},
+                    {
+                        name: tool.enabled
+                        for name, tool in builtin_tools.items()
+                    },
                 )
                 if "execute_shell_command" in builtin_tools:
-                    async_execution_tools["execute_shell_command"] = builtin_tools[
-                        "execute_shell_command"
-                    ].async_execution
+                    async_execution_tools["execute_shell_command"] = (
+                        builtin_tools["execute_shell_command"].async_execution
+                    )
         except Exception as exc:
             logger.warning(
                 f"Failed to load agent tools config: {exc}, "
@@ -758,19 +763,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             )
             or get_default_background_subagent_supervisor()
         )
-        intent = has_subagent_intent(request_context)
-        if not intent:
-            return
         workspace_dir = self._workspace_dir or Path(
             self._agent_config.workspace_dir or ".",
         )
-        effective_skill_names = (
-            resolve_effective_skills(
-                workspace_dir,
-                request_context.get("channel", "console"),
-            )
-            if intent
-            else []
+        effective_skill_names = resolve_effective_skills(
+            workspace_dir,
+            request_context.get("channel", "console"),
         )
         tools = create_background_subagent_tools(
             supervisor=supervisor,
@@ -778,8 +776,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             workspace_dir=workspace_dir,
             request_context=request_context,
             effective_skill_names=effective_skill_names,
+            selected_expert_id=str(
+                request_context.get("selected_expert_id") or "",
+            ).strip()
+            or None,
         )
-        names = self._background_subagent_tool_names(intent)
+        names = self._background_subagent_tool_names(True)
         for name in names:
             toolkit.register_tool_function(
                 tools[name],
@@ -791,8 +793,16 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self,
         request_context: dict[str, Any],
     ) -> bool:
-        return request_context.get("agent_role", "main") == "subagent" or not (
-            request_context.get("agent_id") or getattr(self._agent_config, "id", None)
+        selected_expert_id = str(
+            request_context.get("selected_expert_id") or "",
+        ).strip()
+        return (
+            request_context.get("agent_role", "main") == "subagent"
+            or not (
+                request_context.get("agent_id")
+                or getattr(self._agent_config, "id", None)
+            )
+            or not selected_expert_id
         )
 
     @staticmethod
@@ -817,7 +827,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         builtin_names = set(_default_builtin_tools())
         runtime = self._source_tool_runtime()
         configured_tools = self._configured_builtin_tools()
-        enabled_tools = {name: tool.enabled for name, tool in configured_tools.items()}
+        enabled_tools = {
+            name: tool.enabled for name, tool in configured_tools.items()
+        }
         for version in self._source_tool_versions:
             self._register_source_tool_version(
                 toolkit,
@@ -896,7 +908,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """Reject source tools that cannot safely replace a registered tool."""
         if not is_builtin_override and version.name in toolkit.tools:
             raise RuntimeError(
-                "source tool collides with a skill or managed tool: " f"{version.name}",
+                "source tool collides with a skill or managed tool: "
+                f"{version.name}",
             )
         if not is_builtin_override:
             return
@@ -1158,7 +1171,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         # Get agent_id from request_context
         agent_id = (
-            self._request_context.get("agent_id") if self._request_context else None
+            self._request_context.get("agent_id")
+            if self._request_context
+            else None
         )
 
         # Check if heartbeat is enabled in agent config
@@ -1197,7 +1212,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             ),
         )
         if plan_mode_enabled:
-            sys_prompt = sys_prompt + "\n\n" + _PLAN_MODE_CLARIFICATION_INSTRUCTION
+            sys_prompt = (
+                sys_prompt + "\n\n" + _PLAN_MODE_CLARIFICATION_INSTRUCTION
+            )
         if not plan_mode_enabled and is_chat_task_progress_enabled(
             get_current_source_system_config(),
         ):
@@ -1290,7 +1307,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """Register pre-reasoning and pre-acting hooks."""
         # Bootstrap hook - checks BOOTSTRAP.md on first interaction
         # Use workspace_dir if available, else fallback to WORKING_DIR
-        working_dir = self._workspace_dir if self._workspace_dir else WORKING_DIR
+        working_dir = (
+            self._workspace_dir if self._workspace_dir else WORKING_DIR
+        )
         bootstrap_hook = BootstrapHook(
             working_dir=working_dir,
             language=self._language,
@@ -1374,7 +1393,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     client_tools = client_tools.tools
                 collisions = sorted(
                     source_tool_names
-                    & {str(getattr(tool, "name", "")) for tool in client_tools},
+                    & {
+                        str(getattr(tool, "name", "")) for tool in client_tools
+                    },
                 )
                 if not collisions:
                     # Set progress callback so MCP notifications reset the
@@ -1405,7 +1426,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 if recovered_client is not None:
                     self._mcp_clients[i] = recovered_client
                     if hasattr(recovered_client, "on_progress_callback"):
-                        recovered_client.on_progress_callback = self._reset_watchdog
+                        recovered_client.on_progress_callback = (
+                            self._reset_watchdog
+                        )
                     try:
                         existing_tool_names = set(self.toolkit.tools)
                         await self.toolkit.register_mcp_client(
@@ -1543,7 +1566,10 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             # original_func stores tool_func.__call__ (a bound method);
             # extract the MCPToolFunction instance via __self__.
             mcp_func = getattr(func, "__self__", None) or func
-            if isinstance(mcp_func, MCPToolFunction) and mcp_func.mcp_name == mcp_name:
+            if (
+                isinstance(mcp_func, MCPToolFunction)
+                and mcp_func.mcp_name == mcp_name
+            ):
                 mcp_func.on_progress_callback = cb  # type: ignore[attr-defined]
 
     async def _recover_mcp_client(self, client: Any) -> Any | None:
@@ -2138,7 +2164,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         filtered = [
             block
             for block in msg.content
-            if not (isinstance(block, dict) and block.get("type") == "tool_use")
+            if not (
+                isinstance(block, dict) and block.get("type") == "tool_use"
+            )
         ]
 
         n_removed = len(msg.content) - len(filtered)
@@ -2199,7 +2227,10 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
             new_content = []
             for block in msg.content:
-                if isinstance(block, dict) and block.get("type") in media_types:
+                if (
+                    isinstance(block, dict)
+                    and block.get("type") in media_types
+                ):
                     total_stripped += 1
                     continue
 
@@ -2213,7 +2244,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                         item
                         for item in block["output"]
                         if not (
-                            isinstance(item, dict) and item.get("type") in media_types
+                            isinstance(item, dict)
+                            and item.get("type") in media_types
                         )
                     ]
                     stripped_count = original_len - len(block["output"])
@@ -2294,7 +2326,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                             messages=await self._research_messages(),
                         )
 
-                    futures = [self._acting(tool_call) for tool_call in tool_calls]
+                    futures = [
+                        self._acting(tool_call) for tool_call in tool_calls
+                    ]
                     if self.parallel_tool_calls:
                         await asyncio.gather(*futures)
                     else:
@@ -2361,7 +2395,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         # Check if message is a system command
         last_msg = msg[-1] if isinstance(msg, list) else msg
-        query = last_msg.get_text_content() if isinstance(last_msg, Msg) else None
+        query = (
+            last_msg.get_text_content() if isinstance(last_msg, Msg) else None
+        )
 
         if self.command_handler.is_command(query):
             logger.info(f"Received command: {query}")
@@ -2375,7 +2411,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         if hasattr(self.memory, "_long_term_memory"):
             running = self._agent_config.running
             ms = running.memory_summary
-            if ms.force_memory_search and self.memory_manager is not None and query:
+            if (
+                ms.force_memory_search
+                and self.memory_manager is not None
+                and query
+            ):
                 try:
                     result = await asyncio.wait_for(
                         self.memory_manager.memory_search(
@@ -2392,7 +2432,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     )
                 except Exception as e:
                     logger.warning(
-                        "force_memory_search failed or timed out," f" skipping e={e}",
+                        "force_memory_search failed or timed out,"
+                        f" skipping e={e}",
                     )
                     self.memory._long_term_memory = ""
             else:
@@ -2418,6 +2459,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         If the reply task does not finish within
         ``AGENT_INTERRUPT_TIMEOUT`` seconds, the wait is abandoned.
         """
+        await self._cancel_selected_expert_run()
         self._stop_watchdog()
         if self._reply_task and not self._reply_task.done():
             task = self._reply_task
@@ -2439,3 +2481,35 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     "Exception occurred during interrupt cleanup",
                     exc_info=True,
                 )
+
+    async def _cancel_selected_expert_run(self) -> None:
+        """Best-effort cancellation for the expert synchronously awaiting this turn."""
+        request_context = getattr(self, "_request_context", {}) or {}
+        if not request_context.get("selected_expert_execution"):
+            return
+        run_id = str(
+            request_context.get("selected_expert_run_id") or "",
+        ).strip()
+        if not run_id:
+            return
+        agent_config = getattr(self, "_agent_config", None)
+        if agent_config is None:
+            return
+        supervisor = (
+            request_context.get("_subagent_supervisor")
+            or get_default_background_subagent_supervisor()
+        )
+        try:
+            scope = build_background_subagent_scope(
+                parent_agent_config=agent_config,
+                request_context=request_context,
+            )
+            await supervisor.cancel(scope, run_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning(
+                "Failed to cancel selected expert run %s during interrupt",
+                run_id,
+                exc_info=True,
+            )

@@ -6,12 +6,14 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import shutil
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .fs import _atomic_write_json
+from .fs import _atomic_write_json, _validate_path_segment
 from .models import ExpertVersion, ExpertVersionsManifest
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,8 @@ _IGNORED_ARTIFACTS = {
     "desktop.ini",
     ".git",
     "versions",
+    "versions.json",
+    "scan_result.json",
 }
 
 _TEXT_EXTENSIONS = {
@@ -175,7 +179,15 @@ class ExpertVersionService:
         return digest.hexdigest()
 
     def _get_version_root(self, source_id: str, item_id: str) -> Path:
-        return self.marketplace_root / source_id / "experts" / item_id / "versions"
+        _validate_path_segment(source_id, "source_id")
+        _validate_path_segment(item_id, "item_id")
+        return (
+            self.marketplace_root
+            / source_id
+            / "experts"
+            / item_id
+            / "versions"
+        )
 
     def _get_version_dir(
         self,
@@ -183,10 +195,19 @@ class ExpertVersionService:
         item_id: str,
         version_id: str,
     ) -> Path:
+        _validate_path_segment(version_id, "version_id")
         return self._get_version_root(source_id, item_id) / version_id
 
     def _get_versions_json_path(self, source_id: str, item_id: str) -> Path:
-        return self.marketplace_root / source_id / "experts" / item_id / "versions.json"
+        _validate_path_segment(source_id, "source_id")
+        _validate_path_segment(item_id, "item_id")
+        return (
+            self.marketplace_root
+            / source_id
+            / "experts"
+            / item_id
+            / "versions.json"
+        )
 
     def _load_versions_manifest(
         self,
@@ -197,7 +218,9 @@ class ExpertVersionService:
         if not path.exists():
             return ExpertVersionsManifest()
         try:
-            return ExpertVersionsManifest(**json.loads(path.read_text(encoding="utf-8")))
+            return ExpertVersionsManifest(
+                **json.loads(path.read_text(encoding="utf-8")),
+            )
         except (json.JSONDecodeError, KeyError, TypeError):
             return ExpertVersionsManifest()
 
@@ -213,22 +236,43 @@ class ExpertVersionService:
 
     def _copy_package_tree(self, source_dir: Path, target_dir: Path) -> None:
         preserve = {"versions", "versions.json"}
-        target_dir.mkdir(parents=True, exist_ok=True)
-        for existing in list(target_dir.iterdir()):
-            if existing.name in preserve:
-                continue
-            if existing.is_dir():
-                shutil.rmtree(existing)
-            else:
-                existing.unlink()
-        for entry in source_dir.iterdir():
-            if entry.name in preserve:
-                continue
-            target = target_dir / entry.name
-            if entry.is_dir():
-                shutil.copytree(entry, target)
-            else:
-                shutil.copy2(entry, target)
+        target_dir.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(
+            tempfile.mkdtemp(
+                prefix=f".{target_dir.name}-",
+                dir=target_dir.parent,
+            ),
+        )
+        backup = target_dir.with_name(f".{target_dir.name}.backup")
+        try:
+            for entry in source_dir.iterdir():
+                if entry.name in preserve:
+                    continue
+                target = staging / entry.name
+                if entry.is_dir():
+                    shutil.copytree(entry, target)
+                else:
+                    shutil.copy2(entry, target)
+            if target_dir.is_dir():
+                for name in preserve:
+                    existing = target_dir / name
+                    if existing.is_dir():
+                        shutil.copytree(existing, staging / name)
+                    elif existing.is_file():
+                        shutil.copy2(existing, staging / name)
+            if backup.exists():
+                shutil.rmtree(backup)
+            if target_dir.exists():
+                os.replace(target_dir, backup)
+            os.replace(staging, target_dir)
+            if backup.exists():
+                shutil.rmtree(backup)
+        except BaseException:
+            if staging.exists():
+                shutil.rmtree(staging, ignore_errors=True)
+            if not target_dir.exists() and backup.exists():
+                os.replace(backup, target_dir)
+            raise
 
     def _is_ignored(self, path: Path) -> bool:
         return bool(_IGNORED_ARTIFACTS & set(path.parts))
@@ -243,7 +287,10 @@ class ExpertVersionService:
                 return {"name": path.name, "type": "file", "path": relative}
             children = []
             for child in sorted(path.iterdir()):
-                if child.name.startswith(".") or child.name in _IGNORED_ARTIFACTS:
+                if (
+                    child.name.startswith(".")
+                    or child.name in _IGNORED_ARTIFACTS
+                ):
                     continue
                 children.append(build_tree(child))
             return {
@@ -256,5 +303,6 @@ class ExpertVersionService:
         return [
             build_tree(item)
             for item in sorted(root.iterdir())
-            if not item.name.startswith(".") and item.name not in _IGNORED_ARTIFACTS
+            if not item.name.startswith(".")
+            and item.name not in _IGNORED_ARTIFACTS
         ]

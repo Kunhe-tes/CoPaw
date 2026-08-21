@@ -390,6 +390,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: collapsed ? null : t("nav.market"),
       icon: <Store size={16} />,
     },
+    {
+      key: "expert-community",
+      label: collapsed ? null : "专家社区",
+      icon: <SearchCheck size={16} />,
+    },
     // 4. 运行中心
     {
       key: "run-center",

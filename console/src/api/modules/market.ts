@@ -34,6 +34,71 @@ export interface MarketSkillDetail extends MarketSkill {
   }>;
 }
 
+export interface MarketExpert {
+  item_id: string;
+  name: string;
+  description: string;
+  version: string;
+  creator_id: string;
+  creator_name: string;
+  category_id: number | null;
+  bbk_ids: string[];
+  status: "active" | "inactive";
+  created_at: string | null;
+  updated_at: string | null;
+  version_unchanged?: boolean;
+}
+
+export interface ExpertVersion {
+  version_id: string;
+  created_at: string;
+  created_by: string;
+  created_by_name: string;
+  description: string;
+  signature: string;
+  is_current: boolean;
+  is_initial: boolean;
+}
+
+export interface ExpertVersions {
+  expert_name: string;
+  versions: ExpertVersion[];
+}
+
+export interface ExpertOperationResult {
+  user_id: string;
+  success: boolean;
+  definition_id?: string | null;
+  reason?: string | null;
+}
+
+export interface ExpertDistributionRequest {
+  target_type: "all" | "bbk_id" | "user_id";
+  target_values: string[];
+}
+
+export interface ExpertDistributionResponse {
+  item_id: string;
+  distributed_count: number;
+  conflict_count: number;
+  results: ExpertOperationResult[];
+}
+
+export interface ExpertRecallResponse {
+  item_id: string;
+  recalled_count: number;
+  failed_count: number;
+  results: ExpertOperationResult[];
+}
+
+export interface PublishExpertRequest {
+  definition_id: string;
+  agent_id: string;
+  category_id?: number;
+  bbk_ids: string[];
+  overwrite: boolean;
+}
+
 // 更新统计配置请求
 export interface UpdateStatisticsConfigRequest {
   include_in_statistics: boolean;
@@ -250,6 +315,135 @@ export const marketApi = {
     }
     const opts = mergeHeaders({ "X-Source-Id": sourceId });
     return request<MarketSkill[]>(url, opts);
+  },
+
+  listMarketExperts: async (
+    sourceId: string,
+    options?: { categoryId?: number; bbkIds?: string[] },
+  ): Promise<MarketExpert[]> => {
+    const params = new URLSearchParams();
+    if (options?.categoryId !== undefined) {
+      params.set("category_id", String(options.categoryId));
+    }
+    if (options?.bbkIds?.length) {
+      params.set("bbk_ids", options.bbkIds.join(","));
+    }
+    const query = params.toString();
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return request<MarketExpert[]>(
+      `/market/experts${query ? `?${query}` : ""}`,
+      opts,
+    );
+  },
+
+  publishExpert: async (
+    sourceId: string,
+    data: PublishExpertRequest,
+  ): Promise<MarketExpert> => {
+    return request<MarketExpert>("/market/experts", {
+      method: "POST",
+      ...mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      }),
+      body: JSON.stringify(data),
+    });
+  },
+
+  getMarketExpert: async (
+    sourceId: string,
+    itemId: string,
+  ): Promise<MarketExpert> => {
+    const opts = mergeHeaders({ "X-Source-Id": sourceId });
+    return request<MarketExpert>(`/market/experts/${itemId}`, opts);
+  },
+
+  listExpertVersions: async (
+    sourceId: string,
+    itemId: string,
+  ): Promise<ExpertVersions> => {
+    return request<ExpertVersions>(
+      `/market/experts/${itemId}/versions`,
+      mergeHeaders({ "X-Source-Id": sourceId }),
+    );
+  },
+
+  restoreExpertVersion: async (
+    sourceId: string,
+    itemId: string,
+    versionId: string,
+  ): Promise<MarketExpert> => {
+    return request<MarketExpert>(
+      `/market/experts/${itemId}/versions/${encodeURIComponent(versionId)}/restore`,
+      {
+        method: "POST",
+        ...mergeHeaders({
+          "X-Source-Id": sourceId,
+          "X-Manager": "true",
+        }),
+      },
+    );
+  },
+
+  installExpert: async (
+    sourceId: string,
+    itemId: string,
+    userId: string,
+    agentId: string,
+  ): Promise<ExpertOperationResult> => {
+    return request<ExpertOperationResult>(`/market/experts/${itemId}/install`, {
+      method: "POST",
+      ...mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-User-Id": userId,
+      }),
+      body: JSON.stringify({ agent_id: agentId }),
+    });
+  },
+
+  distributeExpert: async (
+    sourceId: string,
+    itemId: string,
+    data: ExpertDistributionRequest,
+  ): Promise<ExpertDistributionResponse> => {
+    return request<ExpertDistributionResponse>(
+      `/market/experts/${itemId}/distribute`,
+      {
+        method: "POST",
+        ...mergeHeaders({
+          "Content-Type": "application/json",
+          "X-Source-Id": sourceId,
+          "X-Manager": "true",
+        }),
+        body: JSON.stringify(data),
+      },
+    );
+  },
+
+  recallExpert: async (
+    sourceId: string,
+    itemId: string,
+    targetUserIds?: string[],
+  ): Promise<ExpertRecallResponse> => {
+    return request<ExpertRecallResponse>(`/market/experts/${itemId}/recall`, {
+      method: "POST",
+      ...mergeHeaders({
+        "Content-Type": "application/json",
+        "X-Source-Id": sourceId,
+        "X-Manager": "true",
+      }),
+      body: JSON.stringify({ target_user_ids: targetUserIds }),
+    });
+  },
+
+  unpublishExpert: async (sourceId: string, itemId: string): Promise<void> => {
+    const opts: RequestInit = {
+      method: "DELETE",
+      ...mergeHeaders({ "X-Source-Id": sourceId, "X-Manager": "true" }),
+    };
+    return request<void>(`/market/experts/${itemId}`, opts);
   },
 
   getSkillDetail: async (
@@ -635,20 +829,20 @@ export const marketApi = {
   updateSkillStatisticsConfig: async (
     sourceId: string,
     itemId: string,
-    data: UpdateStatisticsConfigRequest
+    data: UpdateStatisticsConfigRequest,
   ): Promise<UpdateStatisticsConfigResponse> => {
     const opts: RequestInit = {
       method: "PATCH",
-      ...(mergeHeaders({
+      ...mergeHeaders({
         "Content-Type": "application/json",
         "X-Source-Id": sourceId,
         "X-Manager": "true",
-      })),
+      }),
       body: JSON.stringify(data),
     };
     return request<UpdateStatisticsConfigResponse>(
       `/market/skills/${itemId}/statistics`,
-      opts
+      opts,
     );
   },
 };

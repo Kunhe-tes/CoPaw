@@ -645,6 +645,25 @@ def _extract_context_references(
     return request_data.get("context_references")
 
 
+def _extract_selected_expert_id(
+    request_data: Union[AgentRequest, dict],
+) -> str | None:
+    """Keep an explicit expert selection available for the runner."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "selected_expert_id", None)
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("selected_expert_id")
+    else:
+        value = request_data.get("selected_expert_id")
+        channel_meta = request_data.get("channel_meta")
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("selected_expert_id")
+    if isinstance(value, str):
+        value = value.strip()
+    return value or None
+
+
 def _extract_plan_mode(request_data: Union[AgentRequest, dict]) -> str | None:
     """Keep supported Plan Mode requests in Console channel metadata."""
     if isinstance(request_data, AgentRequest):
@@ -820,6 +839,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references
+    selected_expert_id = _extract_selected_expert_id(request_data)
+    if selected_expert_id is not None:
+        native_payload["meta"]["selected_expert_id"] = selected_expert_id
     scenario_preset_id = _extract_scenario_preset_id(request_data)
     if scenario_preset_id is not None:
         native_payload["meta"]["scenario_preset_id"] = scenario_preset_id
@@ -837,7 +859,11 @@ def _extract_scenario_preset_id(
     mapping = (
         request_data
         if isinstance(request_data, dict)
-        else request_data.model_dump()
+        else (
+            request_data.model_dump()
+            if hasattr(request_data, "model_dump")
+            else dict(getattr(request_data, "__dict__", {}))
+        )
     )
     value = mapping.get("scenario_preset_id")
     if value is None:

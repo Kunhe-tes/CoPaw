@@ -109,7 +109,9 @@ async def test_get_or_create_chat_stores_agent_metadata_for_new_chat() -> None:
     assert chat.meta["agent_id"] == "agent-a"
 
 
-async def test_get_or_create_chat_merges_agent_metadata_for_existing_chat() -> None:
+async def test_get_or_create_chat_merges_agent_metadata_for_existing_chat() -> (
+    None
+):
     repo = _InMemoryChatRepo()
     manager = ChatManager(repo=repo)
     existing = await manager.get_or_create_chat(
@@ -187,7 +189,9 @@ async def test_delete_chats_removes_the_chat_scoped_archive(tmp_path) -> None:
     assert not archive_store.path_for(chat.id).exists()
 
 
-async def test_delete_chats_removes_scenario_private_resources(tmp_path) -> None:
+async def test_delete_chats_removes_scenario_private_resources(
+    tmp_path,
+) -> None:
     repo = _InMemoryChatRepo()
     manager = ChatManager(repo=repo, resource_root=tmp_path / "scenario")
     chat = await manager.get_or_create_chat("session-1", "user-1")
@@ -197,6 +201,45 @@ async def test_delete_chats_removes_scenario_private_resources(tmp_path) -> None
 
     assert await manager.delete_chats([chat.id]) is True
     assert not private_root.exists()
+
+
+async def test_delete_chats_releases_expert_dependency_view(tmp_path) -> None:
+    repo = _InMemoryChatRepo()
+    manager = ChatManager(
+        repo=repo,
+        resource_root=tmp_path / "scenario",
+        expert_dependency_root=tmp_path,
+    )
+    chat = await manager.get_or_create_chat("session-1", "user-1")
+    expert_view = (
+        tmp_path
+        / ".expert_sessions"
+        / chat.id
+        / "00000000-0000-0000-0000-000000000040"
+    )
+    expert_view.mkdir(parents=True)
+    (expert_view / "SKILL.md").write_text("private", encoding="utf-8")
+
+    assert await manager.delete_chats([chat.id]) is True
+    assert not expert_view.exists()
+
+
+async def test_delete_chats_releases_expert_view_without_scenario_root(
+    tmp_path,
+) -> None:
+    repo = _InMemoryChatRepo()
+    manager = ChatManager(repo=repo, expert_dependency_root=tmp_path)
+    chat = await manager.get_or_create_chat("session-1", "user-1")
+    expert_view = (
+        tmp_path
+        / ".expert_sessions"
+        / chat.id
+        / "00000000-0000-0000-0000-000000000041"
+    )
+    expert_view.mkdir(parents=True)
+
+    assert await manager.delete_chats([chat.id]) is True
+    assert not expert_view.exists()
 
 
 async def test_delete_chats_never_removes_resource_root_for_invalid_id(
@@ -212,7 +255,9 @@ async def test_delete_chats_never_removes_resource_root_for_invalid_id(
     assert (tmp_path / "scenario").exists()
 
 
-async def test_get_or_create_scenario_chat_keeps_first_snapshot_under_race() -> None:
+async def test_get_or_create_scenario_chat_keeps_first_snapshot_under_race() -> (
+    None
+):
     repo = _InMemoryChatRepo()
     manager = ChatManager(repo=repo)
     first_factory_started = asyncio.Event()
@@ -251,9 +296,11 @@ async def test_get_or_create_scenario_chat_keeps_first_snapshot_under_race() -> 
         ),
     )
     release_first_factory.set()
-    (first_chat, first_created), (second_chat, second_created) = await asyncio.gather(
-        first,
-        second,
+    (first_chat, first_created), (second_chat, second_created) = (
+        await asyncio.gather(
+            first,
+            second,
+        )
     )
 
     assert first_created is True
