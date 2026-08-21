@@ -3449,6 +3449,10 @@ class AgentRunner(Runner):
         preflight: _QueryPreflight,
     ) -> _RuntimeStartResult:
         """装配 agent、chat、MCP 客户端以及会话级 hook 运行状态。"""
+        from ...providers.provider_manager import ProviderManager
+
+        manager = await ProviderManager.get_or_create_instance(self.tenant_id)
+        await manager.refresh_if_due()
         inputs = await self._build_query_runtime_inputs(
             request=request,
             msgs=msgs,

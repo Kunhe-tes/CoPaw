@@ -6,6 +6,7 @@ providers, adding/removing custom providers, and fetching provider details."""
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -44,6 +45,7 @@ logger = logging.getLogger(__name__)
 
 _PROVIDER_MANAGER_SLOW_LOG_MS = 500
 _PROVIDER_INFO_SLOW_LOG_MS = 100
+_PROVIDER_FRESHNESS_TTL_SECONDS = 300.0
 
 if fcntl is None and msvcrt is None:  # pragma: no cover
     raise ImportError(
@@ -67,6 +69,9 @@ class ProviderManager:
     _instance = None
     _instances: dict[str, "ProviderManager"] = {}
     _instances_lock = threading.Lock()
+    _init_executor = concurrent.futures.ThreadPoolExecutor(max_workers=8)
+    _inflight: dict[str, concurrent.futures.Future["ProviderManager"]] = {}
+    _instance_tasks = _inflight
 
     @classmethod
     def reset_instance_cache(cls) -> None:
@@ -78,6 +83,11 @@ class ProviderManager:
         with cls._instances_lock:
             cls._instances.clear()
             cls._instance = None
+            inflight = list(cls._inflight.values())
+            cls._inflight.clear()
+        for task in inflight:
+            if not task.done():
+                task.cancel()
         reset_scope_bound_model_caches()
 
     def __init__(self, tenant_id: str = "default") -> None:
@@ -94,6 +104,11 @@ class ProviderManager:
         self.custom_providers: Dict[str, Provider] = {}
         self.active_model: ModelSlotConfig | None = None
         self._file_freshness_tokens: dict[str, tuple[int, int]] = {}
+        self._next_freshness_check_at = (
+            time.monotonic() + _PROVIDER_FRESHNESS_TTL_SECONDS
+        )
+        self._freshness_lock = threading.RLock()
+        self._refresh_inflight: concurrent.futures.Future[None] | None = None
         self.root_path = self._get_tenant_root_path(tenant_id)
         self.builtin_path = self.root_path / "builtin"
         self.custom_path = self.root_path / "custom"
@@ -683,8 +698,8 @@ class ProviderManager:
         if effective_tenant_id in ProviderManager._instances:
             return ProviderManager._instances[effective_tenant_id]
 
-        # Slow path: create instance with lock
-        lock_started_at = time.perf_counter()
+        # Construct outside the global registry lock.  Disk initialization is
+        # deliberately allowed to run concurrently for different tenants.
         logger.info(
             "provider_manager_instance_cache_miss route_tenant_id=%s "
             "provider_tenant_id=%s cached_instances=%d thread_id=%s",
@@ -694,48 +709,68 @@ class ProviderManager:
             threading.get_ident(),
         )
         with ProviderManager._instances_lock:
-            lock_wait_ms = int((time.perf_counter() - lock_started_at) * 1000)
-            logger.info(
-                "provider_manager_instance_lock_acquired route_tenant_id=%s "
-                "provider_tenant_id=%s wait_ms=%d cached_instances=%d "
-                "thread_id=%s",
-                tenant_id,
+            existing = ProviderManager._instances.get(effective_tenant_id)
+            if existing is not None:
+                return existing
+            future = ProviderManager._get_or_start_instance_future(
                 effective_tenant_id,
-                lock_wait_ms,
-                len(ProviderManager._instances),
-                threading.get_ident(),
             )
-            # Double-check after acquiring lock
-            if effective_tenant_id not in ProviderManager._instances:
-                create_started_at = time.perf_counter()
-                logger.info(
-                    "provider_manager_instance_create_start "
-                    "route_tenant_id=%s provider_tenant_id=%s",
-                    tenant_id,
-                    effective_tenant_id,
-                )
-                ProviderManager._instances[effective_tenant_id] = (
-                    ProviderManager(
-                        effective_tenant_id,
-                    )
-                )
-                logger.info(
-                    "provider_manager_instance_create_done "
-                    "route_tenant_id=%s provider_tenant_id=%s "
-                    "duration_ms=%d cached_instances=%d",
-                    tenant_id,
-                    effective_tenant_id,
-                    int((time.perf_counter() - create_started_at) * 1000),
-                    len(ProviderManager._instances),
-                )
-            else:
-                logger.info(
-                    "provider_manager_instance_reused_after_lock "
-                    "route_tenant_id=%s provider_tenant_id=%s",
-                    tenant_id,
-                    effective_tenant_id,
-                )
-            return ProviderManager._instances[effective_tenant_id]
+        create_started_at = time.perf_counter()
+        existing = future.result()
+        logger.info(
+            "provider_manager_instance_create_done route_tenant_id=%s "
+            "provider_tenant_id=%s duration_ms=%d cached_instances=%d",
+            tenant_id,
+            effective_tenant_id,
+            int((time.perf_counter() - create_started_at) * 1000),
+            len(ProviderManager._instances),
+        )
+        return existing
+
+    @classmethod
+    async def get_or_create_instance(
+        cls,
+        tenant_id: str | None = None,
+    ) -> "ProviderManager":
+        """Get a manager asynchronously with scope-keyed single-flight startup."""
+        effective = cls._resolve_effective_provider_tenant_id(tenant_id)
+        cached = cls._instances.get(effective)
+        if cached is not None:
+            return cached
+
+        with cls._instances_lock:
+            cached = cls._instances.get(effective)
+            if cached is not None:
+                return cached
+            future = cls._get_or_start_instance_future(effective)
+
+        try:
+            return await asyncio.shield(asyncio.wrap_future(future))
+        finally:
+            if future.done():
+                with cls._instances_lock:
+                    cls._inflight.pop(effective, None)
+
+    @classmethod
+    def _get_or_start_instance_future(
+        cls,
+        effective: str,
+    ) -> concurrent.futures.Future["ProviderManager"]:
+        future = cls._inflight.get(effective)
+        if future is not None and not future.done():
+            return future
+        cls._inflight.pop(effective, None)
+        future = cls._init_executor.submit(cls._build_instance_sync, effective)
+        cls._inflight[effective] = future
+
+        return future
+
+    @staticmethod
+    def _build_instance_sync(effective: str) -> "ProviderManager":
+        ProviderManager.ensure_tenant_provider_storage(effective)
+        created = ProviderManager(effective)
+        with ProviderManager._instances_lock:
+            return ProviderManager._instances.setdefault(effective, created)
 
     @staticmethod
     def get_active_chat_model() -> ChatModelBase:
@@ -805,6 +840,9 @@ class ProviderManager:
             self._file_freshness_tokens[str(path)] = self._file_token(path)
         else:
             self._file_freshness_tokens.pop(str(path), None)
+
+    def _mark_freshness_due(self) -> None:
+        self._next_freshness_check_at = 0.0
 
     def _refresh_if_stale(self):
         """Reload providers whose files changed on disk since last snapshot."""
@@ -890,7 +928,7 @@ class ProviderManager:
                 (time.perf_counter() - apply_active_started_at) * 1000,
             )
         reset_cache_started_at = time.perf_counter()
-        reset_scope_bound_model_caches()
+        reset_scope_bound_model_caches(self.tenant_id)
         reset_cache_ms = int(
             (time.perf_counter() - reset_cache_started_at) * 1000,
         )
@@ -1021,10 +1059,44 @@ class ProviderManager:
         """Apply changes for active model."""
         self.active_model = self.load_active_model()
 
+    async def refresh_if_due(self) -> None:
+        """Refresh provider files only after the freshness TTL elapses."""
+        if time.monotonic() < getattr(self, "_next_freshness_check_at", 0.0):
+            return
+        lock = getattr(self, "_freshness_lock", None)
+        if lock is None:
+            lock = threading.RLock()
+            self._freshness_lock = lock
+        with lock:
+            if time.monotonic() < self._next_freshness_check_at:
+                return
+            future = getattr(self, "_refresh_inflight", None)
+            if future is None:
+                future = ProviderManager._init_executor.submit(
+                    self._refresh_and_mark_fresh,
+                )
+                self._refresh_inflight = future
+
+                def clear_completed(
+                    _: concurrent.futures.Future[None],
+                ) -> None:
+                    with lock:
+                        if self._refresh_inflight is future:
+                            self._refresh_inflight = None
+
+                future.add_done_callback(clear_completed)
+        await asyncio.shield(asyncio.wrap_future(future))
+
+    def _refresh_and_mark_fresh(self) -> None:
+        self._refresh_if_stale()
+        self._next_freshness_check_at = (
+            time.monotonic() + _PROVIDER_FRESHNESS_TTL_SECONDS
+        )
+
     async def list_provider_info(self) -> List[ProviderInfo]:
         started_at = time.perf_counter()
         refresh_started_at = time.perf_counter()
-        self._refresh_if_stale()
+        await self.refresh_if_due()
         refresh_ms = int((time.perf_counter() - refresh_started_at) * 1000)
         providers: list[tuple[str, Provider]] = [
             ("builtin", provider)
@@ -1132,12 +1204,29 @@ class ProviderManager:
         return None
 
     async def get_provider_info(self, provider_id: str) -> ProviderInfo | None:
+        await self.refresh_if_due()
         provider = self.get_provider(provider_id)
         return await provider.get_info() if provider else None
 
     def get_active_model(self) -> ModelSlotConfig | None:
-        # Return the currently active provider/model configuration.
-        self._refresh_if_stale()
+        """Return the cached active model.
+
+        Async request boundaries refresh this snapshot through
+        :meth:`refresh_if_due`.  Synchronous CLI callers retain their
+        historical refresh behavior when no event loop is running.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            if time.monotonic() >= getattr(
+                self,
+                "_next_freshness_check_at",
+                0.0,
+            ):
+                self._refresh_if_stale()
+                self._next_freshness_check_at = (
+                    time.monotonic() + _PROVIDER_FRESHNESS_TTL_SECONDS
+                )
         return self.active_model
 
     def update_provider(self, provider_id: str, config: Dict) -> bool:
@@ -1153,7 +1242,8 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
-        reset_scope_bound_model_caches()
+        self._mark_freshness_due()
+        reset_scope_bound_model_caches(self.tenant_id)
         return True
 
     async def fetch_provider_models(
@@ -1171,6 +1261,7 @@ class ProviderManager:
                 provider,
                 is_builtin=provider_id in self.builtin_providers,
             )
+            reset_scope_bound_model_caches(self.tenant_id)
             return models
         except Exception as e:
             logger.warning(
@@ -1211,7 +1302,8 @@ class ProviderManager:
         provider.support_connection_check = False
         self.custom_providers[provider.id] = provider
         await self._save_provider_async(provider, is_builtin=False)
-        reset_scope_bound_model_caches()
+        self._mark_freshness_due()
+        reset_scope_bound_model_caches(self.tenant_id)
         return await provider.get_info()
 
     def remove_custom_provider(self, provider_id: str) -> bool:
@@ -1223,7 +1315,8 @@ class ProviderManager:
             if provider_path.exists():
                 os.remove(provider_path)
             self._file_freshness_tokens.pop(str(provider_path), None)
-            reset_scope_bound_model_caches()
+            self._mark_freshness_due()
+            reset_scope_bound_model_caches(self.tenant_id)
             return True
         return False
 
@@ -1243,7 +1336,7 @@ class ProviderManager:
             model=model_id,
         )
         await self._save_active_model_async(self.active_model)
-        reset_scope_bound_model_caches()
+        reset_scope_bound_model_caches(self.tenant_id)
 
         self.maybe_probe_multimodal(provider_id, model_id)
 
@@ -1289,7 +1382,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
-        reset_scope_bound_model_caches()
+        reset_scope_bound_model_caches(self.tenant_id)
         return await provider.get_info()
 
     async def delete_model_from_provider(
@@ -1305,7 +1398,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
-        reset_scope_bound_model_caches()
+        reset_scope_bound_model_caches(self.tenant_id)
         return await provider.get_info()
 
     async def probe_model_multimodal(
@@ -1359,6 +1452,7 @@ class ProviderManager:
             provider,
             is_builtin=provider_id in self.builtin_providers,
         )
+        reset_scope_bound_model_caches(self.tenant_id)
         return {
             "supports_image": result.supports_image,
             "supports_video": result.supports_video,
@@ -1398,6 +1492,7 @@ class ProviderManager:
             is_builtin=is_builtin,
             skip_if_exists=skip_if_exists,
         )
+        self._mark_freshness_due()
 
     def overwrite_provider_payload(self, payload: Dict) -> Provider:
         """Replace a tenant provider with the supplied payload.
@@ -1424,6 +1519,8 @@ class ProviderManager:
             self.custom_providers[provider.id] = provider
 
         self._save_provider(provider, is_builtin=is_builtin)
+        self._mark_freshness_due()
+        reset_scope_bound_model_caches(self.tenant_id)
         return provider
 
     def load_provider(
@@ -1476,6 +1573,7 @@ class ProviderManager:
         active_model: ModelSlotConfig,
     ) -> None:
         await run_runtime_state_work(self.save_active_model, active_model)
+        self._mark_freshness_due()
 
     @staticmethod
     def _save_active_model_to_root(

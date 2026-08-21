@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import shutil
 import time
@@ -13,7 +14,6 @@ from typing import Any, List, Literal, Optional, Sequence
 from copy import deepcopy
 from urllib.parse import unquote
 
-import anyio
 from fastapi import (
     APIRouter,
     Body,
@@ -27,9 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ...config.context import (
     get_current_effective_tenant_id,
-    resolve_scope_preferred_tenant_id,
     resolve_storage_tenant_id,
-    resolve_runtime_tenant_id,
 )
 from ...config.utils import (
     SECRET_DIR,
@@ -49,6 +47,11 @@ from ..workspace.tenant_initializer import TenantInitializer
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/models", tags=["models"])
+
+
+async def _await_if_needed(value: Any) -> Any:
+    return await value if inspect.isawaitable(value) else value
+
 
 _PROVIDER_API_SLOW_LOG_MS = 500
 
@@ -119,6 +122,7 @@ async def get_provider_manager(request: Request) -> ProviderManager:
 
     cached_manager = cached_instances.get(provider_tenant_id)
     if cached_manager is not None:
+        await _await_if_needed(cached_manager.refresh_if_due())
         return _record_provider_manager_dependency_done(
             request=request,
             started_at=started_at,
@@ -134,101 +138,17 @@ async def get_provider_manager(request: Request) -> ProviderManager:
             storage_ensure_skipped=True,
         )
 
-    queued_at = time.perf_counter()
-    return await anyio.to_thread.run_sync(
-        _get_provider_manager_cold_sync,
-        request,
-        started_at,
-        resolve_ms,
-        tenant_id,
-        provider_tenant_id,
-        cache_hit_before,
-        root_path,
-        queued_at,
+    manager = await _await_if_needed(
+        ProviderManager.get_or_create_instance(tenant_id),
     )
-
-
-def _get_provider_manager_cold_sync(
-    request: Request,
-    started_at: float,
-    resolve_ms: int,
-    tenant_id: str,
-    provider_tenant_id: str,
-    cache_hit_before: bool,
-    root_path: PathlibPath,
-    queued_at: float,
-) -> ProviderManager:
-    threadpool_wait_ms = int((time.perf_counter() - queued_at) * 1000)
-    request.state.provider_manager_dependency_threadpool_wait_ms = (
-        threadpool_wait_ms
-    )
-    logger.info(
-        "provider_manager_dependency_threadpool_enter path=%s "
-        "route_tenant_id=%s provider_tenant_id=%s wait_ms=%d "
-        "cache_hit_before=%s root_path=%s",
-        request.url.path,
-        tenant_id,
-        provider_tenant_id,
-        threadpool_wait_ms,
-        cache_hit_before,
-        root_path,
-    )
-
-    ensure_started_at = time.perf_counter()
-    logger.info(
-        "provider_storage_ensure_start path=%s route_tenant_id=%s "
-        "provider_tenant_id=%s root_path=%s",
-        request.url.path,
-        tenant_id,
-        provider_tenant_id,
-        root_path,
-    )
-    ProviderManager.ensure_tenant_provider_storage(tenant_id)
-    ensure_ms = int((time.perf_counter() - ensure_started_at) * 1000)
-    logger.info(
-        "provider_storage_ensure_done path=%s route_tenant_id=%s "
-        "provider_tenant_id=%s duration_ms=%d root_path=%s",
-        request.url.path,
-        tenant_id,
-        provider_tenant_id,
-        ensure_ms,
-        root_path,
-    )
-
-    # Return tenant-specific provider manager
-    get_instance_started_at = time.perf_counter()
-    logger.info(
-        "provider_manager_get_instance_start path=%s route_tenant_id=%s "
-        "provider_tenant_id=%s cache_hit_before=%s root_path=%s",
-        request.url.path,
-        tenant_id,
-        provider_tenant_id,
-        cache_hit_before,
-        root_path,
-    )
-    manager = ProviderManager.get_instance(tenant_id)
-    get_instance_ms = int(
-        (time.perf_counter() - get_instance_started_at) * 1000,
-    )
-    logger.info(
-        "provider_manager_get_instance_done path=%s route_tenant_id=%s "
-        "provider_tenant_id=%s manager_tenant_id=%s duration_ms=%d "
-        "cache_hit_after=%s root_path=%s",
-        request.url.path,
-        tenant_id,
-        provider_tenant_id,
-        manager.tenant_id,
-        get_instance_ms,
-        manager.tenant_id in ProviderManager._instances,
-        root_path,
-    )
+    await _await_if_needed(manager.refresh_if_due())
     return _record_provider_manager_dependency_done(
         request=request,
         started_at=started_at,
         resolve_ms=resolve_ms,
-        ensure_ms=ensure_ms,
-        get_instance_ms=get_instance_ms,
-        threadpool_wait_ms=threadpool_wait_ms,
+        ensure_ms=0,
+        get_instance_ms=int((time.perf_counter() - started_at) * 1000),
+        threadpool_wait_ms=0,
         tenant_id=tenant_id,
         provider_tenant_id=provider_tenant_id,
         manager=manager,
@@ -1831,9 +1751,11 @@ async def get_tenant_providers():
             detail="Tenant ID not set in context. Ensure request includes tenant identity.",
         )
 
-    # Get tenant-specific provider manager (source of truth)
-    ProviderManager.ensure_tenant_provider_storage(tenant_id)
-    manager = ProviderManager.get_instance(tenant_id)
+    # Get a fresh tenant snapshot before reading the active model.
+    manager = await _await_if_needed(
+        ProviderManager.get_or_create_instance(tenant_id),
+    )
+    await _await_if_needed(manager.refresh_if_due())
 
     # Get active model from ProviderManager
     active_model = manager.get_active_model()
