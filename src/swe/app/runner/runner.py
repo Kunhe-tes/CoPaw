@@ -1281,6 +1281,16 @@ async def _cleanup_mcp_clients(clients: list[Any]) -> None:
             logger.warning(f"Error closing MCP client: {e}")
 
 
+def _consume_background_task_exception(task: asyncio.Task[Any]) -> None:
+    """取回后台任务异常，避免未消费异常泄露到事件循环。"""
+    if task.cancelled():
+        return
+    try:
+        task.exception()
+    except asyncio.CancelledError:
+        return
+
+
 def _extract_text_from_blocks(blocks: list) -> str:
     """从 content blocks 中提取文本."""
     texts = []
@@ -2345,6 +2355,7 @@ class _QueryAttemptState:
     session_state_loaded: bool = False
     should_return: bool = False
     succeeded: bool = False
+    session_title_task_started: bool = False
 
 
 @dataclass(frozen=True)
@@ -2383,6 +2394,7 @@ class AgentRunner(Runner):
         self._workspace: Any = None  # Workspace instance for control commands
         self.memory_manager: BaseMemoryManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
+        self._query_background_tasks: set[asyncio.Task[None]] = set()
         self.session: Any | None = None
 
     def set_chat_manager(self, chat_manager):
@@ -2870,6 +2882,28 @@ class AgentRunner(Runner):
                 trace_id,
                 exc_info=True,
             )
+
+    def _schedule_session_title_task(
+        self,
+        *,
+        request: AgentRequest,
+        chat: Any,
+        msgs: list[Any],
+        trace_id: str | None,
+    ) -> None:
+        """在首个模型事件后异步补写会话标题。"""
+        task = asyncio.create_task(
+            self._generate_session_title_before_stream(
+                request=request,
+                chat=chat,
+                msgs=msgs,
+                trace_id=trace_id,
+            ),
+        )
+        self._query_background_tasks.add(task)
+        setattr(request, "_session_title_task", task)
+        task.add_done_callback(self._query_background_tasks.discard)
+        task.add_done_callback(_consume_background_task_exception)
 
     @staticmethod
     def _attach_trace_id_to_event(event: Any, trace_id: str | None) -> Any:
@@ -3676,12 +3710,6 @@ class AgentRunner(Runner):
                 ),
             ),
         )
-        await self._generate_session_title_before_stream(
-            request=request,
-            chat=chat,
-            msgs=msgs,
-            trace_id=getattr(request, "trace_id", None),
-        )
         env_context, block_response = await self._emit_session_start_hook(
             request=request,
             tenant_hooks=inputs.tenant_hooks,
@@ -4381,13 +4409,19 @@ class AgentRunner(Runner):
             "Runner finally block executing for session %s",
             session_id,
         )
-        await self._save_state_during_cleanup(
-            runtime=runtime,
-            session_state_loaded=session_state_loaded,
+        cleanup_results = await asyncio.gather(
+            self._save_state_during_cleanup(
+                runtime=runtime,
+                session_state_loaded=session_state_loaded,
+            ),
+            self._update_chat_during_cleanup(runtime),
+            self._cleanup_mcp_during_cleanup(runtime),
+            self._end_skill_detector_during_cleanup(runtime),
+            return_exceptions=True,
         )
-        await self._update_chat_during_cleanup(runtime)
-        await self._cleanup_mcp_during_cleanup(runtime)
-        await self._end_skill_detector_during_cleanup(runtime)
+        for result in cleanup_results:
+            if isinstance(result, BaseException):
+                raise result
 
     async def _cleanup_blocked_runtime_start(
         self,
@@ -4621,14 +4655,18 @@ class AgentRunner(Runner):
                 save_err,
             )
 
-    def _load_query_retry_settings(self) -> tuple[int, int, float, float]:
+    def _load_query_retry_settings(
+        self,
+        agent_config: Any | None = None,
+    ) -> tuple[int, int, float, float]:
         """读取 query 重试配置，配置不可用时回退为单次执行。"""
-        agent_config_for_retry = None
+        agent_config_for_retry = agent_config
         try:
-            agent_config_for_retry = load_agent_config(
-                self.agent_id,
-                tenant_id=self.tenant_id,
-            )
+            if agent_config_for_retry is None:
+                agent_config_for_retry = load_agent_config(
+                    self.agent_id,
+                    tenant_id=self.tenant_id,
+                )
         except Exception:
             pass
 
@@ -4914,6 +4952,14 @@ class AgentRunner(Runner):
                 plan=plan,
                 outcome=outcome,
             ):
+                if not attempt_state.session_title_task_started:
+                    self._schedule_session_title_task(
+                        request=attempt_input.request,
+                        chat=runtime.chat,
+                        msgs=attempt_input.msgs,
+                        trace_id=attempt_input.trace_id,
+                    )
+                    attempt_state.session_title_task_started = True
                 yield msg, last
 
             skill_snapshot_to_persist = (
@@ -4979,9 +5025,14 @@ class AgentRunner(Runner):
 
         # ── Query 级别重试循环 ──
         retry_state = _RetryState()
-        max_retry_attempts, max_retries, backoff_base, backoff_cap = (
-            self._load_query_retry_settings()
-        )
+        if preflight.agent_config is None:
+            max_retry_attempts, max_retries, backoff_base, backoff_cap = (
+                self._load_query_retry_settings()
+            )
+        else:
+            max_retry_attempts, max_retries, backoff_base, backoff_cap = (
+                self._load_query_retry_settings(preflight.agent_config)
+            )
         attempt_input = _QueryAttemptInput(
             request=request,
             msgs=msgs,
