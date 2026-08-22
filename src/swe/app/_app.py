@@ -643,6 +643,7 @@ async def _initialize_database_backed_modules(
     if db_connection is None:
         return
     try:
+        from .goals.registry import initialize_goal_service
         from .greeting.router import init_greeting_module
         from .featured_case.router import init_featured_case_module
         from .feedback.router import init_feedback_module
@@ -652,6 +653,7 @@ async def _initialize_database_backed_modules(
         )
         from .scenario_preset.router import init_scenario_preset_module
 
+        await initialize_goal_service(db_connection)
         init_greeting_module(db_connection)
         init_featured_case_module(db_connection)
         init_feedback_module(db_connection)

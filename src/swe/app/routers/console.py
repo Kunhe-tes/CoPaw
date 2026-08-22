@@ -675,6 +675,21 @@ def _extract_plan_mode(request_data: Union[AgentRequest, dict]) -> str | None:
     return mode if mode in {"plan", "normal"} else None
 
 
+def _extract_goal_id(request_data: Union[AgentRequest, dict]) -> str | None:
+    """Carry the server-owned Goal id into the existing Console run path."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = channel_meta.get("goal_id")
+    else:
+        value = request_data.get("goal_id")
+        channel_meta = request_data.get("channel_meta")
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("goal_id")
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        return None
+    return value.strip()
+
+
 def _local_path_from_console_attachment_url(url: object) -> Path | None:
     """Resolve the local path encoded in a Console attachment preview URL."""
     if not isinstance(url, str) or not url:
@@ -856,6 +871,9 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     plan_mode = _extract_plan_mode(request_data)
     if plan_mode is not None:
         native_payload["meta"]["mode"] = plan_mode
+    goal_id = _extract_goal_id(request_data)
+    if goal_id is not None:
+        native_payload["meta"]["goal_id"] = goal_id
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references

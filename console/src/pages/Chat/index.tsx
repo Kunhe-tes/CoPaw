@@ -74,6 +74,7 @@ import { Form } from "@agentscope-ai/design";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
 import SubAgentRunMonitor from "./components/SubAgentRunMonitor";
+import GoalMonitor from "./components/GoalMonitor";
 import ConversationQuickNav from "@/components/ConversationQuickNav";
 // ==================== 首页改版 (Kun He) ====================
 import WelcomeCenterLayout from "@/components/agentscope-chat/WelcomeCenterLayout";
@@ -1830,6 +1831,24 @@ export default function ChatPage() {
         },
         requestBody.session_id,
       );
+      if (backendChatId && userText && !planModeEnabled) {
+        try {
+          const activeGoal = await chatApi.getRecentGoal(backendChatId);
+          if (
+            activeGoal &&
+            !["COMPLETE", "CANCELLED"].includes(activeGoal.state)
+          ) {
+            await chatApi.enqueueGoalSteering(
+              activeGoal.goal_id,
+              backendChatId,
+              userText,
+            );
+            Object.assign(requestBody, { goal_id: activeGoal.goal_id });
+          }
+        } catch (error) {
+          console.warn("Unable to route input to active Goal:", error);
+        }
+      }
       if (backendChatId) {
         if (userText) {
           sessionApi.setLastUserMessage(backendChatId, userText);
@@ -2416,6 +2435,7 @@ export default function ChatPage() {
                   chatId={feedbackChatId}
                   resetKey={subAgentMonitorResetKey}
                 />
+                <GoalMonitor chatId={feedbackChatId} />
                 {!isContentOnly && (
                   <DragUploadOverlay
                     visible={isDragging}

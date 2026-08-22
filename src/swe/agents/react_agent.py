@@ -172,6 +172,13 @@ _PLAN_MODE_ALLOWED_TOOLS = frozenset(
         "submit_proposed_plan",
     },
 )
+_GOAL_TURN_INSTRUCTION = """[Goal Mode]
+You are advancing a confirmed Goal Contract. Perform one focused Main Agent turn,
+then you MUST call `submit_goal_turn_resolution` exactly once. Use `continue`
+when more work can proceed now, `wait` only with explicit wake conditions,
+`propose_completion` only when every completion condition is ready for
+independent verification, and `blocked` only when no effective action remains.
+Do not claim final completion in prose; the Goal Runtime verifies it."""
 
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
@@ -200,6 +207,12 @@ def _add_main_agent_tools(
     workspace_dir: Path | None,
     plan_mode_enabled: bool,
 ) -> None:
+    if request_context.get("goal_id"):
+        from ..app.goals.turn_tool import create_submit_goal_turn_resolution_tool
+
+        tool_functions["submit_goal_turn_resolution"] = (
+            create_submit_goal_turn_resolution_tool(request_context)
+        )
     if not _plan_interaction_tools_enabled(plan_mode_enabled):
         return
     tool_functions.update(
@@ -1276,6 +1289,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             self._system_prompt_file_snapshot(),
             request_context.get("agent_id"),
             bool(request_context.get("plan_mode_enabled")),
+            request_context.get("goal_id"),
             self._heartbeat_enabled_for_prompt(),
             getattr(self, "_env_context", None),
             tuple(sorted(resolved_model_slot.items())),
@@ -1333,6 +1347,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             sys_prompt = (
                 sys_prompt + "\n\n" + _PLAN_MODE_CLARIFICATION_INSTRUCTION
             )
+        elif self._request_context.get("goal_id"):
+            sys_prompt = sys_prompt + "\n\n" + _GOAL_TURN_INSTRUCTION
         if not plan_mode_enabled and is_chat_task_progress_enabled(
             get_current_source_system_config(),
         ):

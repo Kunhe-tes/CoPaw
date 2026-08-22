@@ -449,6 +449,28 @@ async def test_submit_proposed_plan_persists_before_review_card(
 
 
 @pytest.mark.asyncio
+async def test_submit_proposed_plan_can_emit_goal_ready_contract_draft(
+    tmp_path: Path,
+) -> None:
+    tool = create_submit_proposed_plan_tool(request_context={}, workspace_dir=tmp_path)
+    response = await tool(
+        objective="Ship Goal Runtime",
+        completion_criteria=[{
+            "requirement": "API exists",
+            "observable_assertion": "route is registered",
+            "verification_method": "inspect OpenAPI",
+            "expected_outcome": "route is listed",
+        }],
+        constraints={"must_preserve": [], "must_not_do": ["change auth"]},
+        autonomy_boundary="No deployment",
+    )
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["card_type"] == "goal_proposal"
+    assert card["objective"] == "Ship Goal Runtime"
+
+
+@pytest.mark.asyncio
 async def test_submit_proposed_plan_omits_removed_fields_from_signature(
     tmp_path: Path,
 ) -> None:

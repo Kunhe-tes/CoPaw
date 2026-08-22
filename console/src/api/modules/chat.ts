@@ -15,6 +15,7 @@ import type {
   Session,
   SubAgentRunCancelResponse,
   SubAgentRunSnapshot,
+  GoalSnapshot,
 } from "../types";
 
 /** Response from POST /console/upload. url = filename only; agent_id from header. */
@@ -381,6 +382,38 @@ export const chatApi = {
         body: JSON.stringify({ chat_id: chatId }),
       },
     ),
+
+  getRecentGoal: (chatId: string) =>
+    request<GoalSnapshot | null>(
+      `/goals/recent?chat_id=${encodeURIComponent(chatId)}`,
+    ),
+
+  pauseGoal: (goalId: string, chatId: string) =>
+    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/pause?chat_id=${encodeURIComponent(chatId)}`, {
+      method: "POST",
+    }),
+
+  resumeGoal: (goalId: string, chatId: string) =>
+    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/resume?chat_id=${encodeURIComponent(chatId)}`, {
+      method: "POST",
+    }),
+
+  cancelGoal: (goalId: string, chatId: string) =>
+    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/cancel?chat_id=${encodeURIComponent(chatId)}`, {
+      method: "POST",
+    }),
+
+  editGoal: (goalId: string, chatId: string, contract: GoalSnapshot["contract"]) =>
+    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/edit?chat_id=${encodeURIComponent(chatId)}`, {
+      method: "POST",
+      body: JSON.stringify({ contract }),
+    }),
+
+  enqueueGoalSteering: (goalId: string, chatId: string, content: string) =>
+    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/steering?chat_id=${encodeURIComponent(chatId)}`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
 };
 
 export const sessionApi = {

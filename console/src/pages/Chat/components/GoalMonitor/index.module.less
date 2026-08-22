@@ -1,0 +1,12 @@
+.anchor { position: absolute; right: 16px; bottom: 16px; z-index: 3; }
+.trigger, .header { border: 0; background: #fff; color: #1f1f1f; cursor: pointer; }
+.trigger { width: 36px; height: 36px; border-radius: 18px; box-shadow: 0 2px 8px rgb(0 0 0 / 15%); }
+.panel { width: min(320px, calc(100vw - 32px)); overflow: hidden; border-radius: 8px; background: #fff; box-shadow: 0 4px 16px rgb(0 0 0 / 16%); }
+.header { display: flex; align-items: center; width: 100%; padding: 11px 12px; text-align: left; border-bottom: 1px solid #f0f0f0; }
+.title { margin-left: 8px; font-weight: 600; }.status { margin-left: auto; color: #3769fc; font-size: 12px; }
+.activityDots { display: inline-flex; gap: 3px; }.activityDots i { width: 4px; height: 4px; border-radius: 50%; background: #3769fc; }
+.content { display: grid; gap: 8px; padding: 12px; }.objective { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.progress, .meta, .reason { color: #666; font-size: 12px; }.reason { margin: 0; }.controls { display: flex; gap: 8px; }
+.criteria { display: grid; gap: 4px; padding: 0; margin: 0; list-style: none; font-size: 12px; }.criteria li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }.criteria span { margin-right: 6px; color: #888; }.criteria li[data-verified="true"] span { color: #389e0d; }
+.controls button { border: 0; background: transparent; color: #3769fc; cursor: pointer; }.controls button:disabled { color: #aaa; cursor: not-allowed; }
+.editor { display: grid; gap: 6px; padding-top: 4px; }.editor input, .editor textarea { min-width: 0; border: 1px solid #d9d9d9; border-radius: 4px; padding: 6px 8px; }.editor textarea { min-height: 56px; resize: vertical; }.editor button { width: fit-content; border: 0; color: #3769fc; background: transparent; cursor: pointer; }

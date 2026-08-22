@@ -1367,6 +1367,60 @@ def _build_stop_incomplete_msg(reason: str) -> Msg:
     )
 
 
+def _build_goal_follow_up_msg(
+    next_focus: str | None,
+    steering: list[str] | None = None,
+    contract_context: str | None = None,
+) -> Msg:
+    """Continue an active Goal without creating a visible user request."""
+    steering_text = "\n".join(f"- {item}" for item in steering or [])
+    return _build_internal_follow_up_msg(
+        "Continue the confirmed Goal Contract. "
+        + (f"\n{contract_context}" if contract_context else "")
+        + "\n"
+        f"Next focus: {(next_focus or 'advance remaining criteria').strip()}"
+        + (f"\nNew user steering:\n{steering_text}" if steering_text else ""),
+    )
+
+
+def _build_goal_contract_context(goal: Any) -> str:
+    """Keep internal continuations anchored to the durable Contract revision."""
+    remaining = [
+        f"- {item.criterion_id}: {item.criterion.requirement}"
+        for item in goal.criteria
+        if not item.verified
+    ]
+    return (
+        f"Contract revision: {goal.revision}\n"
+        f"Objective: {goal.contract.objective}\n"
+        "Unverified completion criteria:\n"
+        + ("\n".join(remaining) if remaining else "- none")
+    )
+
+
+def _build_goal_finalization_msg(state: str, reason: str | None) -> Msg:
+    """Emit the only terminal chat event for a Goal request."""
+    messages = {
+        "COMPLETE": "Goal verification passed. The confirmed Goal is complete.",
+        "PAUSED": "Goal is paused. You can resume it when ready.",
+        "BLOCKED": "Goal is blocked and needs your direction.",
+        "LIMITED": "Goal paused after reaching its Main Agent turn budget. Resume to start a new budget cycle.",
+        "CANCELLED": "Goal was cancelled.",
+        "WAITING": "Goal is waiting for its declared wake condition.",
+        "INTERRUPTED": "Goal execution was interrupted. Resume to continue.",
+    }
+    content = messages.get(state, "Goal execution ended.")
+    if reason:
+        content = f"{content}\n\nReason: {reason}"
+    return Msg(name="Friday", role="assistant", content=content)
+
+
+def _request_goal_id(request: AgentRequest) -> str | None:
+    meta = getattr(request, "channel_meta", None) or {}
+    value = meta.get("goal_id") if isinstance(meta, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
 def _normalize_session_skill_snapshot(
     snapshot: dict[str, Any] | None,
 ) -> dict[str, dict[str, Any]]:
@@ -3099,6 +3153,14 @@ class AgentRunner(Runner):
             "_hook_overlay_model": hook_overlay,
         }
         channel_meta = getattr(request, "channel_meta", None) or {}
+        goal_id = channel_meta.get("goal_id")
+        if isinstance(goal_id, str) and goal_id:
+            request_context["goal_id"] = goal_id
+            from ..goals.verification import ContractVerificationAdapter
+
+            request_context["goal_verifier"] = ContractVerificationAdapter(
+                getattr(self, "working_dir", None),
+            )
         plan_mode_enabled = bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
         request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
         request_context[_PLAN_REQUEST_MODE_KEY] = (
@@ -3979,16 +4041,90 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ):
         """执行 agent turn 与统一 Stop completion gate 生命周期。"""
+        goal_id = _request_goal_id(request)
         while True:
+            if goal_id:
+                from ..goals.registry import get_goal_service
+
+                service = get_goal_service()
+                if service is None:
+                    logger.warning("Goal service is unavailable: %s", goal_id)
+                    return
+                try:
+                    await service.begin_turn(goal_id)
+                except ValueError:
+                    logger.warning("Goal cannot start a turn: %s", goal_id)
+                    return
+                getattr(runtime.agent, "_request_context", {}).pop(
+                    "goal_turn_resolution", None,
+                )
             outcome.stop_hook_active = False
             async for msg, last in self._stream_agent_turns(
                 runtime=runtime,
                 plan=plan,
                 outcome=outcome,
             ):
-                yield msg, last
+                yield msg, False if goal_id else last
 
             if outcome.pre_tool_terminal_stop:
+                if goal_id:
+                    await service.abandon_turn(goal_id, "Goal turn stopped before settlement")
+                    goal = await service.get(goal_id)
+                    yield _build_goal_finalization_msg(
+                        goal.state.value, goal.state_reason,
+                    ), True
+                return
+
+            if goal_id:
+                from ..goals.registry import get_goal_service
+                from ..goals.runtime import GoalRuntime, GoalTurnResolution
+
+                service = get_goal_service()
+                raw = getattr(runtime.agent, "_request_context", {}).get(
+                    "goal_turn_resolution",
+                )
+                if service is None or not isinstance(raw, dict):
+                    logger.warning("Goal turn has no valid resolution: %s", goal_id)
+                    if service is not None:
+                        await service.abandon_turn(
+                            goal_id, "Main Agent did not submit a Goal turn resolution",
+                        )
+                        goal = await service.get(goal_id)
+                        yield _build_goal_finalization_msg(
+                            goal.state.value, goal.state_reason,
+                        ), True
+                    return
+                try:
+                    _, steering = await service.consume_steering(goal_id)
+                    resolution = GoalTurnResolution.model_validate(raw)
+                    verifier = getattr(runtime.agent, "_request_context", {}).get(
+                        "goal_verifier",
+                    )
+                    if not callable(verifier):
+                        raise ValueError("Goal verification adapter is unavailable")
+                    settled = await GoalRuntime(service, verifier=verifier).settle(
+                        goal_id, resolution,
+                    )
+                except (TypeError, ValueError):
+                    logger.warning("Goal turn settlement failed", exc_info=True)
+                    await service.abandon_turn(goal_id, "Goal turn settlement failed")
+                    goal = await service.get(goal_id)
+                    yield _build_goal_finalization_msg(
+                        goal.state.value, goal.state_reason,
+                    ), True
+                    return
+                if settled.state.value == "ACTIVE" and resolution.decision == "continue":
+                    plan.turn_msgs = [
+                        _build_goal_follow_up_msg(
+                            settled.next_focus,
+                            steering,
+                            _build_goal_contract_context(settled),
+                        ),
+                    ]
+                    continue
+                yield _build_goal_finalization_msg(
+                    settled.state.value, settled.state_reason,
+                ), True
                 return
 
             stop_result = await self._emit_stop_hook_if_needed(

@@ -15,6 +15,7 @@ from ...app.plans import (
     PlanReviewCard,
     PlanService,
     ProposedPlanCreate,
+    GoalProposal,
 )
 from ...constant import WORKING_DIR
 
@@ -402,13 +403,34 @@ def create_submit_proposed_plan_tool(
     """创建带请求上下文的 Proposed Plan 提交工具。"""
 
     async def submit_proposed_plan(
-        title: str,
-        summary: str,
-        steps: _TextListInput,
-        risks: _TextListInput,
-        verification: _TextListInput,
+        title: str | None = None,
+        summary: str | None = None,
+        steps: _TextListInput = [],
+        risks: _TextListInput = [],
+        verification: _TextListInput = [],
+        objective: str | None = None,
+        completion_criteria: list[dict[str, str]] | str | None = None,
+        constraints: dict[str, list[str]] | str | None = None,
+        autonomy_boundary: str | None = None,
     ) -> ToolResponse:
-        """在没有未决问题时持久化 Proposed Plan，并返回审核卡片元数据。"""
+        """Submit either a legacy plan or a Goal-ready Contract Draft."""
+        if objective is not None:
+            criteria = _coerce_json_array(completion_criteria, "completion_criteria")
+            parsed_constraints = constraints
+            if isinstance(parsed_constraints, str):
+                parsed_constraints = json.loads(parsed_constraints)
+            proposal = GoalProposal(
+                objective=objective,
+                completion_criteria=criteria,
+                constraints=parsed_constraints or {},
+                autonomy_boundary=autonomy_boundary or "",
+            )
+            return ToolResponse(
+                content=[TextBlock(type="text", text="Goal Contract Draft submitted for review.")],
+                metadata={_PLAN_CARD_METADATA_KEY: proposal.model_dump(mode="json")},
+            )
+        if title is None or summary is None or not steps or not risks or not verification:
+            raise ValueError("legacy plan fields are required when objective is absent")
         payload = ProposedPlanCreate(
             title=title,
             summary=summary,
