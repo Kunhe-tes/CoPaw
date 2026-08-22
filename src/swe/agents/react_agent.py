@@ -1497,122 +1497,192 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 Options: "override", "skip", "raise", "rename"
                 (default: "skip")
         """
-        for i, client in enumerate(self._mcp_clients):
+        i = 0
+        while i < len(self._mcp_clients):
+            client = self._mcp_clients[i]
             if isinstance(client, LazyMCPClient):
-                await self._register_lazy_mcp_client(
-                    client,
+                lazy_clients, i = self._collect_lazy_mcp_clients(i)
+                await self._register_lazy_mcp_clients(
+                    lazy_clients,
                     namesake_strategy=namesake_strategy,
                 )
                 continue
-            client_name = getattr(client, "name", repr(client))
-            configured_tools = getattr(
-                self._agent_config.tools,
-                "builtin_tools",
-                {},
+            i = await self._register_stateful_mcp_client(
+                i,
+                namesake_strategy=namesake_strategy,
             )
-            source_tool_names = {
-                version.name
-                for version in self._source_tool_versions
-                if configured_tools.get(version.name, None) is None
-                or configured_tools[version.name].enabled
-            }
-            collisions: list[str] = []
-            try:
-                client_tools = await client.list_tools()
-                if hasattr(client_tools, "tools"):
-                    client_tools = client_tools.tools
-                collisions = sorted(
-                    source_tool_names
-                    & {
-                        str(getattr(tool, "name", "")) for tool in client_tools
-                    },
+
+    def _collect_lazy_mcp_clients(
+        self,
+        start_index: int,
+    ) -> tuple[list[LazyMCPClient], int]:
+        clients: list[LazyMCPClient] = []
+        index = start_index
+        while index < len(self._mcp_clients) and isinstance(
+            self._mcp_clients[index],
+            LazyMCPClient,
+        ):
+            clients.append(self._mcp_clients[index])
+            index += 1
+        return clients, index
+
+    async def _register_stateful_mcp_client(
+        self,
+        client_index: int,
+        *,
+        namesake_strategy: NamesakeStrategy,
+    ) -> int:
+        client = self._mcp_clients[client_index]
+        client_name = getattr(client, "name", repr(client))
+        configured_tools = getattr(
+            self._agent_config.tools,
+            "builtin_tools",
+            {},
+        )
+        source_tool_names = {
+            version.name
+            for version in self._source_tool_versions
+            if configured_tools.get(version.name, None) is None
+            or configured_tools[version.name].enabled
+        }
+        collisions: list[str] = []
+        try:
+            client_tools = await client.list_tools()
+            if hasattr(client_tools, "tools"):
+                client_tools = client_tools.tools
+            collisions = sorted(
+                source_tool_names
+                & {str(getattr(tool, "name", "")) for tool in client_tools},
+            )
+            if not collisions:
+                # Set progress callback so MCP notifications reset the
+                # watchdog.
+                if hasattr(client, "on_progress_callback"):
+                    client.on_progress_callback = self._reset_watchdog
+                existing_tool_names = set(self.toolkit.tools)
+                await self.toolkit.register_mcp_client(
+                    client,
+                    namesake_strategy=namesake_strategy,
                 )
-                if not collisions:
-                    # Set progress callback so MCP notifications reset the
-                    # watchdog.
-                    if hasattr(client, "on_progress_callback"):
-                        client.on_progress_callback = self._reset_watchdog
+                # Wire watchdog callback into MCPToolFunction instances
+                # registered by this client.
+                self._wire_mcp_progress_callbacks(client)
+                self._normalize_registered_tool_functions(
+                    self.toolkit,
+                    sorted(set(self.toolkit.tools) - existing_tool_names),
+                )
+        except (ClosedResourceError, asyncio.CancelledError) as error:
+            if self._should_propagate_cancelled_error(error):
+                raise
+            logger.warning(
+                "MCP client '%s' session interrupted while listing tools; "
+                "trying recovery",
+                client_name,
+            )
+            recovered_client = await self._recover_mcp_client(client)
+            if recovered_client is not None:
+                self._mcp_clients[client_index] = recovered_client
+                if hasattr(recovered_client, "on_progress_callback"):
+                    recovered_client.on_progress_callback = (
+                        self._reset_watchdog
+                    )
+                try:
                     existing_tool_names = set(self.toolkit.tools)
                     await self.toolkit.register_mcp_client(
-                        client,
+                        recovered_client,
                         namesake_strategy=namesake_strategy,
                     )
-                    # Wire watchdog callback into MCPToolFunction instances
-                    # registered by this client.
-                    self._wire_mcp_progress_callbacks(client)
+                    self._wire_mcp_progress_callbacks(recovered_client)
                     self._normalize_registered_tool_functions(
                         self.toolkit,
                         sorted(set(self.toolkit.tools) - existing_tool_names),
                     )
-            except (ClosedResourceError, asyncio.CancelledError) as error:
-                if self._should_propagate_cancelled_error(error):
-                    raise
-                logger.warning(
-                    "MCP client '%s' session interrupted while listing tools; "
-                    "trying recovery",
-                    client_name,
-                )
-                recovered_client = await self._recover_mcp_client(client)
-                if recovered_client is not None:
-                    self._mcp_clients[i] = recovered_client
-                    if hasattr(recovered_client, "on_progress_callback"):
-                        recovered_client.on_progress_callback = (
-                            self._reset_watchdog
-                        )
-                    try:
-                        existing_tool_names = set(self.toolkit.tools)
-                        await self.toolkit.register_mcp_client(
-                            recovered_client,
-                            namesake_strategy=namesake_strategy,
-                        )
-                        self._wire_mcp_progress_callbacks(recovered_client)
-                        self._normalize_registered_tool_functions(
-                            self.toolkit,
-                            sorted(
-                                set(self.toolkit.tools) - existing_tool_names,
-                            ),
-                        )
-                        continue
-                    except asyncio.CancelledError as recover_error:
-                        if self._should_propagate_cancelled_error(
-                            recover_error,
-                        ):
-                            raise
-                        logger.warning(
-                            "MCP client '%s' registration cancelled after "
-                            "recovery, skipping",
-                            client_name,
-                        )
-                    except Exception as e:  # pylint: disable=broad-except
-                        logger.warning(
-                            "MCP client '%s' still unavailable after "
-                            "recovery, skipping: %s",
-                            client_name,
-                            e,
-                        )
-                else:
+                    return client_index + 1
+                except asyncio.CancelledError as recover_error:
+                    if self._should_propagate_cancelled_error(recover_error):
+                        raise
                     logger.warning(
-                        "MCP client '%s' recovery failed, skipping",
+                        "MCP client '%s' registration cancelled after "
+                        "recovery, skipping",
                         client_name,
                     )
-            except Exception as e:  # pylint: disable=broad-except
+                except Exception as e:  # pylint: disable=broad-except
+                    logger.warning(
+                        "MCP client '%s' still unavailable after "
+                        "recovery, skipping: %s",
+                        client_name,
+                        e,
+                    )
+            else:
                 logger.warning(
-                    "Failed to register MCP client '%s', skipping: %s",
+                    "MCP client '%s' recovery failed, skipping",
                     client_name,
-                    e,
-                    exc_info=True,
                 )
-            if collisions:
-                raise RuntimeError(
-                    "MCP tool collides with an active source tool: "
-                    + ", ".join(collisions),
-                )
+        except Exception as e:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to register MCP client '%s', skipping: %s",
+                client_name,
+                e,
+                exc_info=True,
+            )
+        if collisions:
+            raise RuntimeError(
+                "MCP tool collides with an active source tool: "
+                + ", ".join(collisions),
+            )
+        return client_index + 1
+
+    async def _register_lazy_mcp_clients(
+        self,
+        clients: list[LazyMCPClient],
+        *,
+        namesake_strategy: NamesakeStrategy,
+    ) -> None:
+        """Discover lazy MCP schemas concurrently, then register in order."""
+        discovered_tools = await asyncio.gather(
+            *(
+                self._discover_lazy_mcp_client_tools(client)
+                for client in clients
+            ),
+        )
+        for client, client_tools in zip(clients, discovered_tools):
+            if client_tools is None:
+                continue
+            await self._register_lazy_mcp_client(
+                client,
+                namesake_strategy=namesake_strategy,
+                client_tools=client_tools,
+            )
+
+    async def _discover_lazy_mcp_client_tools(
+        self,
+        client: LazyMCPClient,
+    ) -> list[Any] | None:
+        try:
+            return await client.list_tools()
+        except asyncio.CancelledError as error:
+            if self._should_propagate_cancelled_error(error):
+                raise
+            logger.warning(
+                "Lazy MCP client '%s' discovery cancelled, skipping",
+                client.name,
+            )
+            return None
+        except Exception as error:  # pylint: disable=broad-except
+            logger.warning(
+                "Failed to discover lazy MCP client '%s', skipping: %s",
+                client.name,
+                error,
+                exc_info=True,
+            )
+            return None
 
     async def _register_lazy_mcp_client(
         self,
         client: LazyMCPClient,
         *,
         namesake_strategy: NamesakeStrategy,
+        client_tools: list[Any] | None = None,
     ) -> None:
         """Register cached schemas whose calls create short-lived clients."""
         configured_tools = getattr(
@@ -1626,24 +1696,10 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             if configured_tools.get(version.name, None) is None
             or configured_tools[version.name].enabled
         }
-        try:
-            client_tools = await client.list_tools()
-        except asyncio.CancelledError as error:
-            if self._should_propagate_cancelled_error(error):
-                raise
-            logger.warning(
-                "Lazy MCP client '%s' discovery cancelled, skipping",
-                client.name,
-            )
-            return
-        except Exception as error:  # pylint: disable=broad-except
-            logger.warning(
-                "Failed to discover lazy MCP client '%s', skipping: %s",
-                client.name,
-                error,
-                exc_info=True,
-            )
-            return
+        if client_tools is None:
+            client_tools = await self._discover_lazy_mcp_client_tools(client)
+            if client_tools is None:
+                return
 
         collisions = sorted(
             source_tool_names

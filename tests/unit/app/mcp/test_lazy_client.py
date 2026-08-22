@@ -214,6 +214,77 @@ async def test_agent_registers_cached_lazy_tool_without_connecting_until_call():
 
 
 @pytest.mark.asyncio
+async def test_agent_discovers_lazy_mcp_clients_concurrently_in_order():
+    first_started = asyncio.Event()
+    second_started = asyncio.Event()
+    allow_discovery = asyncio.Event()
+
+    class SlowLazyClient(LazyMCPClient):
+        def __init__(self, name: str, tool_name: str) -> None:
+            super().__init__(
+                name=name,
+                discovery_key=f"test:{name}",
+                create_client=AsyncMock(),
+                discovery_cache=MCPToolDiscoveryCache(),
+            )
+            self.tool_name = tool_name
+
+        async def list_tools(self):
+            if self.name == "first-mcp":
+                first_started.set()
+                await second_started.wait()
+            else:
+                second_started.set()
+            await allow_discovery.wait()
+            return [_tool(self.tool_name)]
+
+        def get_tool_function(self, tool):
+            async def _call(**_kwargs):
+                yield SimpleNamespace(content=[])
+
+            _call.__name__ = tool.name
+            return _call
+
+    class Toolkit:
+        def __init__(self):
+            self.tools: dict[str, SimpleNamespace] = {}
+            self.registered_tool_names: list[str] = []
+
+        def register_tool_function(self, tool_func, **kwargs):
+            tool_name = kwargs["func_name"]
+            self.registered_tool_names.append(tool_name)
+            self.tools[tool_name] = SimpleNamespace(
+                original_func=tool_func,
+                mcp_name=None,
+            )
+
+    first_client = SlowLazyClient("first-mcp", "first_tool")
+    second_client = SlowLazyClient("second-mcp", "second_tool")
+    agent = object.__new__(SWEAgent)
+    agent._mcp_clients = [first_client, second_client]
+    agent._source_tool_versions = ()
+    agent._agent_config = SimpleNamespace(
+        tools=SimpleNamespace(builtin_tools={}),
+    )
+    agent.toolkit = Toolkit()
+    agent._reset_watchdog = lambda: None
+
+    register_task = asyncio.create_task(agent.register_mcp_clients())
+    await asyncio.wait_for(first_started.wait(), timeout=0.5)
+    await asyncio.wait_for(second_started.wait(), timeout=0.5)
+    allow_discovery.set()
+
+    await asyncio.wait_for(register_task, timeout=1)
+
+    assert agent.toolkit.registered_tool_names == [
+        "first_tool",
+        "second_tool",
+    ]
+    assert agent.toolkit.tools["first_tool"].mcp_name == "first-mcp"
+    assert agent.toolkit.tools["second_tool"].mcp_name == "second-mcp"
+
+
+@pytest.mark.asyncio
 async def test_lazy_clients_share_one_inflight_discovery_for_the_same_scope():
     cache = MCPToolDiscoveryCache(ttl_seconds=60)
     discovery_started = asyncio.Event()
@@ -247,12 +318,14 @@ async def test_discovery_cache_evicts_oldest_entry_at_capacity():
     discover_first = AsyncMock(return_value=[_tool("first")])
 
     assert [
-        tool.name for tool in await cache.get_or_discover("second", AsyncMock())
+        tool.name
+        for tool in await cache.get_or_discover("second", AsyncMock())
     ] == [
         "second",
     ]
     assert [
-        tool.name for tool in await cache.get_or_discover("first", discover_first)
+        tool.name
+        for tool in await cache.get_or_discover("first", discover_first)
     ] == ["first"]
     discover_first.assert_awaited_once()
 
