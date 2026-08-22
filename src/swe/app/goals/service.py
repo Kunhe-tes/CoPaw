@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Protocol
 
@@ -94,6 +95,7 @@ class GoalService:
             raise ValueError("turn_budget must be positive")
         self._store = store
         self._turn_budget = turn_budget
+        self._create_locks: dict[str, asyncio.Lock] = {}
 
     async def create_goal(
         self,
@@ -101,22 +103,27 @@ class GoalService:
         scope: GoalScope,
         contract: GoalContract,
     ) -> GoalSnapshot:
-        current = await self._store.latest_for_chat(scope.chat_id)
-        if current is not None and not current.is_terminal:
-            raise GoalConflictError("chat already has a non-terminal goal")
-        snapshot = GoalSnapshot(
-            scope=scope,
-            contract=contract,
-            criteria=[
-                GoalCriterionStatus(
-                    criterion_id=f"criterion-{index}",
-                    criterion=criterion,
-                )
-                for index, criterion in enumerate(contract.completion_criteria, 1)
-            ],
-            turn_budget=self._turn_budget,
-        )
-        return await self._store.create(snapshot)
+        lock = self._create_locks.setdefault(scope.chat_id, asyncio.Lock())
+        async with lock:
+            current = await self._store.latest_for_chat(scope.chat_id)
+            if current is not None and not current.is_terminal:
+                raise GoalConflictError("chat already has a non-terminal goal")
+            snapshot = GoalSnapshot(
+                scope=scope,
+                contract=contract,
+                criteria=[
+                    GoalCriterionStatus(
+                        criterion_id=f"criterion-{index}",
+                        criterion=criterion,
+                    )
+                    for index, criterion in enumerate(
+                        contract.completion_criteria,
+                        1,
+                    )
+                ],
+                turn_budget=self._turn_budget,
+            )
+            return await self._store.create(snapshot)
 
     async def get(self, goal_id: str) -> GoalSnapshot:
         return await self._require_goal(goal_id)
@@ -320,6 +327,7 @@ class GoalService:
         )
         if criterion is None:
             raise ValueError("criterion not found")
+        criterion.verification_request_id = None
         if evidence_ref:
             criterion.evidence_refs.append(evidence_ref)
         if passed:
@@ -331,6 +339,31 @@ class GoalService:
             if criterion.consecutive_failures >= 3:
                 goal.state = GoalState.BLOCKED
                 goal.state_reason = "criterion verification failed three times"
+        return await self._save(goal)
+
+    async def wait_for_verification_approval(
+        self,
+        goal_id: str,
+        criterion_id: str,
+        *,
+        request_id: str,
+        reason: str,
+        expected_revision: int | None = None,
+    ) -> GoalSnapshot:
+        """Persist a verification approval wait without recording a failure."""
+        goal = await self._require_goal(goal_id)
+        if expected_revision is not None and goal.revision != expected_revision:
+            return goal
+        criterion = next(
+            (item for item in goal.criteria if item.criterion_id == criterion_id),
+            None,
+        )
+        if criterion is None:
+            raise ValueError("criterion not found")
+        criterion.verification_request_id = request_id
+        goal.state = GoalState.WAITING
+        goal.state_reason = reason
+        goal.next_focus = None
         return await self._save(goal)
 
     def _apply_pending_control(

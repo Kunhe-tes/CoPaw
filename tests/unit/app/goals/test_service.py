@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from swe.app.goals.models import (
@@ -57,6 +59,28 @@ async def test_create_goal_rejects_a_second_non_terminal_goal_for_chat() -> None
 
 
 @pytest.mark.asyncio
+async def test_concurrent_goal_creation_keeps_one_non_terminal_goal_per_chat() -> None:
+    class YieldingStore(InMemoryGoalStore):
+        async def latest_for_chat(self, chat_id: str):
+            await asyncio.sleep(0)
+            return await super().latest_for_chat(chat_id)
+
+        async def create(self, snapshot):
+            await asyncio.sleep(0)
+            return await super().create(snapshot)
+
+    service = GoalService(YieldingStore())
+    results = await asyncio.gather(
+        service.create_goal(scope=scope(), contract=contract()),
+        service.create_goal(scope=scope(), contract=contract("Other")),
+        return_exceptions=True,
+    )
+
+    assert sum(not isinstance(item, Exception) for item in results) == 1
+    assert sum(isinstance(item, GoalConflictError) for item in results) == 1
+
+
+@pytest.mark.asyncio
 async def test_settlement_applies_cancel_before_edit_and_pause() -> None:
     service = GoalService(InMemoryGoalStore(), turn_budget=2)
     goal = await service.create_goal(scope=scope(), contract=contract())
@@ -81,7 +105,9 @@ async def test_settlement_applies_cancel_before_edit_and_pause() -> None:
 
 
 @pytest.mark.asyncio
-async def test_edit_activates_new_revision_and_clears_evidence_without_resetting_budget() -> None:
+async def test_edit_activates_new_revision_and_clears_evidence_without_resetting_budget() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore(), turn_budget=3)
     goal = await service.create_goal(scope=scope(), contract=contract())
     await service.record_verification(goal.goal_id, "criterion-1", passed=True)
@@ -145,10 +171,14 @@ async def test_three_consecutive_failures_for_one_criterion_blocks_goal() -> Non
 
 
 @pytest.mark.asyncio
-async def test_edit_without_running_turn_applies_immediately_and_wakes_waiting_goal() -> None:
+async def test_edit_without_running_turn_applies_immediately_and_wakes_waiting_goal() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
-    waiting = await service.settle_turn(goal.goal_id, decision="wait", next_focus="approval")
+    waiting = await service.settle_turn(
+        goal.goal_id, decision="wait", next_focus="approval"
+    )
 
     edited = await service.request_edit(waiting.goal_id, contract("Edited"))
 

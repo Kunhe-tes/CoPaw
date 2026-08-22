@@ -168,9 +168,6 @@ export default function GoalMonitor({
             <span className={styles.progress}>
               已通过 {passedCount} / {goal.criteria.length} 项条件
             </span>
-            <span className={styles.meta}>
-              执行轮次 {goal.turns_used} / {goal.turn_budget}
-            </span>
             <div
               className={styles.progressTrack}
               role="progressbar"

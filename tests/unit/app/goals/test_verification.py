@@ -1,9 +1,17 @@
 from __future__ import annotations
 
-import pytest
 from types import SimpleNamespace
 
-from swe.app.goals.models import CompletionCriterion
+import pytest
+
+from swe.app.goals.models import (
+    CompletionCriterion,
+    GoalContract,
+    GoalCriterionStatus,
+    GoalScope,
+    GoalSnapshot,
+)
+from swe.app.goals.runtime import VerificationPending
 from swe.app.goals import verification
 from swe.app.goals.verification import ContractVerificationAdapter
 
@@ -44,3 +52,61 @@ async def test_verification_rejects_mutating_or_unexecutable_contract_method() -
     assert "read-only" in (reason or "")
     assert not prose
     assert "must begin" in (prose_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_guarded_verification_creates_an_approval_and_returns_pending(
+    monkeypatch,
+) -> None:
+    checked = criterion("command: pytest -q", "exit 0")
+    snapshot = GoalSnapshot(
+        goal_id="goal-1",
+        scope=GoalScope(
+            tenant_id="tenant",
+            source_id="source",
+            agent_profile_id="agent",
+            chat_id="chat",
+            effective_model="model",
+        ),
+        contract=GoalContract(
+            objective="Verify the change",
+            completion_criteria=[checked],
+            constraints={"must_preserve": [], "must_not_do": []},
+            autonomy_boundary="No deployment",
+        ),
+        criteria=[
+            GoalCriterionStatus(criterion_id="criterion-1", criterion=checked),
+        ],
+        turn_budget=12,
+    )
+    monkeypatch.setattr(
+        verification,
+        "get_guard_engine",
+        lambda: SimpleNamespace(
+            guard=lambda *_args, **_kwargs: SimpleNamespace(is_safe=False),
+        ),
+    )
+    created: list[dict] = []
+
+    class _Approvals:
+        async def create_pending(self, **kwargs):
+            created.append(kwargs)
+            return SimpleNamespace(request_id="approval-1")
+
+        async def get_request_status(self, _request_id):
+            return {"status": "pending"}
+
+    monkeypatch.setattr(verification, "get_approval_service", lambda: _Approvals())
+    results = await ContractVerificationAdapter(
+        None,
+        approval_context={
+            "session_id": "session",
+            "user_id": "user",
+            "channel": "console",
+        },
+    )(snapshot)
+
+    result = results["criterion-1"]
+    assert isinstance(result, VerificationPending)
+    assert result.request_id == "approval-1"
+    assert created[0]["extra"]["goal_id"] == "goal-1"

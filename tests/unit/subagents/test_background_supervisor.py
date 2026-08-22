@@ -17,6 +17,7 @@ from swe.app.subagents import (
     BackgroundSubAgentSupervisor,
     DefinitionMatchMetadata,
     DelegationSpec,
+    InMemoryDefinitionProvider,
     PerRunSubAgentRunStore,
     PermissionPolicy,
     SkillOwnedDefinitionMetadata,
@@ -27,6 +28,7 @@ from swe.app.subagents import (
 from swe.config.config import AgentProfileConfig, MCPClientConfig, MCPConfig
 from swe.app.tenant_context import bind_tenant_context
 from swe.app.subagents.models import AgentOwnedDefinitionMetadata
+from swe.app.subagents.builtins import _builtin
 
 
 @pytest.fixture(autouse=True)
@@ -248,6 +250,33 @@ async def test_wait_lazy_reaps_worker_without_result(tmp_path):
     assert record.worker is not None
     assert record.worker.exit_code == 1
     assert record.errors[-1].code == "worker_exited_without_result"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_run_waits_for_one_worker_without_a_poll_timeout(tmp_path):
+    popen_factory = _FakePopenFactory()
+    definition = _builtin(
+        name="plan-researcher",
+        description="test definition",
+        instruction="test instruction",
+    )
+    supervisor = BackgroundSubAgentSupervisor(
+        popen_factory=popen_factory,
+        registry=AgentRegistry([InMemoryDefinitionProvider([definition])]),
+    )
+    scope = _scope(tmp_path)
+    started = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+    )
+
+    record = await supervisor.wait_for_run(scope, started.run_id)
+
+    assert record is not None
+    assert record.run_id == started.run_id
+    assert record.status == "failed"
 
 
 @pytest.mark.asyncio

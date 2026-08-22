@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import inspect
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+import logging
 from typing import Literal
 
 from pydantic import Field
@@ -11,8 +13,22 @@ from pydantic import Field
 from .models import GoalSnapshot, GoalState, GoalTurnDecision, StrictGoalModel
 from .service import GoalService
 
-VerificationResult = tuple[bool, str | None]
-Verifier = Callable[[GoalSnapshot], dict[str, VerificationResult] | Awaitable[dict[str, VerificationResult]]]
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class VerificationPending:
+    """A verification command is waiting for the existing approval flow."""
+
+    request_id: str
+    reason: str
+
+
+VerificationResult = tuple[bool, str | None] | VerificationPending
+Verifier = Callable[
+    [GoalSnapshot],
+    dict[str, VerificationResult] | Awaitable[dict[str, VerificationResult]],
+]
 
 
 class GoalTurnResolution(StrictGoalModel):
@@ -32,9 +48,10 @@ class GoalTurnResolution(StrictGoalModel):
             raise ValueError("wait requires at least one wake condition")
         if self.decision == "blocked" and not (self.blocker or "").strip():
             raise ValueError("blocked requires a blocker")
-        if self.decision == "propose_completion" and not (
-            self.completion_proposal or ""
-        ).strip():
+        if (
+            self.decision == "propose_completion"
+            and not (self.completion_proposal or "").strip()
+        ):
             raise ValueError("propose_completion requires a completion proposal")
 
 
@@ -51,9 +68,17 @@ class GoalRuntime:
         resolution: GoalTurnResolution,
         *,
         wake_from_steering: bool = False,
+        environment_changed: bool = False,
     ) -> GoalSnapshot:
         """Persist the Main Agent result, then run contract-bound verification."""
         before = await self._service.get(goal_id)
+        logger.info(
+            "goal_turn_resolution goal_id=%s revision=%s decision=%s affected_criteria=%s",
+            goal_id,
+            before.revision,
+            resolution.decision,
+            resolution.affected_criteria,
+        )
         if not before.turn_active:
             before = await self._service.begin_turn(goal_id)
         goal = await self._service.settle_turn(
@@ -72,9 +97,14 @@ class GoalRuntime:
             # verify or complete the newly activated Contract.
             return goal
         if resolution.decision != "propose_completion":
-            if resolution.affected_criteria:
+            affected = set(resolution.affected_criteria)
+            if environment_changed and not affected:
+                affected = {item.criterion_id for item in goal.criteria}
+            if affected:
                 goal = await self._verify(
-                    goal, before.revision, resolution.affected_criteria,
+                    goal,
+                    before.revision,
+                    affected,
                 )
                 if goal.state != GoalState.ACTIVE:
                     return goal
@@ -91,25 +121,72 @@ class GoalRuntime:
             return await self._service.persist(goal)
         return await self._service.enforce_budget_limit(goal_id)
 
+    async def retry_pending_verification(self, goal_id: str) -> GoalSnapshot:
+        """Resume an approval-gated Verification Run without spending a turn."""
+        goal = await self._service.get(goal_id)
+        pending = {
+            item.criterion_id for item in goal.criteria if item.verification_request_id
+        }
+        if goal.state != GoalState.ACTIVE or not pending:
+            return goal
+        goal = await self._verify(goal, goal.revision, pending)
+        if goal.state == GoalState.BLOCKED:
+            return goal
+        if all(criterion.verified for criterion in goal.criteria):
+            goal.state = GoalState.COMPLETE
+            goal.state_reason = None
+            return await self._service.persist(goal)
+        return goal
+
     async def _verify(
         self,
         goal: GoalSnapshot,
         revision: int,
         requested: set[str] | list[str],
     ) -> GoalSnapshot:
-        results = self._verifier(goal)
-        if inspect.isawaitable(results):
-            results = await results
         requested = set(requested)
         criterion_ids = {item.criterion_id for item in goal.criteria}
         if requested and not requested.issubset(criterion_ids):
             raise ValueError("affected_criteria contains an unknown criterion")
+        verification_goal = goal.model_copy(deep=True)
+        verification_goal.criteria = [
+            item
+            for item in verification_goal.criteria
+            if item.criterion_id in requested
+        ]
+        results = self._verifier(verification_goal)
+        if inspect.isawaitable(results):
+            results = await results
         for criterion in goal.criteria:
             if criterion.criterion_id not in requested:
                 continue
-            passed, evidence = results.get(
+            result = results.get(
                 criterion.criterion_id,
                 (False, "verification result missing"),
+            )
+            if isinstance(result, VerificationPending):
+                logger.info(
+                    "goal_verification_pending goal_id=%s revision=%s criterion_id=%s request_id=%s",
+                    goal.goal_id,
+                    revision,
+                    criterion.criterion_id,
+                    result.request_id,
+                )
+                goal = await self._service.wait_for_verification_approval(
+                    goal.goal_id,
+                    criterion.criterion_id,
+                    request_id=result.request_id,
+                    reason=result.reason,
+                    expected_revision=revision,
+                )
+                return goal
+            passed, evidence = result
+            logger.info(
+                "goal_verification_result goal_id=%s revision=%s criterion_id=%s passed=%s",
+                goal.goal_id,
+                revision,
+                criterion.criterion_id,
+                passed,
             )
             goal = await self._service.record_verification(
                 goal.goal_id,

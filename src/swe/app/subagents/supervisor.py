@@ -422,6 +422,23 @@ class BackgroundSubAgentSupervisor:
             timed_out=bool(active_runs and not terminal_runs),
         )
 
+    async def wait_for_run(
+        self,
+        scope: BackgroundSubAgentScope,
+        run_id: str,
+    ) -> BackgroundSubAgentRunRecord | None:
+        """Wait for one managed worker to reach a terminal persisted record."""
+        active = self._active_for_scope(scope)
+        handle = active.get(run_id)
+        if handle is None:
+            return await PerRunSubAgentRunStore(scope.run_store_dir).get(run_id)
+        await asyncio.to_thread(handle.process.wait)
+        terminal_runs = await self._reap_scope(scope)
+        return next(
+            (item for item in terminal_runs if item.run_id == run_id),
+            await PerRunSubAgentRunStore(scope.run_store_dir).get(run_id),
+        )
+
     async def get(
         self,
         scope: BackgroundSubAgentScope,

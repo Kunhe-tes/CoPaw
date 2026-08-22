@@ -18,7 +18,10 @@ from swe.agents.skill_tool_registry import (
     reset_skill_tool_registry,
     SkillToolRegistry,
 )
-from swe.agents.tool_guard_mixin import ToolGuardMixin
+from swe.agents.tool_guard_mixin import (
+    ToolGuardMixin,
+    _goal_tool_may_write_environment,
+)
 from swe.app.subagents import PermissionPolicy
 from swe.security.tool_guard.models import (
     GuardFinding,
@@ -1056,6 +1059,19 @@ def test_plan_mode_shell_policy_rejects_mutating_shell_bypasses(
             {"command": command},
         )
         assert denial is not None, command
+
+
+def test_goal_write_tracker_ignores_readonly_tools_and_marks_mutations() -> None:
+    assert not _goal_tool_may_write_environment("read_file", {})
+    assert not _goal_tool_may_write_environment(
+        "execute_shell_command",
+        {"command": "pytest -q"},
+    )
+    assert _goal_tool_may_write_environment("write_file", {})
+    assert _goal_tool_may_write_environment(
+        "execute_shell_command",
+        {"command": "git commit -m 'goal'"},
+    )
 
 
 @pytest.mark.asyncio

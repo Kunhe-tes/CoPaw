@@ -48,17 +48,15 @@ async def _wake_goal_after_subagent(
 ) -> None:
     """Bridge a terminal Background SubAgent result into Goal wake-up."""
     from ...app.goals.registry import get_goal_service
-    from ...app.goals.wakeup import notify_goal_wake
 
-    while True:
-        snapshot = await supervisor.wait(scope, timeout_ms=1000)
-        if any(item.run_id == run_id for item in snapshot.terminal_runs):
-            service = get_goal_service()
-            if service is not None:
-                await service.wake(goal_id, "Background SubAgent completed")
-            return
-        if not any(item.run_id == run_id for item in snapshot.active_runs):
-            return
+    terminal = await supervisor.wait_for_run(scope, run_id)
+    if terminal is None:
+        return
+    service = get_goal_service()
+    if service is not None:
+        await service.wake(goal_id, "Background SubAgent completed")
+
+
 _START_SUBAGENT_DESCRIPTION = (
     "Start a Background SubAgent Run. Use an exact listed Skill-qualified "
     "name when delegating to a Skill-owned definition."

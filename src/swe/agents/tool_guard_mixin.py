@@ -51,6 +51,19 @@ def _current_task_label() -> str:
     return f"task-{id(task)}"
 
 
+def _goal_tool_may_write_environment(
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> bool:
+    """Conservatively track real Goal-turn writes for contract rechecks."""
+    if tool_name in _GOAL_ENVIRONMENT_WRITE_TOOLS:
+        return True
+    if tool_name != "execute_shell_command":
+        return False
+    command = f" {str(tool_input.get('command') or '').lower()} "
+    return any(token in command for token in _GOAL_MUTATING_SHELL_TOKENS)
+
+
 def _trace_field(trace_ctx: Any, field: str, default: Any = "") -> Any:
     """安全读取 trace 上下文字段，避免诊断日志反向打断 tracing。"""
     if trace_ctx is None:
@@ -129,6 +142,14 @@ _PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
 _SELECTED_EXPERT_EXECUTION_KEY = "selected_expert_execution"
 _SELECTED_EXPERT_RUN_ID_KEY = "selected_expert_run_id"
 _SELECTED_EXPERT_WAIT_TIMEOUT_MS = 3000
+_GOAL_ENVIRONMENT_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+_GOAL_MUTATING_SHELL_TOKENS = frozenset(
+    {
+        "rm ", "mv ", "cp ", "mkdir", "touch", "tee ", ">", ">>",
+        "sed -i", "git commit", "git reset", "git checkout", "git clean",
+        "pip install", "npm install", "pnpm install",
+    },
+)
 
 
 def _subagent_mcp_server_key(
@@ -1712,6 +1733,12 @@ class ToolGuardMixin:
                 tool_name,
                 tool_input,
             )
+            request_context = getattr(self, "_request_context", {}) or {}
+            if (
+                request_context.get("goal_id")
+                and _goal_tool_may_write_environment(tool_name, tool_input)
+            ):
+                request_context["_goal_turn_environment_changed"] = True
             return result
 
         except PreToolUseTerminalStop:

@@ -1386,7 +1386,15 @@ def _build_goal_follow_up_msg(
 def _build_goal_contract_context(goal: Any) -> str:
     """Keep internal continuations anchored to the durable Contract revision."""
     remaining = [
-        f"- {item.criterion_id}: {item.criterion.requirement}"
+        "\n".join(
+            [
+                f"- {item.criterion_id}",
+                f"  Requirement: {item.criterion.requirement}",
+                f"  Observable assertion: {item.criterion.observable_assertion}",
+                f"  Verification method: {item.criterion.verification_method}",
+                f"  Expected outcome: {item.criterion.expected_outcome}",
+            ],
+        )
         for item in goal.criteria
         if not item.verified
     ]
@@ -1400,9 +1408,18 @@ def _build_goal_contract_context(goal: Any) -> str:
         for item in goal.criteria
         if item.consecutive_failures
     ]
+    constraints = goal.contract.constraints
+    must_preserve = getattr(constraints, "must_preserve", [])
+    must_not_do = getattr(constraints, "must_not_do", [])
+    preserve_text = ", ".join(must_preserve) if must_preserve else "none"
+    must_not_text = ", ".join(must_not_do) if must_not_do else "none"
     return (
         f"Contract revision: {goal.revision}\n"
         f"Objective: {goal.contract.objective}\n"
+        "Constraints:\n"
+        f"- must_preserve: {preserve_text}\n"
+        f"- must_not_do: {must_not_text}\n"
+        f"Autonomy boundary: {goal.contract.autonomy_boundary}\n"
         "Verified completion criteria:\n"
         + ("\n".join(verified) if verified else "- none")
         + "\n"
@@ -1434,6 +1451,34 @@ def _request_goal_id(request: AgentRequest) -> str | None:
     meta = getattr(request, "channel_meta", None) or {}
     value = meta.get("goal_id") if isinstance(meta, dict) else None
     return value if isinstance(value, str) and value else None
+
+
+def _goal_matches_runtime_scope(
+    goal: Any,
+    runtime: _QueryRuntime,
+    *,
+    tenant_id: str | None,
+    agent_id: str | None,
+) -> bool:
+    """Reject a Goal id injected from a different Chat or frozen scope."""
+    chat_id = str(getattr(getattr(runtime, "chat", None), "id", "") or "")
+    request_context = getattr(runtime.agent, "_request_context", {}) or {}
+    source_id = str(request_context.get("source_id") or "default")
+    resolved_model = str(
+        (getattr(runtime.agent, "_resolved_model_slot", {}) or {}).get("model")
+        or "",
+    )
+    return (
+        bool(chat_id)
+        and goal.scope.chat_id == chat_id
+        and goal.scope.tenant_id == str(tenant_id or "default")
+        and goal.scope.agent_profile_id == str(agent_id or "default")
+        and goal.scope.source_id == source_id
+        and (
+            not resolved_model
+            or goal.scope.effective_model in {"default", resolved_model}
+        )
+    )
 
 
 def _normalize_session_skill_snapshot(
@@ -3169,17 +3214,26 @@ class AgentRunner(Runner):
         }
         channel_meta = getattr(request, "channel_meta", None) or {}
         goal_id = channel_meta.get("goal_id")
+        goal_mode_enabled = bool(channel_meta.get("goal_mode_enabled", False))
+        goal_request = bool(goal_id) or goal_mode_enabled
         if isinstance(goal_id, str) and goal_id:
             request_context["goal_id"] = goal_id
             from ..goals.verification import ContractVerificationAdapter
 
             request_context["goal_verifier"] = ContractVerificationAdapter(
                 getattr(self, "working_dir", None),
+                approval_context={
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "channel": channel,
+                },
             )
-        request_context["goal_mode_enabled"] = bool(
-            channel_meta.get("goal_mode_enabled", False),
+        request_context["goal_mode_enabled"] = goal_mode_enabled
+        plan_mode_enabled = (
+            False
+            if goal_request
+            else bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
         )
-        plan_mode_enabled = bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
         request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
         request_context[_PLAN_REQUEST_MODE_KEY] = (
             "plan" if plan_mode_enabled else "normal"
@@ -3197,7 +3251,9 @@ class AgentRunner(Runner):
             request_context[_ACCEPTED_PLAN_SOURCE_META_KEY] = (
                 _ACCEPTED_PLAN_SERVER_SOURCE
             )
-        selected_expert_id = _request_selected_expert_id(request)
+        selected_expert_id = (
+            None if goal_request else _request_selected_expert_id(request)
+        )
         if plan_mode_enabled:
             selected_expert_id = None
         if selected_expert_id is not None:
@@ -4069,6 +4125,20 @@ class AgentRunner(Runner):
                     logger.warning("Goal service is unavailable: %s", goal_id)
                     return
                 try:
+                    current_goal = await service.get(goal_id)
+                    if not _goal_matches_runtime_scope(
+                        current_goal,
+                        runtime,
+                        tenant_id=self.tenant_id,
+                        agent_id=self.agent_id,
+                    ):
+                        logger.warning("Goal scope mismatch: %s", goal_id)
+                        yield Msg(
+                            name="Friday",
+                            role="assistant",
+                            content="The requested Goal is not available in this chat.",
+                        ), True
+                        return
                     goal = await service.begin_turn(goal_id)
                 except ValueError:
                     logger.warning("Goal cannot start a turn: %s", goal_id)
@@ -4076,9 +4146,9 @@ class AgentRunner(Runner):
                 getattr(runtime.agent, "_request_context", {})[
                     "goal_contract_context"
                 ] = _build_goal_contract_context(goal)
-                getattr(runtime.agent, "_request_context", {}).pop(
-                    "goal_turn_resolution", None,
-                )
+                request_context = getattr(runtime.agent, "_request_context", {})
+                request_context.pop("goal_turn_resolution", None)
+                request_context.pop("_goal_turn_environment_changed", None)
             outcome.stop_hook_active = False
             async for msg, last in self._stream_agent_turns(
                 runtime=runtime,
@@ -4090,10 +4160,6 @@ class AgentRunner(Runner):
             if outcome.pre_tool_terminal_stop:
                 if goal_id:
                     await service.abandon_turn(goal_id, "Goal turn stopped before settlement")
-                    goal = await service.get(goal_id)
-                    yield _build_goal_finalization_msg(
-                        goal.state.value, goal.state_reason,
-                    ), True
                 return
 
             if goal_id:
@@ -4110,10 +4176,6 @@ class AgentRunner(Runner):
                         await service.abandon_turn(
                             goal_id, "Main Agent did not submit a Goal turn resolution",
                         )
-                        goal = await service.get(goal_id)
-                        yield _build_goal_finalization_msg(
-                            goal.state.value, goal.state_reason,
-                        ), True
                     return
                 try:
                     had_pending_steering = await service.has_pending_steering(
@@ -4129,14 +4191,15 @@ class AgentRunner(Runner):
                         goal_id,
                         resolution,
                         wake_from_steering=had_pending_steering,
+                        environment_changed=bool(
+                            getattr(runtime.agent, "_request_context", {}).get(
+                                "_goal_turn_environment_changed",
+                            ),
+                        ),
                     )
                 except (TypeError, ValueError):
                     logger.warning("Goal turn settlement failed", exc_info=True)
                     await service.abandon_turn(goal_id, "Goal turn settlement failed")
-                    goal = await service.get(goal_id)
-                    yield _build_goal_finalization_msg(
-                        goal.state.value, goal.state_reason,
-                    ), True
                     return
                 if settled.state.value == "ACTIVE":
                     _, steering = await service.consume_steering(goal_id)
@@ -4154,12 +4217,29 @@ class AgentRunner(Runner):
                     await wait_for_goal_wake(goal_id)
                     woken = await service.get(goal_id)
                     if woken.state.value == "ACTIVE":
+                        retried = await GoalRuntime(
+                            service,
+                            verifier=verifier,
+                        ).retry_pending_verification(goal_id)
+                        if retried.state.value == "COMPLETE":
+                            yield _build_goal_finalization_msg(
+                                retried.state.value,
+                                retried.state_reason,
+                            ), True
+                            return
+                        if retried.state.value != "ACTIVE":
+                            settled = retried
+                            yield _build_goal_finalization_msg(
+                                settled.state.value,
+                                settled.state_reason,
+                            ), True
+                            return
                         _, steering = await service.consume_steering(goal_id)
                         plan.turn_msgs = [
                             _build_goal_follow_up_msg(
-                                woken.next_focus,
+                                retried.next_focus,
                                 steering,
-                                _build_goal_contract_context(woken),
+                                _build_goal_contract_context(retried),
                             ),
                         ]
                         continue

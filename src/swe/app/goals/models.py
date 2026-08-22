@@ -105,6 +105,7 @@ class GoalCriterionStatus(StrictGoalModel):
     verified: bool = False
     consecutive_failures: int = Field(default=0, ge=0)
     evidence_refs: list[str] = Field(default_factory=list)
+    verification_request_id: str | None = None
 
 
 class GoalControlCommand(StrictGoalModel):
