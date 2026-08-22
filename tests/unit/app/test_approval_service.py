@@ -18,6 +18,14 @@ def _result():
     return SimpleNamespace(findings=[], findings_count=0)
 
 
+class _GoalWakeService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    async def wake(self, goal_id: str, reason: str) -> None:
+        self.calls.append((goal_id, reason))
+
+
 class _ZhaohuChannel:
     def __init__(self) -> None:
         self.result_calls: list[dict[str, Any]] = []
@@ -35,6 +43,28 @@ class _ChannelManager:
         if name == "zhaohu":
             return self.zhaohu
         return None
+
+
+@pytest.mark.asyncio
+async def test_resolved_goal_approval_wakes_its_goal(monkeypatch) -> None:
+    service = ApprovalService()
+    goal_service = _GoalWakeService()
+    monkeypatch.setattr(
+        "swe.app.goals.registry.get_goal_service",
+        lambda: goal_service,
+    )
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        pending = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="execute_shell_command",
+            result=_result(),
+            extra={"goal_id": "goal-1"},
+        )
+        await service.resolve_request(pending.request_id, ApprovalDecision.APPROVED)
+
+    assert goal_service.calls == [("goal-1", "Tool approval approved")]
 
 
 def _runner_with_zhaohu_workspace() -> tuple[AgentRunner, _ZhaohuChannel]:

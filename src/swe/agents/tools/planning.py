@@ -3,21 +3,16 @@
 
 import json
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ...app.plans import (
-    JsonProposedPlanStore,
     PlanClarificationCard,
-    PlanReviewCard,
-    PlanService,
-    ProposedPlanCreate,
     GoalProposal,
 )
-from ...constant import WORKING_DIR
 
 _PLAN_CARD_METADATA_KEY = "plan_interaction_card"
 _DIRECT_CLARIFICATION_KINDS = frozenset(
@@ -27,11 +22,6 @@ _SUPPORTED_CLARIFICATION_KINDS = _DIRECT_CLARIFICATION_KINDS | {"form"}
 _SUPPORTED_FORM_FIELD_TYPES = frozenset(
     {"single_choice", "multi_choice", "text"},
 )
-_TEXT_LIST_INPUT_DESCRIPTION = "Array of text items or a JSON string array."
-_TextListInput = Annotated[
-    list[str] | str,
-    Field(description=_TEXT_LIST_INPUT_DESCRIPTION),
-]
 _FORM_FIELD_ID_KEYS = ("id", "key", "name", "label", "title")
 _FORM_FIELD_LABEL_KEYS = ("label", "title", "name", "key", "id")
 _FORM_FIELD_HINT_KEYS = frozenset(
@@ -403,64 +393,31 @@ def create_submit_proposed_plan_tool(
     """创建带请求上下文的 Proposed Plan 提交工具。"""
 
     async def submit_proposed_plan(
-        title: str | None = None,
-        summary: str | None = None,
-        steps: _TextListInput = [],
-        risks: _TextListInput = [],
-        verification: _TextListInput = [],
-        objective: str | None = None,
-        completion_criteria: list[dict[str, str]] | str | None = None,
-        constraints: dict[str, list[str]] | str | None = None,
-        autonomy_boundary: str | None = None,
+        objective: str,
+        completion_criteria: list[dict[str, str]] | str,
+        constraints: dict[str, list[str]] | str,
+        autonomy_boundary: str,
     ) -> ToolResponse:
-        """Submit either a legacy plan or a Goal-ready Contract Draft."""
-        if objective is not None:
-            criteria = _coerce_json_array(completion_criteria, "completion_criteria")
-            parsed_constraints = constraints
-            if isinstance(parsed_constraints, str):
-                parsed_constraints = json.loads(parsed_constraints)
-            proposal = GoalProposal(
-                objective=objective,
-                completion_criteria=criteria,
-                constraints=parsed_constraints or {},
-                autonomy_boundary=autonomy_boundary or "",
-            )
-            return ToolResponse(
-                content=[TextBlock(type="text", text="Goal Contract Draft submitted for review.")],
-                metadata={_PLAN_CARD_METADATA_KEY: proposal.model_dump(mode="json")},
-            )
-        if title is None or summary is None or not steps or not risks or not verification:
-            raise ValueError("legacy plan fields are required when objective is absent")
-        payload = ProposedPlanCreate(
-            title=title,
-            summary=summary,
-            steps=steps,
-            risks=risks,
-            verification=verification,
+        """Submit a Goal-ready Contract Draft for explicit user confirmation."""
+        criteria = _coerce_json_array(completion_criteria, "completion_criteria")
+        parsed_constraints = constraints
+        if isinstance(parsed_constraints, str):
+            parsed_constraints = json.loads(parsed_constraints)
+        proposal = GoalProposal(
+            objective=objective,
+            completion_criteria=criteria,
+            constraints=parsed_constraints,
+            autonomy_boundary=autonomy_boundary,
         )
-        service = PlanService(
-            JsonProposedPlanStore(Path(workspace_dir or WORKING_DIR)),
-        )
-        plan = await service.create_plan(
-            chat_id=str(request_context.get("chat_id") or ""),
-            session_id=str(request_context.get("session_id") or ""),
-            turn_id=request_context.get("turn_id"),
-            created_by=str(request_context.get("user_id") or "main-agent"),
-            payload=payload,
-        )
-        card = PlanReviewCard.from_plan(plan)
         return ToolResponse(
             content=[
                 TextBlock(
                     type="text",
-                    text="Proposed plan submitted for review.",
+                    text="Goal Contract Draft submitted for review.",
                 ),
             ],
             metadata={
-                _PLAN_CARD_METADATA_KEY: card.model_dump(
-                    mode="json",
-                    exclude_none=True,
-                ),
+                _PLAN_CARD_METADATA_KEY: proposal.model_dump(mode="json"),
             },
         )
 

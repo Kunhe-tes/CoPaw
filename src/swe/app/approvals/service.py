@@ -303,6 +303,24 @@ class ApprovalService:
         if not pending.future.done():
             pending.future.set_result(decision)
 
+        goal_id = str(pending.extra.get("goal_id") or "").strip()
+        if goal_id:
+            try:
+                from ..goals.registry import get_goal_service
+
+                goal_service = get_goal_service()
+                if goal_service is not None:
+                    await goal_service.wake(
+                        goal_id,
+                        f"Tool approval {decision.value}",
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to wake Goal after approval resolution: %s",
+                    goal_id,
+                    exc_info=True,
+                )
+
         await self._persist_request(pending)
         await self.record_event(pending, "resolved", status=pending.status)
         return pending

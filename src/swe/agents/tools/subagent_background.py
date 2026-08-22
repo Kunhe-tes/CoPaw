@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 import json
 from pathlib import Path
@@ -36,6 +37,28 @@ _RUN_ID_CONTEXT_KEYS = (
 )
 _FAILURE_SUMMARY_MAX_CHARS = 1024
 _DEFAULT_SUPERVISOR = BackgroundSubAgentSupervisor()
+
+
+async def _wake_goal_after_subagent(
+    *,
+    supervisor: BackgroundSubAgentSupervisor,
+    scope: BackgroundSubAgentScope,
+    goal_id: str,
+    run_id: str,
+) -> None:
+    """Bridge a terminal Background SubAgent result into Goal wake-up."""
+    from ...app.goals.registry import get_goal_service
+    from ...app.goals.wakeup import notify_goal_wake
+
+    while True:
+        snapshot = await supervisor.wait(scope, timeout_ms=1000)
+        if any(item.run_id == run_id for item in snapshot.terminal_runs):
+            service = get_goal_service()
+            if service is not None:
+                await service.wake(goal_id, "Background SubAgent completed")
+            return
+        if not any(item.run_id == run_id for item in snapshot.active_runs):
+            return
 _START_SUBAGENT_DESCRIPTION = (
     "Start a Background SubAgent Run. Use an exact listed Skill-qualified "
     "name when delegating to a Skill-owned definition."
@@ -196,6 +219,9 @@ def create_background_subagent_tools(
                 objective=start_request.objective,
                 background=start_request.background,
             )
+            goal_id = str(request_context.get("goal_id") or "").strip()
+            if goal_id:
+                request_context.setdefault("goal_subagent_run_ids", [])
             result = await supervisor.start(
                 scope=tool_scope,
                 spec=spec,
@@ -217,6 +243,23 @@ def create_background_subagent_tools(
                     else []
                 ),
             )
+            if goal_id:
+                run_id = getattr(result, "run_id", None)
+                if run_id:
+                    request_context["goal_subagent_run_ids"].append(run_id)
+                    from ...app.goals.registry import get_goal_service
+
+                    goal_service = get_goal_service()
+                    if goal_service is not None:
+                        await goal_service.link_subagent(goal_id, run_id)
+                    asyncio.create_task(
+                        _wake_goal_after_subagent(
+                            supervisor=supervisor,
+                            scope=tool_scope,
+                            goal_id=goal_id,
+                            run_id=run_id,
+                        ),
+                    )
         except Exception as exc:
             return _json_response(
                 {

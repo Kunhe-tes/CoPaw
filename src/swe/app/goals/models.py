@@ -141,6 +141,7 @@ class GoalSnapshot(StrictGoalModel):
     state_reason: str | None = None
     control_commands: list[GoalControlCommand] = Field(default_factory=list)
     steering: list[GoalSteering] = Field(default_factory=list)
+    subagent_run_ids: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
 

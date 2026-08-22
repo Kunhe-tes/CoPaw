@@ -135,6 +135,11 @@ class MySqlGoalStore:
                     1 if steering.consumed else 0,
                 ),
             )
+        for run_id in snapshot.subagent_run_ids:
+            await db.execute(
+                _UPSERT_SUBAGENT_LINK,
+                (snapshot.goal_id, snapshot.revision, run_id),
+            )
 
     @asynccontextmanager
     async def _transaction(self):
@@ -255,3 +260,6 @@ _UPSERT_CONTROL = f"""INSERT INTO {_CONTROLS} (command_id, goal_id, action, stat
 VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE status=VALUES(status), contract_json=VALUES(contract_json)"""
 _UPSERT_STEERING = f"""INSERT INTO {_STEERING} (goal_id, revision, sequence_no, content, consumed)
 VALUES (%s, %s, %s, %s, %s) ON DUPLICATE KEY UPDATE consumed=VALUES(consumed)"""
+_UPSERT_SUBAGENT_LINK = f"""INSERT INTO {_SUBAGENT_LINKS} (
+goal_id, revision, subagent_run_id
+) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE subagent_run_id=VALUES(subagent_run_id)"""

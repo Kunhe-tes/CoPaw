@@ -124,7 +124,9 @@ async def recent_goal(
     goal = await (await _service(request)).recent_for_chat(chat.id)
     if goal is None:
         return None
-    return await _owned_goal(await _service(request), workspace, goal.goal_id)
+    return await _owned_goal(
+        await _service(request), workspace, goal.goal_id, chat.id,
+    )
 
 
 @router.get("/{goal_id}", response_model=GoalSnapshot)

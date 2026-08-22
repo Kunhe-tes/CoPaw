@@ -86,3 +86,19 @@ async def test_save_writes_goal_revision_criteria_and_control_snapshot() -> None
     assert "INSERT INTO swe_goal_revisions" in sql
     assert "INSERT INTO swe_goal_criteria" in sql
     assert "INSERT INTO swe_goal_control_commands" in sql
+
+
+@pytest.mark.asyncio
+async def test_save_projects_goal_owned_subagent_links() -> None:
+    db = FakeDb()
+    store = MySqlGoalStore(db)
+    service = GoalService(store)
+    created = await service.create_goal(scope=scope(), contract=contract())
+    created.subagent_run_ids.append("subagent-1")
+
+    await store.save(created)
+
+    assert any(
+        "INSERT INTO swe_goal_subagent_links" in query
+        for query, _ in db.executed
+    )

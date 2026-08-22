@@ -679,7 +679,7 @@ def _extract_goal_id(request_data: Union[AgentRequest, dict]) -> str | None:
     """Carry the server-owned Goal id into the existing Console run path."""
     if isinstance(request_data, AgentRequest):
         channel_meta = getattr(request_data, "channel_meta", None) or {}
-        value = channel_meta.get("goal_id")
+        value = getattr(request_data, "goal_id", None) or channel_meta.get("goal_id")
     else:
         value = request_data.get("goal_id")
         channel_meta = request_data.get("channel_meta")
@@ -688,6 +688,21 @@ def _extract_goal_id(request_data: Union[AgentRequest, dict]) -> str | None:
     if not isinstance(value, str) or not value.strip() or len(value) > 128:
         return None
     return value.strip()
+
+
+def _extract_goal_mode_enabled(request_data: Union[AgentRequest, dict]) -> bool:
+    """Read the explicit, one-request Goal Mode selector."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "goal_mode_enabled", None)
+        if value is None:
+            value = channel_meta.get("goal_mode_enabled")
+    else:
+        value = request_data.get("goal_mode_enabled")
+        channel_meta = request_data.get("channel_meta")
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("goal_mode_enabled")
+    return value is True
 
 
 def _local_path_from_console_attachment_url(url: object) -> Path | None:
@@ -874,6 +889,8 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     goal_id = _extract_goal_id(request_data)
     if goal_id is not None:
         native_payload["meta"]["goal_id"] = goal_id
+    if _extract_goal_mode_enabled(request_data):
+        native_payload["meta"]["goal_mode_enabled"] = True
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references

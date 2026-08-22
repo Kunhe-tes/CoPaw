@@ -388,6 +388,12 @@ export const chatApi = {
       `/goals/recent?chat_id=${encodeURIComponent(chatId)}`,
     ),
 
+  createGoal: (chatId: string, contract: GoalSnapshot["contract"]) =>
+    request<GoalSnapshot>("/goals", {
+      method: "POST",
+      body: JSON.stringify({ chat_id: chatId, contract }),
+    }),
+
   pauseGoal: (goalId: string, chatId: string) =>
     request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/pause?chat_id=${encodeURIComponent(chatId)}`, {
       method: "POST",

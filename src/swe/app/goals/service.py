@@ -18,6 +18,7 @@ from .models import (
     TERMINAL_GOAL_STATES,
     utc_now,
 )
+from .wakeup import notify_goal_wake
 
 DEFAULT_GOAL_TURN_BUDGET = 12
 logger = logging.getLogger(__name__)
@@ -139,10 +140,38 @@ class GoalService:
         goal.steering.append(
             GoalSteering(sequence_no=len(goal.steering) + 1, content=text),
         )
+        woke = goal.state == GoalState.WAITING
+        if woke:
+            goal.state = GoalState.ACTIVE
+            goal.state_reason = None
+        saved = await self._save(goal)
+        if woke:
+            notify_goal_wake(goal_id)
+        return saved
+
+    async def has_pending_steering(self, goal_id: str) -> bool:
+        """Check whether in-turn Steering should prevent a new wait state."""
+        goal = await self._require_goal(goal_id)
+        return any(not item.consumed for item in goal.steering)
+
+    async def link_subagent(self, goal_id: str, run_id: str) -> GoalSnapshot:
+        goal = await self._require_goal(goal_id)
+        if goal.is_terminal:
+            raise GoalConflictError("terminal goals cannot link a subagent")
+        if run_id not in goal.subagent_run_ids:
+            goal.subagent_run_ids.append(run_id)
+        return await self._save(goal)
+
+    async def wake(self, goal_id: str, reason: str = "Goal wake event") -> GoalSnapshot:
+        goal = await self._require_goal(goal_id)
         if goal.state == GoalState.WAITING:
             goal.state = GoalState.ACTIVE
             goal.state_reason = None
-        return await self._save(goal)
+            goal.next_focus = reason
+            saved = await self._save(goal)
+            notify_goal_wake(goal_id)
+            return saved
+        return goal
 
     async def consume_steering(self, goal_id: str) -> tuple[GoalSnapshot, list[str]]:
         """Claim pending Steering in arrival order for one next Goal turn."""
@@ -166,7 +195,10 @@ class GoalService:
         goal.control_commands.append(GoalControlCommand(action=action))
         if not goal.turn_active:
             self._apply_pending_control(goal)
-        return await self._save(goal)
+        saved = await self._save(goal)
+        if not saved.turn_active:
+            notify_goal_wake(goal_id)
+        return saved
 
     async def request_edit(
         self,
@@ -181,7 +213,10 @@ class GoalService:
         )
         if not goal.turn_active:
             self._apply_pending_control(goal)
-        return await self._save(goal)
+        saved = await self._save(goal)
+        if not saved.turn_active:
+            notify_goal_wake(goal_id)
+        return saved
 
     async def resume(self, goal_id: str) -> GoalSnapshot:
         goal = await self._require_goal(goal_id)
@@ -198,7 +233,9 @@ class GoalService:
         if goal.state not in TERMINAL_GOAL_STATES:
             goal.state = GoalState.ACTIVE
             goal.state_reason = None
-        return await self._save(goal)
+        saved = await self._save(goal)
+        notify_goal_wake(goal_id)
+        return saved
 
     async def begin_turn(self, goal_id: str) -> GoalSnapshot:
         """Mark a running Main Agent turn so controls settle at its boundary."""
@@ -226,6 +263,7 @@ class GoalService:
         next_focus: str | None = None,
         blocker: str | None = None,
         defer_budget_limit: bool = False,
+        wake_from_steering: bool = False,
     ) -> GoalSnapshot:
         """Persist one finished Main Agent turn and apply pending user control."""
         goal = await self._require_goal(goal_id)
@@ -244,6 +282,7 @@ class GoalService:
             decision=decision,
             next_focus=next_focus,
             blocker=blocker,
+            wake_from_steering=wake_from_steering,
         )
         if (
             not defer_budget_limit
@@ -336,11 +375,17 @@ class GoalService:
         decision: GoalTurnDecision,
         next_focus: str | None,
         blocker: str | None,
+        wake_from_steering: bool,
     ) -> None:
         if decision == "wait":
-            goal.state = GoalState.WAITING
-            goal.state_reason = next_focus or "Waiting for a wake condition"
-            goal.next_focus = None
+            if wake_from_steering:
+                goal.state = GoalState.ACTIVE
+                goal.state_reason = None
+                goal.next_focus = next_focus or "Apply newly received user steering"
+            else:
+                goal.state = GoalState.WAITING
+                goal.state_reason = next_focus or "Waiting for a wake condition"
+                goal.next_focus = None
         elif decision == "blocked":
             goal.state = GoalState.BLOCKED
             goal.state_reason = blocker or "Main Agent reported a blocker"

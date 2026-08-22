@@ -14,6 +14,7 @@ import styles from "./index.module.less";
 
 export interface ExpertSelectorProps {
   planModeEnabled: boolean;
+  goalModeEnabled?: boolean;
   selectedExpertId: string | null;
   onChange: (expertId: string | null) => void;
   onDisablePlanMode: () => void;
@@ -22,6 +23,7 @@ export interface ExpertSelectorProps {
 
 export default function ExpertSelector({
   planModeEnabled,
+  goalModeEnabled = false,
   selectedExpertId,
   onChange,
   onDisablePlanMode,
@@ -74,7 +76,7 @@ export default function ExpertSelector({
       }}
       trigger={["click"]}
       placement="bottomRight"
-      disabled={disabled}
+      disabled={disabled || goalModeEnabled}
       dropdownRender={() => (
         <div className={styles.panel} role="menu" aria-label="专家选择">
           {loading ? (
@@ -115,7 +117,7 @@ export default function ExpertSelector({
         <button
           type="button"
           className={`${styles.trigger} ${open ? styles.triggerActive : ""}`}
-          disabled={disabled}
+          disabled={disabled || goalModeEnabled}
           aria-label={selectedExpert ? `已选择专家 ${label}` : "选择专家"}
         >
           {loading ? <LoadingOutlined className={styles.loading} /> : null}

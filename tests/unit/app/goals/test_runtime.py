@@ -92,3 +92,25 @@ async def test_begin_turn_makes_a_direct_edit_pending_until_settlement() -> None
 
     assert pending.revision == 1
     assert pending.control_commands[-1].status == "pending"
+
+
+@pytest.mark.asyncio
+async def test_affected_criteria_are_verified_before_the_next_continuation() -> None:
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    runtime = GoalRuntime(
+        service,
+        verifier=lambda _: {"criterion-1": (True, "focused verification")},
+    )
+
+    result = await runtime.settle(
+        goal.goal_id,
+        GoalTurnResolution(
+            decision="continue",
+            summary="Changed the checked output",
+            affected_criteria=["criterion-1"],
+        ),
+    )
+
+    assert result.state == GoalState.ACTIVE
+    assert result.criteria[0].verified

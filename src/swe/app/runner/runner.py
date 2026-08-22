@@ -1390,11 +1390,26 @@ def _build_goal_contract_context(goal: Any) -> str:
         for item in goal.criteria
         if not item.verified
     ]
+    verified = [
+        f"- {item.criterion_id}: verified"
+        for item in goal.criteria
+        if item.verified
+    ]
+    failures = [
+        f"- {item.criterion_id}: {item.consecutive_failures} consecutive failure(s)"
+        for item in goal.criteria
+        if item.consecutive_failures
+    ]
     return (
         f"Contract revision: {goal.revision}\n"
         f"Objective: {goal.contract.objective}\n"
+        "Verified completion criteria:\n"
+        + ("\n".join(verified) if verified else "- none")
+        + "\n"
         "Unverified completion criteria:\n"
         + ("\n".join(remaining) if remaining else "- none")
+        + "\nVerification failures:\n"
+        + ("\n".join(failures) if failures else "- none")
     )
 
 
@@ -3161,6 +3176,9 @@ class AgentRunner(Runner):
             request_context["goal_verifier"] = ContractVerificationAdapter(
                 getattr(self, "working_dir", None),
             )
+        request_context["goal_mode_enabled"] = bool(
+            channel_meta.get("goal_mode_enabled", False),
+        )
         plan_mode_enabled = bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
         request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
         request_context[_PLAN_REQUEST_MODE_KEY] = (
@@ -4051,10 +4069,13 @@ class AgentRunner(Runner):
                     logger.warning("Goal service is unavailable: %s", goal_id)
                     return
                 try:
-                    await service.begin_turn(goal_id)
+                    goal = await service.begin_turn(goal_id)
                 except ValueError:
                     logger.warning("Goal cannot start a turn: %s", goal_id)
                     return
+                getattr(runtime.agent, "_request_context", {})[
+                    "goal_contract_context"
+                ] = _build_goal_contract_context(goal)
                 getattr(runtime.agent, "_request_context", {}).pop(
                     "goal_turn_resolution", None,
                 )
@@ -4095,7 +4116,9 @@ class AgentRunner(Runner):
                         ), True
                     return
                 try:
-                    _, steering = await service.consume_steering(goal_id)
+                    had_pending_steering = await service.has_pending_steering(
+                        goal_id,
+                    )
                     resolution = GoalTurnResolution.model_validate(raw)
                     verifier = getattr(runtime.agent, "_request_context", {}).get(
                         "goal_verifier",
@@ -4103,7 +4126,9 @@ class AgentRunner(Runner):
                     if not callable(verifier):
                         raise ValueError("Goal verification adapter is unavailable")
                     settled = await GoalRuntime(service, verifier=verifier).settle(
-                        goal_id, resolution,
+                        goal_id,
+                        resolution,
+                        wake_from_steering=had_pending_steering,
                     )
                 except (TypeError, ValueError):
                     logger.warning("Goal turn settlement failed", exc_info=True)
@@ -4113,7 +4138,8 @@ class AgentRunner(Runner):
                         goal.state.value, goal.state_reason,
                     ), True
                     return
-                if settled.state.value == "ACTIVE" and resolution.decision == "continue":
+                if settled.state.value == "ACTIVE":
+                    _, steering = await service.consume_steering(goal_id)
                     plan.turn_msgs = [
                         _build_goal_follow_up_msg(
                             settled.next_focus,
@@ -4122,6 +4148,22 @@ class AgentRunner(Runner):
                         ),
                     ]
                     continue
+                if settled.state.value == "WAITING":
+                    from ..goals.wakeup import wait_for_goal_wake
+
+                    await wait_for_goal_wake(goal_id)
+                    woken = await service.get(goal_id)
+                    if woken.state.value == "ACTIVE":
+                        _, steering = await service.consume_steering(goal_id)
+                        plan.turn_msgs = [
+                            _build_goal_follow_up_msg(
+                                woken.next_focus,
+                                steering,
+                                _build_goal_contract_context(woken),
+                            ),
+                        ]
+                        continue
+                    settled = woken
                 yield _build_goal_finalization_msg(
                     settled.state.value, settled.state_reason,
                 ), True

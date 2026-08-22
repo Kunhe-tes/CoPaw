@@ -193,3 +193,21 @@ async def test_steering_wakes_waiting_goal_and_is_consumed_in_order() -> None:
     assert current.state == GoalState.ACTIVE
     assert messages == ["Use the approved endpoint", "Keep existing data"]
     assert all(item.consumed for item in current.steering)
+
+
+@pytest.mark.asyncio
+async def test_steering_arriving_during_a_turn_prevents_a_stale_wait_state() -> None:
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    await service.begin_turn(goal.goal_id)
+    await service.enqueue_steering(goal.goal_id, "Continue with the new priority")
+
+    settled = await service.settle_turn(
+        goal.goal_id,
+        decision="wait",
+        next_focus="Wait for approval",
+        wake_from_steering=await service.has_pending_steering(goal.goal_id),
+    )
+
+    assert settled.state == GoalState.ACTIVE
+    assert settled.next_focus == "Wait for approval"

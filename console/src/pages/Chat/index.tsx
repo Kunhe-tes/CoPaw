@@ -22,11 +22,12 @@ import {
   useTransition,
 } from "react";
 import { flushSync } from "react-dom";
-import { Button, Modal, Result } from "antd";
+import { Button, Modal, Result, Switch } from "antd";
 import { useAppMessage } from "../../hooks/useAppMessage";
 import {
   ControlOutlined,
   ExclamationCircleOutlined,
+  FlagOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import { SparkCopyLine } from "@agentscope-ai/icons";
@@ -116,7 +117,11 @@ import {
   CHAT_ATTACHMENT_ACCEPT_HINT,
   uploadChatAttachment,
 } from "./attachmentUploadPolicy";
-import { ComposerQuickMenuSubmenu } from "@/components/agentscope-chat/ComposerQuickMenu";
+import {
+  ComposerQuickMenuItem,
+  ComposerQuickMenuSubmenu,
+} from "@/components/agentscope-chat/ComposerQuickMenu";
+import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 
 import RuntimeRequestCard from "./components/RuntimeRequestCard";
 import { FOLLOW_UP_SUBMIT_FAILED_EVENT } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
@@ -1108,6 +1113,7 @@ export default function ChatPage() {
   });
   const [pendingPlanRevision, setPendingPlanRevision] =
     useState<PendingPlanRevision | null>(null);
+  const [goalModeEnabled, setGoalModeEnabled] = useState(false);
   activePlanModeSessionRef.current = activePlanModeSession;
   activePlanModeScopeKeyRef.current = activePlanModeScopeKey;
 
@@ -1811,6 +1817,7 @@ export default function ChatPage() {
         // ==================== userId 统一整改结束 ====================
         stream: true,
         mode: getPlanModeForRequest(planModeEnabled),
+        goal_mode_enabled: goalModeEnabled,
         ...biz_params,
         context_references:
           userText.startsWith("/") &&
@@ -1831,6 +1838,7 @@ export default function ChatPage() {
         },
         requestBody.session_id,
       );
+      let routedAsSteering = false;
       if (backendChatId && userText && !planModeEnabled) {
         try {
           const activeGoal = await chatApi.getRecentGoal(backendChatId);
@@ -1843,7 +1851,7 @@ export default function ChatPage() {
               backendChatId,
               userText,
             );
-            Object.assign(requestBody, { goal_id: activeGoal.goal_id });
+            routedAsSteering = true;
           }
         } catch (error) {
           console.warn("Unable to route input to active Goal:", error);
@@ -1854,12 +1862,26 @@ export default function ChatPage() {
           sessionApi.setLastUserMessage(backendChatId, userText);
         }
       }
+      if (routedAsSteering) {
+        return new Response(
+          `data: ${JSON.stringify({
+            object: "response",
+            status: "completed",
+            output: [],
+            id: `goal-steering-${Date.now()}`,
+          })}\n\n`,
+          { headers: { "Content-Type": "text/event-stream" } },
+        );
+      }
 
       const timeoutSignal = createTimedAbortSignal(data.signal);
       // The expert is a one-turn selection. Clear it as soon as the request
       // has been submitted so aborts/network failures cannot leave stale UI
       // state for the next turn.
       setSelectedExpertId(null);
+      if (goalModeEnabled) {
+        setGoalModeEnabled(false);
+      }
       try {
         setSubAgentMonitorResetKey((value) => value + 1);
         const response = await fetch(getApiUrl("/console/chat"), {
@@ -1898,6 +1920,7 @@ export default function ChatPage() {
     [
       loadActiveModelData,
       planModeEnabled,
+      goalModeEnabled,
       resolveLogicalRequestSessionId,
       resolveRequestChatId,
       selectedAgent,
@@ -1996,9 +2019,30 @@ export default function ChatPage() {
       () => ({
         onContinueModifying: handleContinueModifyingPlan,
         onPlanModeDecision: handlePlanModeDecision,
+        onConfirmGoalProposal: async (proposal) => {
+          if (!feedbackChatId) {
+            throw new Error("当前会话尚未创建，无法确认 Goal");
+          }
+          return chatApi.createGoal(feedbackChatId, {
+            objective: proposal.objective,
+            completion_criteria: proposal.completion_criteria,
+            constraints: proposal.constraints,
+            autonomy_boundary: proposal.autonomy_boundary,
+          });
+        },
       }),
-      [handleContinueModifyingPlan, handlePlanModeDecision],
+      [feedbackChatId, handleContinueModifyingPlan, handlePlanModeDecision],
     );
+  const handleGoalResume = useCallback((goalId: string) => {
+    emit({
+      type: "handleSubmit",
+      data: {
+        query: "继续已恢复的 Goal",
+        fileList: [],
+        biz_params: { mode: "normal", goal_id: goalId },
+      },
+    });
+  }, []);
   const htmlPreviewTrackingContextValue = useMemo(
     () => ({
       cronTaskId: feedbackTask?.cronTaskId || null,
@@ -2126,8 +2170,30 @@ export default function ChatPage() {
           showIcon={false}
           tooltip={t("chat.planMode.tooltip", "计划模式使用只读工具先产出计划")}
           onChange={(enabled) => {
+            if (enabled) setGoalModeEnabled(false);
             void persistPlanMode(enabled);
           }}
+        />
+        <ComposerQuickMenuItem
+          key="goal-mode"
+          icon={<FlagOutlined />}
+          interactive
+          label="Goal"
+          extra={
+            <Switch
+              size="small"
+              checked={goalModeEnabled}
+              disabled={composerDisabled}
+              aria-label="Goal 模式"
+              onChange={(enabled) => {
+                setGoalModeEnabled(enabled);
+                if (enabled) {
+                  setSelectedExpertId(null);
+                  if (planModeEnabled) void persistPlanMode(false);
+                }
+              }}
+            />
+          }
         />
       </ComposerQuickMenuSubmenu>,
     ];
@@ -2151,6 +2217,7 @@ export default function ChatPage() {
             {!isContentOnly && (
               <ExpertSelector
                 planModeEnabled={planModeEnabled}
+                goalModeEnabled={goalModeEnabled}
                 selectedExpertId={selectedExpertId}
                 onChange={setSelectedExpertId}
                 onDisablePlanMode={() => {
@@ -2435,7 +2502,10 @@ export default function ChatPage() {
                   chatId={feedbackChatId}
                   resetKey={subAgentMonitorResetKey}
                 />
-                <GoalMonitor chatId={feedbackChatId} />
+                <GoalMonitor
+                  chatId={feedbackChatId}
+                  onResume={handleGoalResume}
+                />
                 {!isContentOnly && (
                   <DragUploadOverlay
                     visible={isDragging}

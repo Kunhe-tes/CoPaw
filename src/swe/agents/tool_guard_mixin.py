@@ -1992,6 +1992,9 @@ class ToolGuardMixin:
         extra["agent_id"] = self._request_context.get("agent_id")
         extra["tenant_id"] = self._request_context.get("tenant_id")
         extra["source_id"] = self._request_context.get("source_id")
+        goal_id = str(self._request_context.get("goal_id") or "").strip()
+        if goal_id:
+            extra["goal_id"] = goal_id
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
 

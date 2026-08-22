@@ -179,6 +179,12 @@ when more work can proceed now, `wait` only with explicit wake conditions,
 `propose_completion` only when every completion condition is ready for
 independent verification, and `blocked` only when no effective action remains.
 Do not claim final completion in prose; the Goal Runtime verifies it."""
+_GOAL_PROPOSAL_INSTRUCTION = """[Goal Mode — Contract Draft]
+Turn the user's overall objective into a complete Goal Contract Draft. Ask for
+clarification when the objective, deterministic completion criteria, constraints,
+or autonomy boundary are materially unclear. When the Contract Draft is ready,
+call `submit_proposed_plan` with objective, completion_criteria, constraints,
+and autonomy_boundary. Do not execute the Goal before the user confirms it."""
 
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
@@ -213,7 +219,8 @@ def _add_main_agent_tools(
         tool_functions["submit_goal_turn_resolution"] = (
             create_submit_goal_turn_resolution_tool(request_context)
         )
-    if not _plan_interaction_tools_enabled(plan_mode_enabled):
+    goal_mode_enabled = bool(request_context.get("goal_mode_enabled"))
+    if not goal_mode_enabled and not _plan_interaction_tools_enabled(plan_mode_enabled):
         return
     tool_functions.update(
         {
@@ -1348,7 +1355,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 sys_prompt + "\n\n" + _PLAN_MODE_CLARIFICATION_INSTRUCTION
             )
         elif self._request_context.get("goal_id"):
+            goal_context = self._request_context.get("goal_contract_context")
             sys_prompt = sys_prompt + "\n\n" + _GOAL_TURN_INSTRUCTION
+            if isinstance(goal_context, str) and goal_context.strip():
+                sys_prompt = sys_prompt + "\n\n" + goal_context
+        elif self._request_context.get("goal_mode_enabled"):
+            sys_prompt = sys_prompt + "\n\n" + _GOAL_PROPOSAL_INSTRUCTION
         if not plan_mode_enabled and is_chat_task_progress_enabled(
             get_current_source_system_config(),
         ):

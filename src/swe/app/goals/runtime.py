@@ -49,6 +49,8 @@ class GoalRuntime:
         self,
         goal_id: str,
         resolution: GoalTurnResolution,
+        *,
+        wake_from_steering: bool = False,
     ) -> GoalSnapshot:
         """Persist the Main Agent result, then run contract-bound verification."""
         before = await self._service.get(goal_id)
@@ -60,6 +62,7 @@ class GoalRuntime:
             next_focus=resolution.next_focus,
             blocker=resolution.blocker,
             defer_budget_limit=resolution.decision == "propose_completion",
+            wake_from_steering=wake_from_steering,
         )
         if goal.state != GoalState.ACTIVE:
             return goal
