@@ -474,17 +474,21 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._source_tool_versions = tuple(source_tool_versions)
         self._skill_tool_registry = SkillToolRegistry()
         self._init_agent_phase_state()
+        goal_finalization = bool(self._request_context.get("goal_finalization"))
 
         # Extract configuration from agent_config
         running_config = agent_config.running
         self._language = agent_config.language
 
-        # Initialize toolkit with built-in tools
-        toolkit = self._create_toolkit(namesake_strategy=namesake_strategy)
-
-        # Load and register skills
-        self._register_skills(toolkit)
-        self._register_source_tools(toolkit)
+        # Finalization is a deliberately tool-free, read-only Agent turn.
+        toolkit = (
+            Toolkit()
+            if goal_finalization
+            else self._create_toolkit(namesake_strategy=namesake_strategy)
+        )
+        if not goal_finalization:
+            self._register_skills(toolkit)
+            self._register_source_tools(toolkit)
 
         # Build system prompt
         sys_prompt = self._build_sys_prompt()
@@ -542,8 +546,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         # Setup memory manager
         self._setup_memory_manager(
-            enable_memory_manager,
-            memory_manager,
+            enable_memory_manager and not goal_finalization,
+            None if goal_finalization else memory_manager,
             namesake_strategy,
         )
 

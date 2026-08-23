@@ -1447,6 +1447,24 @@ def _build_goal_finalization_msg(state: str, reason: str | None) -> Msg:
     return Msg(name="Friday", role="assistant", content=content)
 
 
+_GOAL_FINALIZATION_SYSTEM_PROMPT = """[Goal Finalization]
+Produce only the final concise user-facing response for the authoritative Goal
+state supplied in the user message. This is a read-only finalization turn: do
+not use tools, do not propose more work, do not modify the Goal, and do not
+claim evidence beyond that supplied state. For COMPLETE, provide the formal
+delivery. For other states, state the reason and the appropriate next step."""
+
+
+def _build_goal_finalization_input(goal: Any, state: str, reason: str | None) -> Msg:
+    """Build bounded internal input for a tool-free Goal Finalization Turn."""
+    return _build_internal_follow_up_msg(
+        "Authoritative Goal finalization context:\n"
+        f"Goal state: {state}\n"
+        f"State reason: {reason or 'No additional reason was recorded.'}\n"
+        + _build_goal_contract_context(goal),
+    )
+
+
 def _request_goal_id(request: AgentRequest) -> str | None:
     meta = getattr(request, "channel_meta", None) or {}
     value = meta.get("goal_id") if isinstance(meta, dict) else None
@@ -3335,6 +3353,109 @@ class AgentRunner(Runner):
             source_tool_versions=source_tool_versions,
         )
 
+    def _create_goal_finalization_agent(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+    ) -> SWEAgent:
+        """Create an isolated, tool-free Agent for one Goal finalization."""
+        source_context = getattr(runtime.agent, "_request_context", {}) or {}
+        request_context = {
+            key: source_context.get(key)
+            for key in (
+                "session_id", "user_id", "channel", "chat_id", "turn_id",
+                "agent_id", "tenant_id", "source_id", "user_name", "bbk_id",
+                "trace_id",
+            )
+            if source_context.get(key) is not None
+        }
+        request_context["agent_role"] = "main"
+        request_context["goal_finalization"] = True
+        resolved_slot = getattr(runtime.agent, "_resolved_model_slot", {}) or {}
+        model_slot_override = None
+        model_provider_override = None
+        provider_id = str(resolved_slot.get("provider_id") or "")
+        model_name = str(resolved_slot.get("model") or "")
+        if provider_id and model_name:
+            from ...providers.models import ModelSlotConfig
+            from ...providers.provider_manager import ProviderManager
+
+            model_slot_override = ModelSlotConfig(
+                provider_id=provider_id,
+                model=model_name,
+            )
+            model_provider_override = ProviderManager.get_instance(
+                self.tenant_id,
+            ).get_provider(provider_id)
+            if model_provider_override is None:
+                raise RuntimeError("Goal finalization provider is unavailable")
+        return SWEAgent(
+            agent_config=runtime.agent_config,
+            env_context=None,
+            enable_memory_manager=False,
+            mcp_clients=[],
+            memory_manager=None,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            task_tracker=None,
+            enable_workspace_skills=False,
+            model_slot_override=model_slot_override,
+            model_provider_override=model_provider_override,
+            system_prompt_override=_GOAL_FINALIZATION_SYSTEM_PROMPT,
+            source_tool_versions=(),
+        )
+
+    async def _stream_goal_finalization_turn(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+    ):
+        """Stream a no-budget Goal Finalization Turn or its fixed fallback."""
+        state = goal.state.value
+        previous_msg: Msg | None = None
+        try:
+            agent = self._create_goal_finalization_agent(runtime=runtime, goal=goal)
+            async for msg, _ in self._enforce_query_timeout(
+                stream_printing_messages(
+                    agents=[agent],
+                    coroutine_task=agent(
+                        [
+                            _build_goal_finalization_input(
+                                goal,
+                                state,
+                                goal.state_reason,
+                            ),
+                        ],
+                    ),
+                ),
+                session_id=runtime.session_id,
+                agent=agent,
+                run_key=(runtime.chat.id if runtime.chat is not None else None),
+            ):
+                if getattr(msg, "role", None) != "assistant":
+                    continue
+                if not str(getattr(msg, "content", "") or "").strip():
+                    continue
+                if previous_msg is not None:
+                    yield previous_msg, False
+                previous_msg = msg
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Goal Finalization Turn failed; emitting fallback goal_id=%s",
+                getattr(goal, "goal_id", ""),
+            )
+        final_msg = previous_msg or _build_goal_finalization_msg(
+            state,
+            goal.state_reason,
+        )
+        memory = getattr(runtime.agent, "memory", None)
+        add_to_memory = getattr(memory, "add", None)
+        if callable(add_to_memory):
+            await add_to_memory(final_msg)
+        yield final_msg, True
+
     def _attach_session_skill_detector(
         self,
         *,
@@ -4222,17 +4343,25 @@ class AgentRunner(Runner):
                             verifier=verifier,
                         ).retry_pending_verification(goal_id)
                         if retried.state.value == "COMPLETE":
-                            yield _build_goal_finalization_msg(
-                                retried.state.value,
-                                retried.state_reason,
-                            ), True
+                            async for finalization_msg, last in (
+                                self._stream_goal_finalization_turn(
+                                    runtime=runtime,
+                                    goal=retried,
+                                )
+                            ):
+                                yield finalization_msg, last
                             return
                         if retried.state.value != "ACTIVE":
                             settled = retried
-                            yield _build_goal_finalization_msg(
-                                settled.state.value,
-                                settled.state_reason,
-                            ), True
+                            if settled.state.value == "INTERRUPTED":
+                                return
+                            async for finalization_msg, last in (
+                                self._stream_goal_finalization_turn(
+                                    runtime=runtime,
+                                    goal=settled,
+                                )
+                            ):
+                                yield finalization_msg, last
                             return
                         _, steering = await service.consume_steering(goal_id)
                         plan.turn_msgs = [
@@ -4244,9 +4373,12 @@ class AgentRunner(Runner):
                         ]
                         continue
                     settled = woken
-                yield _build_goal_finalization_msg(
-                    settled.state.value, settled.state_reason,
-                ), True
+                if settled.state.value == "INTERRUPTED":
+                    return
+                async for finalization_msg, last in self._stream_goal_finalization_turn(
+                    runtime=runtime, goal=settled,
+                ):
+                    yield finalization_msg, last
                 return
 
             stop_result = await self._emit_stop_hook_if_needed(
