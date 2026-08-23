@@ -77,6 +77,9 @@ describe("GoalMonitor", () => {
     expect(screen.getByText("Ship Goal Runtime")).toBeInTheDocument();
     expect(screen.getByText("执行中")).toBeInTheDocument();
     expect(screen.getByText("已通过 1 / 1 项条件")).toBeInTheDocument();
+    expect(
+      screen.getByRole("progressbar", { name: "Goal 完成条件审查进度" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/执行轮次/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "暂停目标" }));
     await waitFor(() =>

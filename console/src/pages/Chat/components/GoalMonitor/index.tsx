@@ -171,7 +171,7 @@ export default function GoalMonitor({
             <div
               className={styles.progressTrack}
               role="progressbar"
-              aria-label="Goal 完成条件验证进度"
+              aria-label="Goal 完成条件审查进度"
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={progressPercent}
@@ -184,7 +184,7 @@ export default function GoalMonitor({
             <ul className={styles.criteria} aria-label="完成条件">
               {goal.criteria.map((item) => (
                 <li key={item.criterion_id} data-verified={item.verified}>
-                  <span>{item.verified ? "已通过" : "待验证"}</span>
+                  <span>{item.verified ? "已通过" : "待审查"}</span>
                   {item.criterion.requirement}
                 </li>
               ))}
