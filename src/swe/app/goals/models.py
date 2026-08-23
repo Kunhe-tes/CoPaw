@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Strict domain models for the first Goal Runtime phase."""
 
 from __future__ import annotations
@@ -140,6 +141,7 @@ class GoalSnapshot(StrictGoalModel):
     turn_active: bool = False
     next_focus: str | None = None
     state_reason: str | None = None
+    pending_review_criteria: list[str] = Field(default_factory=list)
     control_commands: list[GoalControlCommand] = Field(default_factory=list)
     steering: list[GoalSteering] = Field(default_factory=list)
     subagent_run_ids: list[str] = Field(default_factory=list)

@@ -3439,6 +3439,7 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
         goal: Any,
+        approved_tool_call: dict[str, Any] | None = None,
     ) -> SWEAgent:
         """Create a restricted, frozen-model Agent for Goal completion review."""
         source_context = getattr(runtime.agent, "_request_context", {}) or {}
@@ -3454,10 +3455,15 @@ class AgentRunner(Runner):
                 "tenant_id",
                 "source_id",
                 "trace_id",
+                "goal_id",
             )
             if source_context.get(key) is not None
         }
         request_context["agent_role"] = "completion_judge"
+        if approved_tool_call is not None:
+            request_context["forced_tool_call_json"] = json.dumps(
+                approved_tool_call,
+            )
         resolved_slot = getattr(runtime.agent, "_resolved_model_slot", {}) or {}
         model_slot_override = None
         model_provider_override = None
@@ -3543,9 +3549,18 @@ class AgentRunner(Runner):
             tool_observations if isinstance(tool_observations, list) else []
         )
         try:
+            approval_result = await self._completion_review_approval_result(
+                review_goal,
+            )
+            if approval_result is not None:
+                return approval_result
+            approved_tool_call = await self._completion_review_approved_tool_call(
+                review_goal,
+            )
             agent = self._create_goal_completion_judge_agent(
                 runtime=runtime,
                 goal=review_goal,
+                approved_tool_call=approved_tool_call,
             )
             final_content = ""
             async for msg, _ in self._enforce_query_timeout(
@@ -3586,6 +3601,63 @@ class AgentRunner(Runner):
                 review_goal.goal_id,
             )
             return parse_completion_review("", criterion_ids)
+
+    async def _completion_review_approval_result(
+        self,
+        review_goal: Any,
+    ) -> dict[str, Any] | None:
+        """Return pending or denied review results before replaying a Judge."""
+        from ..approvals import get_approval_service
+        from ..goals.runtime import CompletionReviewPending
+
+        request_ids = {
+            item.verification_request_id
+            for item in review_goal.criteria
+            if item.verification_request_id
+        }
+        if not request_ids:
+            return None
+        criterion_ids = {item.criterion_id for item in review_goal.criteria}
+        if len(request_ids) != 1:
+            return {
+                criterion_id: (False, "completion review approval is inconsistent")
+                for criterion_id in criterion_ids
+            }
+        request_id = next(iter(request_ids))
+        status = await get_approval_service().get_request_status(request_id)
+        decision = str((status or {}).get("status") or "pending")
+        if decision == "approved":
+            return None
+        if decision == "pending":
+            return {
+                criterion_id: CompletionReviewPending(
+                    request_id=request_id,
+                    reason="Completion Judge tool approval required",
+                )
+                for criterion_id in criterion_ids
+            }
+        return {
+            criterion_id: (False, f"Completion Judge approval {decision}")
+            for criterion_id in criterion_ids
+        }
+
+    async def _completion_review_approved_tool_call(
+        self,
+        review_goal: Any,
+    ) -> dict[str, Any] | None:
+        """Load the normal Tool Guard replay payload after approval."""
+        from ..approvals import get_approval_service
+
+        request_ids = {
+            item.verification_request_id
+            for item in review_goal.criteria
+            if item.verification_request_id
+        }
+        if not request_ids:
+            return None
+        request = await get_approval_service().get_request(next(iter(request_ids)))
+        tool_call = getattr(request, "extra", {}).get("tool_call")
+        return dict(tool_call) if isinstance(tool_call, dict) else None
 
     async def _stream_goal_finalization_turn(
         self,

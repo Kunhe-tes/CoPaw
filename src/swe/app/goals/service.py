@@ -359,6 +359,11 @@ class GoalService:
         if criterion is None:
             raise ValueError("criterion not found")
         criterion.verification_request_id = None
+        goal.pending_review_criteria = [
+            item_id
+            for item_id in goal.pending_review_criteria
+            if item_id != criterion_id
+        ]
         if passed:
             if evidence_ref:
                 criterion.evidence_refs.append(evidence_ref)
@@ -382,6 +387,7 @@ class GoalService:
         request_id: str,
         reason: str,
         expected_revision: int | None = None,
+        criterion_ids: set[str] | None = None,
     ) -> GoalSnapshot:
         """Persist a completion review approval wait without recording a failure."""
         goal = await self._require_goal(goal_id)
@@ -390,17 +396,14 @@ class GoalService:
             and goal.revision != expected_revision
         ):
             return goal
-        criterion = next(
-            (
-                item
-                for item in goal.criteria
-                if item.criterion_id == criterion_id
-            ),
-            None,
-        )
-        if criterion is None:
+        requested = criterion_ids or {criterion_id}
+        available = {item.criterion_id for item in goal.criteria}
+        if not requested.issubset(available):
             raise ValueError("criterion not found")
-        criterion.verification_request_id = request_id
+        for criterion in goal.criteria:
+            if criterion.criterion_id in requested:
+                criterion.verification_request_id = request_id
+        goal.pending_review_criteria = sorted(requested)
         goal.state = GoalState.WAITING
         goal.state_reason = reason
         goal.next_focus = None

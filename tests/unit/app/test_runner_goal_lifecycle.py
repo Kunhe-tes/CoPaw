@@ -349,7 +349,11 @@ def test_goal_completion_judge_agent_is_restricted_and_model_frozen(
     )
     runtime = SimpleNamespace(
         agent=SimpleNamespace(
-            _request_context={"chat_id": "chat-1", "turn_id": "turn-1"},
+            _request_context={
+                "chat_id": "chat-1",
+                "turn_id": "turn-1",
+                "goal_id": "goal-1",
+            },
             _resolved_model_slot={"provider_id": "provider-1", "model": "model-1"},
         ),
         agent_config="agent-config",
@@ -364,6 +368,7 @@ def test_goal_completion_judge_agent_is_restricted_and_model_frozen(
     assert captured["request_context"] == {
         "chat_id": "chat-1",
         "turn_id": "turn-1",
+        "goal_id": "goal-1",
         "agent_role": "completion_judge",
     }
     assert captured["enable_memory_manager"] is False
@@ -492,6 +497,32 @@ async def test_goal_completion_reviewer_parses_hidden_judge_output(
     assert "The result is ready" in package
     assert "main-agent-evidence" in package
     assert "read_file" in package
+
+
+@pytest.mark.asyncio
+async def test_goal_completion_reviewer_maps_denied_approval_to_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, goal_id = await _goal_service()
+    goal = await service.get(goal_id)
+    goal.criteria[0].verification_request_id = "approval-1"
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+
+    class FakeApprovals:
+        async def get_request_status(self, request_id: str):
+            assert request_id == "approval-1"
+            return {"status": "denied"}
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        lambda: FakeApprovals(),
+    )
+
+    result = await runner._completion_review_approval_result(goal)
+
+    assert result == {
+        "criterion-1": (False, "Completion Judge approval denied"),
+    }
 
 
 def test_completion_judge_has_no_bootstrap_and_respects_profile_tools(

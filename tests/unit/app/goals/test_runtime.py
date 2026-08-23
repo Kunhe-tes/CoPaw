@@ -349,6 +349,7 @@ async def test_completion_review_approval_waits_without_counting_a_failure() -> 
     assert result.state == GoalState.WAITING
     assert result.criteria[0].consecutive_failures == 0
     assert result.criteria[0].verification_request_id == "approval-1"
+    assert result.pending_review_criteria == ["criterion-1"]
 
 
 @pytest.mark.asyncio
@@ -387,6 +388,42 @@ async def test_approved_review_retries_without_another_main_agent_turn() -> (
     assert waiting.state == GoalState.WAITING
     assert result.state == GoalState.COMPLETE
     assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_denied_review_approval_records_a_rejection() -> None:
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    calls = 0
+
+    def reviewer(_):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return {
+                "criterion-1": CompletionReviewPending(
+                    request_id="approval-1",
+                    reason="completion review requires tool approval",
+                ),
+            }
+        return {"criterion-1": (False, "Completion Judge approval denied")}
+
+    runtime = GoalRuntime(service, reviewer=reviewer)
+    await runtime.settle(
+        goal.goal_id,
+        GoalTurnResolution(
+            decision="propose_completion",
+            summary="Ready for review",
+            completion_proposal="Verify the change",
+        ),
+    )
+    await service.wake(goal.goal_id, "Tool approval denied")
+
+    result = await runtime.retry_pending_completion_review(goal.goal_id)
+
+    assert result.state == GoalState.ACTIVE
+    assert result.criteria[0].consecutive_failures == 1
+    assert result.state_reason == "review rejected: Completion Judge approval denied"
 
 
 @pytest.mark.asyncio

@@ -155,8 +155,14 @@ class GoalRuntime:
         pending = {
             item.criterion_id
             for item in goal.criteria
-            if item.verification_request_id
+            if item.criterion_id in goal.pending_review_criteria
         }
+        if not pending:
+            pending = {
+                item.criterion_id
+                for item in goal.criteria
+                if item.verification_request_id
+            }
         if goal.state != GoalState.ACTIVE or not pending:
             return goal
         goal = await self._review(goal, goal.revision, pending)
@@ -187,6 +193,30 @@ class GoalRuntime:
         results = self._reviewer(review_goal)
         if inspect.isawaitable(results):
             results = await results
+        pending = next(
+            (
+                result
+                for result in results.values()
+                if isinstance(result, CompletionReviewPending)
+            ),
+            None,
+        )
+        if pending is not None:
+            logger.info(
+                "goal_completion_review_pending goal_id=%s revision=%s criterion_ids=%s request_id=%s",
+                goal.goal_id,
+                revision,
+                sorted(requested),
+                pending.request_id,
+            )
+            return await self._service.wait_for_completion_review_approval(
+                goal.goal_id,
+                next(iter(requested)),
+                request_id=pending.request_id,
+                reason=pending.reason,
+                expected_revision=revision,
+                criterion_ids=requested,
+            )
         for criterion in goal.criteria:
             if criterion.criterion_id not in requested:
                 continue
@@ -195,21 +225,7 @@ class GoalRuntime:
                 (False, "completion review result missing"),
             )
             if isinstance(result, CompletionReviewPending):
-                logger.info(
-                    "goal_completion_review_pending goal_id=%s revision=%s criterion_id=%s request_id=%s",
-                    goal.goal_id,
-                    revision,
-                    criterion.criterion_id,
-                    result.request_id,
-                )
-                goal = await self._service.wait_for_completion_review_approval(
-                    goal.goal_id,
-                    criterion.criterion_id,
-                    request_id=result.request_id,
-                    reason=result.reason,
-                    expected_revision=revision,
-                )
-                return goal
+                raise ValueError("completion review approval result is inconsistent")
             passed, evidence = result
             logger.info(
                 "goal_completion_review_result goal_id=%s revision=%s criterion_id=%s accepted=%s",
