@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Lifecycle service for one durable Goal without AgentRunner coupling."""
 
 from __future__ import annotations
@@ -73,7 +74,9 @@ class InMemoryGoalStore:
 
     async def latest_for_chat(self, chat_id: str) -> GoalSnapshot | None:
         matching = [
-            item for item in self._items.values() if item.scope.chat_id == chat_id
+            item
+            for item in self._items.values()
+            if item.scope.chat_id == chat_id
         ]
         if not matching:
             return None
@@ -133,10 +136,14 @@ class GoalService:
         return await self._store.latest_for_chat(chat_id)
 
     async def persist(self, goal: GoalSnapshot) -> GoalSnapshot:
-        """Persist a runtime-owned state transition after verification."""
+        """Persist a runtime-owned state transition after completion review."""
         return await self._save(goal)
 
-    async def enqueue_steering(self, goal_id: str, content: str) -> GoalSnapshot:
+    async def enqueue_steering(
+        self,
+        goal_id: str,
+        content: str,
+    ) -> GoalSnapshot:
         """Durably queue normal user input without changing the Contract."""
         goal = await self._require_goal(goal_id)
         if goal.state not in {GoalState.ACTIVE, GoalState.WAITING}:
@@ -169,7 +176,11 @@ class GoalService:
             goal.subagent_run_ids.append(run_id)
         return await self._save(goal)
 
-    async def wake(self, goal_id: str, reason: str = "Goal wake event") -> GoalSnapshot:
+    async def wake(
+        self,
+        goal_id: str,
+        reason: str = "Goal wake event",
+    ) -> GoalSnapshot:
         goal = await self._require_goal(goal_id)
         if goal.state == GoalState.WAITING:
             goal.state = GoalState.ACTIVE
@@ -180,7 +191,10 @@ class GoalService:
             return saved
         return goal
 
-    async def consume_steering(self, goal_id: str) -> tuple[GoalSnapshot, list[str]]:
+    async def consume_steering(
+        self,
+        goal_id: str,
+    ) -> tuple[GoalSnapshot, list[str]]:
         """Claim pending Steering in arrival order for one next Goal turn."""
         goal = await self._require_goal(goal_id)
         pending = [item for item in goal.steering if not item.consumed]
@@ -216,7 +230,10 @@ class GoalService:
         if goal.is_terminal:
             raise GoalConflictError("terminal goals cannot be edited")
         goal.control_commands.append(
-            GoalControlCommand(action=GoalControlAction.EDIT, contract=contract),
+            GoalControlCommand(
+                action=GoalControlAction.EDIT,
+                contract=contract,
+            ),
         )
         if not goal.turn_active:
             self._apply_pending_control(goal)
@@ -301,13 +318,93 @@ class GoalService:
         return await self._save(goal)
 
     async def enforce_budget_limit(self, goal_id: str) -> GoalSnapshot:
-        """Apply the fixed Main-Agent budget after a final verification attempt."""
+        """Apply the fixed Main-Agent budget after a final completion review."""
         goal = await self._require_goal(goal_id)
-        if goal.state == GoalState.ACTIVE and goal.turns_used >= goal.turn_budget:
+        if (
+            goal.state == GoalState.ACTIVE
+            and goal.turns_used >= goal.turn_budget
+        ):
             goal.state = GoalState.LIMITED
-            goal.state_reason = "Main Agent turn budget exhausted"
+            budget_reason = "Main Agent turn budget exhausted"
+            if goal.state_reason:
+                goal.state_reason = f"{goal.state_reason}; {budget_reason}"
+            else:
+                goal.state_reason = budget_reason
             return await self._save(goal)
         return goal
+
+    async def record_completion_review(
+        self,
+        goal_id: str,
+        criterion_id: str,
+        *,
+        passed: bool,
+        evidence_ref: str | None = None,
+        expected_revision: int | None = None,
+    ) -> GoalSnapshot:
+        goal = await self._require_goal(goal_id)
+        if (
+            expected_revision is not None
+            and goal.revision != expected_revision
+        ):
+            return goal
+        criterion = next(
+            (
+                item
+                for item in goal.criteria
+                if item.criterion_id == criterion_id
+            ),
+            None,
+        )
+        if criterion is None:
+            raise ValueError("criterion not found")
+        criterion.verification_request_id = None
+        if passed:
+            if evidence_ref:
+                criterion.evidence_refs.append(evidence_ref)
+            criterion.verified = True
+            criterion.consecutive_failures = 0
+        else:
+            criterion.verified = False
+            criterion.consecutive_failures += 1
+            rejection_reason = evidence_ref or "completion review rejected"
+            goal.state_reason = f"review rejected: {rejection_reason}"
+            if criterion.consecutive_failures >= 3:
+                goal.state = GoalState.BLOCKED
+                goal.state_reason = f"criterion review rejected three times: {rejection_reason}"
+        return await self._save(goal)
+
+    async def wait_for_completion_review_approval(
+        self,
+        goal_id: str,
+        criterion_id: str,
+        *,
+        request_id: str,
+        reason: str,
+        expected_revision: int | None = None,
+    ) -> GoalSnapshot:
+        """Persist a completion review approval wait without recording a failure."""
+        goal = await self._require_goal(goal_id)
+        if (
+            expected_revision is not None
+            and goal.revision != expected_revision
+        ):
+            return goal
+        criterion = next(
+            (
+                item
+                for item in goal.criteria
+                if item.criterion_id == criterion_id
+            ),
+            None,
+        )
+        if criterion is None:
+            raise ValueError("criterion not found")
+        criterion.verification_request_id = request_id
+        goal.state = GoalState.WAITING
+        goal.state_reason = reason
+        goal.next_focus = None
+        return await self._save(goal)
 
     async def record_verification(
         self,
@@ -318,28 +415,14 @@ class GoalService:
         evidence_ref: str | None = None,
         expected_revision: int | None = None,
     ) -> GoalSnapshot:
-        goal = await self._require_goal(goal_id)
-        if expected_revision is not None and goal.revision != expected_revision:
-            return goal
-        criterion = next(
-            (item for item in goal.criteria if item.criterion_id == criterion_id),
-            None,
+        """Compatibility alias retaining the former service API."""
+        return await self.record_completion_review(
+            goal_id,
+            criterion_id,
+            passed=passed,
+            evidence_ref=evidence_ref,
+            expected_revision=expected_revision,
         )
-        if criterion is None:
-            raise ValueError("criterion not found")
-        criterion.verification_request_id = None
-        if evidence_ref:
-            criterion.evidence_refs.append(evidence_ref)
-        if passed:
-            criterion.verified = True
-            criterion.consecutive_failures = 0
-        else:
-            criterion.verified = False
-            criterion.consecutive_failures += 1
-            if criterion.consecutive_failures >= 3:
-                goal.state = GoalState.BLOCKED
-                goal.state_reason = "criterion verification failed three times"
-        return await self._save(goal)
 
     async def wait_for_verification_approval(
         self,
@@ -350,21 +433,14 @@ class GoalService:
         reason: str,
         expected_revision: int | None = None,
     ) -> GoalSnapshot:
-        """Persist a verification approval wait without recording a failure."""
-        goal = await self._require_goal(goal_id)
-        if expected_revision is not None and goal.revision != expected_revision:
-            return goal
-        criterion = next(
-            (item for item in goal.criteria if item.criterion_id == criterion_id),
-            None,
+        """Compatibility alias retaining the former service API."""
+        return await self.wait_for_completion_review_approval(
+            goal_id,
+            criterion_id,
+            request_id=request_id,
+            reason=reason,
+            expected_revision=expected_revision,
         )
-        if criterion is None:
-            raise ValueError("criterion not found")
-        criterion.verification_request_id = request_id
-        goal.state = GoalState.WAITING
-        goal.state_reason = reason
-        goal.next_focus = None
-        return await self._save(goal)
 
     def _apply_pending_control(
         self,
@@ -414,10 +490,14 @@ class GoalService:
             if wake_from_steering:
                 goal.state = GoalState.ACTIVE
                 goal.state_reason = None
-                goal.next_focus = next_focus or "Apply newly received user steering"
+                goal.next_focus = (
+                    next_focus or "Apply newly received user steering"
+                )
             else:
                 goal.state = GoalState.WAITING
-                goal.state_reason = next_focus or "Waiting for a wake condition"
+                goal.state_reason = (
+                    next_focus or "Waiting for a wake condition"
+                )
                 goal.next_focus = None
         elif decision == "blocked":
             goal.state = GoalState.BLOCKED

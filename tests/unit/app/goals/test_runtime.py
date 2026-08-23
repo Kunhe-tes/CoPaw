@@ -1,12 +1,19 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import pytest
 
-from swe.app.goals.models import CompletionCriterion, GoalContract, GoalScope, GoalState
+from swe.app.goals.models import (
+    CompletionCriterion,
+    GoalContract,
+    GoalScope,
+    GoalState,
+)
 from swe.app.goals.runtime import (
+    CompletionReviewResult,
+    CompletionReviewPending,
     GoalRuntime,
     GoalTurnResolution,
-    VerificationPending,
 )
 from swe.app.goals.service import GoalService, InMemoryGoalStore
 
@@ -20,7 +27,7 @@ def contract() -> GoalContract:
                 observable_assertion="pytest exits 0",
                 verification_method="Run pytest",
                 expected_outcome="exit code 0",
-            )
+            ),
         ],
         constraints={"must_preserve": [], "must_not_do": []},
         autonomy_boundary="No deploy",
@@ -38,13 +45,14 @@ def scope() -> GoalScope:
 
 
 @pytest.mark.asyncio
-async def test_completion_proposal_requires_independent_verification_before_complete() -> (
+async def test_completion_proposal_requires_independent_review_before_complete() -> (
     None
 ):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     runtime = GoalRuntime(
-        service, verifier=lambda _: {"criterion-1": (True, "pytest passed")}
+        service,
+        reviewer=lambda _: {"criterion-1": (True, "pytest passed")},
     )
 
     result = await runtime.settle(
@@ -54,7 +62,7 @@ async def test_completion_proposal_requires_independent_verification_before_comp
             summary="done",
             next_focus=None,
             evidence_refs=["pytest passed"],
-            completion_proposal="Report is ready for verification",
+            completion_proposal="Report is ready for review",
         ),
     )
 
@@ -63,15 +71,133 @@ async def test_completion_proposal_requires_independent_verification_before_comp
 
 
 @pytest.mark.asyncio
-async def test_non_completion_resolution_keeps_the_goal_active_for_next_turn() -> None:
+async def test_completion_proposal_completes_only_after_reviewer_accepts() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
-    runtime = GoalRuntime(service, verifier=lambda _: {})
+
+    def reviewer(_: object) -> dict[str, CompletionReviewResult]:
+        return {"criterion-1": (True, "Observed pytest output")}
+
+    runtime = GoalRuntime(
+        service,
+        reviewer=reviewer,
+    )
 
     result = await runtime.settle(
         goal.goal_id,
         GoalTurnResolution(
-            decision="continue", summary="working", next_focus="write tests"
+            decision="propose_completion",
+            summary="done",
+            completion_proposal="The test command passed",
+        ),
+    )
+
+    assert result.state == GoalState.COMPLETE
+    assert result.criteria[0].verified
+
+
+@pytest.mark.asyncio
+async def test_legacy_verifier_argument_remains_supported() -> None:
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    runtime = GoalRuntime(
+        service,
+        verifier=lambda _: {"criterion-1": (True, "Legacy verifier accepted")},
+    )
+
+    result = await runtime.settle(
+        goal.goal_id,
+        GoalTurnResolution(
+            decision="propose_completion",
+            summary="done",
+            completion_proposal="The test command passed",
+        ),
+    )
+
+    assert result.state == GoalState.COMPLETE
+
+
+def test_runtime_requires_exactly_one_reviewer() -> None:
+    service = GoalService(InMemoryGoalStore())
+    reviewer = lambda _: {"criterion-1": (True, "Accepted")}
+
+    with pytest.raises(ValueError, match="exactly one"):
+        GoalRuntime(service)
+    with pytest.raises(ValueError, match="exactly one"):
+        GoalRuntime(service, reviewer=reviewer, verifier=reviewer)
+
+
+@pytest.mark.asyncio
+async def test_reviewer_rejections_block_after_three_attempts() -> None:
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    runtime = GoalRuntime(
+        service,
+        reviewer=lambda _: {"criterion-1": (False, "Missing test output")},
+    )
+    resolution = GoalTurnResolution(
+        decision="propose_completion",
+        summary="done",
+        completion_proposal="The test command passed",
+    )
+
+    first = await runtime.settle(goal.goal_id, resolution)
+    assert first.state == GoalState.ACTIVE
+    assert first.state_reason == "review rejected: Missing test output"
+    assert first.criteria[0].evidence_refs == []
+
+    await runtime.settle(goal.goal_id, resolution)
+    result = await runtime.settle(goal.goal_id, resolution)
+
+    assert result.state == GoalState.BLOCKED
+    assert "review rejected" in (result.state_reason or "")
+    assert "Missing test output" in (result.state_reason or "")
+    assert result.criteria[0].evidence_refs == []
+
+
+@pytest.mark.asyncio
+async def test_budget_limit_preserves_completion_review_rejection_reason() -> (
+    None
+):
+    service = GoalService(InMemoryGoalStore(), turn_budget=1)
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    runtime = GoalRuntime(
+        service,
+        reviewer=lambda _: {"criterion-1": (False, "Missing test output")},
+    )
+
+    result = await runtime.settle(
+        goal.goal_id,
+        GoalTurnResolution(
+            decision="propose_completion",
+            summary="done",
+            completion_proposal="The test command passed",
+        ),
+    )
+
+    assert result.state == GoalState.LIMITED
+    assert "review rejected: Missing test output" in (
+        result.state_reason or ""
+    )
+    assert "budget exhausted" in (result.state_reason or "")
+
+
+@pytest.mark.asyncio
+async def test_non_completion_resolution_keeps_the_goal_active_for_next_turn() -> (
+    None
+):
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    runtime = GoalRuntime(service, reviewer=lambda _: {})
+
+    result = await runtime.settle(
+        goal.goal_id,
+        GoalTurnResolution(
+            decision="continue",
+            summary="working",
+            next_focus="write tests",
         ),
     )
 
@@ -80,21 +206,21 @@ async def test_non_completion_resolution_keeps_the_goal_active_for_next_turn() -
 
 
 @pytest.mark.asyncio
-async def test_pending_edit_discards_old_completion_proposal_before_verification() -> (
+async def test_pending_edit_discards_old_completion_proposal_before_review() -> (
     None
 ):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     await service.begin_turn(goal.goal_id)
     await service.request_edit(goal.goal_id, contract())
-    verifier_calls = 0
+    reviewer_calls = 0
 
-    def verifier(_):
-        nonlocal verifier_calls
-        verifier_calls += 1
+    def reviewer(_):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
         return {"criterion-1": (True, "stale pass")}
 
-    result = await GoalRuntime(service, verifier=verifier).settle(
+    result = await GoalRuntime(service, reviewer=reviewer).settle(
         goal.goal_id,
         GoalTurnResolution(
             decision="propose_completion",
@@ -106,11 +232,13 @@ async def test_pending_edit_discards_old_completion_proposal_before_verification
 
     assert result.revision == 2
     assert result.state == GoalState.ACTIVE
-    assert verifier_calls == 0
+    assert reviewer_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_begin_turn_makes_a_direct_edit_pending_until_settlement() -> None:
+async def test_begin_turn_makes_a_direct_edit_pending_until_settlement() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     await service.begin_turn(goal.goal_id)
@@ -122,12 +250,14 @@ async def test_begin_turn_makes_a_direct_edit_pending_until_settlement() -> None
 
 
 @pytest.mark.asyncio
-async def test_affected_criteria_are_verified_before_the_next_continuation() -> None:
+async def test_affected_criteria_are_reviewed_before_the_next_continuation() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     runtime = GoalRuntime(
         service,
-        verifier=lambda _: {"criterion-1": (True, "focused verification")},
+        reviewer=lambda _: {"criterion-1": (True, "focused review")},
     )
 
     result = await runtime.settle(
@@ -144,7 +274,7 @@ async def test_affected_criteria_are_verified_before_the_next_continuation() -> 
 
 
 @pytest.mark.asyncio
-async def test_incremental_verification_only_invokes_the_affected_criteria() -> None:
+async def test_incremental_review_only_invokes_the_affected_criteria() -> None:
     service = GoalService(InMemoryGoalStore())
     two_criteria_contract = GoalContract(
         objective="Implement runtime",
@@ -165,14 +295,19 @@ async def test_incremental_verification_only_invokes_the_affected_criteria() -> 
         constraints={"must_preserve": [], "must_not_do": []},
         autonomy_boundary="No deploy",
     )
-    goal = await service.create_goal(scope=scope(), contract=two_criteria_contract)
+    goal = await service.create_goal(
+        scope=scope(),
+        contract=two_criteria_contract,
+    )
     observed_criteria: list[str] = []
 
-    def verifier(snapshot):
-        observed_criteria.extend(item.criterion_id for item in snapshot.criteria)
-        return {"criterion-1": (True, "focused verification")}
+    def reviewer(snapshot):
+        observed_criteria.extend(
+            item.criterion_id for item in snapshot.criteria
+        )
+        return {"criterion-1": (True, "focused review")}
 
-    result = await GoalRuntime(service, verifier=verifier).settle(
+    result = await GoalRuntime(service, reviewer=reviewer).settle(
         goal.goal_id,
         GoalTurnResolution(
             decision="continue",
@@ -187,15 +322,17 @@ async def test_incremental_verification_only_invokes_the_affected_criteria() -> 
 
 
 @pytest.mark.asyncio
-async def test_verification_approval_waits_without_counting_a_failure() -> None:
+async def test_completion_review_approval_waits_without_counting_a_failure() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     runtime = GoalRuntime(
         service,
-        verifier=lambda _: {
-            "criterion-1": VerificationPending(
+        reviewer=lambda _: {
+            "criterion-1": CompletionReviewPending(
                 request_id="approval-1",
-                reason="verification command requires tool approval",
+                reason="completion review requires tool approval",
             ),
         },
     )
@@ -215,35 +352,37 @@ async def test_verification_approval_waits_without_counting_a_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_approved_verification_retries_without_another_main_agent_turn() -> None:
+async def test_approved_review_retries_without_another_main_agent_turn() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     calls = 0
 
-    def verifier(_):
+    def reviewer(_):
         nonlocal calls
         calls += 1
         if calls == 1:
             return {
-                "criterion-1": VerificationPending(
+                "criterion-1": CompletionReviewPending(
                     request_id="approval-1",
-                    reason="verification command requires tool approval",
+                    reason="completion review requires tool approval",
                 ),
             }
-        return {"criterion-1": (True, "approved verification passed")}
+        return {"criterion-1": (True, "approved review accepted")}
 
-    runtime = GoalRuntime(service, verifier=verifier)
+    runtime = GoalRuntime(service, reviewer=reviewer)
     waiting = await runtime.settle(
         goal.goal_id,
         GoalTurnResolution(
             decision="propose_completion",
-            summary="Ready for verification",
+            summary="Ready for review",
             completion_proposal="Verify the change",
         ),
     )
     await service.wake(goal.goal_id, "Tool approval approved")
 
-    result = await runtime.retry_pending_verification(goal.goal_id)
+    result = await runtime.retry_pending_completion_review(goal.goal_id)
 
     assert waiting.state == GoalState.WAITING
     assert result.state == GoalState.COMPLETE
@@ -274,14 +413,19 @@ async def test_environment_write_without_declared_criteria_rechecks_all_criteria
         constraints={"must_preserve": [], "must_not_do": []},
         autonomy_boundary="No deploy",
     )
-    goal = await service.create_goal(scope=scope(), contract=two_criteria_contract)
+    goal = await service.create_goal(
+        scope=scope(),
+        contract=two_criteria_contract,
+    )
     observed: list[str] = []
 
-    def verifier(snapshot):
+    def reviewer(snapshot):
         observed.extend(item.criterion_id for item in snapshot.criteria)
-        return {item.criterion_id: (True, "verified") for item in snapshot.criteria}
+        return {
+            item.criterion_id: (True, "accepted") for item in snapshot.criteria
+        }
 
-    result = await GoalRuntime(service, verifier=verifier).settle(
+    result = await GoalRuntime(service, reviewer=reviewer).settle(
         goal.goal_id,
         GoalTurnResolution(decision="continue", summary="Changed files"),
         environment_changed=True,
