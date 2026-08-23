@@ -76,10 +76,14 @@ docs(skills): document Skills Hub import
   ```
 - **如果 pre-commit 自动修改了文件：** 先提交这些修改，再重复执行
   `pre-commit run --all-files`，直到无修改且通过。
-- **CI 策略：** pre-commit 检查失败的 PR 视为未就绪（not merge-ready）。
-- **前端代码格式化：** 如果你的修改涉及到 `console` 或 `website` 目录，请在提交前运行格式化：
+- **CI 策略：** pre-commit 或 `Console Typecheck` 检查失败的 PR 视为未就绪（not merge-ready）。
+- **Console 类型检查：** 如果修改涉及 `console` 目录，提交前必须运行类型检查：
   ```bash
-  cd console && npm run format
+  cd console
+  pnpm run typecheck
+  ```
+- **Website 格式化：** 如果修改涉及 `website` 目录，请在提交前运行格式化：
+  ```bash
   cd website && npm run format
   ```
 - **文档：** 当你添加或更改面向用户的行为时，更新文档和 README。文档位于 `website/public/docs/` 下。

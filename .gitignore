@@ -130,7 +130,8 @@ src/.hypothesis/
 .qoder/
 
 # github actions
-.github/
+.github/*
+!.github/workflows/
 .gitnexus
 
 .playwright-mcp

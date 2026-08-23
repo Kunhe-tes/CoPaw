@@ -17,7 +17,7 @@ describe("QuestionTooltip", () => {
 
     const tooltip = screen
       .getByText("不会被虚化区域遮住的问题")
-      .closest(".quick-nav-tooltip");
+      .closest<HTMLElement>(".quick-nav-tooltip");
 
     expect(tooltip).toBeInTheDocument();
     expect(container).not.toContainElement(tooltip);
