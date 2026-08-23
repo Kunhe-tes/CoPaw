@@ -47,3 +47,16 @@ def test_parse_completion_review_rejects_all_on_duplicate_unknown_or_missing_ids
         "criterion-1": (False, "completion review output does not match criteria"),
         "criterion-2": (False, "completion review output does not match criteria"),
     }
+
+
+def test_parse_completion_review_keeps_a_rejection_reason_with_evidence() -> None:
+    parsed = parse_completion_review(
+        (
+            '{"reviews":[{"criterion_id":"criterion-1",'
+            '"decision":"reject","reason":"Missing test output",'
+            '"evidence_refs":["tool-1"]}]}'
+        ),
+        {"criterion-1"},
+    )
+
+    assert parsed == {"criterion-1": (False, "Missing test output")}

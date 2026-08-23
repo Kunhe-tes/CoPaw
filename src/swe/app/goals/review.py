@@ -48,9 +48,9 @@ def parse_completion_review(
         if criterion_id not in criterion_ids or criterion_id in parsed:
             return _reject_all(criterion_ids, _MISMATCHED_CRITERIA_REASON)
         parsed[criterion_id] = (
-            decision == "accept",
+            True,
             _evidence_or_reason(evidence_refs, reason),
-        )
+        ) if decision == "accept" else (False, reason.strip())
     if set(parsed) != criterion_ids:
         return _reject_all(criterion_ids, _MISMATCHED_CRITERIA_REASON)
     return parsed

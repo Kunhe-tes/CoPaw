@@ -103,6 +103,13 @@ async def test_goal_stream_keeps_intermediate_turns_open_and_wakes_from_wait(
     )
     monkeypatch.setattr(runner, "_stream_goal_finalization_turn", fake_finalization_turn)
 
+    async def fake_completion_review(**_kwargs):
+        return {"criterion-1": (True, "passed")}
+
+    monkeypatch.setattr(
+        runner, "_run_goal_completion_review", fake_completion_review,
+    )
+
     events = [
         event
         async for event in runner._stream_completion_lifecycle(
@@ -500,6 +507,40 @@ async def test_goal_completion_reviewer_parses_hidden_judge_output(
 
 
 @pytest.mark.asyncio
+async def test_goal_completion_reviewer_ignores_legacy_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+    runtime = SimpleNamespace(
+        agent=SimpleNamespace(
+            _request_context={
+                "goal_verifier": lambda _: {"criterion-1": (True, "bypass")},
+            },
+        ),
+    )
+    resolution = SimpleNamespace(
+        completion_proposal="Ready",
+        evidence_refs=[],
+    )
+    calls = 0
+
+    async def fake_review(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"criterion-1": (False, "Judge rejected")}
+
+    monkeypatch.setattr(runner, "_run_goal_completion_review", fake_review)
+
+    result = await runner._create_goal_completion_reviewer(
+        runtime=runtime,
+        resolution=resolution,
+    )(SimpleNamespace())
+
+    assert result == {"criterion-1": (False, "Judge rejected")}
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_goal_completion_reviewer_maps_denied_approval_to_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -523,6 +564,117 @@ async def test_goal_completion_reviewer_maps_denied_approval_to_rejection(
     assert result == {
         "criterion-1": (False, "Completion Judge approval denied"),
     }
+
+
+@pytest.mark.asyncio
+async def test_goal_completion_reviewer_keeps_submitted_approval_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, goal_id = await _goal_service()
+    goal = await service.get(goal_id)
+    goal.criteria[0].verification_request_id = "approval-1"
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+
+    class FakeApprovals:
+        async def get_request_status(self, request_id: str):
+            assert request_id == "approval-1"
+            return {"status": "submitted"}
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        lambda: FakeApprovals(),
+    )
+
+    result = await runner._completion_review_approval_result(goal)
+
+    assert result is not None
+    assert result["criterion-1"].request_id == "approval-1"
+
+
+@pytest.mark.asyncio
+async def test_approved_review_without_replay_payload_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, goal_id = await _goal_service()
+    goal = await service.get(goal_id)
+    goal.criteria[0].verification_request_id = "approval-1"
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+
+    class FakeApprovals:
+        async def get_request_status(self, _request_id: str):
+            return {"status": "approved"}
+
+        async def get_request(self, _request_id: str):
+            return SimpleNamespace(extra={})
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        lambda: FakeApprovals(),
+    )
+    monkeypatch.setattr(
+        runner,
+        "_create_goal_completion_judge_agent",
+        lambda **_kwargs: pytest.fail("Judge must not start without replay"),
+    )
+
+    result = await runner._run_goal_completion_review(
+        runtime=SimpleNamespace(
+            agent=SimpleNamespace(_request_context={}),
+            session_id="session-1",
+            chat=SimpleNamespace(id="chat-1"),
+        ),
+        review_goal=goal,
+        completion_proposal="Ready",
+        evidence_refs=[],
+        tool_observations=[],
+    )
+
+    assert result == {
+        "criterion-1": (
+            False,
+            "Completion Judge approved tool replay is unavailable",
+        ),
+    }
+
+
+@pytest.mark.asyncio
+async def test_approved_review_replay_preserves_hook_approval_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, goal_id = await _goal_service()
+    goal = await service.get(goal_id)
+    goal.criteria[0].verification_request_id = "approval-1"
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+    record = SimpleNamespace(
+        request_id="approval-1",
+        tool_name="read_file",
+        extra={
+            "tool_call": {"id": "call-1", "name": "read_file", "input": {}},
+            "sibling_tool_calls": [{"id": "call-2"}],
+            "remaining_queue": [{"id": "call-3"}],
+            "thinking_blocks": [{"type": "thinking"}],
+            "approval_kind": "hook_pre_tool_use",
+            "hook_ask_handler_ids": ["hook-1"],
+        },
+    )
+
+    class FakeApprovals:
+        async def get_request(self, request_id: str):
+            assert request_id == "approval-1"
+            return record
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        lambda: FakeApprovals(),
+    )
+
+    replay = await runner._completion_review_approved_tool_call(goal)
+
+    assert replay is not None
+    assert replay["_sibling_tool_calls"] == [{"id": "call-2"}]
+    assert replay["_remaining_queue"] == [{"id": "call-3"}]
+    assert replay["_thinking_blocks"] == [{"type": "thinking"}]
+    assert replay["_approval_replay"]["request_id"] == "approval-1"
 
 
 def test_completion_judge_has_no_bootstrap_and_respects_profile_tools(
@@ -654,6 +806,15 @@ async def test_goal_stream_retries_approved_verification_before_next_turn(
     monkeypatch.setattr(
         "swe.app.goals.wakeup.wait_for_goal_wake",
         fake_wait_for_goal_wake,
+    )
+
+    async def fake_completion_review(**_kwargs):
+        return await verifier(None)
+
+    monkeypatch.setattr(
+        runner,
+        "_run_goal_completion_review",
+        fake_completion_review,
     )
 
     events = [

@@ -142,6 +142,7 @@ class GoalSnapshot(StrictGoalModel):
     next_focus: str | None = None
     state_reason: str | None = None
     pending_review_criteria: list[str] = Field(default_factory=list)
+    pending_review_claim_id: str | None = None
     control_commands: list[GoalControlCommand] = Field(default_factory=list)
     steering: list[GoalSteering] = Field(default_factory=list)
     subagent_run_ids: list[str] = Field(default_factory=list)

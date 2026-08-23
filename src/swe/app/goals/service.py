@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from uuid import uuid4
 from typing import Protocol
 
 from .models import (
@@ -99,6 +100,7 @@ class GoalService:
         self._store = store
         self._turn_budget = turn_budget
         self._create_locks: dict[str, asyncio.Lock] = {}
+        self._review_claim_locks: dict[str, asyncio.Lock] = {}
 
     async def create_goal(
         self,
@@ -409,6 +411,38 @@ class GoalService:
         goal.next_focus = None
         return await self._save(goal)
 
+    async def claim_pending_completion_review(
+        self,
+        goal_id: str,
+    ) -> tuple[GoalSnapshot, str] | None:
+        """Claim one pending review retry so it cannot be counted twice."""
+        lock = self._review_claim_locks.setdefault(goal_id, asyncio.Lock())
+        async with lock:
+            goal = await self._require_goal(goal_id)
+            if (
+                goal.state != GoalState.ACTIVE
+                or not goal.pending_review_criteria
+                or goal.pending_review_claim_id
+            ):
+                return None
+            claim_id = uuid4().hex
+            goal.pending_review_claim_id = claim_id
+            return await self._save(goal), claim_id
+
+    async def release_pending_completion_review_claim(
+        self,
+        goal_id: str,
+        claim_id: str,
+    ) -> GoalSnapshot:
+        """Release an unfinished retry claim after the reviewer returns."""
+        lock = self._review_claim_locks.setdefault(goal_id, asyncio.Lock())
+        async with lock:
+            goal = await self._require_goal(goal_id)
+            if goal.pending_review_claim_id != claim_id:
+                return goal
+            goal.pending_review_claim_id = None
+            return await self._save(goal)
+
     async def record_verification(
         self,
         goal_id: str,
@@ -520,6 +554,8 @@ class GoalService:
             )
             for index, criterion in enumerate(contract.completion_criteria, 1)
         ]
+        goal.pending_review_criteria = []
+        goal.pending_review_claim_id = None
         if goal.state == GoalState.WAITING:
             goal.state = GoalState.ACTIVE
         goal.next_focus = None

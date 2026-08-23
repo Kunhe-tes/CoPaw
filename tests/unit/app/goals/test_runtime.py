@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from swe.app.goals.models import (
@@ -350,6 +352,87 @@ async def test_completion_review_approval_waits_without_counting_a_failure() -> 
     assert result.criteria[0].consecutive_failures == 0
     assert result.criteria[0].verification_request_id == "approval-1"
     assert result.pending_review_criteria == ["criterion-1"]
+
+
+@pytest.mark.asyncio
+async def test_direct_edit_discards_a_pending_completion_review() -> None:
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    reviewer_calls = 0
+
+    def reviewer(_):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        return {
+            "criterion-1": CompletionReviewPending(
+                request_id="approval-1",
+                reason="completion review requires tool approval",
+            ),
+        }
+
+    runtime = GoalRuntime(service, reviewer=reviewer)
+    await runtime.settle(
+        goal.goal_id,
+        GoalTurnResolution(
+            decision="propose_completion",
+            summary="Ready for review",
+            completion_proposal="Verify the change",
+        ),
+    )
+    edited = await service.request_edit(goal.goal_id, contract())
+
+    result = await runtime.retry_pending_completion_review(goal.goal_id)
+
+    assert edited.revision == 2
+    assert result.state == GoalState.ACTIVE
+    assert result.criteria[0].verified is False
+    assert result.pending_review_criteria == []
+    assert reviewer_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_pending_review_retries_record_one_rejection() -> None:
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    reviewer_calls = 0
+    retry_started = asyncio.Event()
+    allow_retry = asyncio.Event()
+
+    async def reviewer(_):
+        nonlocal reviewer_calls
+        reviewer_calls += 1
+        if reviewer_calls == 1:
+            return {
+                "criterion-1": CompletionReviewPending(
+                    request_id="approval-1",
+                    reason="completion review requires tool approval",
+                ),
+            }
+        retry_started.set()
+        await allow_retry.wait()
+        return {"criterion-1": (False, "Completion Judge approval denied")}
+
+    runtime = GoalRuntime(service, reviewer=reviewer)
+    await runtime.settle(
+        goal.goal_id,
+        GoalTurnResolution(
+            decision="propose_completion",
+            summary="Ready for review",
+            completion_proposal="Verify the change",
+        ),
+    )
+    await service.wake(goal.goal_id, "Tool approval denied")
+
+    first_retry = asyncio.create_task(
+        runtime.retry_pending_completion_review(goal.goal_id),
+    )
+    await retry_started.wait()
+    await runtime.retry_pending_completion_review(goal.goal_id)
+    allow_retry.set()
+    result = await first_retry
+
+    assert reviewer_calls == 2
+    assert result.criteria[0].consecutive_failures == 1
 
 
 @pytest.mark.asyncio

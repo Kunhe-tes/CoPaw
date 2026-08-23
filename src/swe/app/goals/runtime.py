@@ -151,28 +151,33 @@ class GoalRuntime:
         goal_id: str,
     ) -> GoalSnapshot:
         """Resume an approval-gated Completion Review without spending a turn."""
-        goal = await self._service.get(goal_id)
-        pending = {
-            item.criterion_id
-            for item in goal.criteria
-            if item.criterion_id in goal.pending_review_criteria
-        }
-        if not pending:
-            pending = {
-                item.criterion_id
-                for item in goal.criteria
-                if item.verification_request_id
-            }
-        if goal.state != GoalState.ACTIVE or not pending:
+        claimed = await self._service.claim_pending_completion_review(goal_id)
+        if claimed is None:
+            return await self._service.get(goal_id)
+        goal, claim_id = claimed
+        try:
+            pending = set(goal.pending_review_criteria)
+            if not pending:
+                pending = {
+                    item.criterion_id
+                    for item in goal.criteria
+                    if item.verification_request_id
+                }
+            if not pending:
+                return goal
+            goal = await self._review(goal, goal.revision, pending)
+            if goal.state == GoalState.BLOCKED:
+                return goal
+            if all(criterion.verified for criterion in goal.criteria):
+                goal.state = GoalState.COMPLETE
+                goal.state_reason = None
+                return await self._service.persist(goal)
             return goal
-        goal = await self._review(goal, goal.revision, pending)
-        if goal.state == GoalState.BLOCKED:
-            return goal
-        if all(criterion.verified for criterion in goal.criteria):
-            goal.state = GoalState.COMPLETE
-            goal.state_reason = None
-            return await self._service.persist(goal)
-        return goal
+        finally:
+            await self._service.release_pending_completion_review_claim(
+                goal_id,
+                claim_id,
+            )
 
     async def _review(
         self,

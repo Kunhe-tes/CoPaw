@@ -3507,9 +3507,6 @@ class AgentRunner(Runner):
     ):
         """Bind one Main-Agent turn's bounded evidence to a Judge callback."""
         request_context = getattr(runtime.agent, "_request_context", {}) or {}
-        legacy_reviewer = request_context.get("goal_verifier")
-        if callable(legacy_reviewer):
-            return legacy_reviewer
         tool_observations = request_context.get(
             "_goal_turn_tool_observations",
             (),
@@ -3548,6 +3545,9 @@ class AgentRunner(Runner):
         observations = (
             tool_observations if isinstance(tool_observations, list) else []
         )
+        has_pending_review_request = any(
+            item.verification_request_id for item in review_goal.criteria
+        )
         try:
             approval_result = await self._completion_review_approval_result(
                 review_goal,
@@ -3557,6 +3557,14 @@ class AgentRunner(Runner):
             approved_tool_call = await self._completion_review_approved_tool_call(
                 review_goal,
             )
+            if has_pending_review_request and approved_tool_call is None:
+                return {
+                    criterion_id: (
+                        False,
+                        "Completion Judge approved tool replay is unavailable",
+                    )
+                    for criterion_id in criterion_ids
+                }
             agent = self._create_goal_completion_judge_agent(
                 runtime=runtime,
                 goal=review_goal,
@@ -3628,7 +3636,7 @@ class AgentRunner(Runner):
         decision = str((status or {}).get("status") or "pending")
         if decision == "approved":
             return None
-        if decision == "pending":
+        if decision in {"pending", "submitted"}:
             return {
                 criterion_id: CompletionReviewPending(
                     request_id=request_id,
@@ -3656,8 +3664,7 @@ class AgentRunner(Runner):
         if not request_ids:
             return None
         request = await get_approval_service().get_request(next(iter(request_ids)))
-        tool_call = getattr(request, "extra", {}).get("tool_call")
-        return dict(tool_call) if isinstance(tool_call, dict) else None
+        return _approved_tool_call_from_record(request) if request else None
 
     async def _stream_goal_finalization_turn(
         self,
