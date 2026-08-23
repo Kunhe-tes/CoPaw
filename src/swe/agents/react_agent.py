@@ -172,6 +172,14 @@ _PLAN_MODE_ALLOWED_TOOLS = frozenset(
         "submit_proposed_plan",
     },
 )
+_COMPLETION_JUDGE_ALLOWED_TOOLS = frozenset(
+    {
+        "read_file",
+        "grep_search",
+        "glob_search",
+        "get_current_time",
+    },
+)
 _GOAL_TURN_INSTRUCTION = """[Goal Mode]
 You are advancing a confirmed Goal Contract. Perform one focused Main Agent turn,
 then you MUST call `submit_goal_turn_resolution` exactly once. Use `continue`
@@ -475,6 +483,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._skill_tool_registry = SkillToolRegistry()
         self._init_agent_phase_state()
         goal_finalization = bool(self._request_context.get("goal_finalization"))
+        completion_judge = (
+            self._request_context.get("agent_role") == "completion_judge"
+        )
 
         # Extract configuration from agent_config
         running_config = agent_config.running
@@ -486,7 +497,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             if goal_finalization
             else self._create_toolkit(namesake_strategy=namesake_strategy)
         )
-        if not goal_finalization:
+        if not goal_finalization and not completion_judge:
             self._register_skills(toolkit)
             self._register_source_tools(toolkit)
 
@@ -546,8 +557,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         # Setup memory manager
         self._setup_memory_manager(
-            enable_memory_manager and not goal_finalization,
-            None if goal_finalization else memory_manager,
+            enable_memory_manager and not goal_finalization and not completion_judge,
+            None if goal_finalization or completion_judge else memory_manager,
             namesake_strategy,
         )
 
@@ -587,6 +598,12 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             request_context,
             plan_mode_enabled,
         )
+        if request_context.get("agent_role") == "completion_judge":
+            enabled_tools = {
+                name: enabled_tools.get(name, False)
+                and name in _COMPLETION_JUDGE_ALLOWED_TOOLS
+                for name in tool_functions
+            }
         toolkit = Toolkit()
         self._register_enabled_tools(
             toolkit,
@@ -596,19 +613,20 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             plan_mode_enabled,
             namesake_strategy,
         )
-        self._register_background_task_tools(
-            toolkit,
-            tool_functions,
-            enabled_tools,
-            async_execution_tools,
-            namesake_strategy,
-        )
+        if request_context.get("agent_role") != "completion_judge":
+            self._register_background_task_tools(
+                toolkit,
+                tool_functions,
+                enabled_tools,
+                async_execution_tools,
+                namesake_strategy,
+            )
 
-        self._register_background_subagent_tools(
-            toolkit,
-            namesake_strategy,
-            request_context,
-        )
+            self._register_background_subagent_tools(
+                toolkit,
+                namesake_strategy,
+                request_context,
+            )
 
         return toolkit
 
@@ -649,6 +667,14 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             logger.warning(
                 f"Failed to load agent tools config: {exc}, "
                 "canonical tool defaults will be used",
+            )
+        if request_context.get("agent_role") == "completion_judge":
+            return (
+                {
+                    name: enabled and name in _COMPLETION_JUDGE_ALLOWED_TOOLS
+                    for name, enabled in enabled_tools.items()
+                },
+                async_execution_tools,
             )
         if request_context.get("agent_role") == "subagent":
             return (
@@ -711,11 +737,14 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             "update_task_progress": update_task_progress,
             "emit_wplus_sop_event": emit_wplus_sop_event,
         }
-        if request_context.get("agent_role", "main") != "subagent":
+        if request_context.get("agent_role", "main") not in {
+            "subagent",
+            "completion_judge",
+        }:
             _add_main_agent_tools(
                 tool_functions,
                 request_context=request_context,
-                workspace_dir=self._workspace_dir,
+                workspace_dir=getattr(self, "_workspace_dir", None),
                 plan_mode_enabled=plan_mode_enabled,
             )
         return tool_functions
@@ -829,7 +858,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             request_context.get("selected_expert_id") or "",
         ).strip()
         return (
-            request_context.get("agent_role", "main") == "subagent"
+            request_context.get("agent_role", "main")
+            in {"subagent", "completion_judge"}
             or not (
                 request_context.get("agent_id")
                 or getattr(self._agent_config, "id", None)
@@ -1455,6 +1485,8 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
     def _register_hooks(self) -> None:
         """Register pre-reasoning and pre-acting hooks."""
+        if self._request_context.get("agent_role") == "completion_judge":
+            return
         # Bootstrap hook - checks BOOTSTRAP.md on first interaction
         # Use workspace_dir if available, else fallback to WORKING_DIR
         working_dir = (

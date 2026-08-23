@@ -1,12 +1,15 @@
+# -*- coding: utf-8 -*-
 """Runner-level Goal stream lifecycle regression tests."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from agentscope.message import Msg
 
+from swe.agents.react_agent import SWEAgent as RealSWEAgent
 from swe.app.goals.models import CompletionCriterion, GoalContract, GoalScope, GoalState
 from swe.app.goals.service import GoalService, InMemoryGoalStore
 from swe.app.runner.runner import (
@@ -289,7 +292,7 @@ async def test_interrupted_goal_after_wake_does_not_finalize(
 
 def test_goal_finalization_agent_is_tool_free(monkeypatch: pytest.MonkeyPatch) -> None:
     runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     class FakeAgent:
         def __init__(self, **kwargs) -> None:
@@ -321,6 +324,133 @@ def test_goal_finalization_agent_is_tool_free(monkeypatch: pytest.MonkeyPatch) -
     assert "only the final concise user-facing response" in captured[
         "system_prompt_override"
     ]
+
+
+def test_goal_completion_judge_agent_is_restricted_and_model_frozen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+    captured: dict[str, Any] = {}
+    frozen_provider = object()
+
+    class FakeAgent:
+        def __init__(self, **kwargs) -> None:
+            captured.update(kwargs)
+
+    class FakeProviderManager:
+        def get_provider(self, provider_id: str) -> object:
+            assert provider_id == "provider-1"
+            return frozen_provider
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+    monkeypatch.setattr(
+        "swe.providers.provider_manager.ProviderManager.get_instance",
+        lambda _tenant_id: FakeProviderManager(),
+    )
+    runtime = SimpleNamespace(
+        agent=SimpleNamespace(
+            _request_context={"chat_id": "chat-1", "turn_id": "turn-1"},
+            _resolved_model_slot={"provider_id": "provider-1", "model": "model-1"},
+        ),
+        agent_config="agent-config",
+    )
+
+    created = runner._create_goal_completion_judge_agent(
+        runtime=runtime,
+        goal=SimpleNamespace(),
+    )
+
+    assert isinstance(created, FakeAgent)
+    assert captured["request_context"] == {
+        "chat_id": "chat-1",
+        "turn_id": "turn-1",
+        "agent_role": "completion_judge",
+    }
+    assert captured["enable_memory_manager"] is False
+    assert captured["memory_manager"] is None
+    assert captured["mcp_clients"] == []
+    assert captured["enable_workspace_skills"] is False
+    assert captured["task_tracker"] is None
+    assert captured["source_tool_versions"] == ()
+    assert captured["model_slot_override"].provider_id == "provider-1"
+    assert captured["model_slot_override"].model == "model-1"
+    assert captured["model_provider_override"] is frozen_provider
+    prompt = captured["system_prompt_override"]
+    assert '"reviews"' in prompt
+    assert "one entry for every supplied criterion" in prompt.lower()
+    assert "missing evidence" in prompt.lower()
+
+    judge = object.__new__(RealSWEAgent)
+    judge._agent_config = SimpleNamespace()
+    judge._request_context = captured["request_context"]
+    judge._workspace_dir = None
+    assert set(judge._create_toolkit().tools) == {
+        "read_file",
+        "grep_search",
+        "glob_search",
+        "get_current_time",
+    }
+
+
+def test_goal_completion_judge_rejects_missing_frozen_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+    created = False
+
+    class FakeAgent:
+        def __init__(self, **_kwargs) -> None:
+            nonlocal created
+            created = True
+
+    monkeypatch.setattr("swe.app.runner.runner.SWEAgent", FakeAgent)
+    runtime = SimpleNamespace(
+        agent=SimpleNamespace(
+            _request_context={},
+            _resolved_model_slot={"provider_id": "provider-1"},
+        ),
+        agent_config="agent-config",
+    )
+
+    with pytest.raises(RuntimeError, match="frozen model is unavailable"):
+        runner._create_goal_completion_judge_agent(
+            runtime=runtime,
+            goal=SimpleNamespace(),
+        )
+
+    assert created is False
+
+
+def test_completion_judge_has_no_bootstrap_and_respects_profile_tools(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    (tmp_path / "BOOTSTRAP.md").write_text("bootstrap", encoding="utf-8")
+    monkeypatch.setattr(
+        "swe.config.config._default_builtin_tools",
+        lambda: {
+            "execute_shell_command": SimpleNamespace(
+                enabled=True,
+                async_execution=False,
+            ),
+            "read_file": SimpleNamespace(enabled=True),
+        },
+    )
+    judge = object.__new__(RealSWEAgent)
+    judge._agent_config = SimpleNamespace(tools=None)
+    judge._request_context = {"agent_role": "completion_judge"}
+    judge._workspace_dir = tmp_path
+    judge._language = "en"
+    judge._enable_memory_manager = False
+    judge.memory_manager = None
+    registered_hooks: list[dict[str, object]] = []
+    judge.register_instance_hook = lambda **kwargs: registered_hooks.append(kwargs)
+
+    judge._register_hooks()
+
+    assert registered_hooks == []
+    assert not (tmp_path / ".bootstrap_completed").exists()
+    assert set(judge._create_toolkit().tools) == {"read_file"}
 
 
 @pytest.mark.asyncio

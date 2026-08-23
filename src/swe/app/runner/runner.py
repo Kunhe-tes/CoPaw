@@ -1455,6 +1455,18 @@ claim evidence beyond that supplied state. For COMPLETE, provide the formal
 delivery. For other states, state the reason and the appropriate next step."""
 
 
+_GOAL_COMPLETION_JUDGE_SYSTEM_PROMPT = """[Goal Completion Judge]
+Perform an independent, evidence-based completion review for the authoritative
+Goal context supplied in the user message. Use only the available read-only
+tools when needed. Do not modify files or the Goal, create plans, delegate,
+or provide a user-facing delivery.
+
+Return exactly one JSON object with no prose or markdown:
+{"reviews":[{"criterion_id":...,"decision":"accept"|"reject","reason":...,"evidence_refs":[...]}]}
+Provide one entry for every supplied criterion. When evidence is insufficient,
+reject the criterion and state the missing evidence in its reason."""
+
+
 def _build_goal_finalization_input(goal: Any, state: str, reason: str | None) -> Msg:
     """Build bounded internal input for a tool-free Goal Finalization Turn."""
     return _build_internal_follow_up_msg(
@@ -3361,8 +3373,8 @@ class AgentRunner(Runner):
     ) -> SWEAgent:
         """Create an isolated, tool-free Agent for one Goal finalization."""
         source_context = getattr(runtime.agent, "_request_context", {}) or {}
-        request_context = {
-            key: source_context.get(key)
+        request_context: dict[str, str] = {
+            key: str(source_context[key])
             for key in (
                 "session_id", "user_id", "channel", "chat_id", "turn_id",
                 "agent_id", "tenant_id", "source_id", "user_name", "bbk_id",
@@ -3403,6 +3415,65 @@ class AgentRunner(Runner):
             model_slot_override=model_slot_override,
             model_provider_override=model_provider_override,
             system_prompt_override=_GOAL_FINALIZATION_SYSTEM_PROMPT,
+            source_tool_versions=(),
+        )
+
+    def _create_goal_completion_judge_agent(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        goal: Any,
+    ) -> SWEAgent:
+        """Create a restricted, frozen-model Agent for Goal completion review."""
+        source_context = getattr(runtime.agent, "_request_context", {}) or {}
+        request_context: dict[str, str] = {
+            key: str(source_context[key])
+            for key in (
+                "session_id",
+                "user_id",
+                "channel",
+                "chat_id",
+                "turn_id",
+                "agent_id",
+                "tenant_id",
+                "source_id",
+                "trace_id",
+            )
+            if source_context.get(key) is not None
+        }
+        request_context["agent_role"] = "completion_judge"
+        resolved_slot = getattr(runtime.agent, "_resolved_model_slot", {}) or {}
+        model_slot_override = None
+        model_provider_override = None
+        provider_id = str(resolved_slot.get("provider_id") or "")
+        model_name = str(resolved_slot.get("model") or "")
+        if not provider_id or not model_name:
+            raise RuntimeError("Goal completion judge frozen model is unavailable")
+        from ...providers.models import ModelSlotConfig
+        from ...providers.provider_manager import ProviderManager
+
+        model_slot_override = ModelSlotConfig(
+            provider_id=provider_id,
+            model=model_name,
+        )
+        model_provider_override = ProviderManager.get_instance(
+            self.tenant_id,
+        ).get_provider(provider_id)
+        if model_provider_override is None:
+            raise RuntimeError("Goal completion judge provider is unavailable")
+        return SWEAgent(
+            agent_config=runtime.agent_config,
+            env_context=None,
+            enable_memory_manager=False,
+            mcp_clients=[],
+            memory_manager=None,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            task_tracker=None,
+            enable_workspace_skills=False,
+            model_slot_override=model_slot_override,
+            model_provider_override=model_provider_override,
+            system_prompt_override=_GOAL_COMPLETION_JUDGE_SYSTEM_PROMPT,
             source_tool_versions=(),
         )
 
