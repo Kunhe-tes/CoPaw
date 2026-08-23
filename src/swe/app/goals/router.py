@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Goal Runtime monitor and explicit-control API."""
 
 from __future__ import annotations
@@ -40,7 +41,10 @@ async def _service(request: Request) -> GoalService:
     db = getattr(request.app.state, "db_connection", None)
     store = MySqlGoalStore(db)
     if not store.is_available:
-        raise HTTPException(status_code=503, detail="Goal Runtime database is unavailable")
+        raise HTTPException(
+            status_code=503,
+            detail="Goal Runtime database is unavailable",
+        )
     await store.initialize()
     return GoalService(store)
 
@@ -56,17 +60,28 @@ async def _chat(workspace: Any, chat_id: str) -> Any:
 def _scope(workspace: Any, chat: Any) -> GoalScope:
     config = getattr(workspace, "config", None)
     source_id = str(getattr(config, "source_id", "") or "default")
-    model = str(
-        getattr(getattr(config, "model", None), "model_name", "")
-        or getattr(config, "model_name", "")
-        or "default",
-    )
+    tenant_id = str(getattr(workspace, "tenant_id", "") or "default")
+    model = ""
+    provider_id = ""
+    try:
+        from ...providers.provider_manager import ProviderManager
+
+        active = ProviderManager.get_instance(tenant_id).get_active_model()
+        if active is not None:
+            provider_id = str(getattr(active, "provider_id", "") or "")
+            model = str(getattr(active, "model", "") or "")
+    except Exception:  # noqa: BLE001
+        provider_id = ""
+        model = ""
+    if not provider_id or not model:
+        raise ValueError("Goal creation requires an active effective model")
     return GoalScope(
-        tenant_id=str(getattr(workspace, "tenant_id", "") or "default"),
+        tenant_id=tenant_id,
         source_id=source_id,
         agent_profile_id=str(getattr(workspace, "agent_id", "") or "default"),
         chat_id=chat.id,
         effective_model=model,
+        effective_model_provider_id=provider_id,
     )
 
 
@@ -86,7 +101,10 @@ async def _owned_goal(
         or goal.scope.agent_profile_id
         != str(getattr(workspace, "agent_id", "") or "default")
         or goal.scope.source_id
-        != str(getattr(getattr(workspace, "config", None), "source_id", "") or "default")
+        != str(
+            getattr(getattr(workspace, "config", None), "source_id", "")
+            or "default",
+        )
     ):
         raise HTTPException(status_code=404, detail="goal not found")
     if goal.scope.chat_id != chat_id:
@@ -110,7 +128,7 @@ async def create_goal(
             scope=_scope(workspace, chat),
             contract=body.contract,
         )
-    except GoalConflictError as exc:
+    except (GoalConflictError, ValueError) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
@@ -125,7 +143,10 @@ async def recent_goal(
     if goal is None:
         return None
     return await _owned_goal(
-        await _service(request), workspace, goal.goal_id, chat.id,
+        await _service(request),
+        workspace,
+        goal.goal_id,
+        chat.id,
     )
 
 
@@ -136,25 +157,45 @@ async def get_goal(
     workspace: Any = Depends(get_workspace),
     chat_id: str = Query(..., min_length=1),
 ) -> GoalSnapshot:
-    return await _owned_goal(await _service(request), workspace, goal_id, chat_id)
+    return await _owned_goal(
+        await _service(request),
+        workspace,
+        goal_id,
+        chat_id,
+    )
 
 
 @router.post("/{goal_id}/pause", response_model=GoalSnapshot)
-async def pause_goal(goal_id: str, request: Request, workspace: Any = Depends(get_workspace), chat_id: str = Query(..., min_length=1)) -> GoalSnapshot:
+async def pause_goal(
+    goal_id: str,
+    request: Request,
+    workspace: Any = Depends(get_workspace),
+    chat_id: str = Query(..., min_length=1),
+) -> GoalSnapshot:
     service = await _service(request)
     await _owned_goal(service, workspace, goal_id, chat_id)
     return await service.request_control(goal_id, GoalControlAction.PAUSE)
 
 
 @router.post("/{goal_id}/resume", response_model=GoalSnapshot)
-async def resume_goal(goal_id: str, request: Request, workspace: Any = Depends(get_workspace), chat_id: str = Query(..., min_length=1)) -> GoalSnapshot:
+async def resume_goal(
+    goal_id: str,
+    request: Request,
+    workspace: Any = Depends(get_workspace),
+    chat_id: str = Query(..., min_length=1),
+) -> GoalSnapshot:
     service = await _service(request)
     await _owned_goal(service, workspace, goal_id, chat_id)
     return await service.resume(goal_id)
 
 
 @router.post("/{goal_id}/cancel", response_model=GoalSnapshot)
-async def cancel_goal(goal_id: str, request: Request, workspace: Any = Depends(get_workspace), chat_id: str = Query(..., min_length=1)) -> GoalSnapshot:
+async def cancel_goal(
+    goal_id: str,
+    request: Request,
+    workspace: Any = Depends(get_workspace),
+    chat_id: str = Query(..., min_length=1),
+) -> GoalSnapshot:
     service = await _service(request)
     await _owned_goal(service, workspace, goal_id, chat_id)
     return await service.request_control(goal_id, GoalControlAction.CANCEL)

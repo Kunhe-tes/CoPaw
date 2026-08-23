@@ -8,6 +8,7 @@ import pytest
 from swe.app.goals.models import (
     CompletionCriterion,
     GoalContract,
+    GoalControlAction,
     GoalScope,
     GoalState,
 )
@@ -101,34 +102,46 @@ async def test_completion_proposal_completes_only_after_reviewer_accepts() -> (
 
 
 @pytest.mark.asyncio
-async def test_legacy_verifier_argument_remains_supported() -> None:
+@pytest.mark.parametrize(
+    ("action", "expected_state"),
+    [
+        (GoalControlAction.CANCEL, GoalState.CANCELLED),
+        (GoalControlAction.PAUSE, GoalState.PAUSED),
+    ],
+)
+async def test_control_during_async_completion_review_wins_over_acceptance(
+    action: GoalControlAction,
+    expected_state: GoalState,
+) -> None:
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
-    runtime = GoalRuntime(
-        service,
-        verifier=lambda _: {"criterion-1": (True, "Legacy verifier accepted")},
-    )
+    reviewer_started = asyncio.Event()
+    release_reviewer = asyncio.Event()
 
-    result = await runtime.settle(
-        goal.goal_id,
-        GoalTurnResolution(
-            decision="propose_completion",
-            summary="done",
-            completion_proposal="The test command passed",
+    async def reviewer(_: object) -> dict[str, CompletionReviewResult]:
+        reviewer_started.set()
+        await release_reviewer.wait()
+        return {"criterion-1": (True, "Observed pytest output")}
+
+    settlement = asyncio.create_task(
+        GoalRuntime(service, reviewer=reviewer).settle(
+            goal.goal_id,
+            GoalTurnResolution(
+                decision="propose_completion",
+                summary="done",
+                completion_proposal="The test command passed",
+            ),
         ),
     )
+    await reviewer_started.wait()
 
-    assert result.state == GoalState.COMPLETE
+    await service.request_control(goal.goal_id, action)
+    release_reviewer.set()
+    result = await settlement
 
-
-def test_runtime_requires_exactly_one_reviewer() -> None:
-    service = GoalService(InMemoryGoalStore())
-    reviewer = lambda _: {"criterion-1": (True, "Accepted")}
-
-    with pytest.raises(ValueError, match="exactly one"):
-        GoalRuntime(service)
-    with pytest.raises(ValueError, match="exactly one"):
-        GoalRuntime(service, reviewer=reviewer, verifier=reviewer)
+    assert result.state == expected_state
+    assert not result.criteria[0].verified
+    assert result.criteria[0].evidence_refs == []
 
 
 @pytest.mark.asyncio
@@ -235,6 +248,40 @@ async def test_pending_edit_discards_old_completion_proposal_before_review() -> 
     assert result.revision == 2
     assert result.state == GoalState.ACTIVE
     assert reviewer_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_direct_edit_supersedes_pending_completion_review_approval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = GoalService(InMemoryGoalStore())
+    goal = await service.create_goal(scope=scope(), contract=contract())
+    await service.wait_for_completion_review_approval(
+        goal.goal_id,
+        "criterion-1",
+        request_id="approval-1",
+        reason="Judge tool approval is pending",
+    )
+    superseded: list[tuple[str, tuple[str, ...]]] = []
+
+    class ApprovalService:
+        async def supersede_goal_review_approvals(
+            self,
+            goal_id: str,
+            request_ids: tuple[str, ...],
+        ) -> int:
+            superseded.append((goal_id, request_ids))
+            return len(request_ids)
+
+    monkeypatch.setattr(
+        "swe.app.approvals.get_approval_service",
+        ApprovalService,
+    )
+
+    edited = await service.request_edit(goal.goal_id, contract())
+
+    assert edited.revision == 2
+    assert superseded == [(goal.goal_id, ("approval-1",))]
 
 
 @pytest.mark.asyncio
@@ -391,7 +438,9 @@ async def test_direct_edit_discards_a_pending_completion_review() -> None:
 
 
 @pytest.mark.asyncio
-async def test_concurrent_pending_review_retries_record_one_rejection() -> None:
+async def test_concurrent_pending_review_retries_record_one_rejection() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     reviewer_calls = 0
@@ -506,7 +555,10 @@ async def test_denied_review_approval_records_a_rejection() -> None:
 
     assert result.state == GoalState.ACTIVE
     assert result.criteria[0].consecutive_failures == 1
-    assert result.state_reason == "review rejected: Completion Judge approval denied"
+    assert (
+        result.state_reason
+        == "review rejected: Completion Judge approval denied"
+    )
 
 
 @pytest.mark.asyncio

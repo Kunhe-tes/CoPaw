@@ -69,15 +69,28 @@ class CompletionCriterion(StrictGoalModel):
 
 
 class GoalConstraints(StrictGoalModel):
-    must_preserve: list[str] = Field(default_factory=list)
-    must_not_do: list[str] = Field(default_factory=list)
+    must_preserve: list[str] = Field(default_factory=list, max_length=32)
+    must_not_do: list[str] = Field(default_factory=list, max_length=32)
+
+    @field_validator("must_preserve", "must_not_do")
+    @classmethod
+    def bound_constraint_text(cls, values: list[str]) -> list[str]:
+        bounded = [value.strip() for value in values]
+        if any(not value or len(value) > 1000 for value in bounded):
+            raise ValueError(
+                "constraints must be non-blank and at most 1000 characters",
+            )
+        return bounded
 
 
 class GoalContract(StrictGoalModel):
     """User-confirmed acceptance and autonomy boundary for one Revision."""
 
     objective: str = Field(min_length=1, max_length=4000)
-    completion_criteria: list[CompletionCriterion] = Field(min_length=1)
+    completion_criteria: list[CompletionCriterion] = Field(
+        min_length=1,
+        max_length=16,
+    )
     constraints: GoalConstraints
     autonomy_boundary: str = Field(min_length=1, max_length=4000)
 
@@ -98,6 +111,7 @@ class GoalScope(StrictGoalModel):
     agent_profile_id: str = Field(min_length=1, max_length=128)
     chat_id: str = Field(min_length=1, max_length=255)
     effective_model: str = Field(min_length=1, max_length=255)
+    effective_model_provider_id: str = Field(default="", max_length=255)
 
 
 class GoalCriterionStatus(StrictGoalModel):
@@ -105,12 +119,14 @@ class GoalCriterionStatus(StrictGoalModel):
     criterion: CompletionCriterion
     verified: bool = False
     consecutive_failures: int = Field(default=0, ge=0)
-    evidence_refs: list[str] = Field(default_factory=list)
+    evidence_refs: list[str] = Field(default_factory=list, max_length=8)
     verification_request_id: str | None = None
 
 
 class GoalControlCommand(StrictGoalModel):
-    command_id: str = Field(default_factory=lambda: f"goal-command-{uuid4().hex}")
+    command_id: str = Field(
+        default_factory=lambda: f"goal-command-{uuid4().hex}",
+    )
     action: GoalControlAction
     contract: GoalContract | None = None
     status: Literal["pending", "applied", "superseded"] = "pending"

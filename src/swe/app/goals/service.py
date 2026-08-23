@@ -237,9 +237,14 @@ class GoalService:
                 contract=contract,
             ),
         )
+        approval_ids = self._pending_review_approval_ids(goal)
         if not goal.turn_active:
-            self._apply_pending_control(goal)
+            applied = self._apply_pending_control(goal)
+        else:
+            applied = None
         saved = await self._save(goal)
+        if applied == GoalControlAction.EDIT:
+            await self._supersede_review_approvals(saved.goal_id, approval_ids)
         if not saved.turn_active:
             notify_goal_wake(goal_id)
         return saved
@@ -298,9 +303,15 @@ class GoalService:
         if goal.turn_active:
             goal.turn_active = False
         goal.turns_used += 1
+        approval_ids = self._pending_review_approval_ids(goal)
         applied = self._apply_pending_control(goal)
         if applied == GoalControlAction.EDIT:
-            return await self._save(goal)
+            saved = await self._save(goal)
+            await self._supersede_review_approvals(
+                saved.goal_id,
+                approval_ids,
+            )
+            return saved
         if applied is not None:
             return await self._save(goal)
         self._apply_turn_decision(
@@ -345,6 +356,8 @@ class GoalService:
         expected_revision: int | None = None,
     ) -> GoalSnapshot:
         goal = await self._require_goal(goal_id)
+        if goal.state != GoalState.ACTIVE:
+            return goal
         if (
             expected_revision is not None
             and goal.revision != expected_revision
@@ -379,6 +392,24 @@ class GoalService:
             if criterion.consecutive_failures >= 3:
                 goal.state = GoalState.BLOCKED
                 goal.state_reason = f"criterion review rejected three times: {rejection_reason}"
+        return await self._save(goal)
+
+    async def complete_completion_review(
+        self,
+        goal_id: str,
+        *,
+        expected_revision: int,
+    ) -> GoalSnapshot:
+        """Complete only the still-active Revision reviewed by the Judge."""
+        goal = await self._require_goal(goal_id)
+        if (
+            goal.state != GoalState.ACTIVE
+            or goal.revision != expected_revision
+            or not all(item.verified for item in goal.criteria)
+        ):
+            return goal
+        goal.state = GoalState.COMPLETE
+        goal.state_reason = None
         return await self._save(goal)
 
     async def wait_for_completion_review_approval(
@@ -442,42 +473,6 @@ class GoalService:
                 return goal
             goal.pending_review_claim_id = None
             return await self._save(goal)
-
-    async def record_verification(
-        self,
-        goal_id: str,
-        criterion_id: str,
-        *,
-        passed: bool,
-        evidence_ref: str | None = None,
-        expected_revision: int | None = None,
-    ) -> GoalSnapshot:
-        """Compatibility alias retaining the former service API."""
-        return await self.record_completion_review(
-            goal_id,
-            criterion_id,
-            passed=passed,
-            evidence_ref=evidence_ref,
-            expected_revision=expected_revision,
-        )
-
-    async def wait_for_verification_approval(
-        self,
-        goal_id: str,
-        criterion_id: str,
-        *,
-        request_id: str,
-        reason: str,
-        expected_revision: int | None = None,
-    ) -> GoalSnapshot:
-        """Compatibility alias retaining the former service API."""
-        return await self.wait_for_completion_review_approval(
-            goal_id,
-            criterion_id,
-            request_id=request_id,
-            reason=reason,
-            expected_revision=expected_revision,
-        )
 
     def _apply_pending_control(
         self,
@@ -561,6 +556,28 @@ class GoalService:
         goal.next_focus = None
         if goal.state == GoalState.ACTIVE:
             goal.state_reason = None
+
+    @staticmethod
+    def _pending_review_approval_ids(goal: GoalSnapshot) -> tuple[str, ...]:
+        return tuple(
+            item.verification_request_id
+            for item in goal.criteria
+            if item.verification_request_id
+        )
+
+    @staticmethod
+    async def _supersede_review_approvals(
+        goal_id: str,
+        request_ids: tuple[str, ...],
+    ) -> None:
+        if not request_ids:
+            return
+        from ..approvals import get_approval_service
+
+        await get_approval_service().supersede_goal_review_approvals(
+            goal_id,
+            request_ids,
+        )
 
     async def _require_goal(self, goal_id: str) -> GoalSnapshot:
         goal = await self._store.get(goal_id)

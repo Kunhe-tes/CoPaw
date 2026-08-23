@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import asyncio
@@ -48,7 +49,9 @@ def scope(chat_id: str = "chat-1") -> GoalScope:
 
 
 @pytest.mark.asyncio
-async def test_create_goal_rejects_a_second_non_terminal_goal_for_chat() -> None:
+async def test_create_goal_rejects_a_second_non_terminal_goal_for_chat() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore(), turn_budget=2)
     created = await service.create_goal(scope=scope(), contract=contract())
 
@@ -59,7 +62,9 @@ async def test_create_goal_rejects_a_second_non_terminal_goal_for_chat() -> None
 
 
 @pytest.mark.asyncio
-async def test_concurrent_goal_creation_keeps_one_non_terminal_goal_per_chat() -> None:
+async def test_concurrent_goal_creation_keeps_one_non_terminal_goal_per_chat() -> (
+    None
+):
     class YieldingStore(InMemoryGoalStore):
         async def latest_for_chat(self, chat_id: str):
             await asyncio.sleep(0)
@@ -110,7 +115,11 @@ async def test_edit_activates_new_revision_and_clears_evidence_without_resetting
 ):
     service = GoalService(InMemoryGoalStore(), turn_budget=3)
     goal = await service.create_goal(scope=scope(), contract=contract())
-    await service.record_verification(goal.goal_id, "criterion-1", passed=True)
+    await service.record_completion_review(
+        goal.goal_id,
+        "criterion-1",
+        passed=True,
+    )
     await service.settle_turn(
         goal.goal_id,
         decision="continue",
@@ -154,12 +163,14 @@ async def test_resume_from_limited_resets_only_the_budget_cycle() -> None:
 
 
 @pytest.mark.asyncio
-async def test_three_consecutive_failures_for_one_criterion_blocks_goal() -> None:
+async def test_three_consecutive_failures_for_one_criterion_blocks_goal() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
 
     for _ in range(3):
-        goal = await service.record_verification(
+        goal = await service.record_completion_review(
             goal.goal_id,
             "criterion-1",
             passed=False,
@@ -177,7 +188,9 @@ async def test_edit_without_running_turn_applies_immediately_and_wakes_waiting_g
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     waiting = await service.settle_turn(
-        goal.goal_id, decision="wait", next_focus="approval"
+        goal.goal_id,
+        decision="wait",
+        next_focus="approval",
     )
 
     edited = await service.request_edit(waiting.goal_id, contract("Edited"))
@@ -192,20 +205,31 @@ async def test_pause_without_running_turn_applies_immediately() -> None:
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
 
-    paused = await service.request_control(goal.goal_id, GoalControlAction.PAUSE)
+    paused = await service.request_control(
+        goal.goal_id,
+        GoalControlAction.PAUSE,
+    )
 
     assert paused.state == GoalState.PAUSED
     assert paused.control_commands[-1].status == "applied"
 
 
 @pytest.mark.asyncio
-async def test_terminal_goal_cannot_be_mutated_by_later_controls_or_edits() -> None:
+async def test_terminal_goal_cannot_be_mutated_by_later_controls_or_edits() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
-    cancelled = await service.request_control(goal.goal_id, GoalControlAction.CANCEL)
+    cancelled = await service.request_control(
+        goal.goal_id,
+        GoalControlAction.CANCEL,
+    )
 
     with pytest.raises(GoalConflictError, match="terminal"):
-        await service.request_control(cancelled.goal_id, GoalControlAction.PAUSE)
+        await service.request_control(
+            cancelled.goal_id,
+            GoalControlAction.PAUSE,
+        )
     with pytest.raises(GoalConflictError, match="terminal"):
         await service.request_edit(cancelled.goal_id, contract("Changed"))
 
@@ -214,7 +238,11 @@ async def test_terminal_goal_cannot_be_mutated_by_later_controls_or_edits() -> N
 async def test_steering_wakes_waiting_goal_and_is_consumed_in_order() -> None:
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
-    await service.settle_turn(goal.goal_id, decision="wait", next_focus="approval")
+    await service.settle_turn(
+        goal.goal_id,
+        decision="wait",
+        next_focus="approval",
+    )
     await service.enqueue_steering(goal.goal_id, "Use the approved endpoint")
     await service.enqueue_steering(goal.goal_id, "Keep existing data")
 
@@ -226,11 +254,16 @@ async def test_steering_wakes_waiting_goal_and_is_consumed_in_order() -> None:
 
 
 @pytest.mark.asyncio
-async def test_steering_arriving_during_a_turn_prevents_a_stale_wait_state() -> None:
+async def test_steering_arriving_during_a_turn_prevents_a_stale_wait_state() -> (
+    None
+):
     service = GoalService(InMemoryGoalStore())
     goal = await service.create_goal(scope=scope(), contract=contract())
     await service.begin_turn(goal.goal_id)
-    await service.enqueue_steering(goal.goal_id, "Continue with the new priority")
+    await service.enqueue_steering(
+        goal.goal_id,
+        "Continue with the new priority",
+    )
 
     settled = await service.settle_turn(
         goal.goal_id,

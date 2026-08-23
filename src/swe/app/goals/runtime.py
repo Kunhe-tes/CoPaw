@@ -32,12 +32,6 @@ CompletionReviewer = Callable[
     | Awaitable[dict[str, CompletionReviewResult]],
 ]
 
-# Keep the command-verification adapter working until it is replaced by the
-# completion-judge integration. These names are not persisted in Goal snapshots.
-VerificationPending = CompletionReviewPending
-VerificationResult = CompletionReviewResult
-Verifier = CompletionReviewer
-
 
 class GoalTurnResolution(StrictGoalModel):
     """The validated Main Agent output consumed at a Goal turn boundary."""
@@ -72,20 +66,10 @@ class GoalRuntime:
         self,
         service: GoalService,
         *,
-        reviewer: CompletionReviewer | None = None,
-        verifier: Verifier | None = None,
+        reviewer: CompletionReviewer,
     ) -> None:
-        if reviewer is not None:
-            if verifier is not None:
-                raise ValueError("provide exactly one of reviewer or verifier")
-            resolved_reviewer = reviewer
-        else:
-            if verifier is None:
-                raise ValueError("provide exactly one of reviewer or verifier")
-            resolved_reviewer = verifier
         self._service = service
-        # ``verifier`` is a deprecated compatibility alias for existing callers.
-        self._reviewer: CompletionReviewer = resolved_reviewer
+        self._reviewer = reviewer
 
     async def settle(
         self,
@@ -141,9 +125,10 @@ class GoalRuntime:
         if goal.state == GoalState.BLOCKED:
             return goal
         if all(criterion.verified for criterion in goal.criteria):
-            goal.state = GoalState.COMPLETE
-            goal.state_reason = None
-            return await self._service.persist(goal)
+            return await self._service.complete_completion_review(
+                goal_id,
+                expected_revision=before.revision,
+            )
         return await self._service.enforce_budget_limit(goal_id)
 
     async def retry_pending_completion_review(
@@ -169,9 +154,10 @@ class GoalRuntime:
             if goal.state == GoalState.BLOCKED:
                 return goal
             if all(criterion.verified for criterion in goal.criteria):
-                goal.state = GoalState.COMPLETE
-                goal.state_reason = None
-                return await self._service.persist(goal)
+                return await self._service.complete_completion_review(
+                    goal_id,
+                    expected_revision=goal.revision,
+                )
             return goal
         finally:
             await self._service.release_pending_completion_review_claim(
@@ -230,7 +216,9 @@ class GoalRuntime:
                 (False, "completion review result missing"),
             )
             if isinstance(result, CompletionReviewPending):
-                raise ValueError("completion review approval result is inconsistent")
+                raise ValueError(
+                    "completion review approval result is inconsistent",
+                )
             passed, evidence = result
             logger.info(
                 "goal_completion_review_result goal_id=%s revision=%s criterion_id=%s accepted=%s",
@@ -249,7 +237,3 @@ class GoalRuntime:
             if goal.state == GoalState.BLOCKED:
                 return goal
         return goal
-
-    async def retry_pending_verification(self, goal_id: str) -> GoalSnapshot:
-        """Compatibility alias for the pre-review runtime API."""
-        return await self.retry_pending_completion_review(goal_id)

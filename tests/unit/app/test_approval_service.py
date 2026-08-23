@@ -62,9 +62,49 @@ async def test_resolved_goal_approval_wakes_its_goal(monkeypatch) -> None:
             result=_result(),
             extra={"goal_id": "goal-1"},
         )
-        await service.resolve_request(pending.request_id, ApprovalDecision.APPROVED)
+        await service.resolve_request(
+            pending.request_id,
+            ApprovalDecision.APPROVED,
+        )
 
     assert goal_service.calls == [("goal-1", "Tool approval approved")]
+
+
+@pytest.mark.asyncio
+async def test_supersede_goal_review_approvals_cancels_only_its_pending_ids() -> (
+    None
+):
+    service = ApprovalService()
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        target = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="read_file",
+            result=_result(),
+            extra={"goal_id": "goal-1"},
+        )
+        other = await service.create_pending(
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            tool_name="read_file",
+            result=_result(),
+            extra={"goal_id": "goal-2"},
+        )
+
+        count = await service.supersede_goal_review_approvals(
+            "goal-1",
+            (target.request_id, other.request_id),
+        )
+        target_status = await service.get_request_status(target.request_id)
+        other_status = await service.get_request_status(other.request_id)
+
+    assert count == 1
+    assert (
+        target_status is not None and target_status["status"] == "superseded"
+    )
+    assert other_status is not None and other_status["status"] == "pending"
 
 
 def _runner_with_zhaohu_workspace() -> tuple[AgentRunner, _ZhaohuChannel]:
