@@ -194,6 +194,7 @@ import { shouldShowGlobalVoiceRecorder } from "@/components/GlobalVoiceRecorder/
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
+const GOAL_STEERING_STATES = new Set(["ACTIVE", "WAITING"]);
 
 function useExternalApprovalResolvedRefresh() {
   const { refreshSession } = useChatAnywhereSessions();
@@ -1839,12 +1840,12 @@ export default function ChatPage() {
         requestBody.session_id,
       );
       let routedAsSteering = false;
-      if (backendChatId && userText && !planModeEnabled) {
+      if (backendChatId && userText) {
         try {
           const activeGoal = await chatApi.getRecentGoal(backendChatId);
           if (
             activeGoal &&
-            !["COMPLETE", "CANCELLED"].includes(activeGoal.state)
+            GOAL_STEERING_STATES.has(activeGoal.state)
           ) {
             await chatApi.enqueueGoalSteering(
               activeGoal.goal_id,

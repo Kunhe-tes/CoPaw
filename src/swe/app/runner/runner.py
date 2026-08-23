@@ -4245,6 +4245,7 @@ class AgentRunner(Runner):
                 if service is None:
                     logger.warning("Goal service is unavailable: %s", goal_id)
                     return
+                current_goal = None
                 try:
                     current_goal = await service.get(goal_id)
                     if not _goal_matches_runtime_scope(
@@ -4263,6 +4264,20 @@ class AgentRunner(Runner):
                     goal = await service.begin_turn(goal_id)
                 except ValueError:
                     logger.warning("Goal cannot start a turn: %s", goal_id)
+                    state = getattr(
+                        getattr(current_goal, "state", None),
+                        "value",
+                        None,
+                    )
+                    state_text = state or "unavailable"
+                    yield Msg(
+                        name="Friday",
+                        role="assistant",
+                        content=(
+                            f"Goal is currently {state_text} and cannot start a new turn. "
+                            "Use the Goal Monitor to resume, edit, or cancel it."
+                        ),
+                    ), True
                     return
                 getattr(runtime.agent, "_request_context", {})[
                     "goal_contract_context"

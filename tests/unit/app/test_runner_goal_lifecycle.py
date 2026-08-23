@@ -148,6 +148,42 @@ async def test_goal_finalization_falls_back_when_model_fails(
 
 
 @pytest.mark.asyncio
+async def test_explicit_goal_request_reports_when_goal_cannot_start_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, goal_id = await _goal_service()
+    goal = await service.get(goal_id)
+    goal.state = GoalState.PAUSED
+    await service.persist(goal)
+    monkeypatch.setattr("swe.app.goals.registry.get_goal_service", lambda: service)
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+    agent = SimpleNamespace(
+        _request_context={"source_id": "source-1"},
+    )
+    runtime = SimpleNamespace(agent=agent, chat=SimpleNamespace(id="chat-1"))
+
+    async def unexpected_turn(**_kwargs):
+        raise AssertionError("a paused Goal must not begin a Main Agent turn")
+        yield
+
+    monkeypatch.setattr(runner, "_stream_agent_turns", unexpected_turn)
+    events = [
+        event
+        async for event in runner._stream_completion_lifecycle(
+            request=SimpleNamespace(channel_meta={"goal_id": goal_id}),
+            runtime=runtime,
+            plan=_TurnPlan(original_user_message="Continue Goal", turn_msgs=[]),
+            outcome=_QueryTurnOutcome(),
+        )
+    ]
+
+    assert [last for _, last in events] == [True]
+    assert "PAUSED" in events[0][0].content
+    assert "resume" in events[0][0].content.lower()
+    assert (await service.get(goal_id)).state == GoalState.PAUSED
+
+
+@pytest.mark.asyncio
 async def test_goal_finalization_persists_the_final_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
