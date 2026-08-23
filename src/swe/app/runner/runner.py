@@ -1483,6 +1483,32 @@ def _request_goal_id(request: AgentRequest) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
+def _append_goal_tool_observations(
+    observations: list[dict[str, str]],
+    msg: Msg,
+) -> None:
+    """Copy bounded current-turn tool results into a Judge-only package."""
+    if len(observations) >= 20 or not isinstance(msg.content, list):
+        return
+    for block in msg.content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        output = block.get("output", "")
+        try:
+            output_text = json.dumps(output, ensure_ascii=False, default=str)
+        except (TypeError, ValueError):
+            output_text = str(output)
+        observations.append(
+            {
+                "tool_call_id": str(block.get("id") or ""),
+                "tool_name": str(block.get("name") or ""),
+                "output": output_text[:4000],
+            },
+        )
+        if len(observations) >= 20:
+            return
+
+
 def _goal_matches_runtime_scope(
     goal: Any,
     runtime: _QueryRuntime,
@@ -3248,16 +3274,6 @@ class AgentRunner(Runner):
         goal_request = bool(goal_id) or goal_mode_enabled
         if isinstance(goal_id, str) and goal_id:
             request_context["goal_id"] = goal_id
-            from ..goals.verification import ContractVerificationAdapter
-
-            request_context["goal_verifier"] = ContractVerificationAdapter(
-                getattr(self, "working_dir", None),
-                approval_context={
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "channel": channel,
-                },
-            )
         request_context["goal_mode_enabled"] = goal_mode_enabled
         plan_mode_enabled = (
             False
@@ -3476,6 +3492,100 @@ class AgentRunner(Runner):
             system_prompt_override=_GOAL_COMPLETION_JUDGE_SYSTEM_PROMPT,
             source_tool_versions=(),
         )
+
+    def _create_goal_completion_reviewer(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        resolution: Any,
+    ):
+        """Bind one Main-Agent turn's bounded evidence to a Judge callback."""
+        request_context = getattr(runtime.agent, "_request_context", {}) or {}
+        legacy_reviewer = request_context.get("goal_verifier")
+        if callable(legacy_reviewer):
+            return legacy_reviewer
+        tool_observations = request_context.get(
+            "_goal_turn_tool_observations",
+            (),
+        )
+
+        async def reviewer(review_goal: Any):
+            return await self._run_goal_completion_review(
+                runtime=runtime,
+                review_goal=review_goal,
+                completion_proposal=resolution.completion_proposal,
+                evidence_refs=resolution.evidence_refs,
+                tool_observations=tool_observations,
+            )
+
+        return reviewer
+
+    async def _run_goal_completion_review(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        review_goal: Any,
+        completion_proposal: str | None,
+        evidence_refs: list[str],
+        tool_observations: object,
+    ) -> dict[str, Any]:
+        """Run a hidden Judge invocation and fail closed on unusable output."""
+        from ..goals.review import (
+            build_completion_review_input,
+            parse_completion_review,
+        )
+        from ..goals.runtime import CompletionReviewPending
+
+        criterion_ids = {
+            item.criterion_id for item in review_goal.criteria
+        }
+        observations = (
+            tool_observations if isinstance(tool_observations, list) else []
+        )
+        try:
+            agent = self._create_goal_completion_judge_agent(
+                runtime=runtime,
+                goal=review_goal,
+            )
+            final_content = ""
+            async for msg, _ in self._enforce_query_timeout(
+                stream_printing_messages(
+                    agents=[agent],
+                    coroutine_task=agent(
+                        [
+                            build_completion_review_input(
+                                review_goal,
+                                completion_proposal=completion_proposal,
+                                evidence_refs=evidence_refs,
+                                tool_observations=observations,
+                            ),
+                        ],
+                    ),
+                ),
+                session_id=runtime.session_id,
+                agent=agent,
+                run_key=(
+                    runtime.chat.id if runtime.chat is not None else None
+                ),
+            ):
+                if getattr(msg, "role", None) == "assistant":
+                    final_content = str(getattr(msg, "content", "") or "")
+            pending = getattr(agent, "_tool_guard_pending_info", None)
+            if isinstance(pending, dict) and pending.get("request_id"):
+                return {
+                    criterion_id: CompletionReviewPending(
+                        request_id=str(pending["request_id"]),
+                        reason="Completion Judge tool approval required",
+                    )
+                    for criterion_id in criterion_ids
+                }
+            return parse_completion_review(final_content, criterion_ids)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "Goal Completion Judge failed goal_id=%s",
+                review_goal.goal_id,
+            )
+            return parse_completion_review("", criterion_ids)
 
     async def _stream_goal_finalization_turn(
         self,
@@ -4356,12 +4466,21 @@ class AgentRunner(Runner):
                 request_context = getattr(runtime.agent, "_request_context", {})
                 request_context.pop("goal_turn_resolution", None)
                 request_context.pop("_goal_turn_environment_changed", None)
+                request_context["_goal_turn_tool_observations"] = []
             outcome.stop_hook_active = False
             async for msg, last in self._stream_agent_turns(
                 runtime=runtime,
                 plan=plan,
                 outcome=outcome,
             ):
+                if goal_id:
+                    observations = getattr(
+                        runtime.agent,
+                        "_request_context",
+                        {},
+                    ).get("_goal_turn_tool_observations")
+                    if isinstance(observations, list):
+                        _append_goal_tool_observations(observations, msg)
                 yield msg, False if goal_id else last
 
             if outcome.pre_tool_terminal_stop:
@@ -4389,12 +4508,11 @@ class AgentRunner(Runner):
                         goal_id,
                     )
                     resolution = GoalTurnResolution.model_validate(raw)
-                    verifier = getattr(runtime.agent, "_request_context", {}).get(
-                        "goal_verifier",
+                    reviewer = self._create_goal_completion_reviewer(
+                        runtime=runtime,
+                        resolution=resolution,
                     )
-                    if not callable(verifier):
-                        raise ValueError("Goal verification adapter is unavailable")
-                    settled = await GoalRuntime(service, verifier=verifier).settle(
+                    settled = await GoalRuntime(service, reviewer=reviewer).settle(
                         goal_id,
                         resolution,
                         wake_from_steering=had_pending_steering,
@@ -4426,8 +4544,8 @@ class AgentRunner(Runner):
                     if woken.state.value == "ACTIVE":
                         retried = await GoalRuntime(
                             service,
-                            verifier=verifier,
-                        ).retry_pending_verification(goal_id)
+                            reviewer=reviewer,
+                        ).retry_pending_completion_review(goal_id)
                         if retried.state.value == "COMPLETE":
                             async for finalization_msg, last in (
                                 self._stream_goal_finalization_turn(

@@ -421,6 +421,79 @@ def test_goal_completion_judge_rejects_missing_frozen_model(
     assert created is False
 
 
+@pytest.mark.asyncio
+async def test_goal_completion_reviewer_parses_hidden_judge_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service, goal_id = await _goal_service()
+    goal = await service.get(goal_id)
+    runner = AgentRunner(agent_id="agent-1", tenant_id="tenant-1")
+    captured: dict[str, Any] = {}
+
+    class FakeJudge:
+        def __call__(self, messages):
+            captured["messages"] = messages
+
+            async def run() -> None:
+                return None
+
+            return run()
+
+    async def fake_stream_printing_messages(**kwargs):
+        kwargs["coroutine_task"].close()
+        yield Msg(
+            name="Judge",
+            role="assistant",
+            content=(
+                '{"reviews":[{"criterion_id":"criterion-1",'
+                '"decision":"accept","reason":"Observed output",'
+                '"evidence_refs":["tool-1"]}]}'
+            ),
+        ), True
+
+    async def fake_enforce(stream, **_kwargs):
+        async for item in stream:
+            yield item
+
+    monkeypatch.setattr(
+        runner,
+        "_create_goal_completion_judge_agent",
+        lambda **_kwargs: FakeJudge(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.stream_printing_messages",
+        fake_stream_printing_messages,
+    )
+    monkeypatch.setattr(runner, "_enforce_query_timeout", fake_enforce)
+    runtime = SimpleNamespace(
+        agent=SimpleNamespace(
+            _request_context={
+                "_goal_turn_tool_observations": [
+                    {"tool_name": "read_file", "output": "observed"},
+                ],
+            },
+        ),
+        session_id="session-1",
+        chat=SimpleNamespace(id="chat-1"),
+    )
+    resolution = SimpleNamespace(
+        completion_proposal="The result is ready",
+        evidence_refs=["main-agent-evidence"],
+    )
+
+    reviewer = runner._create_goal_completion_reviewer(
+        runtime=runtime,
+        resolution=resolution,
+    )
+    result = await reviewer(goal)
+
+    assert result == {"criterion-1": (True, "tool-1")}
+    package = captured["messages"][0].content
+    assert "The result is ready" in package
+    assert "main-agent-evidence" in package
+    assert "read_file" in package
+
+
 def test_completion_judge_has_no_bootstrap_and_respects_profile_tools(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
