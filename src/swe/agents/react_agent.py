@@ -22,6 +22,7 @@ from agentscope.message import Msg, ToolResultBlock, ToolUseBlock
 from agentscope.tool import Toolkit
 from pydantic import BaseModel
 
+from . import mcp_tool_registrar
 from .agent_runtime_builder import AgentRuntimeBuilder
 from .command_handler import CommandHandler
 from .mcp_tool_registrar import McpToolRegistrar
@@ -76,6 +77,7 @@ from ..constant import (
     WORKING_DIR,
 )
 from ..agents.memory.base_memory_manager import BaseMemoryManager
+from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
 
 if TYPE_CHECKING:
     from ..config.config import AgentProfileConfig
@@ -421,6 +423,19 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
     """
 
     _reply_task: asyncio.Task[Any] | None
+
+    @staticmethod
+    def _rebuild_mcp_client(client: Any) -> Any | None:
+        """Proxy the legacy recovery seam to the MCP tool registrar."""
+        original_http_client = mcp_tool_registrar.HttpStatefulClient
+        original_stdio_client = mcp_tool_registrar.StdIOStatefulClient
+        mcp_tool_registrar.HttpStatefulClient = HttpStatefulClient
+        mcp_tool_registrar.StdIOStatefulClient = StdIOStatefulClient
+        try:
+            return McpToolRegistrar._rebuild_mcp_client(client)
+        finally:
+            mcp_tool_registrar.HttpStatefulClient = original_http_client
+            mcp_tool_registrar.StdIOStatefulClient = original_stdio_client
 
     def __init__(
         self,
