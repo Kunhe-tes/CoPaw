@@ -423,6 +423,67 @@ async def test_runtime_input_builder_keeps_request_context_and_headers(
 
 
 @pytest.mark.asyncio
+async def test_runtime_finalizer_registers_mcp_before_attaching_detector() -> (
+    None
+):
+    from swe.app.runner import query_runtime
+
+    events: list[str] = []
+
+    class FakeAgent:
+        async def register_mcp_clients(self) -> None:
+            events.append("register")
+
+        def set_console_output_enabled(self, *, enabled: bool) -> None:
+            assert enabled is False
+            events.append("console")
+
+    agent = FakeAgent()
+    owner = SimpleNamespace(
+        agent_id="agent-1",
+        tenant_id="tenant-1",
+        _create_agent_for_query=lambda **_kwargs: agent,
+        _attach_session_skill_detector=lambda *, runtime, request: (
+            events.append("detector")
+        ),
+    )
+    inputs = _QueryRuntimeInputs(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        agent_config=SimpleNamespace(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        env_context="base",
+        selected_context_directives=["context"],
+        auth_token="token-1",
+        passthrough_headers={},
+    )
+
+    runtime = await query_runtime.finalize_query_runtime(
+        owner,
+        request=_request(),
+        query="hello",
+        msgs=[Msg(name="user", role="user", content="hello")],
+        preflight=_QueryPreflight(),
+        inputs=inputs,
+        resources=SimpleNamespace(
+            chat="chat-1",
+            turn_id="turn-1",
+            env_context="base",
+        ),
+        mcp_clients=["mcp-1"],
+        get_last_user_text=lambda _msgs: "fallback",
+        debug_log=lambda *_args: None,
+    )
+
+    assert runtime.agent is agent
+    assert runtime.selected_context_directives == ["context"]
+    assert events == ["register", "console", "detector"]
+
+
+@pytest.mark.asyncio
 async def test_blocked_runtime_cleanup_updates_chat_before_closing_mcp(
     monkeypatch,
 ) -> None:

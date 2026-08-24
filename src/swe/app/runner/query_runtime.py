@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -15,7 +16,9 @@ from ...providers.provider_manager import ProviderManager
 from ..source_system_config.runtime import get_system_prompt_injections
 from .query_contracts import (
     _QueryPreflight,
+    _QueryRuntime,
     _QueryRuntimeInputs,
+    _QueryRuntimeResources,
     _RuntimeStartResult,
     QueryRuntimeOwner,
 )
@@ -114,6 +117,65 @@ async def build_query_runtime_inputs(
         auth_token=getattr(request, "auth_token", None),
         passthrough_headers=passthrough_headers,
     )
+
+
+async def finalize_query_runtime(
+    owner: Any,
+    *,
+    request: AgentRequest,
+    query: str | None,
+    msgs: list[Any],
+    preflight: _QueryPreflight,
+    inputs: _QueryRuntimeInputs,
+    resources: _QueryRuntimeResources,
+    mcp_clients: list[Any],
+    get_last_user_text: Any,
+    debug_log: Any,
+) -> _QueryRuntime:
+    """Create and initialize the Agent for one assembled query runtime."""
+    agent_build_started_at = time.perf_counter()
+    agent = owner._create_agent_for_query(
+        agent_config=inputs.agent_config,
+        env_context=resources.env_context,
+        mcp_clients=mcp_clients,
+        request=request,
+        session_id=inputs.session_id,
+        user_id=inputs.user_id,
+        channel=inputs.channel,
+        chat=resources.chat,
+        turn_id=resources.turn_id,
+        hook_overlay=inputs.hook_overlay,
+        auth_token=inputs.auth_token,
+        approved_tool_call=preflight.approved_tool_call,
+        current_user_text=query or get_last_user_text(msgs) or "",
+    )
+    await agent.register_mcp_clients()
+    agent.set_console_output_enabled(enabled=False)
+    debug_log(
+        "swe_agent_build_duration_ms=%d agent_id=%s tenant_id=%s "
+        "mcp_client_count=%d",
+        int((time.perf_counter() - agent_build_started_at) * 1000),
+        owner.agent_id,
+        owner.tenant_id,
+        len(mcp_clients),
+    )
+    runtime = _QueryRuntime(
+        agent=agent,
+        agent_config=inputs.agent_config,
+        tenant_hooks=inputs.tenant_hooks,
+        hook_overlay=inputs.hook_overlay,
+        chat=resources.chat,
+        session_skill_detector=None,
+        mcp_clients=mcp_clients,
+        session_id=inputs.session_id,
+        user_id=inputs.user_id,
+        channel=inputs.channel,
+        skip_history=inputs.skip_history,
+        pending_confirmed_skill_snapshots={},
+        selected_context_directives=inputs.selected_context_directives,
+    )
+    owner._attach_session_skill_detector(runtime=runtime, request=request)
+    return runtime
 
 
 async def prepare_query_runtime(
