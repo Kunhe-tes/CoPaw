@@ -18,7 +18,6 @@ from uuid import uuid4
 
 from agentscope.agent import ReActAgent
 from agentscope.agent._react_agent import _MemoryMark
-from agentscope.memory import InMemoryMemory
 from agentscope.message import Msg, ToolResultBlock, ToolUseBlock
 from agentscope.mcp._mcp_function import MCPToolFunction
 from agentscope.tool import Toolkit
@@ -28,10 +27,11 @@ from pydantic import BaseModel
 from ..app.mcp.http_headers import build_mcp_http_headers
 from ..app.mcp.lazy_client import LazyMCPClient, mcp_tool_json_schema
 from ..app.mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
+from .agent_runtime_builder import AgentRuntimeBuilder
 from .command_handler import CommandHandler
+from .mcp_tool_registrar import McpToolRegistrar
 from ..app.mcp import HttpStatefulClient, StdIOStatefulClient
 from .hooks import BootstrapHook, MemoryCompactionHook
-from .model_factory import create_model_and_formatter
 from .prompt import (
     PromptConfig,
     build_multimodal_hint,
@@ -222,13 +222,17 @@ def _add_main_agent_tools(
     plan_mode_enabled: bool,
 ) -> None:
     if request_context.get("goal_id"):
-        from ..app.goals.turn_tool import create_submit_goal_turn_resolution_tool
+        from ..app.goals.turn_tool import (
+            create_submit_goal_turn_resolution_tool,
+        )
 
         tool_functions["submit_goal_turn_resolution"] = (
             create_submit_goal_turn_resolution_tool(request_context)
         )
     goal_mode_enabled = bool(request_context.get("goal_mode_enabled"))
-    if not goal_mode_enabled and not _plan_interaction_tools_enabled(plan_mode_enabled):
+    if not goal_mode_enabled and not _plan_interaction_tools_enabled(
+        plan_mode_enabled,
+    ):
         return
     tool_functions.update(
         {
@@ -482,7 +486,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         self._source_tool_versions = tuple(source_tool_versions)
         self._skill_tool_registry = SkillToolRegistry()
         self._init_agent_phase_state()
-        goal_finalization = bool(self._request_context.get("goal_finalization"))
+        goal_finalization = bool(
+            self._request_context.get("goal_finalization"),
+        )
         completion_judge = (
             self._request_context.get("agent_role") == "completion_judge"
         )
@@ -491,36 +497,11 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         running_config = agent_config.running
         self._language = agent_config.language
 
-        # Finalization is a deliberately tool-free, read-only Agent turn.
-        toolkit = (
-            Toolkit()
-            if goal_finalization
-            else self._create_toolkit(namesake_strategy=namesake_strategy)
-        )
-        if not goal_finalization and not completion_judge:
-            self._register_skills(toolkit)
-            self._register_source_tools(toolkit)
-
-        # Build system prompt
-        sys_prompt = self._build_sys_prompt()
-
-        # Create model and formatter using factory method
-        model, formatter = create_model_and_formatter(
-            agent_id=agent_config.id,
-            model_slot_override=self._model_slot_override,
-            model_provider_override=self._model_provider_override,
-            fallback_model_slot=self._fallback_model_slot,
-            fallback_model_provider=self._fallback_model_provider,
-            resolved_model_info=self._resolved_model_slot,
-            trace_context={
-                "trace_id": self._request_context.get("trace_id"),
-                "user_id": self._request_context.get("user_id"),
-                "session_id": self._request_context.get("session_id"),
-                "channel": self._request_context.get("channel"),
-                "source_id": self._request_context.get("source_id"),
-                "user_name": self._request_context.get("user_name"),
-                "bbk_id": self._request_context.get("bbk_id"),
-            },
+        runtime = AgentRuntimeBuilder.build_for_swe_agent(
+            self,
+            goal_finalization=goal_finalization,
+            completion_judge=completion_judge,
+            namesake_strategy=namesake_strategy,
         )
 
         # Get model info from ProviderManager (single source of truth)
@@ -539,16 +520,16 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             model_info = "unknown"
         logger.info(
             f"Agent '{agent_config.id}' initialized with model: "
-            f"{model_info} (class: {model.__class__.__name__})",
+            f"{model_info} (class: {runtime.model.__class__.__name__})",
         )
         # Initialize parent ReActAgent
         super().__init__(
             name="Friday",
-            model=model,
-            sys_prompt=sys_prompt,
-            toolkit=toolkit,
-            memory=InMemoryMemory(),
-            formatter=formatter,
+            model=runtime.model,
+            sys_prompt=runtime.system_prompt,
+            toolkit=runtime.toolkit,
+            memory=runtime.memory,
+            formatter=runtime.formatter,
             max_iters=running_config.max_iters,
         )
         self._sys_prompt_freshness_token = (
@@ -557,7 +538,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         # Setup memory manager
         self._setup_memory_manager(
-            enable_memory_manager and not goal_finalization and not completion_judge,
+            enable_memory_manager
+            and not goal_finalization
+            and not completion_judge,
             None if goal_finalization or completion_judge else memory_manager,
             namesake_strategy,
         )
@@ -1561,20 +1544,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 Options: "override", "skip", "raise", "rename"
                 (default: "skip")
         """
-        i = 0
-        while i < len(self._mcp_clients):
-            client = self._mcp_clients[i]
-            if isinstance(client, LazyMCPClient):
-                lazy_clients, i = self._collect_lazy_mcp_clients(i)
-                await self._register_lazy_mcp_clients(
-                    lazy_clients,
-                    namesake_strategy=namesake_strategy,
-                )
-                continue
-            i = await self._register_stateful_mcp_client(
-                i,
-                namesake_strategy=namesake_strategy,
-            )
+        await McpToolRegistrar.from_agent(self).register_clients(
+            namesake_strategy=namesake_strategy,
+        )
 
     def _collect_lazy_mcp_clients(
         self,
