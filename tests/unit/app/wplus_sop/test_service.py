@@ -1511,8 +1511,12 @@ async def test_output_review_previews_artifacts_then_writes_approved_memory(
         "example_result_html",
     ]
     assert snapshot["artifacts"][0]["download_url"].startswith(
-        resolve_file_url_base()[0] + "/static/tenant-1/agent-1/",
+        f"/api/wplus-sop/sessions/{session_id}/artifacts/",
     )
+    assert snapshot["artifacts"][0]["download_url"].endswith(
+        "?download=true",
+    )
+    assert "static_url" not in json.dumps(snapshot)
     assert snapshot["memory_candidates"][0]["content"] == {
         "rule": "优先复核高风险分组",
     }
@@ -3930,6 +3934,22 @@ async def test_serialize_session_exposes_stage_reports_and_cumulative_preview(
         "stage-1",
         "stage-2",
     ]
+    stage_download_url = snapshot["stage_reports"][0]["artifacts"][0][
+        "download_url"
+    ]
+    assert stage_download_url == (
+        f"/api/wplus-sop/sessions/{session_id}/stage-report-artifacts/"
+        "stage_sop_json?stage_id=stage-1&revision=1&report_no=1"
+        "&download=true"
+    )
+    cumulative_download_url = snapshot["cumulative_preview"]["artifacts"][0][
+        "download_url"
+    ]
+    assert cumulative_download_url == (
+        f"/api/wplus-sop/sessions/{session_id}/cumulative-artifacts/"
+        "stage_sop_json?preview_version=2&download=true"
+    )
+    assert "static_url" not in json.dumps(snapshot)
     assert (
         snapshot["cumulative_preview"]["snapshots"][0]["stage_id"]
         == "stage-1"

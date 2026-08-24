@@ -945,6 +945,73 @@
   margin-bottom: 14px;
 }
 
+.artifactPreview {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--wplus-line);
+  border-radius: 10px;
+  background: var(--wplus-soft);
+}
+
+.artifactPreviewToolbar {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--wplus-line);
+  background: var(--console-management-surface, #fff);
+}
+
+.artifactFormatTabs,
+.stageReportVersionBar {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.artifactPreviewBody {
+  min-height: 348px;
+  max-height: 560px;
+  overflow: auto;
+
+  > p,
+  > pre {
+    margin: 0;
+    padding: 14px;
+  }
+
+  > p {
+    color: var(--wplus-muted);
+  }
+
+  > pre {
+    color: var(--wplus-ink);
+    font-family: var(--console-font-mono, monospace);
+    font-size: 13px;
+    line-height: 1.65;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+}
+
+.artifactPreviewState {
+  display: grid;
+  min-height: 300px;
+  place-content: center;
+  justify-items: center;
+  gap: 10px;
+  padding: 24px;
+  color: var(--wplus-error);
+  text-align: center;
+
+  p {
+    margin: 0;
+  }
+}
+
 .resultPreviewCard {
   min-width: 0;
   overflow: hidden;
@@ -1276,6 +1343,20 @@
     }
   }
 
+  .artifactPreviewToolbar {
+    align-items: stretch;
+    flex-direction: column;
+
+    > button {
+      min-height: 44px;
+    }
+  }
+
+  .artifactFormatTabs > button {
+    min-height: 44px;
+    flex: 1 1 96px;
+  }
+
   .memoryList article {
     align-items: stretch;
     flex-direction: column;
@@ -1351,17 +1432,6 @@
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .workspace *,
-  .workspace *::before,
-  .workspace *::after {
-    scroll-behavior: auto !important;
-    transition-duration: 0.01ms !important;
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-  }
-
-
 .stageReportList {
   display: flex;
   width: 100%;
@@ -1369,6 +1439,10 @@
   flex-direction: column;
   gap: 10px;
   margin-bottom: 16px;
+}
+
+.stageReportVersionBar {
+  margin-bottom: 2px;
 }
 
 .stageReportItem {
@@ -1402,8 +1476,8 @@
   }
 
   strong {
-    font-size: 14px;
     color: var(--wplus-ink);
+    font-size: 14px;
   }
 
   small {
@@ -1472,4 +1546,14 @@
   gap: 10px;
   margin-top: 4px;
 }
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace *,
+  .workspace *::before,
+  .workspace *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
 }

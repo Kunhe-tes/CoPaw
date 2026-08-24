@@ -151,6 +151,18 @@ export interface WPlusSopCumulativePreview {
   rendered_sha256: Record<string, string>;
 }
 
+export interface WPlusSopStageArtifactIdentity {
+  stageId: string;
+  revision: number;
+  reportNo: number;
+  artifactId: string;
+}
+
+export interface WPlusSopCumulativeArtifactIdentity {
+  previewVersion: number;
+  artifactId: string;
+}
+
 export interface WPlusSopMemoryCandidate {
   candidate_id: string;
   title: string;

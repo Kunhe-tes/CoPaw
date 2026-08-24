@@ -244,14 +244,15 @@ Miner 是 Agent 驱动，技能契约必须与新事件协议同步（参考蓝�
 
 ### 10.2 `console/src/api/modules/wplusSop.ts`
 
-- 跟随 session 投影扩展；如需按版本拉取旧报告文本，新增只读查询（走既有 SSE/HTTP 通道）。
+- 跟随 session 投影扩展；阶段报告按 `stage_id + revision + report_no + artifact_id`、累计预览按 `preview_version + artifact_id` 读取，不能只使用会在不同版本间重复的 `artifact_id`。
+- 阶段与累计产物的预览和下载都走 Session ownership 校验的 HTTP 路由，由请求携带现有认证头直接读取文件；前端不直接读取持久公开的 static URL。
 
 ### 10.3 工作台页面（`console/src/pages/WPlusSopWorkspace/index.tsx`，路由 `/wplus-sop/:sessionId`）
 
 落点文件：`console/src/pages/WPlusSopWorkspace/index.tsx`（主组件，含报告版本切换与累计预览面板；路由已在 `console/src/layouts/MainLayout/index.tsx` 注册）、`console/src/api/types/wplusSop.ts`（类型）、`console/src/api/modules/wplusSop.ts`（API 调用）。
 
-- **环节报告面板**：默认展示最新版本；版本切换器（只读加载历史版本，R5）；明确"最新 vN / 历史只读"标签。
-- **累计 SOP 预览面板**：每次 `cumulative_refreshed` 事件后刷新；显示已确认环节顺序与各环节版本。
+- **环节报告面板**：默认展示最新版本；版本切换器（只读加载历史版本，R5）；明确"最新 vN / 历史只读"标签。页面内提供 JSON / Markdown / HTML 标签页并读取当前所选版本的内容，下载是预览之外的次级操作。
+- **累计 SOP 预览面板**：每次 `cumulative_refreshed` 事件后刷新；显示已确认环节顺序与各环节版本，并在页面内提供累计 JSON / Markdown / HTML 标签页。
 - **确认按钮门控**：仅当当前环节最新报告三格式全部 `validated` 且无失败时可用（R3 的前端强制）。
 - **最终结果视图**：复用现有 OutputReview，新增"与累计逐环节一致"的状态提示（R10 的可见化）。
 - **状态呈现**：`GeneratingStageReport` / `RefreshingCumulative` 参考 `GeneratingTrial` / `ExecutingTrial` / `FinalizingOutputs` 的既有呈现（生命周期进度行 + 状态标签），不新增独立复杂视图（决策 A4）。
@@ -275,6 +276,7 @@ Miner 是 Agent 驱动，技能契约必须与新事件协议同步（参考蓝�
 - **service 层**：confirm_stage 门控（无有效版本拒绝）；revision 后下游报告失效与重计数；最后环节 → 最终组装；累计与最终 sha256 一致性。
 - **渲染层**：环节/累计/最终三格式同一内容语义（回应 R1）；摘要白名单映射不越界。
 - **前端**：类型契约测试（现有 `wplusSop.test.ts` 模式）、版本切换 UI、确认门控状态。
+- **产物读取**：覆盖阶段历史版本与最新版本、累计版本、跨 Session ownership 拒绝、未知版本 404，以及页面内 JSON / Markdown / HTML 加载与失败状态；测试必须实际点击阶段预览和下载，不能只断言按钮存在。
 - **端到端**：对照 AE1–AE5 五条验收示例逐条验证（新增一条：确认后累计刷新失败不得进入下一环节）。
 
 ## 14. 里程碑

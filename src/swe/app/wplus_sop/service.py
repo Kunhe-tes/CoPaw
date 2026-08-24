@@ -10,6 +10,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from .models import (
@@ -489,7 +490,65 @@ def _validate_delivered_artifacts(
             )
 
 
-def _result_preview(result: Any) -> dict[str, str | None]:
+def _artifact_path_segment(value: Any) -> str:
+    return quote(str(value), safe="")
+
+
+def _artifact_url(path: str, query: dict[str, Any]) -> str:
+    return f"{path}?{urlencode(query)}"
+
+
+def _final_artifact_download_url(
+    sop_session_id: str,
+    artifact_id: str,
+) -> str:
+    return _artifact_url(
+        "/api/wplus-sop/sessions/"
+        f"{_artifact_path_segment(sop_session_id)}/artifacts/"
+        f"{_artifact_path_segment(artifact_id)}",
+        {"download": "true"},
+    )
+
+
+def _stage_report_artifact_download_url(
+    sop_session_id: str,
+    report: StageReport,
+    artifact_id: str,
+) -> str:
+    return _artifact_url(
+        "/api/wplus-sop/sessions/"
+        f"{_artifact_path_segment(sop_session_id)}/stage-report-artifacts/"
+        f"{_artifact_path_segment(artifact_id)}",
+        {
+            "stage_id": report.stage_id,
+            "revision": report.revision,
+            "report_no": report.report_no,
+            "download": "true",
+        },
+    )
+
+
+def _cumulative_artifact_download_url(
+    sop_session_id: str,
+    preview: CumulativePreview,
+    artifact_id: str,
+) -> str:
+    return _artifact_url(
+        "/api/wplus-sop/sessions/"
+        f"{_artifact_path_segment(sop_session_id)}/cumulative-artifacts/"
+        f"{_artifact_path_segment(artifact_id)}",
+        {
+            "preview_version": preview.preview_version,
+            "download": "true",
+        },
+    )
+
+
+def _result_preview(
+    result: Any,
+    *,
+    sop_session_id: str,
+) -> dict[str, str | None]:
     artifacts_by_id = {
         artifact.artifact_id: artifact
         for artifact in result.artifacts
@@ -500,9 +559,21 @@ def _result_preview(result: Any) -> dict[str, str | None]:
         "markdown": result.readable_sop,
         "html": result.html,
         "markdown_url": (
-            markdown_artifact.static_url if markdown_artifact else None
+            _final_artifact_download_url(
+                sop_session_id,
+                markdown_artifact.artifact_id,
+            )
+            if markdown_artifact
+            else None
         ),
-        "html_url": html_artifact.static_url if html_artifact else None,
+        "html_url": (
+            _final_artifact_download_url(
+                sop_session_id,
+                html_artifact.artifact_id,
+            )
+            if html_artifact
+            else None
+        ),
         "markdown_sha256": (
             markdown_artifact.sha256 if markdown_artifact else None
         ),
@@ -692,7 +763,11 @@ def _serialize_current_trial(
     return trial, capabilities
 
 
-def _serialize_artifact(artifact: Any) -> dict[str, Any]:
+def _serialize_artifact(
+    artifact: Any,
+    *,
+    download_url: str,
+) -> dict[str, Any]:
     return {
         "artifact_id": artifact.artifact_id,
         "name": artifact.name,
@@ -706,13 +781,17 @@ def _serialize_artifact(artifact: Any) -> dict[str, Any]:
             )
         ),
         "status": "validated",
-        "download_url": artifact.static_url,
+        "download_url": download_url,
         "sha256": artifact.sha256,
         "copied_by": artifact.copied_by,
     }
 
 
-def _serialize_cumulative_preview(preview: CumulativePreview) -> dict[str, Any]:
+def _serialize_cumulative_preview(
+    preview: CumulativePreview,
+    *,
+    sop_session_id: str,
+) -> dict[str, Any]:
     return {
         "preview_version": preview.preview_version,
         "stage_order": preview.stage_order,
@@ -721,7 +800,14 @@ def _serialize_cumulative_preview(preview: CumulativePreview) -> dict[str, Any]:
             for snapshot in preview.snapshots
         ],
         "artifacts": [
-            _serialize_artifact(artifact)
+            _serialize_artifact(
+                artifact,
+                download_url=_cumulative_artifact_download_url(
+                    sop_session_id,
+                    preview,
+                    artifact.artifact_id,
+                ),
+            )
             for artifact in preview.artifacts
         ],
         "rendered_sha256": preview.rendered_sha256,
@@ -786,23 +872,13 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
         "unknowns": projection.unknowns,
         "capabilities": capabilities,
         "artifacts": [
-            {
-                "artifact_id": artifact.artifact_id,
-                "name": artifact.name,
-                "format": (
-                    "json"
-                    if artifact.name.endswith(".json")
-                    else (
-                        "markdown"
-                        if artifact.name.endswith(".md")
-                        else "html"
-                    )
+            _serialize_artifact(
+                artifact,
+                download_url=_final_artifact_download_url(
+                    projection.sop_session_id,
+                    artifact.artifact_id,
                 ),
-                "status": "validated",
-                "download_url": artifact.static_url,
-                "sha256": artifact.sha256,
-                "copied_by": artifact.copied_by,
-            }
+            )
             for artifact in (
                 projection.final_result.artifacts
                 if projection.final_result is not None
@@ -810,7 +886,10 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
             )
         ],
         "result_preview": (
-            _result_preview(projection.final_result)
+            _result_preview(
+                projection.final_result,
+                sop_session_id=projection.sop_session_id,
+            )
             if projection.final_result is not None
             else None
         ),
@@ -822,30 +901,24 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
                 "superseded_by": report.superseded_by,
                 "created_at": report.created_at.isoformat(),
                 "artifacts": [
-                    {
-                        "artifact_id": artifact.artifact_id,
-                        "name": artifact.name,
-                        "format": (
-                            "json"
-                            if artifact.name.endswith(".json")
-                            else (
-                                "markdown"
-                                if artifact.name.endswith(".md")
-                                else "html"
-                            )
+                    _serialize_artifact(
+                        artifact,
+                        download_url=_stage_report_artifact_download_url(
+                            projection.sop_session_id,
+                            report,
+                            artifact.artifact_id,
                         ),
-                        "status": "validated",
-                        "download_url": artifact.static_url,
-                        "sha256": artifact.sha256,
-                        "copied_by": artifact.copied_by,
-                    }
+                    )
                     for artifact in report.artifacts
                 ],
             }
             for report in projection.stage_reports
         ],
         "cumulative_preview": (
-            _serialize_cumulative_preview(projection.cumulative_preview)
+            _serialize_cumulative_preview(
+                projection.cumulative_preview,
+                sop_session_id=projection.sop_session_id,
+            )
             if projection.cumulative_preview is not None
             else None
         ),
