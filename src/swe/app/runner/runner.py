@@ -45,6 +45,7 @@ from .model_call_error_detail import (
     extract_model_call_failure_detail,
 )
 from .query_error_dump import write_query_error_dump
+from .query_execution import QueryInvocation
 from .query_contracts import (
     _QueryPreflight,
     _QueryRuntime,
@@ -5329,6 +5330,16 @@ class AgentRunner(Runner):
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
         user_id = getattr(request, "user_id", "") or ""
+
+        query_execution = getattr(self, "_query_execution", None)
+        if query_execution is not None:
+            async for frame in query_execution.stream(
+                QueryInvocation(request=request, msgs=tuple(msgs)),
+            ):
+                trace_id = getattr(request, "trace_id", None)
+                msg = self._attach_trace_id_to_msg(frame.message, trace_id)
+                yield msg, frame.last
+            return
 
         async for msg, last in self._stream_query_entry(
             msgs,
