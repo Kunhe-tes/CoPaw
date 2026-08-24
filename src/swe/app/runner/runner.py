@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Collection
@@ -88,6 +88,7 @@ from ...agents.hook_runtime.models import (
     HookSessionOverlay,
     HookSessionState,
     MergedHookResult,
+    StopHookExecutionResult,
 )
 from ...agents.hook_runtime.skill_loader import (
     SkillHookLoadError,
@@ -243,6 +244,9 @@ class _QueryTurnOutcome:
     completion_block_reason: str = ""
     completion_marked_incomplete: bool = False
     pre_tool_terminal_stop: bool = False
+    stop_output_buffer_required: bool = False
+    buffered_assistant_messages: list[Msg] = field(default_factory=list)
+    assistant_memory_start: int = 0
 
 
 def _match_command_with_optional_id(
@@ -884,6 +888,81 @@ async def _emit_runner_hook(
     )
 
 
+def _build_stop_hook_runtime(
+    *,
+    tenant_hooks: HookConfig,
+    agent_config: Any,
+    overlay: HookSessionOverlay,
+) -> HookRuntime:
+    agent_hooks = getattr(agent_config, "hooks", None)
+    if not isinstance(agent_hooks, HookConfig):
+        agent_hooks = HookConfig()
+    return HookRuntime(
+        tenant_config=tenant_hooks,
+        agent_config=agent_hooks,
+        session_overlay=overlay,
+    )
+
+
+def _requires_stop_output_buffer(
+    *,
+    request: Any,
+    runner: "AgentRunner",
+    tenant_hooks: HookConfig,
+    agent_config: Any,
+    overlay: HookSessionOverlay,
+    prompt: str,
+) -> bool:
+    context = _build_runner_hook_context(
+        HookEventName.STOP,
+        request=request,
+        runner=runner,
+        prompt=prompt,
+    )
+    return _build_stop_hook_runtime(
+        tenant_hooks=tenant_hooks,
+        agent_config=agent_config,
+        overlay=overlay,
+    ).requires_stop_output_buffer(context)
+
+
+async def _emit_runner_stop_finalization(
+    *,
+    request: Any,
+    runner: "AgentRunner",
+    tenant_hooks: HookConfig,
+    agent_config: Any,
+    overlay: HookSessionOverlay,
+    prompt: str,
+    assistant_response: str,
+    agent: Any,
+    max_transform_seconds: float,
+) -> StopHookExecutionResult:
+    context = _build_runner_hook_context(
+        HookEventName.STOP,
+        request=request,
+        runner=runner,
+        prompt=prompt,
+        assistant_response=assistant_response,
+    )
+
+    async def _conversation_snapshot_provider():
+        return await capture_conversation_snapshot(
+            getattr(agent, "memory", None),
+        )
+
+    return await _build_stop_hook_runtime(
+        tenant_hooks=tenant_hooks,
+        agent_config=agent_config,
+        overlay=overlay,
+    ).emit_stop_finalization(
+        context,
+        workspace_dir=Path(runner.workspace_dir or WORKING_DIR),
+        max_transform_seconds=max_transform_seconds,
+        conversation_snapshot_provider=_conversation_snapshot_provider,
+    )
+
+
 async def _capture_persisted_runner_conversation_snapshot(
     *,
     request: Any,
@@ -1254,17 +1333,94 @@ def _extract_assistant_response(
         # memory.content 是 list of (Msg, marks) tuples
         memory = agent.memory.content
         for msg, _marks in reversed(memory[max(memory_start, 0) :]):
-            if msg.role != "assistant" or not hasattr(msg, "content"):
+            if (
+                msg.role != "assistant"
+                or not hasattr(msg, "content")
+                or _is_live_assistant_event(msg)
+            ):
                 continue
             # content 可能是 list of blocks 或 string
             if isinstance(msg.content, str):
                 return msg.content
-            if isinstance(msg.content, list):
+            if isinstance(msg.content, list) and _has_only_text_blocks(
+                msg.content,
+            ):
                 return _extract_text_from_blocks(msg.content)
     except Exception as e:
         logger.debug("Failed to extract assistant response: %s", e)
 
     return ""
+
+
+def _replace_assistant_response(
+    agent: SWEAgent,
+    response: str,
+    *,
+    memory_start: int = 0,
+) -> bool:
+    if not agent or not hasattr(agent, "memory"):
+        return False
+    try:
+        memory = agent.memory.content
+        for msg, _marks in reversed(memory[max(memory_start, 0) :]):
+            if msg.role != "assistant" or _is_live_assistant_event(msg):
+                continue
+            if isinstance(msg.content, str):
+                msg.content = response
+                return True
+            if isinstance(msg.content, list) and _has_only_text_blocks(
+                msg.content,
+            ):
+                text_blocks = [
+                    block
+                    for block in msg.content
+                    if _content_block_has_text(block)
+                ]
+                if not text_blocks:
+                    continue
+                _replace_content_block_text(text_blocks[0], response)
+                for block in text_blocks[1:]:
+                    _replace_content_block_text(block, "")
+                return True
+    except Exception as exc:
+        logger.debug("Failed to replace assistant response: %s", exc)
+    return False
+
+
+def _content_block_has_text(block: Any) -> bool:
+    if isinstance(block, dict):
+        return block.get("type") == "text" and isinstance(
+            block.get("text"),
+            str,
+        )
+    return getattr(block, "type", None) == "text" and isinstance(
+        getattr(block, "text", None),
+        str,
+    )
+
+
+def _has_only_text_blocks(blocks: list[Any]) -> bool:
+    return bool(blocks) and all(
+        _content_block_has_text(block) for block in blocks
+    )
+
+
+def _is_live_assistant_event(msg: Any) -> bool:
+    metadata = getattr(msg, "metadata", None)
+    if not isinstance(metadata, dict):
+        return False
+    values = " ".join(
+        str(metadata.get(key, ""))
+        for key in ("event_type", "message_type", "kind", "type")
+    ).lower()
+    return any(token in values for token in ("progress", "tool", "approval"))
+
+
+def _replace_content_block_text(block: Any, response: str) -> None:
+    if isinstance(block, dict):
+        block["text"] = response
+    else:
+        block.text = response
 
 
 def _build_internal_follow_up_msg(follow_up_prompt: str) -> Msg:
@@ -1814,6 +1970,20 @@ def _resolve_max_stop_turns(agent_config: Any) -> int:
         return max(int(stop_turns), 0)
     except (TypeError, ValueError):
         return 2
+
+
+def _resolve_max_stop_transform_seconds(agent_config: Any) -> float:
+    running_config = getattr(agent_config, "running", None)
+    hook_runtime_config = getattr(running_config, "hook_runtime", None)
+    configured_seconds = getattr(
+        hook_runtime_config,
+        "max_stop_transform_seconds",
+        30.0,
+    )
+    try:
+        return max(float(configured_seconds), 0.001)
+    except (TypeError, ValueError):
+        return 30.0
 
 
 def _resolve_max_automatic_follow_up_turns(
@@ -4184,12 +4354,51 @@ class AgentRunner(Runner):
         )
 
     @staticmethod
+    def _resolve_max_stop_transform_seconds(agent_config: Any) -> float:
+        return _resolve_max_stop_transform_seconds(agent_config)
+
+    @staticmethod
     def _extract_assistant_response(
         agent: SWEAgent,
         *,
         memory_start: int = 0,
     ) -> str:
         return _extract_assistant_response(agent, memory_start=memory_start)
+
+    @staticmethod
+    def _replace_assistant_response(
+        agent: SWEAgent,
+        response: str,
+        *,
+        memory_start: int = 0,
+    ) -> bool:
+        return _replace_assistant_response(
+            agent,
+            response,
+            memory_start=memory_start,
+        )
+
+    def _requires_stop_output_buffer(
+        self,
+        *,
+        request: AgentRequest,
+        runtime: _QueryRuntime,
+        plan: _TurnPlan,
+    ) -> bool:
+        if not _hook_config_enabled(
+            runtime.tenant_hooks,
+            runtime.agent_config,
+            runtime.hook_overlay,
+        ):
+            return False
+        return _requires_stop_output_buffer(
+            request=request,
+            runner=self,
+            tenant_hooks=runtime.tenant_hooks,
+            agent_config=runtime.agent_config,
+            overlay=runtime.hook_overlay,
+            prompt=plan.original_user_message,
+        )
 
     @staticmethod
     def _request_goal_id(request: AgentRequest) -> str | None:
@@ -4265,6 +4474,45 @@ class AgentRunner(Runner):
             return None
 
         outcome.stop_hook_active = True
+        if outcome.stop_output_buffer_required:
+            finalization = await _emit_runner_stop_finalization(
+                request=request,
+                runner=self,
+                tenant_hooks=runtime.tenant_hooks,
+                agent_config=runtime.agent_config,
+                overlay=runtime.hook_overlay,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                agent=runtime.agent,
+                max_transform_seconds=(
+                    self._resolve_max_stop_transform_seconds(
+                        runtime.agent_config,
+                    )
+                ),
+            )
+            memory_replaced = self._replace_assistant_response(
+                runtime.agent,
+                finalization.final_response,
+                memory_start=outcome.assistant_memory_start,
+            )
+            if not memory_replaced:
+                return MergedHookResult(
+                    decision=HookDecision.BLOCK,
+                    reason="Stop output transformation could not finalize response",
+                    has_blocking_failure=True,
+                    blocking_failure_reason=(
+                        "Stop output transformation could not finalize response"
+                    ),
+                )
+            outcome.assistant_response = finalization.final_response
+            if finalization.transformation_failed:
+                return MergedHookResult(
+                    decision=HookDecision.BLOCK,
+                    reason="Stop output transformation failed",
+                    has_blocking_failure=True,
+                    blocking_failure_reason="Stop output transformation failed",
+                )
+            return finalization.validation_result
         return await _emit_runner_hook(
             HookEventName.STOP,
             request=request,

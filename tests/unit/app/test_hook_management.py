@@ -440,7 +440,9 @@ def test_uploaded_shell_script_is_executable(
         actor=_actor(),
     )
 
-    assert (workspace_dir / "hooks" / "scripts" / "direct.sh").stat().st_mode & 0o100
+    assert (
+        workspace_dir / "hooks" / "scripts" / "direct.sh"
+    ).stat().st_mode & 0o100
 
 
 def test_list_scripts_returns_controlled_library_metadata(
@@ -513,6 +515,67 @@ async def test_manual_test_runs_one_draft_handler_without_persisting_config(
     assert (workspace_dir / "agent.json").read_text(
         encoding="utf-8",
     ) == original_config
+
+
+@pytest.mark.asyncio
+async def test_manual_test_supports_one_stop_output_transformer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspaces" / "default"
+    _write_default_agent(workspace_dir)
+    execute = AsyncMock(
+        return_value=HookHandlerResult(
+            handler_id="format",
+            order=0,
+            replacement_text="sample final",
+        ),
+    )
+    monkeypatch.setattr(hook_management, "execute_handler", execute)
+    service = HookManagementService(workspace_dir, tenant_id="tenant-a")
+    context = HookContext(
+        session_id="test-session",
+        transcript_path="",
+        cwd=str(workspace_dir),
+        hook_event_name="Stop",
+        tenant_id="tenant-a",
+        effective_tenant_id="tenant-a",
+        user_id="user-a",
+        agent_id="default",
+        channel="test",
+        workspace_dir=str(workspace_dir),
+        assistant_response="sample candidate",
+    )
+
+    result = await service.manual_test(
+        handler={
+            "id": "format",
+            "type": "command",
+            "argv": ["echo"],
+            "outputTransform": True,
+        },
+        context=context,
+        actor=_actor(),
+    )
+
+    assert execute.call_args.args[1].assistant_response == "sample candidate"
+    assert result.redacted_summary["output_transform"] is True
+    assert result.redacted_summary["replacement_applied"] is True
+    assert result.redacted_summary["replacement_length"] == len("sample final")
+
+    with pytest.raises(HookManagementValidationError, match="outputTransform"):
+        await service.manual_test(
+            handler={
+                "id": "invalid-format",
+                "type": "command",
+                "argv": ["echo"],
+                "outputTransform": True,
+            },
+            context=context.model_copy(
+                update={"hook_event_name": "PreToolUse"},
+            ),
+            actor=_actor(),
+        )
 
 
 @pytest.mark.asyncio
@@ -619,9 +682,9 @@ async def test_distribution_merges_selected_groups_and_copies_scripts(
     ]
     assert groups[0]["matcher"] == {"tools": ["shell"]}
     assert groups[0]["hooks"][0]["id"] == "source-handler"
-    assert (target_workspace / "hooks" / "scripts" / "guard.py").read_bytes() == (
-        b"print('source')"
-    )
+    assert (
+        target_workspace / "hooks" / "scripts" / "guard.py"
+    ).read_bytes() == (b"print('source')")
     assert result.matcher_group_ids == ("replace-group", "new-group")
     activate.assert_awaited_once()
 
@@ -704,12 +767,12 @@ async def test_distribution_rejects_conflicting_script_used_by_preserved_group(
             activate=activate,
         )
 
-    assert target.get_configuration().hooks["events"]["PreToolUse"][0]["id"] == (
-        "preserved-group"
-    )
-    assert (target_workspace / "hooks" / "scripts" / "shared.py").read_bytes() == (
-        b"print('target')"
-    )
+    assert target.get_configuration().hooks["events"]["PreToolUse"][0][
+        "id"
+    ] == ("preserved-group")
+    assert (
+        target_workspace / "hooks" / "scripts" / "shared.py"
+    ).read_bytes() == (b"print('target')")
     activate.assert_not_awaited()
 
 

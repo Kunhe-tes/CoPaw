@@ -776,6 +776,11 @@ class HookRuntimeRunningConfig(BaseModel):
             "未配置时按各机制预算推导"
         ),
     )
+    max_stop_transform_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Stop 输出变换流水线的总时限（秒）",
+    )
 
     @model_validator(mode="before")
     @classmethod

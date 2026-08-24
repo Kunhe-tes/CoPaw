@@ -36,6 +36,16 @@ class TurnLifecycleOwner(Protocol):
         stop_turns: int,
     ) -> int: ...
 
+    def _requires_stop_output_buffer(self, **kwargs: Any) -> bool: ...
+
+    def _replace_assistant_response(
+        self,
+        agent: Any,
+        response: str,
+        *,
+        memory_start: int = 0,
+    ) -> bool: ...
+
     def _extract_assistant_response(
         self,
         agent: Any,
@@ -98,6 +108,8 @@ async def stream_agent_turns(
     turn_msgs = plan.turn_msgs
     outcome.assistant_response = ""
     memory_start = len(getattr(runtime.agent.memory, "content", []))
+    outcome.assistant_memory_start = memory_start
+    outcome.buffered_assistant_messages.clear()
     stop_turns = owner._resolve_max_stop_turns(runtime.agent_config)
     outcome.max_stop_turns = stop_turns
     outcome.max_automatic_follow_up_turns = (
@@ -129,6 +141,14 @@ async def stream_agent_turns(
                 dict,
             ):
                 outcome.plan_interaction_turn_boundary = True
+            if (
+                outcome.stop_output_buffer_required
+                and _is_bufferable_assistant_text(
+                    msg,
+                )
+            ):
+                outcome.buffered_assistant_messages.append(msg)
+                continue
             yield msg, last
     except PreToolUseTerminalStop as exc:
         consume_terminal_stop = getattr(
@@ -518,6 +538,13 @@ async def _stream_standard_completion_lifecycle(
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     while True:
         outcome.stop_hook_active = False
+        outcome.stop_output_buffer_required = (
+            owner._requires_stop_output_buffer(
+                request=request,
+                runtime=runtime,
+                plan=plan,
+            )
+        )
         async for msg, last in owner._stream_agent_turns(
             runtime=runtime,
             plan=plan,
@@ -537,4 +564,61 @@ async def _stream_standard_completion_lifecycle(
             continue
         if incomplete_msg is not None:
             yield incomplete_msg, True
+        elif outcome.stop_output_buffer_required:
+            buffered_messages = outcome.buffered_assistant_messages
+            if buffered_messages:
+                final_message = buffered_messages[-1]
+                _replace_buffered_assistant_text(
+                    final_message,
+                    outcome.assistant_response,
+                )
+                yield final_message, True
         return
+
+
+def _is_bufferable_assistant_text(msg: Msg) -> bool:
+    if msg.role != "assistant" or _is_live_assistant_event(msg):
+        return False
+    if isinstance(msg.content, str):
+        return True
+    if not isinstance(msg.content, list):
+        return False
+    return bool(msg.content) and all(
+        _content_block_has_text(block) for block in msg.content
+    )
+
+
+def _is_live_assistant_event(msg: Msg) -> bool:
+    metadata = getattr(msg, "metadata", None)
+    if not isinstance(metadata, dict):
+        return False
+    values = " ".join(
+        str(metadata.get(key, ""))
+        for key in ("event_type", "message_type", "kind", "type")
+    ).lower()
+    return any(token in values for token in ("progress", "tool", "approval"))
+
+
+def _content_block_has_text(block: Any) -> bool:
+    if isinstance(block, dict):
+        return block.get("type") == "text" and isinstance(
+            block.get("text"),
+            str,
+        )
+    return getattr(block, "type", None) == "text" and isinstance(
+        getattr(block, "text", None),
+        str,
+    )
+
+
+def _replace_buffered_assistant_text(msg: Msg, response: str) -> None:
+    if isinstance(msg.content, str):
+        msg.content = response
+        return
+    if not isinstance(msg.content, list):
+        return
+    for index, block in enumerate(msg.content):
+        if isinstance(block, dict):
+            block["text"] = response if index == 0 else ""
+        else:
+            block.text = response if index == 0 else ""

@@ -25,6 +25,7 @@ export function createHandler(type: HookHandlerType): HookHandlerDraft {
     timeout: 10,
     statusMessage: "",
     once: false,
+    outputTransform: false,
     includeConversationSnapshot: false,
     conversationSnapshotLimit: 50,
     failPolicy: "allow",

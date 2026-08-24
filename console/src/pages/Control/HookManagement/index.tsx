@@ -703,9 +703,29 @@ function HookManagementPage() {
                     仅执行一次
                     <Switch
                       checked={Boolean(handler.once)}
+                      disabled={Boolean(handler.outputTransform)}
                       onChange={(once) => onHandlerChange({ once })}
                     />
                   </label>
+                  {selected.event === "Stop" && (
+                    <label className={styles.switchLine}>
+                      输出变换器
+                      <Switch
+                        checked={Boolean(handler.outputTransform)}
+                        onChange={(outputTransform) =>
+                          onHandlerChange({
+                            outputTransform,
+                            once: outputTransform ? false : handler.once,
+                          })
+                        }
+                      />
+                    </label>
+                  )}
+                  {selected.event === "Stop" && handler.outputTransform && (
+                    <p>
+                      启用后，候选文本会在 Stop 完成前暂存；仅最终文本会交付。
+                    </p>
+                  )}
                   <label className={styles.switchLine}>
                     附带会话快照
                     <Switch
