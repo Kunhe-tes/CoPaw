@@ -15,6 +15,7 @@ import pytest_asyncio
 
 from swe.providers.provider_manager import ProviderManager
 from swe.providers.provider import ModelInfo, ProviderInfo
+from swe.providers.provider_runtime_cache import ProviderRuntimeCache
 
 
 def _manager_for(scope: str) -> ProviderManager:
@@ -226,6 +227,8 @@ async def test_owner_cancellation_clears_scope_inflight(monkeypatch):
 async def test_refresh_if_due_is_single_flight(monkeypatch):
     manager = _manager_for("scope-a")
     manager._next_freshness_check_at = time.monotonic() - 1
+    cache = ProviderRuntimeCache(freshness_ttl_seconds=60)
+    monkeypatch.setattr(ProviderManager, "_runtime_cache", cache)
     refreshes = 0
 
     def refresh():
@@ -236,6 +239,36 @@ async def test_refresh_if_due_is_single_flight(monkeypatch):
     monkeypatch.setattr(manager, "_refresh_if_stale", refresh)
     await asyncio.gather(*[manager.refresh_if_due() for _ in range(3)])
     assert refreshes == 1
+    assert cache._freshness_generation.get("scope-a", 0) == 0
+
+
+@pytest.mark.asyncio
+async def test_refresh_if_due_rechecks_after_invalidation_during_manager_refresh(
+    monkeypatch,
+):
+    manager = _manager_for("scope-a")
+    cache = ProviderRuntimeCache(freshness_ttl_seconds=60)
+    monkeypatch.setattr(ProviderManager, "_runtime_cache", cache)
+    started = threading.Event()
+    release = threading.Event()
+    refreshes = 0
+
+    def refresh() -> None:
+        nonlocal refreshes
+        refreshes += 1
+        started.set()
+        release.wait(timeout=5)
+
+    monkeypatch.setattr(manager, "_refresh_if_stale", refresh)
+    first = asyncio.create_task(manager.refresh_if_due())
+    assert await asyncio.to_thread(started.wait, 5)
+    cache.invalidate("scope-a")
+    release.set()
+    await first
+
+    await manager.refresh_if_due()
+
+    assert refreshes == 2
 
 
 @pytest.mark.asyncio

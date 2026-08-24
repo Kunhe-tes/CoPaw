@@ -158,6 +158,18 @@ class ProviderRuntimeCache:
         self._freshness_due.add(scope)
         self._next_freshness_check_at.setdefault(scope, 0.0)
 
+    def freshness_check_is_due(self, scope: str) -> bool:
+        """Return whether this scope still has a refresh the cache must run."""
+        return (
+            scope in self._freshness_due
+            and time.monotonic()
+            >= self._next_freshness_check_at.get(scope, float("inf"))
+        )
+
+    def next_freshness_check_at(self, scope: str) -> float:
+        """Expose the cache-owned schedule for legacy facade observers."""
+        return self._next_freshness_check_at.get(scope, 0.0)
+
     async def refresh_if_due(
         self,
         scope: str,

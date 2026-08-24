@@ -1050,10 +1050,14 @@ class ProviderManager:
 
     async def refresh_if_due(self) -> None:
         """Refresh provider files only after the freshness TTL elapses."""
-        if time.monotonic() < getattr(self, "_next_freshness_check_at", 0.0):
-            return
         cache = self._get_runtime_cache()
-        cache.mark_freshness_due(self.tenant_id)
+        if time.monotonic() < getattr(
+            self,
+            "_next_freshness_check_at",
+            0.0,
+        ) and not cache.freshness_check_is_due(self.tenant_id):
+            return
+        cache.ensure_freshness_due(self.tenant_id)
 
         async def refresh() -> None:
             future = cache.submit(
@@ -1062,12 +1066,12 @@ class ProviderManager:
             await asyncio.shield(asyncio.wrap_future(future))
 
         await cache.refresh_if_due(self.tenant_id, refresh)
+        self._next_freshness_check_at = cache.next_freshness_check_at(
+            self.tenant_id,
+        )
 
     def _refresh_and_mark_fresh(self) -> None:
         self._refresh_if_stale()
-        self._next_freshness_check_at = (
-            time.monotonic() + _PROVIDER_FRESHNESS_TTL_SECONDS
-        )
 
     async def list_provider_info(self) -> List[ProviderInfo]:
         started_at = time.perf_counter()
