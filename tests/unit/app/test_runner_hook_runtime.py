@@ -727,7 +727,10 @@ async def test_query_handler_user_prompt_hook_blocks_before_command_dispatch(
         ),
     )
     command_path = AsyncMock()
-    monkeypatch.setattr("swe.app.runner.runner.run_command_path", command_path)
+    monkeypatch.setattr(
+        "swe.app.runner.query_execution.admission.run_command_path",
+        command_path,
+    )
 
     request = SimpleNamespace(
         session_id="session-1",
@@ -773,7 +776,7 @@ async def test_query_handler_no_config_does_not_emit_hook(
         yield Msg(name="Friday", role="assistant", content="command"), True
 
     monkeypatch.setattr(
-        "swe.app.runner.runner.run_command_path",
+        "swe.app.runner.query_execution.admission.run_command_path",
         fake_run_command_path,
     )
 
@@ -820,7 +823,7 @@ async def test_query_handler_traces_conversation_commands(
         yield Msg(name="Friday", role="assistant", content="command"), True
 
     monkeypatch.setattr(
-        "swe.app.runner.runner.run_command_path",
+        "swe.app.runner.query_execution.admission.run_command_path",
         fake_run_command_path,
     )
     request = SimpleNamespace(

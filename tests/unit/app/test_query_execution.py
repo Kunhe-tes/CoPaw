@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from agentscope.message import Msg
@@ -13,7 +14,7 @@ from swe.app.runner.query_execution import (
     QueryFrame,
     QueryInvocation,
 )
-from swe.app.runner.runner import AgentRunner
+from swe.app.runner.runner import AgentRunner, _QueryPreflight
 
 
 class _RecordingAdapter:
@@ -63,10 +64,10 @@ async def test_query_handler_preserves_query_execution_frame_order(
 
 
 @pytest.mark.asyncio
-async def test_runner_uses_live_query_execution_adapter_by_default(
+async def test_live_adapter_runs_admission_without_runner_entry(
     tmp_path,
 ) -> None:
-    """A normal runner reaches the legacy flow through QueryExecution."""
+    """The live Adapter owns admission instead of calling the legacy entry."""
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     request = SimpleNamespace(
         session_id="session-1",
@@ -74,32 +75,27 @@ async def test_runner_uses_live_query_execution_adapter_by_default(
         channel="console",
         channel_meta={},
     )
-    messages = [Msg(name="user", role="user", content="hello")]
-    calls: list[tuple[object, ...]] = []
+    runner._prepare_query_preflight = AsyncMock(
+        return_value=_QueryPreflight(
+            response=Msg(name="Friday", role="assistant", content="blocked"),
+        ),
+    )
 
-    async def legacy_entry(*args, **kwargs):
-        calls.append((args, kwargs))
-        yield Msg(name="Friday", role="assistant", content="legacy"), True
+    async def unexpected_legacy_entry(*_args, **_kwargs):
+        if _args:
+            raise AssertionError("live adapter called runner entry")
+        yield Msg(name="Friday", role="assistant", content="unexpected"), True
 
-    runner._stream_query_entry = legacy_entry
+    runner._stream_query_entry = unexpected_legacy_entry
 
     frames = [
         frame
-        async for frame in runner.query_handler(messages, request=request)
+        async for frame in runner.query_handler(
+            [Msg(name="user", role="user", content="hello")],
+            request=request,
+        )
     ]
 
-    assert isinstance(runner._query_execution, QueryExecution)
-    assert calls == [
-        (
-            (messages,),
-            {
-                "request": request,
-                "query": "hello",
-                "session_id": "session-1",
-                "user_id": "user-1",
-            },
-        ),
-    ]
     assert [(msg.get_text_content(), last) for msg, last in frames] == [
-        ("legacy", True),
+        ("blocked", True),
     ]

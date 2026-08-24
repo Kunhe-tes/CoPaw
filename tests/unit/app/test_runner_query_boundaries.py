@@ -691,7 +691,7 @@ async def test_command_dispatch_requires_unconsumed_approval(
         yield _blocked_msg("normal response"), True
 
     monkeypatch.setattr(
-        "swe.app.runner.runner.run_command_path",
+        "swe.app.runner.query_execution.admission.run_command_path",
         command_path,
     )
     runner._stream_query_after_preflight = normal_path

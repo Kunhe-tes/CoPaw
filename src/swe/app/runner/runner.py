@@ -32,8 +32,6 @@ from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
     _get_last_user_text,
-    _is_command,
-    run_command_path,
 )
 from .hidden_context_injection import (
     append_hidden_context_to_user_message,
@@ -46,6 +44,7 @@ from .model_call_error_detail import (
 )
 from .query_error_dump import write_query_error_dump
 from .query_execution import QueryExecution, QueryInvocation
+from .query_execution.admission import stream_admission
 from .query_execution.adapters import LegacyQueryExecutionAdapter
 from .query_contracts import (
     _QueryPreflight,
@@ -5269,54 +5268,14 @@ class AgentRunner(Runner):
         session_id: str,
         user_id: str,
     ):
-        """处理 query 主流程前的审批、prompt hook 与命令分发。"""
-        preflight = await self._prepare_query_preflight(
-            session_id=session_id,
-            user_id=user_id,
-            query=query,
-            request=request,
-        )
-        if preflight.response is not None:
-            yield preflight.response, True
-            if preflight.cleanup_denied_memory:
-                await self._cleanup_denied_session_memory(
-                    session_id,
-                    user_id,
-                    denial_response=preflight.response,
-                )
-            return
-
-        if not preflight.approval_consumed and query and _is_command(query):
-            logger.info("Command path: %s", query.strip()[:50])
-            trace_id = await self._start_query_trace(request, msgs)
-            try:
-                async for msg, last in run_command_path(request, msgs, self):
-                    yield msg, last
-            except asyncio.CancelledError:
-                await self._end_trace_if_needed(
-                    trace_id,
-                    TraceStatus.CANCELLED,
-                )
-                raise
-            except Exception as exc:
-                await self._end_trace_if_needed(
-                    trace_id,
-                    TraceStatus.ERROR,
-                    str(exc),
-                )
-                raise
-            await self._end_trace_if_needed(
-                trace_id,
-                TraceStatus.COMPLETED,
-            )
-            return
-
-        async for msg, last in self._stream_query_after_preflight(
+        """Compatibility facade for admission execution."""
+        async for msg, last in stream_admission(
+            self,
             msgs,
             request=request,
             query=query,
             session_id=session_id,
-            preflight=preflight,
+            user_id=user_id,
         ):
             yield msg, last
 
