@@ -34,6 +34,8 @@ from swe.providers.provider import (
     ProviderInfo,
 )
 from swe.providers.models import ModelSlotConfig
+from swe.providers.provider_runtime_cache import ProviderRuntimeCache
+from swe.providers.tenant_provider_repository import TenantProviderRepository
 from swe.constant import SECRET_DIR
 from swe.runtime_cache import reset_scope_bound_model_caches
 from swe.runtime_workers import run_runtime_state_work
@@ -99,6 +101,10 @@ class ProviderManager:
         # Initialize provider manager, load providers from registry and store
         # any necessary state (e.g., cached models).
         self.tenant_id = tenant_id
+        self._repository = TenantProviderRepository(SECRET_DIR)
+        self._runtime_cache = ProviderRuntimeCache(
+            _PROVIDER_FRESHNESS_TTL_SECONDS,
+        )
         self.builtin_providers: Dict[str, Provider] = {}
         self._builtin_provider_defaults: Dict[str, Provider] = {}
         self.custom_providers: Dict[str, Provider] = {}
@@ -802,12 +808,10 @@ class ProviderManager:
 
     def _prepare_disk_storage(self):
         """Prepare directory structure"""
-        for path in [self.root_path, self.builtin_path, self.custom_path]:
-            path.mkdir(parents=True, exist_ok=True)
-            try:
-                os.chmod(path, 0o700)  # Restrict permissions for security
-            except Exception:
-                pass
+        paths = self._repository.prepare_scope(self.tenant_id)
+        self.root_path = paths.root
+        self.builtin_path = paths.builtin
+        self.custom_path = paths.custom
 
     def _init_builtins(self):
         # Deep copy builtin providers to ensure per-tenant isolation
@@ -843,6 +847,14 @@ class ProviderManager:
 
     def _mark_freshness_due(self) -> None:
         self._next_freshness_check_at = 0.0
+        self._get_runtime_cache().mark_freshness_due(self.tenant_id)
+
+    def _get_runtime_cache(self) -> ProviderRuntimeCache:
+        cache = getattr(self, "_runtime_cache", None)
+        if cache is None:
+            cache = ProviderRuntimeCache(_PROVIDER_FRESHNESS_TTL_SECONDS)
+            self._runtime_cache = cache
+        return cache
 
     def _refresh_if_stale(self):
         """Reload providers whose files changed on disk since last snapshot."""
@@ -1063,29 +1075,21 @@ class ProviderManager:
         """Refresh provider files only after the freshness TTL elapses."""
         if time.monotonic() < getattr(self, "_next_freshness_check_at", 0.0):
             return
-        lock = getattr(self, "_freshness_lock", None)
-        if lock is None:
-            lock = threading.RLock()
-            self._freshness_lock = lock
-        with lock:
-            if time.monotonic() < self._next_freshness_check_at:
-                return
-            future = getattr(self, "_refresh_inflight", None)
-            if future is None:
-                future = ProviderManager._init_executor.submit(
-                    self._refresh_and_mark_fresh,
-                )
-                self._refresh_inflight = future
+        cache = self._get_runtime_cache()
+        cache.mark_freshness_due(self.tenant_id)
 
-                def clear_completed(
-                    _: concurrent.futures.Future[None],
-                ) -> None:
-                    with lock:
-                        if self._refresh_inflight is future:
-                            self._refresh_inflight = None
+        async def refresh() -> None:
+            future = ProviderManager._init_executor.submit(
+                self._refresh_and_mark_fresh,
+            )
+            self._refresh_inflight = future
+            try:
+                await asyncio.shield(asyncio.wrap_future(future))
+            finally:
+                if self._refresh_inflight is future:
+                    self._refresh_inflight = None
 
-                future.add_done_callback(clear_completed)
-        await asyncio.shield(asyncio.wrap_future(future))
+        await cache.refresh_if_due(self.tenant_id, refresh)
 
     def _refresh_and_mark_fresh(self) -> None:
         self._refresh_if_stale()
@@ -1472,6 +1476,18 @@ class ProviderManager:
         provider_path = provider_dir / f"{provider.id}.json"
         if skip_if_exists and provider_path.exists():
             return
+        repository = getattr(self, "_repository", None)
+        if (
+            repository is not None
+            and repository.root_path(self.tenant_id) == self.root_path
+        ):
+            provider_path = repository.write_provider(
+                self.tenant_id,
+                provider.model_dump(),
+                is_builtin=is_builtin,
+            )
+            self._update_mtime(provider_path)
+            return
         with open(provider_path, "w", encoding="utf-8") as f:
             json.dump(provider.model_dump(), f, ensure_ascii=False, indent=2)
         try:
@@ -1534,6 +1550,17 @@ class ProviderManager:
         if not provider_path.exists():
             return None
         try:
+            repository = getattr(self, "_repository", None)
+            if (
+                repository is not None
+                and repository.root_path(self.tenant_id) == self.root_path
+            ):
+                data = repository.read_provider(
+                    self.tenant_id,
+                    provider_id,
+                    is_builtin=is_builtin,
+                )
+                return self._provider_from_data(data) if data else None
             with open(provider_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return self._provider_from_data(data)
@@ -1565,6 +1592,17 @@ class ProviderManager:
 
     def save_active_model(self, active_model: ModelSlotConfig):
         """Save the active provider/model configuration to disk."""
+        repository = getattr(self, "_repository", None)
+        if (
+            repository is not None
+            and repository.root_path(self.tenant_id) == self.root_path
+        ):
+            active_path = repository.write_active_model(
+                self.tenant_id,
+                active_model,
+            )
+            self._update_mtime(active_path)
+            return
         self._save_active_model_to_root(self.root_path, active_model)
         self._update_mtime(self.root_path / "active_model.json")
 
@@ -1613,6 +1651,12 @@ class ProviderManager:
 
     def load_active_model(self) -> ModelSlotConfig | None:
         """Load the active provider/model configuration from disk."""
+        repository = getattr(self, "_repository", None)
+        if (
+            repository is not None
+            and repository.root_path(self.tenant_id) == self.root_path
+        ):
+            return repository.read_active_model(self.tenant_id)
         return self._read_active_model_from_root(self.root_path)
 
     def _init_from_storage(self):
