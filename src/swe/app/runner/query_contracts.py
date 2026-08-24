@@ -87,9 +87,6 @@ class _RuntimeStartResult:
 class QueryPreflightOwner(Protocol):
     """Preflight collaborator needs only these runner capabilities."""
 
-    agent_id: str
-    tenant_id: str | None
-
     async def _resolve_pending_approval(
         self,
         session_id: str,

@@ -24,6 +24,7 @@ from swe.app.runner.runner import (
     _QueryRuntime,
     _QueryRuntimeInputs,
 )
+from swe.app.runner.query_contracts import _RuntimeStartResult
 
 
 def _request(**overrides):
@@ -107,6 +108,206 @@ async def test_query_boundary_facades_delegate_to_collaborators(
         query="hello",
         preflight=preflight,
     )
+
+
+@pytest.mark.asyncio
+async def test_query_runtime_collaborator_preserves_assembly_order(
+    monkeypatch,
+) -> None:
+    from swe.app.runner import query_runtime
+
+    events: list[str] = []
+
+    async def refresh_if_due() -> None:
+        events.append("refresh")
+
+    manager = SimpleNamespace(refresh_if_due=refresh_if_due)
+
+    async def get_or_create_instance(tenant_id: str) -> object:
+        assert tenant_id == "tenant-1"
+        events.append("provider")
+        return manager
+
+    async def build_inputs(**_kwargs) -> object:
+        events.append("inputs")
+        return SimpleNamespace()
+
+    async def start_resources(**kwargs) -> tuple[object, None]:
+        kwargs["mcp_clients"].append(object())
+        events.extend(
+            [
+                "resources",
+                "lazy MCP",
+                "SESSION_START",
+                "selected-skill hooks",
+            ],
+        )
+        return SimpleNamespace(), None
+
+    async def finalize_runtime(**_kwargs) -> object:
+        events.extend(["agent build", "register_mcp_clients"])
+        return SimpleNamespace()
+
+    owner = SimpleNamespace(
+        tenant_id="tenant-1",
+        _build_query_runtime_inputs=build_inputs,
+        _start_query_runtime_resources=start_resources,
+        _finalize_query_runtime=finalize_runtime,
+        _cleanup_query_runtime_mcp_clients=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        query_runtime.ProviderManager,
+        "get_or_create_instance",
+        get_or_create_instance,
+    )
+
+    result = await query_runtime.prepare_query_runtime(
+        owner,
+        request=_request(),
+        msgs=[Msg(name="user", role="user", content="hello")],
+        query="hello",
+        preflight=_QueryPreflight(),
+    )
+
+    assert result.runtime is not None
+    assert events == [
+        "provider",
+        "refresh",
+        "inputs",
+        "resources",
+        "lazy MCP",
+        "SESSION_START",
+        "selected-skill hooks",
+        "agent build",
+        "register_mcp_clients",
+    ]
+    owner._cleanup_query_runtime_mcp_clients.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_query_runtime_collaborator_returns_session_start_block(
+    monkeypatch,
+) -> None:
+    from swe.app.runner import query_runtime
+
+    events: list[str] = []
+    block_result = _RuntimeStartResult(block_response=_blocked_msg("blocked"))
+
+    async def refresh_if_due() -> None:
+        events.append("refresh")
+
+    async def get_or_create_instance(_tenant_id: str) -> object:
+        events.append("provider")
+        return SimpleNamespace(refresh_if_due=refresh_if_due)
+
+    async def build_inputs(**_kwargs) -> object:
+        events.append("inputs")
+        return SimpleNamespace()
+
+    async def start_resources(**kwargs) -> tuple[object, _RuntimeStartResult]:
+        kwargs["mcp_clients"].append(object())
+        events.extend(["resources", "lazy MCP", "SESSION_START"])
+        return SimpleNamespace(), block_result
+
+    owner = SimpleNamespace(
+        tenant_id="tenant-1",
+        _build_query_runtime_inputs=build_inputs,
+        _start_query_runtime_resources=start_resources,
+        _finalize_query_runtime=AsyncMock(),
+        _cleanup_query_runtime_mcp_clients=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        query_runtime.ProviderManager,
+        "get_or_create_instance",
+        get_or_create_instance,
+    )
+
+    result = await query_runtime.prepare_query_runtime(
+        owner,
+        request=_request(),
+        msgs=[],
+        query=None,
+        preflight=_QueryPreflight(),
+    )
+
+    assert result is block_result
+    assert events == [
+        "provider",
+        "refresh",
+        "inputs",
+        "resources",
+        "lazy MCP",
+        "SESSION_START",
+    ]
+    owner._finalize_query_runtime.assert_not_awaited()
+    owner._cleanup_query_runtime_mcp_clients.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_query_runtime_collaborator_cleans_mcp_after_assembly_error(
+    monkeypatch,
+) -> None:
+    from swe.app.runner import query_runtime
+
+    events: list[str] = []
+    mcp_client = object()
+
+    async def refresh_if_due() -> None:
+        events.append("refresh")
+
+    async def get_or_create_instance(_tenant_id: str) -> object:
+        events.append("provider")
+        return SimpleNamespace(refresh_if_due=refresh_if_due)
+
+    async def build_inputs(**_kwargs) -> object:
+        events.append("inputs")
+        return SimpleNamespace()
+
+    async def start_resources(**kwargs) -> tuple[object, None]:
+        kwargs["mcp_clients"].append(mcp_client)
+        events.extend(["resources", "lazy MCP", "SESSION_START"])
+        return SimpleNamespace(), None
+
+    async def finalize_runtime(**_kwargs) -> object:
+        events.append("agent build")
+        raise RuntimeError("agent build failed")
+
+    async def cleanup_mcp_clients(clients: list[object]) -> None:
+        assert clients == [mcp_client]
+        events.append("cleanup")
+
+    owner = SimpleNamespace(
+        tenant_id="tenant-1",
+        _build_query_runtime_inputs=build_inputs,
+        _start_query_runtime_resources=start_resources,
+        _finalize_query_runtime=finalize_runtime,
+        _cleanup_query_runtime_mcp_clients=cleanup_mcp_clients,
+    )
+    monkeypatch.setattr(
+        query_runtime.ProviderManager,
+        "get_or_create_instance",
+        get_or_create_instance,
+    )
+
+    with pytest.raises(RuntimeError, match="agent build failed"):
+        await query_runtime.prepare_query_runtime(
+            owner,
+            request=_request(),
+            msgs=[],
+            query=None,
+            preflight=_QueryPreflight(),
+        )
+
+    assert events == [
+        "provider",
+        "refresh",
+        "inputs",
+        "resources",
+        "lazy MCP",
+        "SESSION_START",
+        "agent build",
+        "cleanup",
+    ]
 
 
 @pytest.mark.asyncio
