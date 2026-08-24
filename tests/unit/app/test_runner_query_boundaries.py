@@ -484,6 +484,44 @@ async def test_runtime_finalizer_registers_mcp_before_attaching_detector() -> (
 
 
 @pytest.mark.asyncio
+async def test_runtime_module_loads_selected_skill_hooks_after_start(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.app.runner import query_runtime
+
+    loaded: list[str] = []
+    overlay = HookSessionOverlay()
+    inputs = SimpleNamespace(
+        hook_overlay=overlay,
+        selected_skill_directives=[
+            SimpleNamespace(name="skill-1", path=tmp_path / "skill-1.md"),
+        ],
+    )
+
+    def load_hooks(**kwargs):
+        loaded.append(kwargs["skill_name"])
+        return kwargs["session_state"]
+
+    monkeypatch.setattr(
+        query_runtime,
+        "load_skill_hooks_for_session",
+        load_hooks,
+        raising=False,
+    )
+
+    result = await query_runtime.load_selected_skill_hooks(
+        inputs=inputs,
+        workspace_dir=tmp_path,
+        tenant_id="tenant-1",
+        approved_http_urls=set(),
+    )
+
+    assert result == overlay
+    assert loaded == ["skill-1"]
+
+
+@pytest.mark.asyncio
 async def test_blocked_runtime_cleanup_updates_chat_before_closing_mcp(
     monkeypatch,
 ) -> None:

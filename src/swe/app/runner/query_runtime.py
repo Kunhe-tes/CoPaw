@@ -11,6 +11,11 @@ from typing import Any
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
 from ...agents.hook_runtime.models import HookSessionOverlay
+from ...agents.hook_runtime.models import HookSessionState
+from ...agents.hook_runtime.skill_loader import (
+    SkillHookLoadError,
+    load_skill_hooks_for_session,
+)
 from ...constant import WORKING_DIR
 from ...providers.provider_manager import ProviderManager
 from ..source_system_config.runtime import get_system_prompt_injections
@@ -24,6 +29,36 @@ from .query_contracts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def load_selected_skill_hooks(
+    *,
+    inputs: _QueryRuntimeInputs,
+    workspace_dir: Any,
+    tenant_id: str | None,
+    approved_http_urls: set[str],
+) -> HookSessionOverlay:
+    """Load validated selected skill Hooks after the session-start phase."""
+    del tenant_id
+    state: HookSessionState = inputs.hook_overlay
+    for directive in inputs.selected_skill_directives:
+        try:
+            state = load_skill_hooks_for_session(
+                skill_name=directive.name,
+                skill_root=directive.path.parent,
+                workspace_dir=workspace_dir,
+                session_state=state,
+                approved_http_urls=approved_http_urls,
+            )
+        except SkillHookLoadError as exc:
+            logger.warning(
+                "Rejected hooks for explicitly selected skill '%s': %s",
+                directive.name,
+                exc,
+            )
+    return HookSessionOverlay.model_validate(
+        state.model_dump(mode="json", by_alias=True),
+    )
 
 
 async def build_query_runtime_inputs(

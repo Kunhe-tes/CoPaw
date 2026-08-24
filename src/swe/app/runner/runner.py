@@ -4155,30 +4155,13 @@ class AgentRunner(Runner):
         inputs: _QueryRuntimeInputs,
     ) -> HookSessionOverlay:
         """Load validated selected skill hooks after startup hooks complete."""
-        state: HookSessionState = inputs.hook_overlay
-        workspace = Path(self.workspace_dir or WORKING_DIR)
-        approvals = _load_tenant_approved_skill_hook_http_urls(self.tenant_id)
-
-        for directive in inputs.selected_skill_directives:
-            try:
-                next_state = load_skill_hooks_for_session(
-                    skill_name=directive.name,
-                    skill_root=directive.path.parent,
-                    workspace_dir=workspace,
-                    session_state=state,
-                    approved_http_urls=approvals,
-                )
-            except SkillHookLoadError as exc:
-                logger.warning(
-                    "Rejected hooks for explicitly selected skill '%s': %s",
-                    directive.name,
-                    exc,
-                )
-                continue
-            state = next_state
-
-        return HookSessionOverlay.model_validate(
-            state.model_dump(mode="json", by_alias=True),
+        return await query_runtime.load_selected_skill_hooks(
+            inputs=inputs,
+            workspace_dir=Path(self.workspace_dir or WORKING_DIR),
+            tenant_id=self.tenant_id,
+            approved_http_urls=(
+                _load_tenant_approved_skill_hook_http_urls(self.tenant_id)
+            ),
         )
 
     async def _finalize_query_runtime(
