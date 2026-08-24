@@ -1470,7 +1470,9 @@ reject the criterion and state the missing evidence in its reason."""
 
 
 def _build_goal_finalization_input(
-    goal: Any, state: str, reason: str | None
+    goal: Any,
+    state: str,
+    reason: str | None,
 ) -> Msg:
     """Build bounded internal input for a tool-free Goal Finalization Turn."""
     return _build_internal_follow_up_msg(
@@ -3499,21 +3501,25 @@ class AgentRunner(Runner):
             request_context["forced_tool_call_json"] = json.dumps(
                 approved_tool_call,
             )
-        resolved_slot = getattr(runtime.agent, "_resolved_model_slot", {}) or {}
+        resolved_slot = (
+            getattr(runtime.agent, "_resolved_model_slot", {}) or {}
+        )
         frozen_scope = getattr(goal, "scope", None)
         model_slot_override = None
         model_provider_override = None
         provider_id = str(
-            getattr(frozen_scope, "effective_model_provider_id", "") or ""
+            getattr(frozen_scope, "effective_model_provider_id", "") or "",
         ) or str(resolved_slot.get("provider_id") or "")
         model_name = str(
-            getattr(frozen_scope, "effective_model", "") or ""
+            getattr(frozen_scope, "effective_model", "") or "",
         )
         if model_name == "default":
             model_name = ""
         model_name = model_name or str(resolved_slot.get("model") or "")
         if not provider_id or not model_name:
-            raise RuntimeError("Goal completion judge frozen model is unavailable")
+            raise RuntimeError(
+                "Goal completion judge frozen model is unavailable",
+            )
         from ...providers.models import ModelSlotConfig
         from ...providers.provider_manager import ProviderManager
 
@@ -3582,9 +3588,7 @@ class AgentRunner(Runner):
         )
         from ..goals.runtime import CompletionReviewPending
 
-        criterion_ids = {
-            item.criterion_id for item in review_goal.criteria
-        }
+        criterion_ids = {item.criterion_id for item in review_goal.criteria}
         observations = (
             tool_observations if isinstance(tool_observations, list) else []
         )
@@ -3597,8 +3601,10 @@ class AgentRunner(Runner):
             )
             if approval_result is not None:
                 return approval_result
-            approved_tool_call = await self._completion_review_approved_tool_call(
-                review_goal,
+            approved_tool_call = (
+                await self._completion_review_approved_tool_call(
+                    review_goal,
+                )
             )
             if has_pending_review_request and approved_tool_call is None:
                 return {
@@ -3637,10 +3643,15 @@ class AgentRunner(Runner):
                 if getattr(msg, "role", None) == "assistant":
                     final_content = str(getattr(msg, "content", "") or "")
             pending = getattr(agent, "_tool_guard_pending_info", None)
-            if isinstance(pending, dict) and pending.get("request_id"):
+            request_id = (
+                pending.get("request_id")
+                if isinstance(pending, dict)
+                else None
+            )
+            if request_id:
                 return {
                     criterion_id: CompletionReviewPending(
-                        request_id=str(pending["request_id"]),
+                        request_id=str(request_id),
                         reason="Completion Judge tool approval required",
                     )
                     for criterion_id in criterion_ids
@@ -3671,7 +3682,10 @@ class AgentRunner(Runner):
         criterion_ids = {item.criterion_id for item in review_goal.criteria}
         if len(request_ids) != 1:
             return {
-                criterion_id: (False, "completion review approval is inconsistent")
+                criterion_id: (
+                    False,
+                    "completion review approval is inconsistent",
+                )
                 for criterion_id in criterion_ids
             }
         request_id = next(iter(request_ids))
@@ -3706,7 +3720,9 @@ class AgentRunner(Runner):
         }
         if not request_ids:
             return None
-        request = await get_approval_service().get_request(next(iter(request_ids)))
+        request = await get_approval_service().get_request(
+            next(iter(request_ids)),
+        )
         return _approved_tool_call_from_record(request) if request else None
 
     async def _stream_goal_finalization_turn(
@@ -3720,7 +3736,8 @@ class AgentRunner(Runner):
         previous_msg: Msg | None = None
         try:
             agent = self._create_goal_finalization_agent(
-                runtime=runtime, goal=goal
+                runtime=runtime,
+                goal=goal,
             )
             async for msg, _ in self._enforce_query_timeout(
                 stream_printing_messages(
@@ -4570,9 +4587,12 @@ class AgentRunner(Runner):
                         content="The active Goal is not available in this chat.",
                     ), True
                     return
-                steering = plan.original_user_message.strip()
-                if steering:
-                    await service.enqueue_steering(active_goal.goal_id, steering)
+                steering_message = plan.original_user_message.strip()
+                if steering_message:
+                    await service.enqueue_steering(
+                        active_goal.goal_id,
+                        steering_message,
+                    )
                 yield Msg(
                     name="Friday",
                     role="assistant",
@@ -4628,7 +4648,9 @@ class AgentRunner(Runner):
                     "goal_contract_context"
                 ] = _build_goal_contract_context(goal)
                 request_context = getattr(
-                    runtime.agent, "_request_context", {}
+                    runtime.agent,
+                    "_request_context",
+                    {},
                 )
                 request_context.pop("goal_turn_resolution", None)
                 request_context.pop("_goal_turn_environment_changed", None)
@@ -4652,7 +4674,8 @@ class AgentRunner(Runner):
             if outcome.pre_tool_terminal_stop:
                 if goal_id:
                     await service.abandon_turn(
-                        goal_id, "Goal turn stopped before settlement"
+                        goal_id,
+                        "Goal turn stopped before settlement",
                     )
                 return
 
@@ -4666,7 +4689,8 @@ class AgentRunner(Runner):
                 )
                 if service is None or not isinstance(raw, dict):
                     logger.warning(
-                        "Goal turn has no valid resolution: %s", goal_id
+                        "Goal turn has no valid resolution: %s",
+                        goal_id,
                     )
                     if service is not None:
                         await service.abandon_turn(
@@ -4684,7 +4708,8 @@ class AgentRunner(Runner):
                         resolution=resolution,
                     )
                     settled = await GoalRuntime(
-                        service, reviewer=reviewer
+                        service,
+                        reviewer=reviewer,
                     ).settle(
                         goal_id,
                         resolution,
@@ -4697,10 +4722,12 @@ class AgentRunner(Runner):
                     )
                 except (TypeError, ValueError):
                     logger.warning(
-                        "Goal turn settlement failed", exc_info=True
+                        "Goal turn settlement failed",
+                        exc_info=True,
                     )
                     await service.abandon_turn(
-                        goal_id, "Goal turn settlement failed"
+                        goal_id,
+                        "Goal turn settlement failed",
                     )
                     return
                 if settled.state.value == "ACTIVE":
@@ -4717,8 +4744,8 @@ class AgentRunner(Runner):
                     from ..goals.wakeup import wait_for_goal_wake
 
                     while settled.state.value == "WAITING":
-                    await wait_for_goal_wake(goal_id)
-                    woken = await service.get(goal_id)
+                        await wait_for_goal_wake(goal_id)
+                        woken = await service.get(goal_id)
                         if woken.state.value != "ACTIVE":
                             settled = woken
                             break
@@ -4731,12 +4758,12 @@ class AgentRunner(Runner):
                                 finalization_msg,
                                 last,
                             ) in self._stream_goal_finalization_turn(
-                                    runtime=runtime,
-                                    goal=retried,
+                                runtime=runtime,
+                                goal=retried,
                             ):
                                 yield finalization_msg, last
                             return
-                            settled = retried
+                        settled = retried
                         if settled.state.value != "ACTIVE":
                             continue
                         _, steering = await service.consume_steering(goal_id)
