@@ -60,7 +60,6 @@ from . import (
     session_lifecycle,
     turn_lifecycle,
 )
-from .retry_classifier import is_query_retryable
 from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
 from .stream_boundary import normalize_reasoning_boundary_stream
 from .task_progress import attach_task_progress
@@ -4473,291 +4472,6 @@ class AgentRunner(Runner):
         ):
             yield item
 
-    async def _stream_completion_lifecycle_legacy(
-        self,
-        *,
-        request: AgentRequest,
-        runtime: _QueryRuntime,
-        plan: _TurnPlan,
-        outcome: _QueryTurnOutcome,
-    ):
-        """执行 agent turn 与统一 Stop completion gate 生命周期。"""
-        goal_id = _request_goal_id(request)
-        if not goal_id:
-            from ..goals.registry import get_goal_service
-
-            service = get_goal_service()
-            chat_id = str(getattr(getattr(runtime, "chat", None), "id", ""))
-            active_goal = (
-                await service.recent_for_chat(chat_id)
-                if service is not None and chat_id
-                else None
-            )
-            if active_goal is not None and active_goal.state.value in {
-                "ACTIVE",
-                "WAITING",
-            }:
-                if not _goal_matches_runtime_scope(
-                    active_goal,
-                    runtime,
-                    tenant_id=self.tenant_id,
-                    agent_id=self.agent_id,
-                ):
-                    yield Msg(
-                        name="Friday",
-                        role="assistant",
-                        content="The active Goal is not available in this chat.",
-                    ), True
-                    return
-                steering_message = plan.original_user_message.strip()
-                if steering_message:
-                    await service.enqueue_steering(
-                        active_goal.goal_id,
-                        steering_message,
-                    )
-                yield Msg(
-                    name="Friday",
-                    role="assistant",
-                    content=(
-                        "Your message was added as Goal steering. "
-                        "The active Goal will continue under its confirmed Contract."
-                    ),
-                ), True
-                return
-        while True:
-            if goal_id:
-                from ..goals.registry import get_goal_service
-
-                service = get_goal_service()
-                if service is None:
-                    logger.warning("Goal service is unavailable: %s", goal_id)
-                    return
-                current_goal = None
-                try:
-                    current_goal = await service.get(goal_id)
-                    if not _goal_matches_runtime_scope(
-                        current_goal,
-                        runtime,
-                        tenant_id=self.tenant_id,
-                        agent_id=self.agent_id,
-                    ):
-                        logger.warning("Goal scope mismatch: %s", goal_id)
-                        yield Msg(
-                            name="Friday",
-                            role="assistant",
-                            content="The requested Goal is not available in this chat.",
-                        ), True
-                        return
-                    goal = await service.begin_turn(goal_id)
-                except ValueError:
-                    logger.warning("Goal cannot start a turn: %s", goal_id)
-                    state = getattr(
-                        getattr(current_goal, "state", None),
-                        "value",
-                        None,
-                    )
-                    state_text = state or "unavailable"
-                    yield Msg(
-                        name="Friday",
-                        role="assistant",
-                        content=(
-                            f"Goal is currently {state_text} and cannot start a new turn. "
-                            "Use the Goal Monitor to resume, edit, or cancel it."
-                        ),
-                    ), True
-                    return
-                getattr(runtime.agent, "_request_context", {})[
-                    "goal_contract_context"
-                ] = _build_goal_contract_context(goal)
-                request_context = getattr(
-                    runtime.agent,
-                    "_request_context",
-                    {},
-                )
-                request_context.pop("goal_turn_resolution", None)
-                request_context.pop("_goal_turn_environment_changed", None)
-                request_context["_goal_turn_tool_observations"] = []
-            outcome.stop_hook_active = False
-            async for msg, last in self._stream_agent_turns(
-                runtime=runtime,
-                plan=plan,
-                outcome=outcome,
-            ):
-                if goal_id:
-                    observations = getattr(
-                        runtime.agent,
-                        "_request_context",
-                        {},
-                    ).get("_goal_turn_tool_observations")
-                    if isinstance(observations, list):
-                        _append_goal_tool_observations(observations, msg)
-                yield msg, False if goal_id else last
-
-            if outcome.pre_tool_terminal_stop:
-                if goal_id:
-                    await service.abandon_turn(
-                        goal_id,
-                        "Goal turn stopped before settlement",
-                    )
-                return
-
-            if goal_id:
-                from ..goals.registry import get_goal_service
-                from ..goals.runtime import GoalRuntime, GoalTurnResolution
-
-                service = get_goal_service()
-                raw = getattr(runtime.agent, "_request_context", {}).get(
-                    "goal_turn_resolution",
-                )
-                if service is None or not isinstance(raw, dict):
-                    logger.warning(
-                        "Goal turn has no valid resolution: %s",
-                        goal_id,
-                    )
-                    if service is not None:
-                        await service.abandon_turn(
-                            goal_id,
-                            "Main Agent did not submit a Goal turn resolution",
-                        )
-                    return
-                try:
-                    had_pending_steering = await service.has_pending_steering(
-                        goal_id,
-                    )
-                    resolution = GoalTurnResolution.model_validate(raw)
-                    reviewer = self._create_goal_completion_reviewer(
-                        runtime=runtime,
-                        resolution=resolution,
-                    )
-                    settled = await GoalRuntime(
-                        service,
-                        reviewer=reviewer,
-                    ).settle(
-                        goal_id,
-                        resolution,
-                        wake_from_steering=had_pending_steering,
-                        environment_changed=bool(
-                            getattr(runtime.agent, "_request_context", {}).get(
-                                "_goal_turn_environment_changed",
-                            ),
-                        ),
-                    )
-                except (TypeError, ValueError):
-                    logger.warning(
-                        "Goal turn settlement failed",
-                        exc_info=True,
-                    )
-                    await service.abandon_turn(
-                        goal_id,
-                        "Goal turn settlement failed",
-                    )
-                    return
-                if settled.state.value == "ACTIVE":
-                    _, steering = await service.consume_steering(goal_id)
-                    plan.turn_msgs = [
-                        _build_goal_follow_up_msg(
-                            settled.next_focus,
-                            steering,
-                            _build_goal_contract_context(settled),
-                        ),
-                    ]
-                    continue
-                if settled.state.value == "WAITING":
-                    from ..goals.wakeup import wait_for_goal_wake
-
-                    while settled.state.value == "WAITING":
-                        await wait_for_goal_wake(goal_id)
-                        woken = await service.get(goal_id)
-                        if woken.state.value != "ACTIVE":
-                            settled = woken
-                            break
-                        retried = await GoalRuntime(
-                            service,
-                            reviewer=reviewer,
-                        ).retry_pending_completion_review(goal_id)
-                        if retried.state.value == "COMPLETE":
-                            async for (
-                                finalization_msg,
-                                last,
-                            ) in self._stream_goal_finalization_turn(
-                                runtime=runtime,
-                                goal=retried,
-                            ):
-                                yield finalization_msg, last
-                            return
-                        settled = retried
-                        if settled.state.value != "ACTIVE":
-                            continue
-                        _, steering = await service.consume_steering(goal_id)
-                        plan.turn_msgs = [
-                            _build_goal_follow_up_msg(
-                                retried.next_focus,
-                                steering,
-                                _build_goal_contract_context(retried),
-                            ),
-                        ]
-                        break
-                    if settled.state.value == "ACTIVE":
-                        continue
-                if settled.state.value == "INTERRUPTED":
-                    return
-                async for (
-                    finalization_msg,
-                    last,
-                ) in self._stream_goal_finalization_turn(
-                    runtime=runtime,
-                    goal=settled,
-                ):
-                    yield finalization_msg, last
-                return
-
-            stop_result = await self._emit_stop_hook_if_needed(
-                request=request,
-                runtime=runtime,
-                plan=plan,
-                outcome=outcome,
-            )
-            if (
-                stop_result is not None
-                and stop_result.decision == HookDecision.BLOCK
-            ):
-                reason = (
-                    stop_result.blocking_failure_reason
-                    if stop_result.has_blocking_failure
-                    else stop_result.reason
-                ) or "Stop blocked completion"
-                if (
-                    not stop_result.has_blocking_failure
-                    and _should_stop_follow_up(
-                        outcome,
-                    )
-                ):
-                    outcome.stop_follow_up_turns += 1
-                    outcome.automatic_follow_up_turns += 1
-                    plan.turn_msgs = [_build_stop_follow_up_msg(reason)]
-                    outcome.stop_hook_active = False
-                    logger.info(
-                        "Stop scheduled automatic follow-up turn "
-                        "%d/%d for session %s: %s",
-                        outcome.stop_follow_up_turns,
-                        outcome.max_stop_turns,
-                        runtime.session_id,
-                        reason,
-                    )
-                    continue
-
-                outcome.task_completed = False
-                outcome.completion_blocked = True
-                outcome.completion_block_reason = reason
-                outcome.completion_marked_incomplete = True
-                outcome.stop_hook_active = False
-                incomplete_msg = _build_stop_incomplete_msg(reason)
-                await runtime.agent.memory.add(incomplete_msg)
-                yield incomplete_msg, True
-                return
-            outcome.stop_hook_active = False
-            return
-
     async def _generate_backend_suggestions_if_needed(
         self,
         *,
@@ -5264,66 +4978,13 @@ class AgentRunner(Runner):
 
     @staticmethod
     def _summarize_retry_error(exc: BaseException) -> str:
-        """从重试异常中提取用户可读的错误摘要。"""
-        for candidate in (
-            exc,
-            getattr(exc, "__cause__", None),
-            getattr(exc, "__context__", None),
-        ):
-            if candidate is None:
-                continue
-            status_code = getattr(candidate, "status_code", None)
-            if status_code is not None:
-                status_messages = {
-                    429: "请求频率超限",
-                    432: "输入Token数已达上限",
-                    433: "服务过载",
-                    500: "服务内部错误",
-                    502: "网关错误",
-                    503: "服务暂不可用",
-                    504: "请求超时",
-                    529: "站点过载",
-                }
-                return status_messages.get(
-                    status_code,
-                    f"服务错误({status_code})",
-                )
-        if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-            return "请求超时"
-        if isinstance(
-            exc,
-            (ConnectionError, ConnectionResetError, BrokenPipeError),
-        ):
-            return "网络连接异常"
-        msg = str(exc)
-        if "rate limiter" in msg.lower():
-            return "请求频率超限"
-        if "timed out" in msg.lower():
-            return "请求超时"
-        return "服务暂时不可用"
+        return query_attempt.summarize_retry_error(exc)
 
     @staticmethod
     def _extract_retry_config(
         agent_config,
     ) -> tuple[bool, int, float, float]:
-        """从 agent 配置中提取重试参数。
-
-        Returns:
-            (retry_enabled, max_retries, backoff_base, backoff_cap)
-        """
-        query_retry_config = getattr(
-            getattr(agent_config, "running", None),
-            "query_retry",
-            None,
-        )
-        if not query_retry_config:
-            return False, 0, 2.0, 30.0
-        return (
-            getattr(query_retry_config, "enabled", False),
-            getattr(query_retry_config, "max_retries", 0),
-            getattr(query_retry_config, "backoff_base", 2.0),
-            getattr(query_retry_config, "backoff_cap", 30.0),
-        )
+        return query_attempt.extract_retry_config(agent_config)
 
     @staticmethod
     def _compute_retry_backoff(
@@ -5331,10 +4992,10 @@ class AgentRunner(Runner):
         backoff_cap: float,
         backoff_base: float,
     ) -> float:
-        """计算重试退避时间。"""
-        return min(
+        return query_attempt.compute_retry_backoff(
+            retry_attempt,
             backoff_cap,
-            backoff_base * (2 ** (retry_attempt - 1)),
+            backoff_base,
         )
 
     @staticmethod
@@ -5343,8 +5004,9 @@ class AgentRunner(Runner):
         max_retry_attempts: int,
         exc: BaseException,
     ) -> bool:
-        """判断当前异常是否应该重试。"""
-        return retry_attempt < max_retry_attempts - 1 and is_query_retryable(
+        return query_attempt.should_retry(
+            retry_attempt,
+            max_retry_attempts,
             exc,
         )
 
@@ -5356,24 +5018,15 @@ class AgentRunner(Runner):
         skip_history: bool,
         user_id: str,
     ) -> None:
-        """重试前保存当前会话状态。"""
-        if agent is None or not session_state_loaded:
-            return
-        try:
-            await asyncio.wait_for(
-                self.save_job_session_state(
-                    agent,
-                    session_id,
-                    skip_history,
-                    user_id,
-                ),
-                timeout=QUERY_CLEANUP_TIMEOUT,
-            )
-        except Exception as save_err:
-            logger.warning(
-                "Failed to save state before retry: %s",
-                save_err,
-            )
+        await query_attempt.save_state_before_retry(
+            self,
+            agent,
+            session_state_loaded,
+            session_id,
+            skip_history,
+            user_id,
+            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
+        )
 
     def _load_query_retry_settings(
         self,
@@ -5433,28 +5086,11 @@ class AgentRunner(Runner):
         agent: Any,
         retry_msg: Msg,
     ) -> None:
-        """把重试状态写入 memory，失败时不影响主重试流程。"""
-        if agent is None:
-            return
-        try:
-            await agent.memory.add(retry_msg)
-        except Exception:
-            pass
+        await query_attempt.add_retry_notice_to_memory(agent, retry_msg)
 
     @staticmethod
     def _build_retry_status_msg(text: str) -> Msg:
-        """构造面向用户展示的 query 重试状态消息。"""
-        return Msg(
-            name="Friday",
-            role="assistant",
-            content=[
-                TextBlock(
-                    type="text",
-                    text=text,
-                ),
-            ],
-            metadata={"retry_status": True},
-        )
+        return query_attempt.build_retry_status_msg(text)
 
     async def _stream_retry_backoff_notice(
         self,
@@ -5466,31 +5102,16 @@ class AgentRunner(Runner):
         session_id: str,
         retry_state: _RetryState,
     ):
-        """重试下一轮前通知用户并等待退避时间。"""
-        if retry_attempt <= 0:
-            return
-
-        backoff = self._compute_retry_backoff(
-            retry_attempt,
-            backoff_cap,
-            backoff_base,
-        )
-        logger.info(
-            "Query retry attempt %d/%d, backoff=%.1fs (session=%s)",
-            retry_attempt,
-            max_retries,
-            backoff,
-            session_id,
-        )
-        retry_msg = self._build_retry_status_msg(
-            f"正在重试 ({retry_attempt}/{max_retries})...",
-        )
-        yield retry_msg, False
-        await self._add_retry_notice_to_memory(
-            retry_state.prev_agent,
-            retry_msg,
-        )
-        await asyncio.sleep(backoff)
+        async for item in query_attempt.stream_retry_backoff_notice(
+            self,
+            retry_attempt=retry_attempt,
+            max_retries=max_retries,
+            backoff_base=backoff_base,
+            backoff_cap=backoff_cap,
+            session_id=session_id,
+            retry_state=retry_state,
+        ):
+            yield item
 
     async def _stream_retryable_query_error(
         self,
@@ -5503,29 +5124,18 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime | None,
         session_id: str,
     ):
-        """处理可重试异常，保持先提示用户再保存状态的顺序。"""
-        error_summary = self._summarize_retry_error(exc)
-        logger.warning(
-            "Query failed with retryable error (attempt %d/%d): %s "
-            "(summary: %s)",
-            retry_attempt + 1,
-            max_retry_attempts,
-            exc,
-            error_summary,
-        )
-        retry_msg = self._build_retry_status_msg(
-            f"{error_summary}，"
-            f"正在重试 ({retry_attempt + 1}/{max_retries})...",
-        )
-        yield retry_msg, False
-        await self._add_retry_notice_to_memory(retry_state.agent, retry_msg)
-        await self._save_state_before_retry(
-            retry_state.agent,
-            retry_state.session_state_loaded,
-            session_id,
-            runtime.skip_history if runtime is not None else False,
-            runtime.user_id if runtime is not None else "",
-        )
+        async for item in query_attempt.stream_retryable_query_error(
+            self,
+            exc=exc,
+            retry_attempt=retry_attempt,
+            max_retry_attempts=max_retry_attempts,
+            max_retries=max_retries,
+            retry_state=retry_state,
+            runtime=runtime,
+            session_id=session_id,
+            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
+        ):
+            yield item
 
     async def _complete_successful_query_attempt(
         self,
@@ -5605,128 +5215,6 @@ class AgentRunner(Runner):
         ):
             yield item
 
-    async def _stream_single_query_attempt_legacy(
-        self,
-        *,
-        attempt_input: _QueryAttemptInput,
-        outcome: _QueryTurnOutcome,
-        retry_state: _RetryState,
-        attempt_state: _QueryAttemptState,
-    ):
-        """执行一次 query 尝试，调用方负责重试和 finally 清理。"""
-        attempt_state.runtime_start = await self._prepare_query_runtime(
-            request=attempt_input.request,
-            msgs=attempt_input.msgs,
-            query=attempt_input.query,
-            preflight=attempt_input.preflight,
-        )
-        if attempt_state.runtime_start.block_response is not None:
-            await self._end_trace_if_needed(
-                attempt_input.trace_id,
-                TraceStatus.COMPLETED,
-            )
-            yield attempt_state.runtime_start.block_response, True
-            attempt_state.should_return = True
-            return
-
-        runtime = attempt_state.runtime_start.runtime
-        attempt_state.runtime = runtime
-        if runtime is None:
-            attempt_state.should_return = True
-            return
-
-        with runtime_invocation_claims_context(
-            chat_id=runtime.chat.id if runtime.chat is not None else None,
-        ):
-            self._rebind_trace_skill_detector_if_needed(
-                runtime=runtime,
-                trace_id=attempt_input.trace_id,
-            )
-            if (
-                attempt_input.trace_id
-                and runtime.session_skill_detector is None
-            ):
-                await runtime.agent.setup_skill_detector(
-                    attempt_input.trace_id,
-                )
-
-            logger.debug(f"Agent Query msgs {attempt_input.msgs}")
-            attempt_state.session_state_loaded = await self.get_state_loaded(
-                runtime.agent,
-                runtime.session_id,
-                attempt_state.session_state_loaded,
-                runtime.skip_history,
-                runtime.user_id,
-            )
-            retry_state.agent = runtime.agent
-            retry_state.session_state_loaded = (
-                attempt_state.session_state_loaded
-            )
-
-            skill_freshness_refresh = (
-                await self._refresh_session_skill_freshness(
-                    runtime=runtime,
-                )
-            )
-
-            # 会话状态可能保存了旧提示词，执行前强制刷新文件态上下文。
-            runtime.agent.rebuild_sys_prompt()
-
-            plan = await self._build_turn_plan(
-                runtime=runtime,
-                request=attempt_input.request,
-                msgs=attempt_input.msgs,
-                query=attempt_input.query,
-            )
-            if skill_freshness_refresh.notice_text:
-                notice_msg = _build_skill_freshness_notice_msg(
-                    skill_freshness_refresh.notice_text,
-                )
-                plan.turn_msgs.insert(0, notice_msg)
-
-            async for msg, last in self._stream_completion_lifecycle(
-                request=attempt_input.request,
-                runtime=runtime,
-                plan=plan,
-                outcome=outcome,
-            ):
-                if not attempt_state.session_title_task_started:
-                    self._schedule_session_title_task(
-                        request=attempt_input.request,
-                        chat=runtime.chat,
-                        msgs=attempt_input.msgs,
-                        trace_id=attempt_input.trace_id,
-                    )
-                    attempt_state.session_title_task_started = True
-                yield msg, last
-
-            skill_snapshot_to_persist = (
-                await self._build_skill_snapshot_to_persist(
-                    runtime=runtime,
-                    refresh_result=skill_freshness_refresh,
-                )
-            )
-
-            if outcome.completion_blocked:
-                await self._finish_blocked_query_attempt(
-                    runtime=runtime,
-                    outcome=outcome,
-                    trace_id=attempt_input.trace_id,
-                    skill_snapshot_to_persist=skill_snapshot_to_persist,
-                )
-                attempt_state.should_return = True
-                return
-
-            await self._complete_successful_query_attempt(
-                runtime=runtime,
-                plan=plan,
-                outcome=outcome,
-                trace_id=attempt_input.trace_id,
-                skill_snapshot_to_persist=skill_snapshot_to_persist,
-            )
-        retry_state.task_completed = outcome.task_completed
-        attempt_state.succeeded = True
-
     def _new_query_turn_outcome(self) -> _QueryTurnOutcome:
         return _QueryTurnOutcome()
 
@@ -5766,174 +5254,6 @@ class AgentRunner(Runner):
             preflight=preflight,
         ):
             yield item
-
-    async def _stream_query_after_preflight_legacy(
-        self,
-        msgs,
-        *,
-        request: AgentRequest,
-        query: str | None,
-        session_id: str,
-        preflight: _QueryPreflight,
-    ):
-        """执行已经通过前置校验的普通 Agent query 主流程。"""
-        logger.debug(
-            f"AgentRunner.stream_query: request={request}, "
-            f"agent_id={self.agent_id}",
-        )
-
-        from ..agent_context import set_current_agent_id
-        from ...config.context import (
-            reset_current_file_url_network,
-            set_current_file_url_network,
-        )
-
-        set_current_agent_id(self.agent_id)
-        file_url_network_token = set_current_file_url_network(
-            _request_file_url_network(request),
-        )
-
-        trace_id = await self._start_query_trace(request, msgs)
-        runtime_claims_context = runtime_invocation_claims_context(
-            session_id=session_id,
-            trace_id=trace_id,
-        )
-        runtime_claims_context.__enter__()
-        outcome = _QueryTurnOutcome()
-
-        # ── Query 级别重试循环 ──
-        retry_state = _RetryState()
-        if preflight.agent_config is None:
-            max_retry_attempts, max_retries, backoff_base, backoff_cap = (
-                self._load_query_retry_settings()
-            )
-        else:
-            max_retry_attempts, max_retries, backoff_base, backoff_cap = (
-                self._load_query_retry_settings(preflight.agent_config)
-            )
-        attempt_input = _QueryAttemptInput(
-            request=request,
-            msgs=msgs,
-            query=query,
-            preflight=preflight,
-            trace_id=trace_id,
-        )
-        attempt_state = _QueryAttemptState()
-
-        try:
-            for retry_attempt in range(max_retry_attempts):
-                retry_state.prev_agent = retry_state.agent
-                retry_state.prev_session_state_loaded = (
-                    retry_state.session_state_loaded
-                )
-                retry_state.agent = None
-                retry_state.session_state_loaded = False
-                attempt_state = _QueryAttemptState()
-
-                async for msg, last in self._stream_retry_backoff_notice(
-                    retry_attempt=retry_attempt,
-                    max_retries=max_retries,
-                    backoff_base=backoff_base,
-                    backoff_cap=backoff_cap,
-                    session_id=session_id,
-                    retry_state=retry_state,
-                ):
-                    yield msg, last
-
-                try:
-                    async for msg, last in self._stream_single_query_attempt(
-                        attempt_input=attempt_input,
-                        outcome=outcome,
-                        retry_state=retry_state,
-                        attempt_state=attempt_state,
-                    ):
-                        yield msg, last
-
-                    if attempt_state.should_return:
-                        return
-                    if attempt_state.succeeded:
-                        break
-
-                except asyncio.CancelledError as exc:
-                    await self._handle_query_cancelled(
-                        trace_id=trace_id,
-                        session_id=session_id,
-                        agent=(
-                            attempt_state.runtime.agent
-                            if attempt_state.runtime is not None
-                            else None
-                        ),
-                        exc=exc,
-                    )
-                    return
-                except Exception as e:
-                    if not self._should_retry(
-                        retry_attempt,
-                        max_retry_attempts,
-                        e,
-                    ):
-                        await self._raise_console_model_call_failed_if_needed(
-                            request=request,
-                            exc=e,
-                            trace_id=trace_id,
-                        )
-                        await self._handle_query_error(
-                            request=request,
-                            exc=e,
-                            trace_id=trace_id,
-                            locals_snapshot=locals(),
-                        )
-                        raise
-
-                    async for msg, last in self._stream_retryable_query_error(
-                        exc=e,
-                        retry_attempt=retry_attempt,
-                        max_retry_attempts=max_retry_attempts,
-                        max_retries=max_retries,
-                        retry_state=retry_state,
-                        runtime=attempt_state.runtime,
-                        session_id=session_id,
-                    ):
-                        yield msg, last
-        finally:
-            try:
-                runtime_claims_context.__exit__(None, None, None)
-            except ValueError:
-                logger.debug(
-                    "Skipped runtime invocation claims context reset from a "
-                    "different async context",
-                    exc_info=True,
-                )
-            try:
-                reset_current_file_url_network(file_url_network_token)
-            except ValueError:
-                logger.debug(
-                    "Skipped file URL network context reset from a different "
-                    "async context",
-                    exc_info=True,
-                )
-            cleanup_runtime = attempt_state.runtime
-            cleanup_state_loaded = attempt_state.session_state_loaded
-            if cleanup_runtime is None and retry_state.prev_agent is not None:
-                # 重试循环中被取消时 runtime 可能为 None，
-                # 但仍需保存 prev_agent 的状态
-                cleanup_state_loaded = (
-                    retry_state.session_state_loaded
-                    or retry_state.prev_session_state_loaded
-                )
-            await self._cleanup_query_resources(
-                runtime=cleanup_runtime,
-                session_state_loaded=cleanup_state_loaded,
-                session_id=session_id,
-            )
-            await self._cleanup_blocked_runtime_start(
-                attempt_state.runtime_start,
-            )
-            await self._store_qa_content_if_needed(
-                runtime=cleanup_runtime,
-                query=query,
-                outcome=outcome,
-            )
 
     async def _stream_query_entry(
         self,

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -190,6 +191,193 @@ async def test_query_attempt_and_turn_lifecycle_facades_delegate(
             "outcome": outcome,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_lifecycle_facades_preserve_restore_snapshot_save_order(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.app.runner import session_lifecycle
+    from swe.app.runner.runner import _SkillFreshnessRefreshResult
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runtime = SimpleNamespace()
+    events: list[str] = []
+
+    async def restore(owner, *, runtime):
+        assert owner is runner
+        assert runtime is not None
+        events.append("restore")
+
+    async def build_snapshot(owner, *, runtime, refresh_result):
+        assert owner is runner
+        assert runtime is not None
+        assert refresh_result is not None
+        events.append("snapshot")
+        return {"skill": {"version": "v1"}}
+
+    async def save(
+        owner,
+        agent,
+        session_id,
+        skip_history,
+        user_id,
+        hook_overlay,
+    ):
+        assert owner is runner
+        assert agent is not None
+        assert (session_id, skip_history, user_id, hook_overlay) == (
+            "session-1",
+            False,
+            "user-1",
+            None,
+        )
+        events.append("save")
+
+    monkeypatch.setattr(
+        session_lifecycle,
+        "restore_confirmed_session_skill_context",
+        restore,
+    )
+    monkeypatch.setattr(
+        session_lifecycle,
+        "build_skill_snapshot_to_persist",
+        build_snapshot,
+    )
+    monkeypatch.setattr(session_lifecycle, "save_job_session_state", save)
+
+    await runner._restore_confirmed_session_skill_context(runtime=runtime)
+    snapshot = await runner._build_skill_snapshot_to_persist(
+        runtime=runtime,
+        refresh_result=_SkillFreshnessRefreshResult(),
+    )
+    await runner.save_job_session_state(
+        SimpleNamespace(),
+        "session-1",
+        False,
+        "user-1",
+    )
+
+    assert snapshot == {"skill": {"version": "v1"}}
+    assert events == ["restore", "snapshot", "save"]
+
+
+@pytest.mark.asyncio
+async def test_cleanup_collaborator_waits_for_every_task_then_raises_first_error() -> (
+    None
+):
+    from swe.app.runner import query_cleanup
+
+    completed: list[str] = []
+
+    async def cleanup(name: str, error: BaseException | None = None) -> None:
+        await asyncio.sleep(0)
+        completed.append(name)
+        if error is not None:
+            raise error
+
+    first_error = RuntimeError("save failed")
+    owner = SimpleNamespace(
+        _save_state_during_cleanup=lambda **_kwargs: cleanup(
+            "save",
+            first_error,
+        ),
+        _update_chat_during_cleanup=lambda _runtime: cleanup("chat"),
+        _cleanup_mcp_during_cleanup=lambda _runtime: cleanup(
+            "mcp",
+            RuntimeError("mcp failed"),
+        ),
+        _end_skill_detector_during_cleanup=lambda _runtime: cleanup(
+            "detector",
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="save failed") as error:
+        await query_cleanup.cleanup_query_resources(
+            owner,
+            runtime=None,
+            session_state_loaded=False,
+            session_id="session-1",
+        )
+
+    assert error.value is first_error
+    assert set(completed) == {"save", "chat", "mcp", "detector"}
+
+
+@pytest.mark.asyncio
+async def test_retry_backoff_precedes_terminal_error_trace_after_exhaustion(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.app.runner import query_attempt
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    events: list[str] = []
+    terminal_error = RuntimeError("rate limited")
+    terminal_error.status_code = 429
+    attempts = 0
+
+    async def failed_attempt(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        events.append(f"attempt-{attempts}")
+        if attempts == -1:
+            yield _blocked_msg("unreachable"), True
+        raise terminal_error
+
+    async def sleep(_delay: float) -> None:
+        events.append("backoff")
+
+    async def terminal_trace(**_kwargs) -> None:
+        events.append("terminal trace")
+
+    async def terminal_error_handler(**_kwargs) -> None:
+        events.append("terminal error handler")
+
+    runner._start_query_trace = AsyncMock(return_value="trace-1")
+    runner._load_query_retry_settings = lambda *_args: (2, 1, 1.0, 1.0)
+    runner._stream_single_query_attempt = failed_attempt
+    runner._raise_console_model_call_failed_if_needed = terminal_trace
+    runner._handle_query_error = terminal_error_handler
+    runner._cleanup_query_resources = AsyncMock()
+    runner._cleanup_blocked_runtime_start = AsyncMock()
+    runner._store_qa_content_if_needed = AsyncMock()
+    monkeypatch.setattr(query_attempt.asyncio, "sleep", sleep)
+
+    with pytest.raises(RuntimeError, match="rate limited"):
+        async for _msg, _last in runner._stream_query_after_preflight(
+            [Msg(name="user", role="user", content="hello")],
+            request=_request(),
+            query="hello",
+            session_id="session-1",
+            preflight=_QueryPreflight(),
+        ):
+            pass
+
+    assert events == [
+        "attempt-1",
+        "backoff",
+        "attempt-2",
+        "terminal trace",
+        "terminal error handler",
+    ]
+
+
+def test_runner_keeps_only_collaborator_lifecycle_facades() -> None:
+    legacy_methods = {
+        "_stream_completion_lifecycle_legacy",
+        "_stream_single_query_attempt_legacy",
+        "_stream_query_after_preflight_legacy",
+    }
+
+    assert not legacy_methods.intersection(vars(AgentRunner))
+
+
+def test_session_lifecycle_does_not_expose_swe_agent_at_runtime() -> None:
+    from swe.app.runner import session_lifecycle
+
+    assert "SWEAgent" not in vars(session_lifecycle)
 
 
 @pytest.mark.asyncio

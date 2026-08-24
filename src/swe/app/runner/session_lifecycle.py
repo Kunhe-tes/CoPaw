@@ -6,14 +6,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from ...agents.react_agent import SWEAgent
 from ...agents.skills_manager import resolve_effective_skill_dir
 from ...constant import WORKING_DIR
 from .query_contracts import _QueryRuntime
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from ...agents.react_agent import SWEAgent
 
 
 class SessionLifecycleOwner(Protocol):
