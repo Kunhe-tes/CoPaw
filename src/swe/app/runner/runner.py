@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Callable, Collection
@@ -45,6 +45,14 @@ from .model_call_error_detail import (
     extract_model_call_failure_detail,
 )
 from .query_error_dump import write_query_error_dump
+from .query_contracts import (
+    _QueryPreflight,
+    _QueryRuntime,
+    _QueryRuntimeInputs,
+    _QueryRuntimeResources,
+    _RuntimeStartResult,
+)
+from . import query_preflight, query_runtime
 from .retry_classifier import is_query_retryable
 from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
 from .stream_boundary import normalize_reasoning_boundary_stream
@@ -201,77 +209,6 @@ def _resolve_plan_mode_enabled(
     if isinstance(chat_meta, dict):
         return bool(chat_meta.get(_PLAN_MODE_META_KEY, False))
     return False
-
-
-@dataclass
-class _QueryPreflight:
-    """保存进入 Agent 主流程前已经解析出的请求状态。"""
-
-    response: Msg | None = None
-    cleanup_denied_memory: bool = False
-    approval_consumed: bool = False
-    approved_tool_call: dict[str, Any] | None = None
-    agent_config: Any | None = None
-    tenant_hooks: HookConfig | None = None
-    hook_overlay: HookSessionOverlay | None = None
-    hook_additional_context: str = ""
-
-
-@dataclass
-class _QueryRuntimeInputs:
-    """保存请求派生的运行时装配输入。"""
-
-    session_id: str
-    user_id: str
-    channel: str
-    skip_history: bool
-    agent_config: Any
-    tenant_hooks: HookConfig
-    hook_overlay: HookSessionOverlay
-    env_context: str
-    selected_context_directives: list[str]
-    auth_token: str | None
-    passthrough_headers: dict[str, str]
-    selected_skill_directives: list[Any] = field(default_factory=list)
-
-
-@dataclass
-class _QueryRuntimeResources:
-    """保存已连接的请求资源和 hook 更新后的上下文。"""
-
-    chat: Any
-    turn_id: str
-    env_context: str
-
-
-@dataclass
-class _QueryRuntime:
-    """保存单次 query 执行过程中需要在清理阶段复用的对象。"""
-
-    agent: SWEAgent
-    agent_config: Any
-    tenant_hooks: HookConfig
-    hook_overlay: HookSessionOverlay
-    chat: Any
-    session_skill_detector: Any
-    mcp_clients: list[Any]
-    session_id: str
-    user_id: str
-    channel: str
-    skip_history: bool
-    pending_confirmed_skill_snapshots: dict[str, dict[str, Any]]
-    selected_context_directives: list[str] = field(default_factory=list)
-
-
-@dataclass
-class _RuntimeStartResult:
-    """描述运行时初始化是否被 hook 中断。"""
-
-    runtime: _QueryRuntime | None = None
-    block_response: Msg | None = None
-    blocked_chat: Any = None
-    blocked_mcp_clients: list[Any] | None = None
-    blocked_session_id: str = ""
 
 
 @dataclass
@@ -2799,75 +2736,74 @@ class AgentRunner(Runner):
         request: AgentRequest,
     ) -> _QueryPreflight:
         """处理审批与用户 prompt hook，返回主流程需要的前置状态。"""
-        (
-            approval_response,
-            approval_consumed,
-            approved_tool_call,
-        ) = await self._resolve_pending_approval(
-            session_id,
-            query,
+        return await query_preflight.prepare_query_preflight(
+            self,
+            session_id=session_id,
+            user_id=user_id,
+            query=query,
             request=request,
         )
-        if approval_response is not None:
-            return _QueryPreflight(
-                response=approval_response,
-                cleanup_denied_memory=True,
-                approval_consumed=approval_consumed,
-                approved_tool_call=approved_tool_call,
-            )
 
-        agent_config = load_agent_config(
-            self.agent_id,
-            tenant_id=self.tenant_id,
+    def _load_query_preflight_config(self) -> tuple[Any, HookConfig]:
+        """Load the configuration pair used by query preflight."""
+        return (
+            load_agent_config(self.agent_id, tenant_id=self.tenant_id),
+            _load_tenant_hook_config(self.tenant_id),
         )
-        tenant_hooks = _load_tenant_hook_config(self.tenant_id)
-        hook_overlay = await _load_session_hook_overlay(
+
+    async def _load_query_preflight_overlay(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+    ) -> HookSessionOverlay:
+        """Load the request's persisted hook overlay."""
+        return await _load_session_hook_overlay(
             getattr(self, "session", None),
             session_id=session_id,
             user_id=user_id,
         )
-        hook_additional_context = ""
-        if query and _hook_config_enabled(
-            tenant_hooks,
-            agent_config,
-            hook_overlay,
-        ):
-            prompt_hook_result = await _emit_runner_hook(
-                HookEventName.USER_PROMPT_SUBMIT,
-                request=request,
-                runner=self,
-                tenant_hooks=tenant_hooks,
-                agent_config=agent_config,
-                overlay=hook_overlay,
-                prompt=query,
-            )
-            if prompt_hook_result.decision in {
-                HookDecision.BLOCK,
-                HookDecision.DENY,
-                HookDecision.STOP,
-            }:
-                return _QueryPreflight(
-                    response=_hook_block_message(prompt_hook_result),
-                    approval_consumed=approval_consumed,
-                    approved_tool_call=approved_tool_call,
-                )
-            if prompt_hook_result.session_title:
-                request.channel_meta = {
-                    **(getattr(request, "channel_meta", None) or {}),
-                    "session_title": prompt_hook_result.session_title,
-                }
-            hook_additional_context = _format_hook_additional_context(
-                prompt_hook_result,
-            )
 
-        return _QueryPreflight(
-            approval_consumed=approval_consumed,
-            approved_tool_call=approved_tool_call,
-            agent_config=agent_config,
+    @staticmethod
+    def _query_preflight_hooks_enabled(
+        tenant_hooks: HookConfig,
+        agent_config: Any,
+        overlay: HookSessionOverlay,
+    ) -> bool:
+        """Preserve preflight hook enablement rules for the collaborator."""
+        return _hook_config_enabled(tenant_hooks, agent_config, overlay)
+
+    async def _emit_query_user_prompt_submit_hook(
+        self,
+        *,
+        request: AgentRequest,
+        tenant_hooks: HookConfig,
+        agent_config: Any,
+        overlay: HookSessionOverlay,
+        prompt: str,
+    ) -> MergedHookResult:
+        """Emit the user-prompt hook through the runner's shared helper."""
+        return await _emit_runner_hook(
+            HookEventName.USER_PROMPT_SUBMIT,
+            request=request,
+            runner=self,
             tenant_hooks=tenant_hooks,
-            hook_overlay=hook_overlay,
-            hook_additional_context=hook_additional_context,
+            agent_config=agent_config,
+            overlay=overlay,
+            prompt=prompt,
         )
+
+    @staticmethod
+    def _query_preflight_hook_block_message(result: MergedHookResult) -> Msg:
+        """Render a preflight hook rejection with existing runner semantics."""
+        return _hook_block_message(result)
+
+    @staticmethod
+    def _query_preflight_additional_context(
+        result: MergedHookResult,
+    ) -> str:
+        """Format prompt-hook context with existing runner semantics."""
+        return _format_hook_additional_context(result)
 
     async def _start_query_trace(
         self,
@@ -4071,41 +4007,20 @@ class AgentRunner(Runner):
         preflight: _QueryPreflight,
     ) -> _RuntimeStartResult:
         """装配 agent、chat、MCP 客户端以及会话级 hook 运行状态。"""
-        from ...providers.provider_manager import ProviderManager
-
-        manager = await ProviderManager.get_or_create_instance(self.tenant_id)
-        await manager.refresh_if_due()
-        inputs = await self._build_query_runtime_inputs(
+        return await query_runtime.prepare_query_runtime(
+            self,
             request=request,
             msgs=msgs,
+            query=query,
             preflight=preflight,
         )
-        mcp_clients: list[Any] = []
-        try:
-            resources, block_result = (
-                await self._start_query_runtime_resources(
-                    request=request,
-                    msgs=msgs,
-                    inputs=inputs,
-                    mcp_clients=mcp_clients,
-                )
-            )
-            if block_result is not None:
-                return block_result
-            runtime = await self._finalize_query_runtime(
-                request=request,
-                query=query,
-                msgs=msgs,
-                preflight=preflight,
-                inputs=inputs,
-                resources=resources,
-                mcp_clients=mcp_clients,
-            )
-            return _RuntimeStartResult(runtime=runtime)
-        except Exception:
-            if mcp_clients:
-                await _cleanup_mcp_clients(mcp_clients)
-            raise
+
+    @staticmethod
+    async def _cleanup_query_runtime_mcp_clients(
+        mcp_clients: list[Any],
+    ) -> None:
+        """Close runtime clients when assembly fails before handoff."""
+        await _cleanup_mcp_clients(mcp_clients)
 
     async def _build_query_runtime_inputs(
         self,

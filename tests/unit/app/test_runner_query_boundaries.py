@@ -51,6 +51,65 @@ def _blocked_msg(text: str) -> Msg:
 
 
 @pytest.mark.asyncio
+async def test_query_boundary_facades_delegate_to_collaborators(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.app.runner import query_preflight, query_runtime
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    preflight = _QueryPreflight()
+    runtime_start = SimpleNamespace()
+    prepare_preflight = AsyncMock(return_value=preflight)
+    prepare_runtime = AsyncMock(return_value=runtime_start)
+    monkeypatch.setattr(
+        query_preflight,
+        "prepare_query_preflight",
+        prepare_preflight,
+    )
+    monkeypatch.setattr(
+        query_runtime,
+        "prepare_query_runtime",
+        prepare_runtime,
+    )
+    request = _request()
+    msgs = [Msg(name="user", role="user", content="hello")]
+
+    assert (
+        await runner._prepare_query_preflight(
+            session_id="session-1",
+            user_id="user-1",
+            query="hello",
+            request=request,
+        )
+        is preflight
+    )
+    assert (
+        await runner._prepare_query_runtime(
+            request=request,
+            msgs=msgs,
+            query="hello",
+            preflight=preflight,
+        )
+        is runtime_start
+    )
+    prepare_preflight.assert_awaited_once_with(
+        runner,
+        session_id="session-1",
+        user_id="user-1",
+        query="hello",
+        request=request,
+    )
+    prepare_runtime.assert_awaited_once_with(
+        runner,
+        request=request,
+        msgs=msgs,
+        query="hello",
+        preflight=preflight,
+    )
+
+
+@pytest.mark.asyncio
 async def test_user_prompt_block_terminates_before_runtime_preparation(
     monkeypatch,
     tmp_path,
