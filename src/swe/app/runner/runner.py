@@ -4070,29 +4070,14 @@ class AgentRunner(Runner):
             ),
             build_lazy_clients=_build_lazy_mcp_clients,
         )
-        env_context, block_response = await self._emit_session_start_hook(
+        return await query_runtime.complete_runtime_activation(
             request=request,
-            tenant_hooks=inputs.tenant_hooks,
-            agent_config=inputs.agent_config,
-            hook_overlay=inputs.hook_overlay,
-            skip_history=inputs.skip_history,
-            env_context=inputs.env_context,
-        )
-        resources = _QueryRuntimeResources(
+            inputs=inputs,
             chat=chat,
             turn_id=turn_id,
-            env_context=env_context,
-        )
-        if block_response is None:
-            inputs.hook_overlay = await self._load_selected_skill_hooks(
-                inputs=inputs,
-            )
-            return resources, None
-        return resources, _RuntimeStartResult(
-            block_response=block_response,
-            blocked_chat=chat,
-            blocked_mcp_clients=mcp_clients,
-            blocked_session_id=inputs.session_id,
+            mcp_clients=mcp_clients,
+            emit_session_start=self._emit_session_start_hook,
+            load_selected_hooks=self._load_selected_skill_hooks,
         )
 
     async def _load_selected_skill_hooks(

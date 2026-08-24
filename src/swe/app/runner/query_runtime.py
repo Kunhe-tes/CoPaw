@@ -128,6 +128,41 @@ async def select_runtime_context_directives(
     return scenario_snapshot
 
 
+async def complete_runtime_activation(
+    *,
+    request: AgentRequest,
+    inputs: _QueryRuntimeInputs,
+    chat: Any,
+    turn_id: str,
+    mcp_clients: list[Any],
+    emit_session_start: Any,
+    load_selected_hooks: Any,
+) -> tuple[_QueryRuntimeResources, _RuntimeStartResult | None]:
+    """Run SESSION_START and return either resources or its blocked lease."""
+    env_context, block_response = await emit_session_start(
+        request=request,
+        tenant_hooks=inputs.tenant_hooks,
+        agent_config=inputs.agent_config,
+        hook_overlay=inputs.hook_overlay,
+        skip_history=inputs.skip_history,
+        env_context=inputs.env_context,
+    )
+    resources = _QueryRuntimeResources(
+        chat=chat,
+        turn_id=turn_id,
+        env_context=env_context,
+    )
+    if block_response is None:
+        inputs.hook_overlay = await load_selected_hooks(inputs=inputs)
+        return resources, None
+    return resources, _RuntimeStartResult(
+        block_response=block_response,
+        blocked_chat=chat,
+        blocked_mcp_clients=mcp_clients,
+        blocked_session_id=inputs.session_id,
+    )
+
+
 async def load_selected_skill_hooks(
     *,
     inputs: _QueryRuntimeInputs,
