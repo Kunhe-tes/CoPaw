@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import time
 from typing import TYPE_CHECKING, Any
 
 from swe.providers.models import ModelSlotConfig
 from swe.providers.provider import ModelInfo, ProviderInfo
+from swe.providers.provider_runtime_cache import ProviderRuntimeCache
+from swe.providers.tenant_provider_repository import TenantProviderRepository
 
 if TYPE_CHECKING:
     from swe.providers.provider_manager import ProviderManager
@@ -29,8 +32,16 @@ class ProviderCatalogService:
     invalidation.  It deliberately never constructs provider file paths.
     """
 
-    def __init__(self, manager: "ProviderManager") -> None:
+    def __init__(
+        self,
+        manager: "ProviderManager",
+        *,
+        repository: TenantProviderRepository | None,
+        runtime_cache: ProviderRuntimeCache,
+    ) -> None:
         self._manager = manager
+        self._repository = repository
+        self._runtime_cache = runtime_cache
 
     async def list_provider_info(self) -> list[ProviderInfo]:
         manager = self._manager
@@ -181,7 +192,8 @@ class ProviderCatalogService:
         if provider_id not in manager.custom_providers:
             return False
         del manager.custom_providers[provider_id]
-        manager._delete_provider_from_storage(
+        self._delete_provider(
+            manager.tenant_id,
             provider_id,
             is_builtin=False,
         )
@@ -201,7 +213,7 @@ class ProviderCatalogService:
             provider_id=provider_id,
             model=model_id,
         )
-        await manager._save_active_model_async(manager.active_model)
+        await self._save_active_model(manager.active_model)
         self._reset_model_caches()
         manager.maybe_probe_multimodal(provider_id, model_id)
 
@@ -328,7 +340,7 @@ class ProviderCatalogService:
         is_builtin = not provider.is_custom
         if is_builtin:
             manager.custom_providers.pop(provider.id, None)
-            manager._repository.delete_provider(
+            self._delete_provider(
                 manager.tenant_id,
                 provider.id,
                 is_builtin=False,
@@ -336,7 +348,7 @@ class ProviderCatalogService:
             manager.builtin_providers[provider.id] = provider
         else:
             manager.builtin_providers.pop(provider.id, None)
-            manager._repository.delete_provider(
+            self._delete_provider(
                 manager.tenant_id,
                 provider.id,
                 is_builtin=True,
@@ -347,8 +359,43 @@ class ProviderCatalogService:
         return provider
 
     def _invalidate_after_write(self) -> None:
-        self._manager._mark_freshness_due()
-        self._reset_model_caches()
+        self._runtime_cache.invalidate_provider_scope(
+            self._manager.tenant_id,
+        )
+
+    def _delete_provider(
+        self,
+        scope: str,
+        provider_id: str,
+        *,
+        is_builtin: bool,
+    ) -> None:
+        if self._repository is None:
+            raise RuntimeError("Provider repository is not configured.")
+        self._repository.delete_provider(
+            scope,
+            provider_id,
+            is_builtin=is_builtin,
+        )
+        self._repository.discard_provider_freshness_token(
+            scope,
+            provider_id,
+            is_builtin=is_builtin,
+        )
+
+    async def _save_active_model(
+        self,
+        active_model: ModelSlotConfig,
+    ) -> None:
+        save_async = getattr(self._manager, "_save_active_model_async", None)
+        if save_async is not None:
+            await save_async(active_model)
+            return
+        result = self._manager.save_active_model(active_model)
+        if inspect.isawaitable(result):
+            await result
 
     def _reset_model_caches(self) -> None:
-        self._manager._reset_scope_bound_model_caches()
+        self._runtime_cache.reset_scope_bound_model_caches(
+            self._manager.tenant_id,
+        )

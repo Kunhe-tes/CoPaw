@@ -97,7 +97,11 @@ class ProviderManager:
         self._builtin_provider_defaults: Dict[str, Provider] = {}
         self.custom_providers: Dict[str, Provider] = {}
         self.active_model: ModelSlotConfig | None = None
-        self._catalog = ProviderCatalogService(self)
+        self._catalog = ProviderCatalogService(
+            self,
+            repository=self._repository,
+            runtime_cache=self._runtime_cache,
+        )
         self._file_freshness_tokens: dict[str, tuple[int, int]] = {}
         self._next_freshness_check_at = (
             time.monotonic() + _PROVIDER_FRESHNESS_TTL_SECONDS
@@ -846,32 +850,13 @@ class ProviderManager:
         """Return the catalog service, including for legacy test fixtures."""
         catalog = getattr(self, "_catalog", None)
         if catalog is None:
-            catalog = ProviderCatalogService(self)
+            catalog = ProviderCatalogService(
+                self,
+                repository=getattr(self, "_repository", None),
+                runtime_cache=self._get_runtime_cache(),
+            )
             self._catalog = catalog
         return catalog
-
-    def _reset_scope_bound_model_caches(self) -> None:
-        """Compatibility hook for catalog-triggered runtime invalidation."""
-        reset_scope_bound_model_caches(self.tenant_id)
-
-    def _delete_provider_from_storage(
-        self,
-        provider_id: str,
-        *,
-        is_builtin: bool,
-    ) -> None:
-        """Remove one persisted provider and its cached freshness token."""
-        provider_path = self._repository.provider_path(
-            self.tenant_id,
-            provider_id,
-            is_builtin=is_builtin,
-        )
-        self._repository.delete_provider(
-            self.tenant_id,
-            provider_id,
-            is_builtin=is_builtin,
-        )
-        self._file_freshness_tokens.pop(str(provider_path), None)
 
     def _refresh_if_stale(self):
         """Reload providers whose files changed on disk since last snapshot."""

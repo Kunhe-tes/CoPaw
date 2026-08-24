@@ -30,6 +30,10 @@ class TenantProviderRepository:
 
     def __init__(self, secret_dir: Path) -> None:
         self.secret_dir = secret_dir
+        self._freshness_tokens: dict[
+            str,
+            dict[str, tuple[int, int]],
+        ] = {}
 
     def root_path(self, scope: str) -> Path:
         from swe.config.utils import migrate_legacy_scope_dir_if_needed
@@ -127,14 +131,30 @@ class TenantProviderRepository:
         *,
         is_builtin: bool,
     ) -> None:
+        provider_path = self.provider_path(
+            scope,
+            provider_id,
+            is_builtin=is_builtin,
+        )
         try:
-            self.provider_path(
-                scope,
-                provider_id,
-                is_builtin=is_builtin,
-            ).unlink()
+            provider_path.unlink()
         except FileNotFoundError:
             pass
+
+    def discard_provider_freshness_token(
+        self,
+        scope: str,
+        provider_id: str,
+        *,
+        is_builtin: bool,
+    ) -> None:
+        """Forget one deleted provider from a collected scope snapshot."""
+        provider_path = self.provider_path(
+            scope,
+            provider_id,
+            is_builtin=is_builtin,
+        )
+        self._freshness_tokens.get(scope, {}).pop(str(provider_path), None)
 
     def write_active_model(
         self,
@@ -174,6 +194,14 @@ class TenantProviderRepository:
         scope: str,
         builtin_provider_ids: list[str] | tuple[str, ...],
     ) -> dict[str, tuple[int, int]]:
+        return self.collect_freshness_tokens(scope, builtin_provider_ids)
+
+    def collect_freshness_tokens(
+        self,
+        scope: str,
+        builtin_provider_ids: list[str] | tuple[str, ...],
+    ) -> dict[str, tuple[int, int]]:
+        """Collect and retain the provider-file tokens for one scope."""
         paths = [
             self.provider_path(scope, provider_id, is_builtin=True)
             for provider_id in builtin_provider_ids
@@ -187,6 +215,7 @@ class TenantProviderRepository:
                     snapshot[str(path)] = self.file_token(path)
             except OSError:
                 continue
+        self._freshness_tokens[scope] = snapshot
         return snapshot
 
     @staticmethod

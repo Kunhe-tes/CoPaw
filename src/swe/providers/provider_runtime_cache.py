@@ -158,6 +158,20 @@ class ProviderRuntimeCache:
         self._freshness_due.add(scope)
         self._next_freshness_check_at[scope] = 0.0
 
+    def invalidate_provider_scope(self, scope: str) -> None:
+        """Invalidate provider-derived runtime state after a catalog write."""
+        self.mark_freshness_due(scope)
+        self.reset_scope_bound_model_caches(scope)
+
+    @staticmethod
+    def reset_scope_bound_model_caches(scope: str) -> None:
+        """Clear model instances coupled to one provider scope."""
+        from swe.providers.provider_manager import (
+            reset_scope_bound_model_caches,
+        )
+
+        reset_scope_bound_model_caches(scope)
+
     def ensure_freshness_due(self, scope: str) -> None:
         """Schedule a periodic check without invalidating an active refresh."""
         self._freshness_due.add(scope)

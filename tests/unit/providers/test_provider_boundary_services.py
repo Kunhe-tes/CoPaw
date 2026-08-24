@@ -30,6 +30,88 @@ def test_provider_services_exports_the_catalog_service() -> None:
     assert Legacy is ProviderCatalogService
 
 
+def test_catalog_deletes_custom_provider_through_repository_seam() -> None:
+    from swe.providers.provider_catalog_service import ProviderCatalogService
+
+    class FakeManager:
+        tenant_id = "tenant-a"
+        custom_providers = {"custom-provider": object()}
+
+    class FakeRepository:
+        def __init__(self) -> None:
+            self.deleted: list[tuple[str, str, bool]] = []
+            self.discarded_tokens: list[tuple[str, str, bool]] = []
+
+        def delete_provider(
+            self,
+            scope: str,
+            provider_id: str,
+            *,
+            is_builtin: bool,
+        ) -> None:
+            self.deleted.append((scope, provider_id, is_builtin))
+
+        def discard_provider_freshness_token(
+            self,
+            scope: str,
+            provider_id: str,
+            *,
+            is_builtin: bool,
+        ) -> None:
+            self.discarded_tokens.append((scope, provider_id, is_builtin))
+
+    class FakeRuntimeCache:
+        def __init__(self) -> None:
+            self.invalidated_scopes: list[str] = []
+
+        def invalidate_provider_scope(self, scope: str) -> None:
+            self.invalidated_scopes.append(scope)
+
+    manager = FakeManager()
+    repository = FakeRepository()
+    runtime_cache = FakeRuntimeCache()
+
+    catalog = ProviderCatalogService(
+        manager,
+        repository=repository,
+        runtime_cache=runtime_cache,
+    )
+
+    assert catalog.remove_custom_provider("custom-provider") is True
+    assert manager.custom_providers == {}
+    assert repository.deleted == [("tenant-a", "custom-provider", False)]
+    assert repository.discarded_tokens == [
+        ("tenant-a", "custom-provider", False),
+    ]
+    assert runtime_cache.invalidated_scopes == ["tenant-a"]
+
+
+def test_repository_deletion_discards_collected_freshness_token(
+    repository: TenantProviderRepository,
+    provider: OpenAIProvider,
+) -> None:
+    provider_path = repository.write_provider(
+        "tenant-a",
+        provider.model_dump(),
+        is_builtin=False,
+    )
+    freshness_tokens = repository.collect_freshness_tokens("tenant-a", [])
+
+    repository.delete_provider(
+        "tenant-a",
+        provider.id,
+        is_builtin=False,
+    )
+    repository.discard_provider_freshness_token(
+        "tenant-a",
+        provider.id,
+        is_builtin=False,
+    )
+
+    assert not provider_path.exists()
+    assert str(provider_path) not in freshness_tokens
+
+
 @pytest.fixture
 def provider() -> OpenAIProvider:
     return OpenAIProvider(
