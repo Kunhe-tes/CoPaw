@@ -21,6 +21,11 @@ class AgentRequestContext:
     chat_id: str | None = None
     turn_id: str | None = None
     extras: Mapping[str, Any] = field(default_factory=dict)
+    _fixed_keys_present: frozenset[str] = field(
+        default_factory=frozenset,
+        repr=False,
+        compare=False,
+    )
 
     _FIXED_KEYS = (
         "session_id",
@@ -38,9 +43,11 @@ class AgentRequestContext:
         context: Mapping[str, Any] | None,
     ) -> "AgentRequestContext":
         values = dict(context or {})
+        fixed_keys_present = frozenset(values).intersection(cls._FIXED_KEYS)
         return cls(
             **{key: values.pop(key, None) for key in cls._FIXED_KEYS},
             extras=values,
+            _fixed_keys_present=fixed_keys_present,
         )
 
     def to_legacy_dict(self) -> dict[str, Any]:
@@ -51,18 +58,13 @@ class AgentRequestContext:
         }
         result.update(
             {
-                "session_id": self.session_id,
-                "user_id": self.user_id,
-                "channel": self.channel,
-                "agent_id": self.agent_id,
-                "tenant_id": self.tenant_id,
-                "chat_id": self.chat_id,
-                "turn_id": self.turn_id,
+                key: getattr(self, key)
+                for key in self._FIXED_KEYS
+                if getattr(self, key) is not None
+                or key in self._fixed_keys_present
             },
         )
-        return {
-            key: value for key, value in result.items() if value is not None
-        }
+        return result
 
 
 @dataclass(frozen=True)

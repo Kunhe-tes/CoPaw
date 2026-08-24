@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from swe.agents.agent_runtime_builder import (
@@ -37,6 +39,22 @@ def test_request_context_round_trips_fixed_keys_and_extras() -> None:
     assert context.chat_id == "chat-1"
     assert context.turn_id == "turn-1"
     assert context.extras == {"trace_id": "trace-1", "source_id": "source-1"}
+    assert context.to_legacy_dict() == legacy_context
+
+
+def test_request_context_preserves_none_value_presence() -> None:
+    """Legacy None values remain present across the typed compatibility boundary."""
+    legacy_context = {
+        "session_id": None,
+        "user_id": "user-1",
+        "trace_id": None,
+        "source_id": "source-1",
+    }
+
+    context = AgentRequestContext.from_legacy_dict(legacy_context)
+
+    assert context.session_id is None
+    assert context.extras == {"trace_id": None, "source_id": "source-1"}
     assert context.to_legacy_dict() == legacy_context
 
 
@@ -124,6 +142,7 @@ class _FakeStatefulClient:
     def __init__(self, name: str, failure: Exception | None = None) -> None:
         self.name = name
         self._failure = failure
+        self.on_progress_callback: Callable[[], None] | None = None
 
     async def list_tools(self) -> list[object]:
         if self._failure is not None:
@@ -134,6 +153,7 @@ class _FakeStatefulClient:
 class _FakeToolkit:
     def __init__(self) -> None:
         self.registered_client_names: list[str] = []
+        self.tools: dict[str, object] = {}
 
     async def register_mcp_client(
         self,
@@ -143,6 +163,44 @@ class _FakeToolkit:
     ) -> None:
         assert namesake_strategy == "skip"
         self.registered_client_names.append(client.name)
+        self.tools[client.name] = object()
+
+
+@pytest.mark.asyncio
+async def test_registrar_from_agent_wires_watchdog_and_normalizes_new_tools() -> (
+    None
+):
+    """The registrar uses the agent's policies at the registration boundary."""
+    toolkit = _FakeToolkit()
+    client = _FakeStatefulClient("available")
+    reset_watchdog_calls: list[str] = []
+    normalization_calls: list[tuple[object, list[str]]] = []
+
+    class Agent:
+        _mcp_clients = [client]
+        _agent_config = type("AgentConfig", (), {"tools": None})()
+        _source_tool_versions = ()
+
+        def _reset_watchdog(self) -> None:
+            reset_watchdog_calls.append("reset")
+
+        def _normalize_registered_tool_functions(
+            self,
+            registered_toolkit: object,
+            names: list[str],
+        ) -> None:
+            normalization_calls.append((registered_toolkit, names))
+
+    agent = Agent()
+    agent.toolkit = toolkit
+
+    await McpToolRegistrar.from_agent(agent).register_clients()
+
+    progress_callback = client.on_progress_callback
+    assert progress_callback is not None
+    progress_callback()
+    assert reset_watchdog_calls == ["reset"]
+    assert normalization_calls == [(toolkit, ["available"])]
 
 
 @pytest.mark.asyncio

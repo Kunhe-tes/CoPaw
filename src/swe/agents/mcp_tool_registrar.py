@@ -62,9 +62,9 @@ class McpToolRegistrar:
             source_tool_versions=agent._source_tool_versions,
             reset_watchdog=agent._reset_watchdog,
             normalize_tool_functions=agent._normalize_registered_tool_functions,
-            recover_client=agent._recover_mcp_client,
+            recover_client=getattr(agent, "_recover_mcp_client", None),
             should_propagate_cancelled_error=(
-                agent._should_propagate_cancelled_error
+                getattr(agent, "_should_propagate_cancelled_error", None)
             ),
         )
 
