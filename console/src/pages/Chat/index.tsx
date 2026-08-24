@@ -191,10 +191,10 @@ import {
 import { isChatTaskProgressEnabled } from "./taskProgressConfig";
 import GlobalVoiceRecorder from "@/components/GlobalVoiceRecorder";
 import { shouldShowGlobalVoiceRecorder } from "@/components/GlobalVoiceRecorder/presentation";
+import { shouldRouteGoalRequestAsSteering } from "./goalSteeringRouting";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
-const GOAL_STEERING_STATES = new Set(["ACTIVE", "WAITING"]);
 
 function useExternalApprovalResolvedRefresh() {
   const { refreshSession } = useChatAnywhereSessions();
@@ -1845,7 +1845,13 @@ export default function ChatPage() {
           const activeGoal = await chatApi.getRecentGoal(backendChatId);
           if (
             activeGoal &&
-            GOAL_STEERING_STATES.has(activeGoal.state)
+            shouldRouteGoalRequestAsSteering({
+              goalState: activeGoal.state,
+              hasExplicitGoalId: Object.prototype.hasOwnProperty.call(
+                biz_params ?? {},
+                "goal_id",
+              ),
+            })
           ) {
             await chatApi.enqueueGoalSteering(
               activeGoal.goal_id,
