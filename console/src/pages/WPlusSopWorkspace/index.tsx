@@ -37,13 +37,16 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import { wplusSopApi } from "@/api/modules/wplusSop";
 import type {
   WPlusSopAnswerValue,
+  WPlusSopArtifact,
   WPlusSopCommandType,
+  WPlusSopCumulativePreview,
   WPlusSopCustomAnswerValue,
   WPlusSopMemoryCandidate,
   WPlusSopQuestion,
   WPlusSopSafeStreamTrace,
   WPlusSopSession,
   WPlusSopStage,
+  WPlusSopStageReport,
 } from "@/api/types/wplusSop";
 import { getToolDisplayName } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/ToolTitle";
 import {
@@ -245,6 +248,164 @@ function ResultPreview({
   );
 }
 
+function StageReportArtifactButtons({
+  artifacts,
+  downloadingArtifactId,
+  onDownload,
+}: {
+  artifacts: WPlusSopArtifact[];
+  downloadingArtifactId: string | null;
+  onDownload: (artifactId: string, filename: string) => void;
+}) {
+  return (
+    <div className={styles.artifactList}>
+      {artifacts.map((artifact) => (
+        <Button
+          key={artifact.artifact_id}
+          type="text"
+          disabled={
+            !artifact.download_url || artifact.status !== "validated"
+          }
+          loading={downloadingArtifactId === artifact.artifact_id}
+          title={artifact.name}
+          onClick={() => onDownload(artifact.artifact_id, artifact.name)}
+        >
+          <FileCheck2 size={16} />
+          <span className={styles.artifactName}>{artifact.name}</span>
+        </Button>
+      ))}
+    </div>
+  );
+}
+
+function StageReportPanel({
+  reports,
+  currentStageId,
+  downloadingArtifactId,
+  onDownload,
+}: {
+  reports: WPlusSopStageReport[];
+  currentStageId: string | null;
+  downloadingArtifactId: string | null;
+  onDownload: (artifactId: string, filename: string) => void;
+}) {
+  const currentReports = useMemo(
+    () =>
+      reports
+        .filter((report) => report.stage_id === currentStageId)
+        .sort((left, right) => right.report_no - left.report_no),
+    [reports, currentStageId],
+  );
+  if (!currentReports.length) {
+    return (
+      <Alert
+        type="info"
+        showIcon
+        message="环节报告尚未生成"
+        description="预跑成功后会生成当前环节的 JSON、Markdown 与 HTML 报告，供你审阅后再确认。"
+      />
+    );
+  }
+  return (
+    <div className={styles.stageReportList}>
+      {currentReports.map((report) => {
+        const isLatest =
+          report.superseded_by === null || report.superseded_by === undefined;
+        const allValidated = report.artifacts.every(
+          (artifact) => artifact.status === "validated",
+        );
+        return (
+          <article
+            key={"stage-report-" + report.revision + "-" + report.report_no}
+            className={styles.stageReportItem}
+            data-latest={isLatest}
+          >
+            <div className={styles.stageReportMeta}>
+              <div>
+                <strong>
+                  版本 v{report.report_no}
+                  {isLatest ? "（最新）" : "（历史只读）"}
+                </strong>
+                <small>
+                  修订 {report.revision} ·{" "}
+                  {new Date(report.created_at).toLocaleString()}
+                </small>
+              </div>
+              <Space wrap>
+                <Tag color={isLatest ? "green" : "default"}>
+                  {isLatest ? "最新版本" : "已被取代"}
+                </Tag>
+                {!allValidated && <Tag color="warning">校验未完成</Tag>}
+              </Space>
+            </div>
+            <StageReportArtifactButtons
+              artifacts={report.artifacts}
+              downloadingArtifactId={downloadingArtifactId}
+              onDownload={onDownload}
+            />
+          </article>
+        );
+      })}
+    </div>
+  );
+}
+
+function CumulativePreviewPanel({
+  preview,
+  stages,
+  downloadingArtifactId,
+  onDownload,
+}: {
+  preview: WPlusSopCumulativePreview | null | undefined;
+  stages: WPlusSopStage[];
+  downloadingArtifactId: string | null;
+  onDownload: (artifactId: string, filename: string) => void;
+}) {
+  if (!preview) {
+    return null;
+  }
+  const stageTitle = (stageId: string): string =>
+    stages.find((stage) => stage.stage_id === stageId)?.title || stageId;
+  return (
+    <section className={styles.workSection}>
+      <div className={styles.sectionHeading}>
+        <div>
+          <span className={styles.eyebrow}>累计 SOP 预览</span>
+          <h2>已确认内容（累计 v{preview.preview_version}）</h2>
+          <p>
+            以下环节已确认并立即纳入累计结果；未确认环节不会出现在这里。
+          </p>
+        </div>
+        <Tag color="cyan">实时累计</Tag>
+      </div>
+      <ol className={styles.cumulativeOrder}>
+        {preview.stage_order.map((stageId, index) => {
+          const snapshot = preview.snapshots.find(
+            (candidate) => candidate.stage_id === stageId,
+          );
+          return (
+            <li key={stageId}>
+              <span>{String(index + 1).padStart(2, "0")}</span>
+              <div>
+                <strong title={stageTitle(stageId)}>{stageTitle(stageId)}</strong>
+                <small>
+                  已确认版本 v{snapshot?.report_no ?? "—"} · 修订{" "}
+                  {snapshot?.revision ?? "—"}
+                </small>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+      <StageReportArtifactButtons
+        artifacts={preview.artifacts}
+        downloadingArtifactId={downloadingArtifactId}
+        onDownload={onDownload}
+      />
+    </section>
+  );
+}
+
 function LiveRunTranscript({
   trace,
   running,
@@ -408,6 +569,8 @@ function isGenerating(session: WPlusSopSession): boolean {
     "GeneratingQuestions",
     "GeneratingTrial",
     "ExecutingTrial",
+    "GeneratingStageReport",
+    "RefreshingCumulative",
     "FinalizingOutputs",
     "WritingMemory",
     "PendingExit",
@@ -432,6 +595,12 @@ function conclusionMilestoneProjection(session: WPlusSopSession): {
 } {
   if (session.state === "Completed") {
     return { status: "confirmed", label: "已完成" };
+  }
+  if (session.state === "GeneratingStageReport") {
+    return { status: "current", label: "生成环节报告" };
+  }
+  if (session.state === "RefreshingCumulative") {
+    return { status: "current", label: "刷新累计" };
   }
   if (session.state === "FinalizingOutputs") {
     return { status: "current", label: "生成中" };
@@ -1476,21 +1645,63 @@ export default function WPlusSopWorkspace() {
       const currentStage = session.stages.find(
         (stage) => stage.stage_id === session.current_stage_id,
       );
+      const stageReports = session.stage_reports || [];
+      const latestReport = [...stageReports]
+        .filter(
+          (report) =>
+            report.stage_id === session.current_stage_id &&
+            (report.superseded_by === null ||
+              report.superseded_by === undefined),
+        )
+        .sort((left, right) => right.report_no - left.report_no)[0];
+      const allValidated = latestReport
+        ? latestReport.artifacts.every(
+            (artifact) => artifact.status === "validated",
+          )
+        : false;
       return (
-        <section className={styles.decisionPanel}>
-          <CircleCheck size={34} />
-          <span className={styles.eyebrow}>环节验收</span>
-          <h2>{currentStage?.title || "当前环节"}已通过预跑</h2>
-          <p>确认后将锁定本环节事实，并进入下一个环节。</p>
-          <Button
-            type="primary"
-            size="large"
-            loading={busy}
-            disabled={!runtimeReady}
-            onClick={() => void sendCommand("confirm_stage")}
-          >
-            {runtimeReady ? "确认并继续" : "正在完成上一轮处理"}
-          </Button>
+        <section className={styles.workSection}>
+          <div className={styles.sectionHeading}>
+            <div>
+              <span className={styles.eyebrow}>环节验收</span>
+              <h2>{currentStage?.title || "当前环节"}已通过预跑</h2>
+              <p>
+                审阅当前环节报告；确认后将锁定本环节，并立即纳入累计 SOP。
+              </p>
+            </div>
+            <Tag color="blue">待确认</Tag>
+          </div>
+          <StageReportPanel
+            reports={stageReports}
+            currentStageId={session.current_stage_id}
+            downloadingArtifactId={downloadingArtifactId}
+            onDownload={downloadArtifact}
+          />
+          <CumulativePreviewPanel
+            preview={session.cumulative_preview}
+            stages={session.stages}
+            downloadingArtifactId={downloadingArtifactId}
+            onDownload={downloadArtifact}
+          />
+          <div className={styles.stageConfirmActions}>
+            {!allValidated && (
+              <Alert
+                type="warning"
+                showIcon
+                message="环节报告尚未校验完成"
+                description="JSON、Markdown 与 HTML 三份报告全部生成并校验通过后，才能确认本环节。"
+              />
+            )}
+            <Button
+              type="primary"
+              size="large"
+              loading={busy}
+              disabled={!runtimeReady || !allValidated}
+              onClick={() => void sendCommand("confirm_stage")}
+            >
+              {runtimeReady ? "确认并锁定本环节" : "正在完成上一轮处理"}
+            </Button>
+          </div>
         </section>
       );
     }

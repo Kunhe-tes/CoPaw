@@ -10,7 +10,10 @@ import {
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes, useNavigate } from "react-router-dom";
 
-import type { WPlusSopSession } from "@/api/types/wplusSop";
+import type {
+  WPlusSopSession,
+  WPlusSopStageReport,
+} from "@/api/types/wplusSop";
 import WPlusSopWorkspace from "./index";
 import styles from "./index.module.less";
 
@@ -2387,5 +2390,164 @@ describe("WPlusSopWorkspace", () => {
       await screen.findByRole("heading", { name: "无法访问这个工作台" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("not found")).not.toBeInTheDocument();
+  });
+
+  it("shows the latest stage report and confirms the stage once validated", async () => {
+    const stageReports: WPlusSopStageReport[] = [
+      {
+        stage_id: "stage-1",
+        report_no: 1,
+        revision: 1,
+        superseded_by: 2,
+        created_at: "2026-08-21T01:00:00Z",
+        artifacts: [
+          {
+            artifact_id: "stage_sop_json",
+            name: "stage_sop.json",
+            format: "json",
+            status: "validated",
+            download_url: "/static/stage-1-v1.json",
+            sha256: "a".repeat(64),
+          },
+          {
+            artifact_id: "stage_sop_md",
+            name: "stage_sop.md",
+            format: "markdown",
+            status: "validated",
+            download_url: "/static/stage-1-v1.md",
+            sha256: "a".repeat(64),
+          },
+          {
+            artifact_id: "stage_sop_html",
+            name: "stage_sop.html",
+            format: "html",
+            status: "validated",
+            download_url: "/static/stage-1-v1.html",
+            sha256: "a".repeat(64),
+          },
+        ],
+      },
+      {
+        stage_id: "stage-1",
+        report_no: 2,
+        revision: 1,
+        superseded_by: null,
+        created_at: "2026-08-21T02:00:00Z",
+        artifacts: [
+          {
+            artifact_id: "stage_sop_json",
+            name: "stage_sop.json",
+            format: "json",
+            status: "validated",
+            download_url: "/static/stage-1-v2.json",
+            sha256: "b".repeat(64),
+          },
+          {
+            artifact_id: "stage_sop_md",
+            name: "stage_sop.md",
+            format: "markdown",
+            status: "validated",
+            download_url: "/static/stage-1-v2.md",
+            sha256: "b".repeat(64),
+          },
+          {
+            artifact_id: "stage_sop_html",
+            name: "stage_sop.html",
+            format: "html",
+            status: "validated",
+            download_url: "/static/stage-1-v2.html",
+            sha256: "b".repeat(64),
+          },
+        ],
+      },
+    ];
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingStageConfirmation",
+        state_version: 8,
+        stage_reports: stageReports,
+        cumulative_preview: {
+          preview_version: 1,
+          stage_order: [],
+          snapshots: [],
+          artifacts: [],
+          rendered_sha256: {},
+        },
+      }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByRole("heading", { name: /已通过预跑/ }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("版本 v2（最新）")).toBeInTheDocument();
+    expect(screen.getByText("已被取代")).toBeInTheDocument();
+    expect(screen.getByText("最新版本")).toBeInTheDocument();
+
+    const confirmButton = screen.getByRole("button", {
+      name: "确认并锁定本环节",
+    });
+    expect(confirmButton).toBeEnabled();
+    await waitFor(() => {
+      fireEvent.click(confirmButton);
+      expect(apiMock.sendCommand).toHaveBeenCalledWith(
+        "sop-1",
+        expect.objectContaining({ command: "confirm_stage" }),
+      );
+    });
+  });
+
+  it("blocks stage confirmation until the latest report is fully validated", async () => {
+    apiMock.getSession.mockResolvedValue(
+      makeSession({
+        state: "AwaitingStageConfirmation",
+        state_version: 8,
+        stage_reports: [
+          {
+            stage_id: "stage-1",
+            report_no: 1,
+            revision: 1,
+            superseded_by: null,
+            created_at: "2026-08-21T01:00:00Z",
+            artifacts: [
+              {
+                artifact_id: "stage_sop_json",
+                name: "stage_sop.json",
+                format: "json",
+                status: "validated" as const,
+                download_url: "/static/stage-1.json",
+                sha256: "a".repeat(64),
+              },
+              {
+                artifact_id: "stage_sop_md",
+                name: "stage_sop.md",
+                format: "markdown",
+                status: "failed" as const,
+                download_url: null,
+                sha256: null,
+              },
+              {
+                artifact_id: "stage_sop_html",
+                name: "stage_sop.html",
+                format: "html",
+                status: "validated" as const,
+                download_url: "/static/stage-1.html",
+                sha256: "a".repeat(64),
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    renderPage();
+
+    expect(
+      await screen.findByText("环节报告尚未校验完成"),
+    ).toBeInTheDocument();
+    const confirmButton = screen.getByRole("button", {
+      name: "确认并锁定本环节",
+    });
+    expect(confirmButton).toBeDisabled();
+    expect(apiMock.sendCommand).not.toHaveBeenCalled();
   });
 });

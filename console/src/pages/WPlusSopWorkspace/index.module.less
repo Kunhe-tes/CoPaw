@@ -1360,4 +1360,116 @@
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+
+
+.stageReportList {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.stageReportItem {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--wplus-line);
+  border-radius: 10px;
+  background: var(--wplus-card, #fff);
+  text-align: left;
+
+  &[data-latest="true"] {
+    border-color: var(--wplus-success, #52c41a);
+  }
+}
+
+.stageReportMeta {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+
+  > div:first-child {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  strong {
+    font-size: 14px;
+    color: var(--wplus-ink);
+  }
+
+  small {
+    color: var(--wplus-muted, #8c8c8c);
+    font-size: 12px;
+  }
+}
+
+.cumulativeOrder {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 14px;
+  padding: 0;
+  list-style: none;
+
+  li {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 11px;
+    border: 1px solid var(--wplus-line);
+    border-radius: 8px;
+
+    > span {
+      display: grid;
+      width: 26px;
+      height: 26px;
+      flex: none;
+      place-items: center;
+      border-radius: 50%;
+      background: var(--wplus-primary-bg, #e6f4ff);
+      color: var(--wplus-primary, #3769fc);
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    > div {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    strong {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+
+    small {
+      color: var(--wplus-muted, #8c8c8c);
+      font-size: 12px;
+    }
+  }
+}
+
+.stageConfirmActions {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
 }

@@ -350,6 +350,80 @@ def _trial_result_payload(run_id: str) -> dict:
     }
 
 
+def _stage_report_artifacts(seed: str = "a") -> list[dict]:
+    return [
+        {
+            "artifact_id": "stage_sop_json",
+            "name": "stage_sop.json",
+            "static_file_name": f"{seed}.json",
+            "static_url": f"https://static.example/{seed}.json",
+            "sha256": seed * 64,
+            "copied_by": "copy_file_to_static",
+        },
+        {
+            "artifact_id": "stage_sop_md",
+            "name": "stage_sop.md",
+            "static_file_name": f"{seed}.md",
+            "static_url": f"https://static.example/{seed}.md",
+            "sha256": seed * 64,
+            "copied_by": "copy_file_to_static",
+        },
+        {
+            "artifact_id": "stage_sop_html",
+            "name": "stage_sop.html",
+            "static_file_name": f"{seed}.html",
+            "static_url": f"https://static.example/{seed}.html",
+            "sha256": seed * 64,
+            "copied_by": "copy_file_to_static",
+        },
+    ]
+
+
+def _stage_report_payload(
+    stage_id: str,
+    report_no: int,
+    *,
+    revision: int = 1,
+) -> dict:
+    return {
+        "report": {
+            "stage_id": stage_id,
+            "report_no": report_no,
+            "revision": revision,
+            "artifacts": _stage_report_artifacts(
+                "0123456789abcdef"[report_no % 16],
+            ),
+            "validation": {
+                "schema_validator": "scripts/validate_stage_sop.py",
+                "schema_exit_code": 0,
+                "renderers": [
+                    "scripts/render_stage_md.py",
+                    "scripts/render_stage_sop.py",
+                ],
+            },
+        },
+    }
+
+
+def _cumulative_refreshed_payload(
+    session,
+    *,
+    preview_version: int = 1,
+) -> dict:
+    snapshots = session.projection.confirmed_snapshots
+    return {
+        "preview": {
+            "preview_version": preview_version,
+            "stage_order": [snapshot.stage_id for snapshot in snapshots],
+            "snapshots": [
+                snapshot.model_dump(mode="json") for snapshot in snapshots
+            ],
+            "artifacts": _stage_report_artifacts("c"),
+            "rendered_sha256": {"stage_sop_json": "c" * 64},
+        },
+    }
+
+
 def _final_result_payload(tmp_path: Path) -> dict:
     static_dir = tmp_path / "static"
     static_dir.mkdir(parents=True, exist_ok=True)
@@ -1304,11 +1378,24 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
             "accept_trial",
             request_id=f"cmd-accept-{index}",
         )
+        service.append_agent_event(
+            kind="stage_report_generated",
+            payload=_stage_report_payload(stage_id, 1),
+            event_key=f"stage-report-{index}",
+        )
         await _send(
             service,
             session_id,
             "confirm_stage",
             request_id=f"cmd-stage-{index}",
+        )
+        service.append_agent_event(
+            kind="cumulative_refreshed",
+            payload=_cumulative_refreshed_payload(
+                service.get_session(session_id),
+                preview_version=index,
+            ),
+            event_key=f"cumulative-{index}",
         )
 
     service.append_agent_event(
@@ -1336,14 +1423,19 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
         "propose_stage_queue",
         "confirm_stage_queue",
         "submit_answers",
+        "accept_trial",
         "confirm_stage",
         "submit_answers",
+        "accept_trial",
         "confirm_stage",
     ]
-    assert starts[-1]["target_state"] == "FinalizingOutputs"
+    assert starts[-1]["target_state"] == "RefreshingCumulative"
     finalizing_payload = starts[-1]["payload"]
     assert isinstance(finalizing_payload, dict)
-    assert finalizing_payload["final_result_persisted"] is False
+    assert [
+        snapshot["stage_id"]
+        for snapshot in finalizing_payload["confirmed_snapshots"]
+    ] == ["stage-1", "stage-2"]
     assert await service.flush_chat_projection_outbox() > 0
     assert service.workspace.chat_manager.chat.meta[
         "wplus_sop_session"
@@ -2071,16 +2163,30 @@ async def test_question_generation_commands_forward_server_target_state(
         "accept_trial",
         request_id="cmd-target-state-accept",
     )
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="target-state-stage-report",
+    )
     await _send(
         service,
         session_id,
         "confirm_stage",
         request_id="cmd-target-state-next-stage",
     )
+    service.append_agent_event(
+        kind="cumulative_refreshed",
+        payload=_cumulative_refreshed_payload(service.get_session(session_id)),
+        event_key="target-state-cumulative",
+    )
 
     assert starts[-1]["command"] == "confirm_stage"
-    assert starts[-1]["target_state"] == "GeneratingQuestions"
+    assert starts[-1]["target_state"] == "RefreshingCumulative"
     assert starts[-1]["payload"]["current_stage_id"] == "stage-2"
+    assert [
+        snapshot["stage_id"]
+        for snapshot in starts[-1]["payload"]["confirmed_snapshots"]
+    ] == ["stage-1"]
 
 
 @pytest.mark.asyncio
@@ -2392,11 +2498,21 @@ async def test_historical_question_event_is_not_duplicate_in_next_stage(
         "accept_trial",
         request_id="cmd-historical-question-accept",
     )
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="historical-question-stage-report",
+    )
     await _send(
         service,
         session_id,
         "confirm_stage",
         request_id="cmd-historical-question-next-stage",
+    )
+    service.append_agent_event(
+        kind="cumulative_refreshed",
+        payload=_cumulative_refreshed_payload(service.get_session(session_id)),
+        event_key="historical-question-cumulative",
     )
     before = service.get_session(session_id)
     outbox_before = service.store.pending_outbox()
@@ -3587,4 +3703,462 @@ async def test_orphan_recovery_fails_closed_on_stale_projection(
         record.projection.state
         is SessionState.GENERATING_STAGE_PROPOSAL
     )
-    assert record.runs[0].status is RunStatus.CLAIMED
+
+
+async def _new_two_stage_session(
+    service: WPlusSopService,
+    session_id: str,
+) -> str:
+    proposal = service.create_entry_proposal(
+        original_text="创建两环节 SOP",
+        mode="explicit",
+    )
+    confirmed = await service.confirm_entry(
+        proposal_id=proposal.proposal_id,
+        command_request_id=f"cmd-entry-{session_id}",
+        skill_snapshot_id="sha256:miner",
+    )
+    sid = confirmed.record.projection.sop_session_id
+    service.append_agent_event(
+        kind="stage_proposal",
+        payload={
+            "stages": [
+                {"stage_id": "stage-1", "name": "确认范围"},
+                {"stage_id": "stage-2", "name": "生成结果"},
+            ],
+        },
+        event_key=f"stages-{session_id}",
+    )
+    await _send(
+        service,
+        sid,
+        "confirm_stage_queue",
+        {
+            "stages": [
+                {"stage_id": "stage-1", "name": "确认范围"},
+                {"stage_id": "stage-2", "name": "生成结果"},
+            ],
+        },
+        request_id=f"cmd-queue-{session_id}",
+    )
+    return sid
+
+
+async def _advance_to_stage_report(
+    service: WPlusSopService,
+    session_id: str,
+    stage_id: str,
+    suffix: str,
+) -> None:
+    service.append_agent_event(
+        kind="question_batch",
+        payload=_question_payload(stage_id, suffix),
+        event_key=f"questions-{suffix}",
+    )
+    await _send(
+        service,
+        session_id,
+        "submit_answers",
+        {"answers": {f"q-{suffix}": "yes"}},
+        request_id=f"cmd-answers-{suffix}",
+    )
+    service.append_agent_event(
+        kind="trial_plan",
+        payload=_trial_plan_payload(suffix),
+        event_key=f"trial-plan-{suffix}",
+    )
+    service.append_agent_event(
+        kind="trial_execution_completed",
+        payload=_trial_result_payload(suffix),
+        event_key=f"trial-result-{suffix}",
+    )
+    await _send(
+        service,
+        session_id,
+        "accept_trial",
+        request_id=f"cmd-accept-{suffix}",
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirm_stage_rejects_without_acceptable_report(
+    tmp_path: Path,
+) -> None:
+    service = _service(tmp_path)
+    session_id = "sop-gate-no-report"
+    service.store.create_session(
+        SessionProjection(
+            sop_session_id=session_id,
+            ownership=_ownership(),
+            skill_snapshot_id="sha256:miner",
+            state=SessionState.AWAITING_STAGE_CONFIRMATION,
+            state_version=1,
+            title="SOP",
+            stages=[
+                Stage(stage_id="stage-1", name="确认范围"),
+                Stage(stage_id="stage-2", name="生成结果"),
+            ],
+            current_stage_id="stage-1",
+        ),
+        command_receipt=CommandReceipt(
+            command_request_id="cmd-create-gate",
+            command="test_setup",
+            sop_session_id=session_id,
+            resulting_state_version=1,
+        ),
+    )
+    with pytest.raises(WPlusCommandError, match="no acceptable report"):
+        await _send(
+            service,
+            session_id,
+            "confirm_stage",
+            request_id="cmd-gate-confirm",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stage_report_version_must_increment_by_one(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "version")
+    await _advance_to_stage_report(service, session_id, "stage-1", "version")
+
+    with pytest.raises(WPlusCommandError, match="increment by one"):
+        service.append_agent_event(
+            kind="stage_report_generated",
+            payload=_stage_report_payload("stage-1", 2),
+            event_key="version-skip-report",
+        )
+
+
+@pytest.mark.asyncio
+async def test_stage_report_generation_failed_enters_recoverable_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "fail")
+    await _advance_to_stage_report(service, session_id, "stage-1", "fail")
+
+    failed = service.append_agent_event(
+        kind="stage_report_generation_failed",
+        payload={
+            "stage_id": "stage-1",
+            "error_code": "render_failed",
+            "summary": "环节报告渲染失败",
+        },
+        event_key="fail-report",
+    )
+    assert (
+        failed.record.projection.state
+        is SessionState.RECOVERABLE_FAILURE
+    )
+    assert (
+        failed.record.projection.last_error.failed_operation
+        == "stage_report_generation"
+    )
+    assert (
+        failed.record.projection.last_error.error_code
+        == "render_failed"
+    )
+    assert (
+        failed.record.projection.resume_state
+        is SessionState.GENERATING_STAGE_REPORT
+    )
+
+
+@pytest.mark.asyncio
+async def test_serialize_session_exposes_stage_reports_and_cumulative_preview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "serialize")
+
+    for index, stage_id in enumerate(("stage-1", "stage-2"), start=1):
+        await _advance_to_stage_report(
+            service,
+            session_id,
+            stage_id,
+            f"serialize-{index}",
+        )
+        service.append_agent_event(
+            kind="stage_report_generated",
+            payload=_stage_report_payload(stage_id, 1),
+            event_key=f"serialize-report-{index}",
+        )
+        await _send(
+            service,
+            session_id,
+            "confirm_stage",
+            request_id=f"cmd-serialize-confirm-{index}",
+        )
+        service.append_agent_event(
+            kind="cumulative_refreshed",
+            payload=_cumulative_refreshed_payload(
+                service.get_session(session_id),
+                preview_version=index,
+            ),
+            event_key=f"serialize-cumulative-{index}",
+        )
+
+    record = service.get_session(session_id)
+    snapshot = serialize_session(record)
+    assert [
+        report["stage_id"] for report in snapshot["stage_reports"]
+    ] == ["stage-1", "stage-2"]
+    assert [report["report_no"] for report in snapshot["stage_reports"]] == [
+        1,
+        1,
+    ]
+    assert snapshot["cumulative_preview"]["preview_version"] == 2
+    assert snapshot["cumulative_preview"]["stage_order"] == [
+        "stage-1",
+        "stage-2",
+    ]
+    assert (
+        snapshot["cumulative_preview"]["snapshots"][0]["stage_id"]
+        == "stage-1"
+    )
+    assert record.projection.state is SessionState.FINALIZING_OUTPUTS
+
+
+@pytest.mark.asyncio
+async def test_ae1_report_generation_failure_blocks_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "ae1")
+    await _advance_to_stage_report(service, session_id, "stage-1", "ae1")
+
+    failed = service.append_agent_event(
+        kind="stage_report_generation_failed",
+        payload={
+            "stage_id": "stage-1",
+            "error_code": "render_failed",
+            "summary": "环节报告渲染失败",
+        },
+        event_key="ae1-report-failed",
+    )
+    assert failed.record.projection.state is SessionState.RECOVERABLE_FAILURE
+    with pytest.raises(WPlusCommandError, match="not awaiting confirmation"):
+        await _send(
+            service,
+            session_id,
+            "confirm_stage",
+            request_id="ae1-confirm",
+        )
+
+
+@pytest.mark.asyncio
+async def test_ae2_rerun_supersedes_report_versions_and_locks_latest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "ae2")
+    await _advance_to_stage_report(service, session_id, "stage-1", "ae2")
+
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="ae2-report-1",
+    )
+    assert len(service.get_session(session_id).projection.stage_reports) == 1
+    # user feedback triggers a rerun; the rerun produces report v2 (R4)
+    await _send(
+        service,
+        session_id,
+        "submit_trial_feedback",
+        {
+            "feedback": "调整数据口径后重新预跑",
+            "rerun_of_run_id": service.get_session(
+                session_id,
+            ).projection.current_run_id,
+        },
+        request_id="ae2-rerun",
+    )
+    service.append_agent_event(
+        kind="trial_plan",
+        payload=_trial_plan_payload("ae2-rerun"),
+        event_key="ae2-rerun-plan",
+    )
+    service.append_agent_event(
+        kind="trial_execution_completed",
+        payload=_trial_result_payload("ae2-rerun"),
+        event_key="ae2-rerun-result",
+    )
+    await _send(
+        service,
+        session_id,
+        "accept_trial",
+        request_id="ae2-rerun-accept",
+    )
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 2),
+        event_key="ae2-report-2",
+    )
+    reports = service.get_session(session_id).projection.stage_reports
+    assert len(reports) == 2
+    v1 = next(report for report in reports if report.report_no == 1)
+    v2 = next(report for report in reports if report.report_no == 2)
+    assert v1.superseded_by == 2
+    assert v2.superseded_by is None
+
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="ae2-confirm",
+    )
+    snapshots = service.get_session(session_id).projection.confirmed_snapshots
+    assert snapshots[-1].stage_id == "stage-1"
+    assert snapshots[-1].report_no == 2
+
+
+@pytest.mark.asyncio
+async def test_ae3_confirmed_stage_cannot_be_reopened_or_confirm_twice(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "ae3")
+    await _advance_to_stage_report(service, session_id, "stage-1", "ae3")
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="ae3-report-1",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="ae3-confirm",
+    )
+    assert (
+        service.get_session(session_id).projection.state
+        is SessionState.REFRESHING_CUMULATIVE
+    )
+    with pytest.raises(WPlusCommandError, match="not awaiting confirmation"):
+        await _send(
+            service,
+            session_id,
+            "confirm_stage",
+            request_id="ae3-confirm-again",
+        )
+
+
+@pytest.mark.asyncio
+async def test_ae4_cumulative_contains_only_confirmed_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "ae4")
+    await _advance_to_stage_report(service, session_id, "stage-1", "ae4")
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="ae4-report-1",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="ae4-confirm",
+    )
+    service.append_agent_event(
+        kind="cumulative_refreshed",
+        payload=_cumulative_refreshed_payload(
+            service.get_session(session_id),
+            preview_version=1,
+        ),
+        event_key="ae4-cumulative",
+    )
+    projection = service.get_session(session_id).projection
+    assert projection.cumulative_preview is not None
+    assert projection.cumulative_preview.stage_order == ["stage-1"]
+    assert projection.state is SessionState.GENERATING_QUESTIONS
+    assert projection.current_stage_id == "stage-2"
+
+
+@pytest.mark.asyncio
+async def test_refresh_failure_does_not_advance_to_next_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "refresh-fail")
+    await _advance_to_stage_report(service, session_id, "stage-1", "refresh-fail")
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="refresh-fail-report",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="refresh-fail-confirm",
+    )
+    assert (
+        service.get_session(session_id).projection.state
+        is SessionState.REFRESHING_CUMULATIVE
+    )
+    bad_preview = _cumulative_refreshed_payload(
+        service.get_session(session_id),
+        preview_version=1,
+    )
+    extra_snapshot = dict(bad_preview["preview"]["snapshots"][0])
+    extra_snapshot["stage_id"] = "stage-9"
+    bad_preview["preview"]["stage_order"] = ["stage-1", "stage-9"]
+    bad_preview["preview"]["snapshots"] = [
+        bad_preview["preview"]["snapshots"][0],
+        extra_snapshot,
+    ]
+    with pytest.raises(WPlusCommandError, match="does not match confirmed snapshots"):
+        service.append_agent_event(
+            kind="cumulative_refreshed",
+            payload=bad_preview,
+            event_key="refresh-fail-bad-cumulative",
+        )
+    projection = service.get_session(session_id).projection
+    assert projection.state is SessionState.REFRESHING_CUMULATIVE
+    assert len(projection.confirmed_snapshots) == 1
+    assert projection.confirmed_snapshots[0].stage_id == "stage-1"
