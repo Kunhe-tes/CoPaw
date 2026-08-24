@@ -251,14 +251,13 @@ class TenantProviderRepository:
         if source_id:
             source_template_scope = f"default_{source_id}"
             source_template = self.root_path(source_template_scope)
-            if not source_template.exists():
-                default_template = self.root_path("default")
-                if default_template.exists():
-                    source_template.parent.mkdir(parents=True, exist_ok=True)
-                    try:
-                        shutil.copytree(default_template, source_template)
-                    except FileExistsError:
-                        pass
+            default_template = self.root_path("default")
+            if not source_template.exists() and default_template.exists():
+                self._publish_source_template(
+                    source_template_scope,
+                    default_template,
+                    source_template,
+                )
             if source_template.exists() and any(source_template.iterdir()):
                 return source_template
         default_template = self.root_path("default")
@@ -269,6 +268,31 @@ class TenantProviderRepository:
         ):
             return default_template
         return None
+
+    def _publish_source_template(
+        self,
+        source_template_scope: str,
+        default_template: Path,
+        source_template: Path,
+    ) -> None:
+        source_template.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = source_template.parent / ".provider_source_template.lock"
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            self._acquire_lock(lock_file, source_template_scope)
+            try:
+                if source_template.exists():
+                    return
+                temporary_template = source_template.parent / (
+                    f".{source_template.name}.{uuid.uuid4().hex}.tmp"
+                )
+                try:
+                    shutil.copytree(default_template, temporary_template)
+                    os.replace(temporary_template, source_template)
+                except BaseException:
+                    shutil.rmtree(temporary_template, ignore_errors=True)
+                    raise
+            finally:
+                self._release_lock(lock_file)
 
     def _acquire_lock(self, lock_file: Any, scope: str) -> None:
         deadline = time.monotonic() + 30.0

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from swe.config.context import tenant_context
 from swe.providers.provider import ModelInfo
 from swe.providers.models import ModelSlotConfig
 from swe.providers.openai_provider import OpenAIProvider
@@ -389,6 +390,94 @@ def test_repository_waits_for_an_incomplete_template_copy_before_returning(
         provider.model_dump()
     )
     assert repository.read_active_model("tenant-a") == ModelSlotConfig(
+        provider_id="openai",
+        model="gpt-5",
+    )
+
+
+def test_repository_waits_for_source_template_publication_before_seeding_scopes(
+    repository: TenantProviderRepository,
+    provider: OpenAIProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository.write_provider(
+        "default",
+        provider.model_dump(),
+        is_builtin=True,
+    )
+    repository.write_active_model(
+        "default",
+        ModelSlotConfig(provider_id="openai", model="gpt-5"),
+    )
+    default_template = repository.root_path("default")
+    started = threading.Event()
+    release = threading.Event()
+    second_done = threading.Event()
+    original_copytree = shutil.copytree
+
+    def copytree_with_mid_copy_pause(
+        source,
+        destination,
+        *args,
+        **kwargs,
+    ):  # noqa: ANN001
+        if Path(source) != default_template:
+            return original_copytree(source, destination, *args, **kwargs)
+        destination_path = Path(destination)
+        destination_path.mkdir()
+        (destination_path / "builtin").mkdir()
+        shutil.copy2(
+            default_template / "builtin" / "openai.json",
+            destination_path / "builtin" / "openai.json",
+        )
+        started.set()
+        assert release.wait(timeout=2)
+        (destination_path / "custom").mkdir()
+        shutil.copy2(
+            default_template / "active_model.json",
+            destination_path / "active_model.json",
+        )
+        return destination_path
+
+    monkeypatch.setattr(
+        sys.modules[TenantProviderRepository.__module__].shutil,
+        "copytree",
+        copytree_with_mid_copy_pause,
+    )
+
+    def prepare(scope: str, done: threading.Event | None = None) -> None:
+        with tenant_context(source_id="source-a"):
+            repository.prepare_scope(scope)
+        if done is not None:
+            done.set()
+
+    first = threading.Thread(target=lambda: prepare("tenant-a"))
+    second = threading.Thread(
+        target=lambda: prepare("tenant-b", second_done),
+    )
+    first.start()
+    assert started.wait(timeout=2)
+    second.start()
+    second_returned_before_template_published = second_done.wait(timeout=0.1)
+
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert not second_returned_before_template_published
+    assert repository.read_provider("tenant-a", "openai", is_builtin=True) == (
+        provider.model_dump()
+    )
+    assert repository.read_active_model("tenant-a") == ModelSlotConfig(
+        provider_id="openai",
+        model="gpt-5",
+    )
+    assert repository.read_provider("tenant-b", "openai", is_builtin=True) == (
+        provider.model_dump()
+    )
+    assert repository.read_active_model("tenant-b") == ModelSlotConfig(
         provider_id="openai",
         model="gpt-5",
     )
