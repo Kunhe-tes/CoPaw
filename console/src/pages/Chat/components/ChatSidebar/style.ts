@@ -8,10 +8,16 @@ export default createGlobalStyle`
   flex-shrink: 0;
   display: flex;
   flex-direction: row;
+  width: ${DESIGN_TOKENS.sidebarWidth}px;
   height: 100%;
+  overflow: hidden;
+  transition: width 200ms cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .chat-sidebar-wrapper--collapsed {
+  width: ${DESIGN_TOKENS.toolbarWidth}px;
+  overflow: visible;
+
   .chat-sidebar-collapse-toggle {
     position: absolute;
     top: ${DESIGN_TOKENS.toolbarIconPaddingTop}px;
@@ -24,6 +30,12 @@ export default createGlobalStyle`
 
   .collapsed-toolbar-icons {
     padding-top: 76px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-sidebar-wrapper {
+    transition: none;
   }
 }
 
