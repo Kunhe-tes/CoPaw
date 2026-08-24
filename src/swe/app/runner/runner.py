@@ -4039,76 +4039,22 @@ class AgentRunner(Runner):
         with runtime_invocation_claims_context(
             chat_id=chat.id if chat is not None else None,
         ):
-            from .context_references import build_context_reference_directives
-            from .skill_selection import (
-                SkillUseDirective,
-                build_skill_use_directives,
-            )
-            from ..scenario_preset.runtime import (
-                scenario_snapshot_skill_directives,
-                scenario_snapshot_skill_names,
-            )
-
             scenario_snapshot = (
-                _request_scenario_preset_snapshot(request)
-                if chat is not None
-                else None
-            )
-            inputs.agent_config = _agent_config_with_scenario_mcp(
-                inputs.agent_config,
-                scenario_snapshot,
-                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                chat_id=chat.id if chat is not None else "",
-            )
-
-            context_reference_directives = (
-                await build_context_reference_directives(
+                await query_runtime.select_runtime_context_directives(
+                    inputs,
+                    request,
                     workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                    channel=inputs.channel,
-                    agent_config=inputs.agent_config,
-                    references=_request_context_references(request),
+                    chat=chat,
+                    request_scenario_snapshot=(
+                        _request_scenario_preset_snapshot
+                    ),
+                    with_scenario_mcp=_agent_config_with_scenario_mcp,
+                    request_context_references=_request_context_references,
+                    request_selected_skill_names=(
+                        _request_selected_skill_names
+                    ),
                 )
             )
-            selected_context_skill_names = {
-                directive.name
-                for directive in context_reference_directives
-                if isinstance(directive, SkillUseDirective)
-            }
-            selected_skill_directives = build_skill_use_directives(
-                workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                channel=inputs.channel,
-                selected_skill_names=[
-                    name
-                    for name in [
-                        *_request_selected_skill_names(request),
-                        *scenario_snapshot_skill_names(scenario_snapshot),
-                    ]
-                    if name not in selected_context_skill_names
-                ],
-            )
-            selected_skill_directives.extend(
-                (
-                    scenario_snapshot_skill_directives(
-                        scenario_snapshot,
-                        workspace_dir=Path(self.workspace_dir or WORKING_DIR),
-                        chat_id=chat.id,
-                    )
-                    if scenario_snapshot is not None and chat is not None
-                    else []
-                ),
-            )
-            all_context_directives = [
-                *selected_skill_directives,
-                *context_reference_directives,
-            ]
-            inputs.selected_skill_directives = [
-                directive
-                for directive in all_context_directives
-                if isinstance(directive, SkillUseDirective)
-            ]
-            inputs.selected_context_directives = [
-                directive.render() for directive in all_context_directives
-            ]
         query_runtime.build_runtime_mcp_clients(
             mcp_clients,
             agent_config=inputs.agent_config,

@@ -59,6 +59,75 @@ def build_runtime_mcp_clients(
     )
 
 
+async def select_runtime_context_directives(
+    inputs: _QueryRuntimeInputs,
+    request: AgentRequest,
+    *,
+    workspace_dir: Any,
+    chat: Any,
+    request_scenario_snapshot: Any,
+    with_scenario_mcp: Any,
+    request_context_references: Any,
+    request_selected_skill_names: Any,
+) -> Any:
+    """Resolve scenario, reference, and explicit Skill directives for a chat."""
+    from .context_references import build_context_reference_directives
+    from .skill_selection import SkillUseDirective, build_skill_use_directives
+    from ..scenario_preset.runtime import (
+        scenario_snapshot_skill_directives,
+        scenario_snapshot_skill_names,
+    )
+
+    scenario_snapshot = request_scenario_snapshot(request) if chat else None
+    inputs.agent_config = with_scenario_mcp(
+        inputs.agent_config,
+        scenario_snapshot,
+        workspace_dir=workspace_dir,
+        chat_id=chat.id if chat else "",
+    )
+    reference_directives = await build_context_reference_directives(
+        workspace_dir=workspace_dir,
+        channel=inputs.channel,
+        agent_config=inputs.agent_config,
+        references=request_context_references(request),
+    )
+    reference_skill_names = {
+        directive.name
+        for directive in reference_directives
+        if isinstance(directive, SkillUseDirective)
+    }
+    selected_directives = build_skill_use_directives(
+        workspace_dir=workspace_dir,
+        channel=inputs.channel,
+        selected_skill_names=[
+            name
+            for name in [
+                *request_selected_skill_names(request),
+                *scenario_snapshot_skill_names(scenario_snapshot),
+            ]
+            if name not in reference_skill_names
+        ],
+    )
+    if scenario_snapshot is not None and chat is not None:
+        selected_directives.extend(
+            scenario_snapshot_skill_directives(
+                scenario_snapshot,
+                workspace_dir=workspace_dir,
+                chat_id=chat.id,
+            ),
+        )
+    all_directives = [*selected_directives, *reference_directives]
+    inputs.selected_skill_directives = [
+        directive
+        for directive in all_directives
+        if isinstance(directive, SkillUseDirective)
+    ]
+    inputs.selected_context_directives = [
+        directive.render() for directive in all_directives
+    ]
+    return scenario_snapshot
+
+
 async def load_selected_skill_hooks(
     *,
     inputs: _QueryRuntimeInputs,
