@@ -21,6 +21,15 @@ from swe.providers.provider_runtime_cache import ProviderRuntimeCache
 from swe.providers.tenant_provider_repository import TenantProviderRepository
 
 
+def test_provider_services_exports_the_catalog_service() -> None:
+    from swe.providers.provider_catalog_service import ProviderCatalogService
+    from swe.providers.provider_services import (
+        ProviderCatalogService as Legacy,
+    )
+
+    assert Legacy is ProviderCatalogService
+
+
 @pytest.fixture
 def provider() -> OpenAIProvider:
     return OpenAIProvider(

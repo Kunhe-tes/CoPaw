@@ -7,6 +7,7 @@ __all__ = [
     "ActiveModelsInfo",
     "ModelInfo",
     "Provider",
+    "ProviderCatalogService",
     "ProviderManager",
     "ProviderInfo",
 ]
@@ -27,6 +28,12 @@ def __getattr__(name: str):
             "ActiveModelsInfo": _ActiveModelsInfo,
         }
         return exports[name]
+    if name == "ProviderCatalogService":
+        from .provider_catalog_service import (
+            ProviderCatalogService as _ProviderCatalogService,
+        )
+
+        return _ProviderCatalogService
     if name in {"ModelInfo", "Provider", "ProviderInfo"}:
         from .provider import (
             ModelInfo as _ModelInfo,
