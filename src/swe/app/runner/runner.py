@@ -4109,20 +4109,20 @@ class AgentRunner(Runner):
             inputs.selected_context_directives = [
                 directive.render() for directive in all_context_directives
             ]
-        mcp_clients.extend(
-            _build_lazy_mcp_clients(
-                inputs.agent_config.mcp,
-                tenant_id=self.tenant_id,
-                user_id=inputs.user_id,
-                passthrough_headers=inputs.passthrough_headers or None,
-                session_id=inputs.session_id,
-                chat_id=chat.id if chat is not None else None,
-                trace_id=getattr(request, "trace_id", None),
-                frozen_tools_by_key=_scenario_snapshot_frozen_mcp_tools(
-                    scenario_snapshot,
-                    inputs.agent_config,
-                ),
+        query_runtime.build_runtime_mcp_clients(
+            mcp_clients,
+            agent_config=inputs.agent_config,
+            tenant_id=self.tenant_id,
+            user_id=inputs.user_id,
+            passthrough_headers=inputs.passthrough_headers,
+            session_id=inputs.session_id,
+            chat_id=chat.id if chat is not None else None,
+            trace_id=getattr(request, "trace_id", None),
+            frozen_tools_by_key=_scenario_snapshot_frozen_mcp_tools(
+                scenario_snapshot,
+                inputs.agent_config,
             ),
+            build_lazy_clients=_build_lazy_mcp_clients,
         )
         env_context, block_response = await self._emit_session_start_hook(
             request=request,

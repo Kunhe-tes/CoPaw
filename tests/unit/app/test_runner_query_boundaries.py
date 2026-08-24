@@ -521,6 +521,44 @@ async def test_runtime_module_loads_selected_skill_hooks_after_start(
     assert loaded == ["skill-1"]
 
 
+def test_runtime_module_builds_mcp_clients_with_request_scope() -> None:
+    from swe.app.runner import query_runtime
+
+    calls: list[dict[str, object]] = []
+    clients: list[object] = []
+
+    def build_clients(mcp_config, **kwargs):
+        assert mcp_config == "config"
+        calls.append(kwargs)
+        return ["mcp-1"]
+
+    query_runtime.build_runtime_mcp_clients(
+        clients,
+        agent_config=SimpleNamespace(mcp="config"),
+        tenant_id="tenant-1",
+        user_id="user-1",
+        passthrough_headers={"x-request-id": "request-1"},
+        session_id="session-1",
+        chat_id="chat-1",
+        trace_id="trace-1",
+        frozen_tools_by_key={"mcp-1": []},
+        build_lazy_clients=build_clients,
+    )
+
+    assert clients == ["mcp-1"]
+    assert calls == [
+        {
+            "tenant_id": "tenant-1",
+            "user_id": "user-1",
+            "passthrough_headers": {"x-request-id": "request-1"},
+            "session_id": "session-1",
+            "chat_id": "chat-1",
+            "trace_id": "trace-1",
+            "frozen_tools_by_key": {"mcp-1": []},
+        },
+    ]
+
+
 @pytest.mark.asyncio
 async def test_blocked_runtime_cleanup_updates_chat_before_closing_mcp(
     monkeypatch,

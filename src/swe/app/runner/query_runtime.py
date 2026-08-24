@@ -31,6 +31,34 @@ from .query_contracts import (
 logger = logging.getLogger(__name__)
 
 
+def build_runtime_mcp_clients(
+    clients: list[Any],
+    *,
+    agent_config: Any,
+    tenant_id: str | None,
+    user_id: str,
+    passthrough_headers: dict[str, str],
+    session_id: str,
+    chat_id: str | None,
+    trace_id: str | None,
+    frozen_tools_by_key: dict[str, list[dict[str, Any]]],
+    build_lazy_clients: Any,
+) -> None:
+    """Attach this runtime's request-scoped lazy MCP clients."""
+    clients.extend(
+        build_lazy_clients(
+            agent_config.mcp,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            passthrough_headers=passthrough_headers or None,
+            session_id=session_id,
+            chat_id=chat_id,
+            trace_id=trace_id,
+            frozen_tools_by_key=frozen_tools_by_key,
+        ),
+    )
+
+
 async def load_selected_skill_hooks(
     *,
     inputs: _QueryRuntimeInputs,
