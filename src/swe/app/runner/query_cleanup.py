@@ -5,9 +5,80 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, Protocol
 
 from .query_contracts import _QueryRuntime
+
+logger = logging.getLogger(__name__)
+
+
+async def cleanup_mcp_clients(clients: list[Any]) -> None:
+    """Close every MCP client created for one query."""
+    for client in clients:
+        try:
+            await client.close()
+        except Exception as exc:
+            logger.warning("Error closing MCP client: %s", exc)
+
+
+async def cleanup_blocked_runtime_start(
+    owner: Any,
+    runtime_start: Any,
+    *,
+    cleanup_timeout: float,
+    cleanup_mcp: Any | None = None,
+) -> None:
+    """Release chat and MCP resources created before a blocking start Hook."""
+    if (
+        runtime_start is None
+        or runtime_start.block_response is None
+        or runtime_start.runtime is not None
+    ):
+        return
+    session_id = runtime_start.blocked_session_id
+    chat = runtime_start.blocked_chat
+    if owner._chat_manager is not None and chat is not None:
+        try:
+            await asyncio.wait_for(
+                owner._chat_manager.update_chat(chat),
+                timeout=cleanup_timeout,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "Runner finally: blocked chat update timed out "
+                "(session_id=%s, timeout=%.0fs)",
+                session_id,
+                cleanup_timeout,
+            )
+        except asyncio.CancelledError:
+            logger.debug(
+                "Runner finally: blocked chat update cancelled "
+                "(session_id=%s)",
+                session_id,
+            )
+    mcp_clients = runtime_start.blocked_mcp_clients or []
+    if not mcp_clients:
+        return
+    if cleanup_mcp is None:
+        cleanup_mcp = cleanup_mcp_clients
+    try:
+        await asyncio.wait_for(
+            cleanup_mcp(mcp_clients),
+            timeout=cleanup_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Runner finally: blocked MCP cleanup timed out "
+            "(session_id=%s, timeout=%.0fs)",
+            session_id,
+            cleanup_timeout,
+        )
+    except asyncio.CancelledError:
+        logger.debug(
+            "Runner finally: blocked MCP cleanup cancelled " "(session_id=%s)",
+            session_id,
+        )
 
 
 class QueryCleanupOwner(Protocol):

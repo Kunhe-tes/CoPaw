@@ -1215,19 +1215,6 @@ async def _create_mcp_client_with_headers(
     return client
 
 
-async def _cleanup_mcp_clients(clients: list[Any]) -> None:
-    """Clean up all MCP clients created for a request.
-
-    Args:
-        clients: List of MCP client instances to close
-    """
-    for client in clients:
-        try:
-            await client.close()
-        except Exception as e:
-            logger.warning(f"Error closing MCP client: {e}")
-
-
 def _consume_background_task_exception(task: asyncio.Task[Any]) -> None:
     """取回后台任务异常，避免未消费异常泄露到事件循环。"""
     if task.cancelled():
@@ -1236,6 +1223,11 @@ def _consume_background_task_exception(task: asyncio.Task[Any]) -> None:
         task.exception()
     except asyncio.CancelledError:
         return
+
+
+async def _cleanup_mcp_clients(clients: list[Any]) -> None:
+    """Compatibility Adapter for request-scoped MCP cleanup."""
+    await query_cleanup.cleanup_mcp_clients(clients)
 
 
 def _extract_text_from_blocks(blocks: list) -> str:
@@ -4866,57 +4858,12 @@ class AgentRunner(Runner):
         self,
         runtime_start: _RuntimeStartResult | None,
     ) -> None:
-        """清理 SESSION_START hook 阻断前已经创建的资源。"""
-        if (
-            runtime_start is None
-            or runtime_start.block_response is None
-            or runtime_start.runtime is not None
-        ):
-            return
-
-        session_id = runtime_start.blocked_session_id
-        chat = runtime_start.blocked_chat
-        if self._chat_manager is not None and chat is not None:
-            try:
-                await asyncio.wait_for(
-                    self._chat_manager.update_chat(chat),
-                    timeout=QUERY_CLEANUP_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Runner finally: blocked chat update timed out "
-                    "(session_id=%s, timeout=%.0fs)",
-                    session_id,
-                    QUERY_CLEANUP_TIMEOUT,
-                )
-            except asyncio.CancelledError:
-                logger.debug(
-                    "Runner finally: blocked chat update cancelled "
-                    "(session_id=%s)",
-                    session_id,
-                )
-
-        mcp_clients = runtime_start.blocked_mcp_clients or []
-        if not mcp_clients:
-            return
-        try:
-            await asyncio.wait_for(
-                _cleanup_mcp_clients(mcp_clients),
-                timeout=QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Runner finally: blocked MCP cleanup timed out "
-                "(session_id=%s, timeout=%.0fs)",
-                session_id,
-                QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.CancelledError:
-            logger.debug(
-                "Runner finally: blocked MCP cleanup cancelled "
-                "(session_id=%s)",
-                session_id,
-            )
+        await query_cleanup.cleanup_blocked_runtime_start(
+            self,
+            runtime_start,
+            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
+            cleanup_mcp=_cleanup_mcp_clients,
+        )
 
     async def _store_qa_content_if_needed(
         self,

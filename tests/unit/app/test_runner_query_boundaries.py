@@ -318,6 +318,43 @@ async def test_cleanup_collaborator_waits_for_every_task_then_raises_first_error
 
 
 @pytest.mark.asyncio
+async def test_blocked_runtime_cleanup_updates_chat_before_closing_mcp(
+    monkeypatch,
+) -> None:
+    from swe.app.runner import query_cleanup
+
+    events: list[str] = []
+
+    async def update_chat(chat):
+        assert chat == "chat-1"
+        events.append("chat")
+
+    async def close_mcp(clients):
+        assert clients == ["mcp-1"]
+        events.append("mcp")
+
+    monkeypatch.setattr(query_cleanup, "cleanup_mcp_clients", close_mcp)
+    owner = SimpleNamespace(
+        _chat_manager=SimpleNamespace(update_chat=update_chat),
+    )
+    runtime_start = SimpleNamespace(
+        block_response=Msg(name="Friday", role="assistant", content="blocked"),
+        runtime=None,
+        blocked_session_id="session-1",
+        blocked_chat="chat-1",
+        blocked_mcp_clients=["mcp-1"],
+    )
+
+    await query_cleanup.cleanup_blocked_runtime_start(
+        owner,
+        runtime_start,
+        cleanup_timeout=1.0,
+    )
+
+    assert events == ["chat", "mcp"]
+
+
+@pytest.mark.asyncio
 async def test_retry_backoff_precedes_terminal_error_trace_after_exhaustion(
     monkeypatch,
     tmp_path,
@@ -794,7 +831,7 @@ async def test_session_start_block_cleans_previously_created_chat_and_mcp(
         update_chat=update_chat,
     )
     monkeypatch.setattr(
-        "swe.app.runner.runner._cleanup_mcp_clients",
+        "swe.app.runner.query_cleanup.cleanup_mcp_clients",
         cleanup_mcp,
     )
     monkeypatch.setattr(
@@ -928,7 +965,7 @@ async def test_finally_cleans_each_query_resource(
     runner.save_job_session_state = save_job_session_state
     runner._chat_manager = SimpleNamespace(update_chat=update_chat)
     monkeypatch.setattr(
-        "swe.app.runner.runner._cleanup_mcp_clients",
+        "swe.app.runner.query_cleanup.cleanup_mcp_clients",
         cleanup_mcp,
     )
     runtime = _QueryRuntime(
