@@ -318,6 +318,45 @@ async def test_cleanup_collaborator_waits_for_every_task_then_raises_first_error
 
 
 @pytest.mark.asyncio
+async def test_cleanup_module_saves_state_with_enabled_hook_overlay() -> None:
+    from swe.app.runner import query_cleanup
+
+    saved: list[tuple[Any, str, bool, str, Any]] = []
+
+    async def save_state(
+        agent,
+        session_id,
+        skip_history,
+        user_id,
+        *,
+        hook_overlay,
+    ) -> None:
+        saved.append((agent, session_id, skip_history, user_id, hook_overlay))
+
+    overlay = SimpleNamespace()
+    runtime = SimpleNamespace(
+        tenant_hooks=SimpleNamespace(enabled=True),
+        agent_config=SimpleNamespace(),
+        hook_overlay=overlay,
+        agent="agent-1",
+        session_id="session-1",
+        skip_history=False,
+        user_id="user-1",
+    )
+    owner = SimpleNamespace(save_job_session_state=save_state)
+
+    await query_cleanup.save_state_during_cleanup(
+        owner,
+        runtime=runtime,
+        session_state_loaded=True,
+        cleanup_timeout=1.0,
+        hook_config_enabled=lambda *_args: True,
+    )
+
+    assert saved == [("agent-1", "session-1", False, "user-1", overlay)]
+
+
+@pytest.mark.asyncio
 async def test_blocked_runtime_cleanup_updates_chat_before_closing_mcp(
     monkeypatch,
 ) -> None:

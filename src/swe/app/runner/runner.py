@@ -4712,128 +4712,42 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime | None,
         session_state_loaded: bool,
     ) -> None:
-        """在 finally 阶段保存 session state，并限制单步耗时。"""
-        logger.info(
-            "_save_state_during_cleanup: runtime=%s session_state_loaded=%s",
-            runtime is not None,
-            session_state_loaded,
+        await query_cleanup.save_state_during_cleanup(
+            self,
+            runtime=runtime,
+            session_state_loaded=session_state_loaded,
+            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
+            hook_config_enabled=_hook_config_enabled,
         )
-        if runtime is None or not session_state_loaded:
-            return
-
-        hook_overlay = None
-        if _hook_config_enabled(
-            runtime.tenant_hooks,
-            runtime.agent_config,
-            runtime.hook_overlay,
-        ):
-            hook_overlay = runtime.hook_overlay
-        try:
-            await asyncio.wait_for(
-                self.save_job_session_state(
-                    runtime.agent,
-                    runtime.session_id,
-                    runtime.skip_history,
-                    runtime.user_id,
-                    hook_overlay=hook_overlay,
-                ),
-                timeout=QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Runner finally: session state save timed out "
-                "(session_id=%s, timeout=%.0fs)",
-                runtime.session_id,
-                QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.CancelledError:
-            logger.debug(
-                "Runner finally: session state save cancelled (session_id=%s)",
-                runtime.session_id,
-            )
 
     async def _update_chat_during_cleanup(
         self,
         runtime: _QueryRuntime | None,
     ) -> None:
-        """在 finally 阶段写回 chat 状态。"""
-        if (
-            runtime is None
-            or self._chat_manager is None
-            or runtime.chat is None
-        ):
-            return
-
-        try:
-            await asyncio.wait_for(
-                self._chat_manager.update_chat(runtime.chat),
-                timeout=QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Runner finally: chat update timed out "
-                "(session_id=%s, timeout=%.0fs)",
-                runtime.session_id,
-                QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.CancelledError:
-            logger.debug(
-                "Runner finally: chat update cancelled (session_id=%s)",
-                runtime.session_id,
-            )
+        await query_cleanup.update_chat_during_cleanup(
+            self,
+            runtime,
+            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
+        )
 
     async def _cleanup_mcp_during_cleanup(
         self,
         runtime: _QueryRuntime | None,
     ) -> None:
-        """在 finally 阶段关闭本轮创建的 MCP 客户端。"""
-        if runtime is None or not runtime.mcp_clients:
-            return
-
-        try:
-            await asyncio.wait_for(
-                _cleanup_mcp_clients(runtime.mcp_clients),
-                timeout=QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Runner finally: MCP cleanup timed out "
-                "(session_id=%s, timeout=%.0fs)",
-                runtime.session_id,
-                QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.CancelledError:
-            logger.debug(
-                "Runner finally: MCP cleanup cancelled (session_id=%s)",
-                runtime.session_id,
-            )
+        await query_cleanup.cleanup_runtime_mcp(
+            runtime,
+            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
+            cleanup_mcp=_cleanup_mcp_clients,
+        )
 
     async def _end_skill_detector_during_cleanup(
         self,
         runtime: _QueryRuntime | None,
     ) -> None:
-        """在 finally 阶段结束会话级技能探测器。"""
-        if runtime is None or runtime.session_skill_detector is None:
-            return
-
-        try:
-            await asyncio.wait_for(
-                runtime.session_skill_detector.on_reasoning_end(),
-                timeout=QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.TimeoutError:
-            logger.warning(
-                "Runner finally: skill detector cleanup timed out "
-                "(session_id=%s, timeout=%.0fs)",
-                runtime.session_id,
-                QUERY_CLEANUP_TIMEOUT,
-            )
-        except asyncio.CancelledError:
-            logger.debug(
-                "Runner finally: skill detector cleanup cancelled "
-                "(session_id=%s)",
-                runtime.session_id,
-            )
+        await query_cleanup.end_skill_detector_during_cleanup(
+            runtime,
+            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
+        )
 
     async def _cleanup_query_resources(
         self,

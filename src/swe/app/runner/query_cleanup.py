@@ -81,6 +81,138 @@ async def cleanup_blocked_runtime_start(
         )
 
 
+async def save_state_during_cleanup(
+    owner: Any,
+    *,
+    runtime: _QueryRuntime | None,
+    session_state_loaded: bool,
+    cleanup_timeout: float,
+    hook_config_enabled: Any,
+) -> None:
+    """Persist session state during query cleanup within the configured limit."""
+    logger.info(
+        "_save_state_during_cleanup: runtime=%s session_state_loaded=%s",
+        runtime is not None,
+        session_state_loaded,
+    )
+    if runtime is None or not session_state_loaded:
+        return
+    hook_overlay = None
+    if hook_config_enabled(
+        runtime.tenant_hooks,
+        runtime.agent_config,
+        runtime.hook_overlay,
+    ):
+        hook_overlay = runtime.hook_overlay
+    try:
+        await asyncio.wait_for(
+            owner.save_job_session_state(
+                runtime.agent,
+                runtime.session_id,
+                runtime.skip_history,
+                runtime.user_id,
+                hook_overlay=hook_overlay,
+            ),
+            timeout=cleanup_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Runner finally: session state save timed out "
+            "(session_id=%s, timeout=%.0fs)",
+            runtime.session_id,
+            cleanup_timeout,
+        )
+    except asyncio.CancelledError:
+        logger.debug(
+            "Runner finally: session state save cancelled (session_id=%s)",
+            runtime.session_id,
+        )
+
+
+async def update_chat_during_cleanup(
+    owner: Any,
+    runtime: _QueryRuntime | None,
+    *,
+    cleanup_timeout: float,
+) -> None:
+    """Write a query chat record back during cleanup."""
+    if runtime is None or owner._chat_manager is None or runtime.chat is None:
+        return
+    try:
+        await asyncio.wait_for(
+            owner._chat_manager.update_chat(runtime.chat),
+            timeout=cleanup_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Runner finally: chat update timed out "
+            "(session_id=%s, timeout=%.0fs)",
+            runtime.session_id,
+            cleanup_timeout,
+        )
+    except asyncio.CancelledError:
+        logger.debug(
+            "Runner finally: chat update cancelled (session_id=%s)",
+            runtime.session_id,
+        )
+
+
+async def cleanup_runtime_mcp(
+    runtime: _QueryRuntime | None,
+    *,
+    cleanup_timeout: float,
+    cleanup_mcp: Any = cleanup_mcp_clients,
+) -> None:
+    """Close MCP clients created for a running query."""
+    if runtime is None or not runtime.mcp_clients:
+        return
+    try:
+        await asyncio.wait_for(
+            cleanup_mcp(runtime.mcp_clients),
+            timeout=cleanup_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Runner finally: MCP cleanup timed out "
+            "(session_id=%s, timeout=%.0fs)",
+            runtime.session_id,
+            cleanup_timeout,
+        )
+    except asyncio.CancelledError:
+        logger.debug(
+            "Runner finally: MCP cleanup cancelled (session_id=%s)",
+            runtime.session_id,
+        )
+
+
+async def end_skill_detector_during_cleanup(
+    runtime: _QueryRuntime | None,
+    *,
+    cleanup_timeout: float,
+) -> None:
+    """End the session-level skill detector for a completed query."""
+    if runtime is None or runtime.session_skill_detector is None:
+        return
+    try:
+        await asyncio.wait_for(
+            runtime.session_skill_detector.on_reasoning_end(),
+            timeout=cleanup_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(
+            "Runner finally: skill detector cleanup timed out "
+            "(session_id=%s, timeout=%.0fs)",
+            runtime.session_id,
+            cleanup_timeout,
+        )
+    except asyncio.CancelledError:
+        logger.debug(
+            "Runner finally: skill detector cleanup cancelled "
+            "(session_id=%s)",
+            runtime.session_id,
+        )
+
+
 class QueryCleanupOwner(Protocol):
     """The ordered cleanup operations owned by ``AgentRunner``."""
 
