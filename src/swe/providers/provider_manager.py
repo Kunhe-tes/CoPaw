@@ -251,18 +251,18 @@ class ProviderManager:
             tenant_providers_dir: Target directory for provider storage.
         """
         repository = TenantProviderRepository(SECRET_DIR)
-        repository._seed_scope(
-            tenant_id,
-            tenant_providers_dir,
-        )
-        for path in (
-            tenant_providers_dir,
-            tenant_providers_dir / "builtin",
-            tenant_providers_dir / "custom",
-        ):
-            path.mkdir(parents=True, exist_ok=True)
-            repository._restrict_directory_permissions(path)
         if os.environ.get("SWE_ENABLE_LEGACY_PROVIDER_STORAGE") != "1":
+            repository._seed_scope(
+                tenant_id,
+                tenant_providers_dir,
+            )
+            for path in (
+                tenant_providers_dir,
+                tenant_providers_dir / "builtin",
+                tenant_providers_dir / "custom",
+            ):
+                path.mkdir(parents=True, exist_ok=True)
+                repository._restrict_directory_permissions(path)
             return
 
         from ..config.context import get_current_source_id
@@ -509,8 +509,10 @@ class ProviderManager:
                 tenant_id,
             )
         )
-        TenantProviderRepository(SECRET_DIR).prepare_scope(effective_tenant_id)
         if os.environ.get("SWE_ENABLE_LEGACY_PROVIDER_STORAGE") != "1":
+            TenantProviderRepository(SECRET_DIR).prepare_scope(
+                effective_tenant_id,
+            )
             return
         tenant_providers_dir = ProviderManager._get_tenant_root_path(
             effective_tenant_id,

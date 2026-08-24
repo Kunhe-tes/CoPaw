@@ -29,6 +29,7 @@ class ProviderRuntimeCache:
         self._lock = asyncio.Lock()
         self._instances: dict[str, Any] = {}
         self._instance_inflight: dict[str, concurrent.futures.Future[Any]] = {}
+        self._instance_reset_epoch = 0
         self._instances_lock = threading.Lock()
         self._init_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=8,
@@ -84,10 +85,13 @@ class ProviderRuntimeCache:
             if future is not None and not future.done():
                 return future
             self._instance_inflight.pop(scope, None)
+            reset_epoch = self._instance_reset_epoch
 
             def build_and_cache() -> T:
                 created = build(scope)
                 with self._instances_lock:
+                    if self._instance_reset_epoch != reset_epoch:
+                        return created
                     return self._instances.setdefault(scope, created)
 
             future = self._init_executor.submit(build_and_cache)
@@ -109,6 +113,7 @@ class ProviderRuntimeCache:
     def reset_instances(self) -> None:
         """Clear shared instances and cancel pending startup work."""
         with self._instances_lock:
+            self._instance_reset_epoch += 1
             self._instances.clear()
             inflight = list(self._instance_inflight.values())
             self._instance_inflight.clear()

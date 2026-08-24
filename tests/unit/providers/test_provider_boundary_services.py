@@ -6,7 +6,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
+import sys
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -312,6 +315,107 @@ def test_repository_concurrent_scope_seed_produces_complete_template_copy(
     )
 
 
+def test_repository_waits_for_an_incomplete_template_copy_before_returning(
+    repository: TenantProviderRepository,
+    provider: OpenAIProvider,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository.write_provider(
+        "default",
+        provider.model_dump(),
+        is_builtin=True,
+    )
+    repository.write_active_model(
+        "default",
+        ModelSlotConfig(provider_id="openai", model="gpt-5"),
+    )
+    template = repository.root_path("default")
+    started = threading.Event()
+    release = threading.Event()
+    second_done = threading.Event()
+    original_copytree = shutil.copytree
+
+    def copytree_with_mid_copy_pause(
+        source,
+        destination,
+        *args,
+        **kwargs,
+    ):  # noqa: ANN001
+        if Path(source) != template:
+            return original_copytree(source, destination, *args, **kwargs)
+        destination_path = Path(destination)
+        destination_path.mkdir()
+        (destination_path / "builtin").mkdir()
+        shutil.copy2(
+            template / "builtin" / "openai.json",
+            destination_path / "builtin" / "openai.json",
+        )
+        started.set()
+        assert release.wait(timeout=2)
+        (destination_path / "custom").mkdir()
+        shutil.copy2(
+            template / "active_model.json",
+            destination_path / "active_model.json",
+        )
+        return destination_path
+
+    monkeypatch.setattr(
+        sys.modules[TenantProviderRepository.__module__].shutil,
+        "copytree",
+        copytree_with_mid_copy_pause,
+    )
+
+    first = threading.Thread(
+        target=lambda: repository.prepare_scope("tenant-a"),
+    )
+
+    def prepare_second_scope() -> None:
+        repository.prepare_scope("tenant-a")
+        second_done.set()
+
+    second = threading.Thread(target=prepare_second_scope)
+    first.start()
+    assert started.wait(timeout=2)
+    second.start()
+    assert not second_done.wait(timeout=0.1)
+
+    release.set()
+    first.join(timeout=2)
+    second.join(timeout=2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert repository.read_provider("tenant-a", "openai", is_builtin=True) == (
+        provider.model_dump()
+    )
+    assert repository.read_active_model("tenant-a") == ModelSlotConfig(
+        provider_id="openai",
+        model="gpt-5",
+    )
+
+
+def test_runtime_cache_reset_does_not_repopulate_after_running_build_completes() -> (
+    None
+):
+    cache = ProviderRuntimeCache()
+    started = threading.Event()
+    release = threading.Event()
+
+    def build(scope: str) -> str:
+        started.set()
+        assert release.wait(timeout=2)
+        return f"{scope}-state"
+
+    future = cache.get_or_start_instance("scope-a", build)
+    assert started.wait(timeout=2)
+    cache.reset_instances()
+    release.set()
+
+    assert future.result(timeout=2) == "scope-a-state"
+    assert cache.instances == {}
+    assert cache.instance_inflight == {}
+
+
 def test_repository_replaces_provider_json_from_a_same_directory_temp_file(
     repository: TenantProviderRepository,
     provider: OpenAIProvider,
@@ -332,8 +436,13 @@ def test_repository_replaces_provider_json_from_a_same_directory_temp_file(
         is_builtin=True,
     )
 
-    assert len(replacements) == 1
-    temporary_source, replacement_destination = replacements[0]
+    provider_replacements = [
+        replacement
+        for replacement in replacements
+        if replacement[1] == provider_path
+    ]
+    assert len(provider_replacements) == 1
+    temporary_source, replacement_destination = provider_replacements[0]
     assert replacement_destination == provider_path
     temporary_path = os.fspath(temporary_source)
     assert os.path.dirname(temporary_path) == os.fspath(provider_path.parent)

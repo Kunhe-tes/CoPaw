@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 import types
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -370,6 +371,42 @@ def test_ensure_storage_preserves_explicit_scoped_target_tenant(
 
     assert (isolated_secret_dir / target_scope_id / "providers").exists()
     assert not (isolated_secret_dir / current_scope_id / "providers").exists()
+
+
+def test_ensure_storage_uses_legacy_initializer_before_repository_prepare(
+    isolated_secret_dir,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[Path, str, Path]] = []
+
+    def legacy_initialize(lock_file, tenant_id, provider_dir):  # noqa: ANN001
+        observed.append((lock_file, tenant_id, provider_dir))
+        provider_dir.mkdir(parents=True)
+
+    def repository_prepare_must_not_run(self, scope):  # noqa: ANN001
+        raise AssertionError(f"new repository prepare ran for {scope}")
+
+    monkeypatch.setenv("SWE_ENABLE_LEGACY_PROVIDER_STORAGE", "1")
+    monkeypatch.setattr(
+        provider_manager_module.TenantProviderRepository,
+        "prepare_scope",
+        repository_prepare_must_not_run,
+    )
+    monkeypatch.setattr(
+        ProviderManager,
+        "_initialize_with_lock",
+        staticmethod(legacy_initialize),
+    )
+
+    ProviderManager.ensure_tenant_provider_storage("tenant-a")
+
+    assert observed == [
+        (
+            isolated_secret_dir / "tenant-a" / ".provider_init.lock",
+            "tenant-a",
+            isolated_secret_dir / "tenant-a" / "providers",
+        ),
+    ]
 
 
 def test_provider_storage_keeps_legacy_scope_directory_untouched(

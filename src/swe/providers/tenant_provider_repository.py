@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -210,15 +211,29 @@ class TenantProviderRepository:
             return False
 
     def _ensure_scope(self, scope: str, root: Path) -> None:
-        if root.exists():
-            return
         root.parent.mkdir(parents=True, exist_ok=True)
         lock_path = root.parent / ".provider_init.lock"
         with lock_path.open("a+", encoding="utf-8") as lock_file:
             self._acquire_lock(lock_file, scope)
             try:
-                if not root.exists():
-                    self._seed_scope(scope, root)
+                if root.exists():
+                    return
+                temporary_root = root.parent / (
+                    f".{root.name}.{uuid.uuid4().hex}.tmp"
+                )
+                try:
+                    self._seed_scope(scope, temporary_root)
+                    for path in (
+                        temporary_root,
+                        temporary_root / "builtin",
+                        temporary_root / "custom",
+                    ):
+                        path.mkdir(parents=True, exist_ok=True)
+                        self._restrict_directory_permissions(path)
+                    os.replace(temporary_root, root)
+                except BaseException:
+                    shutil.rmtree(temporary_root, ignore_errors=True)
+                    raise
             finally:
                 self._release_lock(lock_file)
 
