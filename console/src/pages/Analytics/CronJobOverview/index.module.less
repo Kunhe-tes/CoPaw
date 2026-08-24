@@ -65,9 +65,9 @@
 .header h1 {
   margin: 0;
   color: #111936;
-  font-size: 28px;
+  font-size: 22px;
   line-height: 1.2;
-  font-weight: 800;
+  font-weight: 700;
 }
 
 .toolbar {
@@ -181,6 +181,17 @@
   flex-direction: column;
   justify-content: space-between;
   padding: 16px 16px 14px;
+}
+
+.listFootnote {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 92px;
+  padding: 28px 0;
+  color: #94a3b8;
+  font-size: 14px;
+  text-align: center;
 }
 
 .reportSubGrid {
@@ -456,6 +467,44 @@
   overflow: hidden;
 }
 
+.sortableHeader {
+  display: inline;
+}
+
+.sortButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: 4px;
+  padding: 0;
+  color: #64748b;
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+  vertical-align: middle;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
+
+  &:hover {
+    color: #2563eb;
+    background: #eaf2ff;
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgba(37, 99, 235, 0.4);
+    outline-offset: 1px;
+  }
+}
+
+.sortButtonActive {
+  color: #2563eb;
+  background: #eaf2ff;
+}
+
 .behaviorTable td,
 .rankTable td {
   height: 42px;
@@ -505,6 +554,26 @@
   }
 }
 
+.skillBranchRankingTable {
+  min-width: 1154px;
+
+  .branchName,
+  .branchNameLink {
+    white-space: nowrap;
+    word-break: keep-all;
+  }
+
+  .branchName span,
+  .branchNameLink span {
+    display: inline-block;
+    max-width: 6em;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    vertical-align: middle;
+    white-space: nowrap;
+  }
+}
+
 .mutedRow td {
   color: #7b879d;
 }
@@ -534,7 +603,7 @@
   border-radius: 12px;
   overflow: hidden;
   background: #ffffff;
-  max-height: 380px;
+  max-height: 420px;
 }
 
 .drillDownTable {
@@ -578,6 +647,23 @@
     white-space: normal !important;
     word-break: break-all;
     padding: 6px 4px !important;
+  }
+}
+
+.branchSkillDrillDownTable {
+  :global(.ant-table-body) {
+    max-height: 300px !important;
+    overflow-y: auto !important;
+  }
+
+  :global(.ant-table-tbody) > tr > :global(.ant-table-cell) {
+    height: auto;
+    min-height: 40px;
+    line-height: 20px;
+    white-space: normal !important;
+    word-break: break-word;
+    overflow: visible;
+    text-overflow: clip;
   }
 }
 

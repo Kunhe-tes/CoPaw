@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useIframeStore } from "@/stores/iframeStore";
@@ -12,6 +13,9 @@ import SkillConfigPage from "./index";
 const mocks = vi.hoisted(() => ({
   listSkillConfigs: vi.fn(),
   getSkillConfigDetail: vi.fn(),
+  getPreviewStats: vi.fn(),
+  getValueReturnStats: vi.fn(),
+  getSkillExposureStats: vi.fn(),
   createSkillConfig: vi.fn(),
   updateSkillConfig: vi.fn(),
   listActivityClasses: vi.fn(),
@@ -30,6 +34,9 @@ vi.mock("@/api/modules/skillConfig", async () => {
     skillConfigApi: {
       listSkillConfigs: mocks.listSkillConfigs,
       getSkillConfigDetail: mocks.getSkillConfigDetail,
+      getPreviewStats: mocks.getPreviewStats,
+      getValueReturnStats: mocks.getValueReturnStats,
+      getSkillExposureStats: mocks.getSkillExposureStats,
       createSkillConfig: mocks.createSkillConfig,
       updateSkillConfig: mocks.updateSkillConfig,
       listActivityClasses: mocks.listActivityClasses,
@@ -64,6 +71,11 @@ describe("SkillConfigPage", () => {
       skills: [],
     });
     mocks.listActivityClasses.mockResolvedValue([]);
+    mocks.getPreviewStats.mockRejectedValue(new Error("查看数据暂不可用"));
+    mocks.getValueReturnStats.mockRejectedValue(new Error("回检数据暂不可用"));
+    mocks.getSkillExposureStats.mockRejectedValue(
+      new Error("曝光统计暂不可用"),
+    );
   });
 
   it("loads SKILL name options from the market API and prefers cn_name", async () => {
@@ -103,13 +115,11 @@ describe("SkillConfigPage", () => {
     });
 
     render(<SkillConfigPage />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "新增 SKILL" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "新增 Skill" }));
 
     expect(mocks.listSweSkills).toHaveBeenCalledWith("RMASSIST");
     const skillSelect = screen.getByRole("combobox", {
-      name: /SKILL\s*名称/,
+      name: /Skill\s*名称/,
     });
     fireEvent.mouseDown(skillSelect);
     expect(
@@ -124,7 +134,7 @@ describe("SkillConfigPage", () => {
         selector: ".ant-select-item-option-content",
       }),
     );
-    expect(screen.getByRole("textbox", { name: "SKILL ID" })).toHaveValue(
+    expect(screen.getByRole("textbox", { name: "Skill ID" })).toHaveValue(
       "skill-cn",
     );
 
@@ -144,22 +154,22 @@ describe("SkillConfigPage", () => {
     render(<SkillConfigPage />);
 
     const createButton = await screen.findByRole("button", {
-      name: "新增 SKILL",
+      name: "新增 Skill",
     });
     fireEvent.click(createButton);
 
     expect(
-      await screen.findByRole("heading", { name: "SKILL 触发规则" }),
+      await screen.findByRole("heading", { name: "Skill 触发规则" }),
     ).toBeTruthy();
     expect(screen.getByRole("heading", { name: "回检" })).toBeTruthy();
     expect(screen.getAllByText("--").length).toBeGreaterThan(5);
-    expect(screen.getByText("暂无 SKILL 数据")).toBeTruthy();
+    expect(screen.getByText("暂无 Skill 数据")).toBeTruthy();
     expect(screen.queryByRole("button", { name: /新\s*增/ })).toBeNull();
     expect(screen.getByText("创建模式")).toBeTruthy();
-    expect(screen.getByText("请选择SKILL名称")).toBeTruthy();
+    expect(screen.getByText("请选择 Skill 名称")).toBeTruthy();
     expect(screen.getByRole("button", { name: /保\s*存/ })).toBeTruthy();
     expect(screen.queryByRole("button", { name: /创\s*建/ })).toBeNull();
-    expect(screen.getByRole("textbox", { name: "SKILL ID" })).toBeDisabled();
+    expect(screen.getByRole("textbox", { name: "Skill ID" })).toBeDisabled();
     const sortInput = screen.getByRole("spinbutton", { name: "排序" });
     expect(sortInput).toHaveValue("1");
     expect(sortInput).toHaveAttribute("aria-valuemax", "9999");
@@ -167,7 +177,7 @@ describe("SkillConfigPage", () => {
     expect(sortInput).toHaveValue("1");
     await waitFor(() =>
       expect(
-        screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
+        screen.getByRole("combobox", { name: /Skill\s*名称/ }),
       ).toHaveFocus(),
     );
   });
@@ -201,15 +211,21 @@ describe("SkillConfigPage", () => {
     await waitFor(() =>
       expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
     );
+    await waitFor(() =>
+      expect(mocks.getValueReturnStats).toHaveBeenCalledWith("job-1", ""),
+    );
+    expect(screen.getAllByText("--")).toHaveLength(6);
+    expect(screen.queryByText("客户核心信息")).toBeNull();
     expect(screen.getByText("查看模式")).toBeTruthy();
     expect(screen.getByText(/点击左侧编辑图标后可修改/)).toBeTruthy();
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
     expect(
-      screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
+      screen.getByRole("combobox", { name: /Skill\s*名称/ }),
     ).toBeDisabled();
     expect(
-      screen.getByRole("button", { name: "刷新 SKILL 列表" }),
+      screen.getByRole("button", { name: "刷新 Skill 列表" }),
     ).toBeTruthy();
+    expect(screen.getByText("悬停条目可编辑")).toBeTruthy();
     expect(
       screen.getByRole("button", { name: /新\s*增/ }).querySelector("svg"),
     ).toBeNull();
@@ -219,8 +235,127 @@ describe("SkillConfigPage", () => {
     expect(await screen.findByRole("button", { name: /保\s*存/ })).toBeTruthy();
     expect(screen.getByText("编辑模式")).toBeTruthy();
     expect(
-      screen.getByRole("combobox", { name: /SKILL\s*名称/ }),
-    ).not.toBeDisabled();
+      screen.getByRole("combobox", { name: /Skill\s*名称/ }),
+    ).toBeDisabled();
+  });
+
+  it("loads adoption and conversion metrics from value return stats", async () => {
+    const item = {
+      skillId: "job-1",
+      bbkId: "571",
+      name: "存款到期续接",
+      sort: 1,
+      businessCenterEnabled: true,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skill_id: "job-1", skill_name: "存款到期续接" },
+    };
+    useIframeStore.setState({ bbk: "571" });
+    mocks.listSkillConfigs.mockResolvedValue([item]);
+    mocks.getSkillConfigDetail.mockResolvedValue(item);
+    mocks.getValueReturnStats.mockResolvedValue({
+      contactCount: 150,
+      listCount: 500,
+      contactRate: 30,
+      acceptCount: 300,
+      acceptRate: 60,
+      aumIncrease: 1233.89,
+      wealthProductAmount: 984.31,
+    });
+
+    render(<SkillConfigPage />);
+
+    await waitFor(() =>
+      expect(mocks.getValueReturnStats).toHaveBeenCalledWith("job-1", "571"),
+    );
+    expect(await screen.findByText("采纳数 300 / 名单数 500")).toBeTruthy();
+    expect(screen.getByText("接触数 150 / 名单数 500")).toBeTruthy();
+    expect(screen.getByText("60")).toBeTruthy();
+    expect(screen.getByText("30")).toBeTruthy();
+    expect(screen.getByText("1233.89")).toBeTruthy();
+    expect(screen.getByText("984.31")).toBeTruthy();
+    expect(screen.getAllByText("--")).toHaveLength(2);
+  });
+
+  it("loads preview metrics from preview stats", async () => {
+    const item = {
+      skillId: "job-1",
+      bbkId: "571",
+      name: "存款到期续接",
+      sort: 1,
+      businessCenterEnabled: true,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skill_id: "job-1", skill_name: "存款到期续接" },
+    };
+    useIframeStore.setState({ bbk: "571" });
+    mocks.listSkillConfigs.mockResolvedValue([item]);
+    mocks.getSkillConfigDetail.mockResolvedValue(item);
+    mocks.getPreviewStats.mockResolvedValue({ uv: 25, pv: 156 });
+
+    render(<SkillConfigPage />);
+
+    await waitFor(() =>
+      expect(mocks.getPreviewStats).toHaveBeenCalledWith("job-1", "571"),
+    );
+    expect(await screen.findByText("25")).toBeTruthy();
+    expect(screen.getByText("156")).toBeTruthy();
+    expect(screen.getByText("客户经理数")).toBeTruthy();
+    expect(screen.getByText("名单页总浏览次数")).toBeTruthy();
+  });
+
+  it("loads and orders customer module exposure stats", async () => {
+    const item = {
+      skillId: "job-1",
+      bbkId: "571",
+      name: "存款到期续接",
+      sort: 1,
+      businessCenterEnabled: true,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skill_id: "job-1", skill_name: "存款到期续接" },
+    };
+    useIframeStore.setState({ bbk: "571" });
+    mocks.listSkillConfigs.mockResolvedValue([item]);
+    mocks.getSkillConfigDetail.mockResolvedValue(item);
+    mocks.getSkillExposureStats.mockResolvedValue({
+      totalCount: 1000,
+      items: [
+        {
+          sequence: 2,
+          targetId: "module-002",
+          targetName: "方案模块B",
+          exposureCount: 250,
+          exposureRate: "25.00%",
+        },
+        {
+          sequence: 1,
+          targetId: "module-001",
+          targetName: "方案模块A",
+          exposureCount: 450,
+          exposureRate: "45.00%",
+        },
+      ],
+    });
+
+    render(<SkillConfigPage />);
+
+    await waitFor(() =>
+      expect(mocks.getSkillExposureStats).toHaveBeenCalledWith("job-1", "571"),
+    );
+    const exposureList = await screen.findByRole("list", {
+      name: "客户级方案模块滚动深度",
+    });
+    const exposureRows = within(exposureList).getAllByRole("listitem");
+    expect(exposureRows[0]).toHaveTextContent("1方案模块A45.00%");
+    expect(exposureRows[1]).toHaveTextContent("2方案模块B25.00%");
+    expect(screen.getByText("曝光总数 1000")).toBeTruthy();
+    expect(
+      screen.getByLabelText("方案模块A：曝光 450 次，占比 45.00%"),
+    ).toBeTruthy();
   });
 
   it("refreshes the SKILL list and selects the first refreshed item", async () => {
@@ -264,7 +399,7 @@ describe("SkillConfigPage", () => {
       expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-2", ""),
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "刷新 SKILL 列表" }));
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Skill 列表" }));
 
     await waitFor(() =>
       expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-3", ""),
@@ -274,9 +409,81 @@ describe("SkillConfigPage", () => {
     ).toHaveAttribute("aria-current", "page");
   });
 
-  it("submits skill_name fallback when an edited SKILL has no cn_name", async () => {
-    const currentItem = {
+  it("reloads the selected Skill details and inspection data when its id is unchanged", async () => {
+    const item = {
       skillId: "job-1",
+      bbkId: "571",
+      name: "存款到期续接",
+      sort: 1,
+      businessCenterEnabled: false,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skill_id: "job-1", skill_name: "存款到期续接" },
+    };
+    useIframeStore.setState({ bbk: "571" });
+    mocks.listSkillConfigs
+      .mockResolvedValueOnce([item])
+      .mockResolvedValueOnce([item]);
+    mocks.getSkillConfigDetail.mockResolvedValue(item);
+    mocks.getPreviewStats
+      .mockResolvedValueOnce({ uv: 25, pv: 156 })
+      .mockResolvedValueOnce({ uv: 35, pv: 256 });
+    mocks.getValueReturnStats.mockResolvedValue({
+      contactCount: 150,
+      listCount: 500,
+      contactRate: 30,
+      acceptCount: 300,
+      acceptRate: 60,
+      aumIncrease: 1233.89,
+      wealthProductAmount: 984.31,
+    });
+    mocks.getSkillExposureStats
+      .mockResolvedValueOnce({ totalCount: 100, items: [] })
+      .mockResolvedValueOnce({ totalCount: 200, items: [] });
+
+    render(<SkillConfigPage />);
+    expect(await screen.findByText("156")).toBeTruthy();
+    expect(screen.getByText("曝光总数 100")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新 Skill 列表" }));
+
+    await waitFor(() =>
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledTimes(2),
+    );
+    expect(mocks.getPreviewStats).toHaveBeenCalledTimes(2);
+    expect(mocks.getValueReturnStats).toHaveBeenCalledTimes(2);
+    expect(mocks.getSkillExposureStats).toHaveBeenCalledTimes(2);
+    expect(await screen.findByText("256")).toBeTruthy();
+    expect(screen.getByText("曝光总数 200")).toBeTruthy();
+  });
+
+  it("exposes a long SKILL list as a keyboard-accessible scroll region", async () => {
+    const items = Array.from({ length: 20 }, (_, index) => ({
+      skillId: `skill-${index + 1}`,
+      name: `SKILL ${index + 1}`,
+      sort: index + 1,
+      businessCenterEnabled: false,
+      customerInsightEnabled: false,
+      outboundCallEnabled: false,
+      enabled: true,
+      source: { skillId: `skill-${index + 1}`, name: `SKILL ${index + 1}` },
+    }));
+    mocks.listSkillConfigs.mockResolvedValue(items);
+    mocks.getSkillConfigDetail.mockResolvedValue(items[0]);
+
+    render(<SkillConfigPage />);
+
+    const listRegion = await screen.findByRole("region", {
+      name: "Skill 列表内容",
+    });
+    expect(listRegion).toHaveAttribute("tabindex", "0");
+    expect(screen.getByRole("button", { name: "SKILL 20" })).toBeTruthy();
+  });
+
+  it("keeps the SKILL name locked while submitting its fallback name on edit", async () => {
+    const currentItem = {
+      skillId: "skill-en",
       bbkId: "571",
       bbkName: "杭州分行",
       name: "旧名称",
@@ -287,11 +494,7 @@ describe("SkillConfigPage", () => {
       enabled: true,
       source: { skillId: "job-1", name: "旧名称" },
     };
-    const updatedItem = {
-      ...currentItem,
-      skillId: "skill-en",
-      name: "customer_insight",
-    };
+    const updatedItem = { ...currentItem, name: "customer_insight", sort: 2 };
     mocks.listSkillConfigs
       .mockResolvedValueOnce([currentItem])
       .mockResolvedValueOnce([updatedItem]);
@@ -311,18 +514,16 @@ describe("SkillConfigPage", () => {
 
     render(<SkillConfigPage />);
     await waitFor(() =>
-      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("job-1", ""),
+      expect(mocks.getSkillConfigDetail).toHaveBeenCalledWith("skill-en", ""),
     );
     fireEvent.click(screen.getByRole("button", { name: "编辑 旧名称" }));
     const skillSelect = await screen.findByRole("combobox", {
-      name: /SKILL\s*名称/,
+      name: /Skill\s*名称/,
     });
-    fireEvent.mouseDown(skillSelect);
-    fireEvent.click(
-      await screen.findByText("customer_insight", {
-        selector: ".ant-select-item-option-content",
-      }),
-    );
+    expect(skillSelect).toBeDisabled();
+    fireEvent.change(screen.getByRole("spinbutton", { name: "排序" }), {
+      target: { value: "2" },
+    });
     fireEvent.click(screen.getByRole("button", { name: /保\s*存/ }));
 
     await waitFor(() =>
@@ -342,13 +543,13 @@ describe("SkillConfigPage", () => {
 
     render(<SkillConfigPage />);
 
-    expect(await screen.findByText("SKILL 配置加载失败")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "新增 SKILL" })).toBeNull();
+    expect(await screen.findByText("Skill 配置加载失败")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "新增 Skill" })).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "重新加载" }));
 
     expect(
-      await screen.findByRole("button", { name: "新增 SKILL" }),
+      await screen.findByRole("button", { name: "新增 Skill" }),
     ).toBeTruthy();
     expect(mocks.listSkillConfigs).toHaveBeenCalledTimes(2);
   });
@@ -363,9 +564,9 @@ describe("SkillConfigPage", () => {
     render(<SkillConfigPage />);
 
     expect(
-      await screen.findByRole("button", { name: "新增 SKILL" }),
+      await screen.findByRole("button", { name: "新增 Skill" }),
     ).toBeTruthy();
-    expect(screen.queryByText("SKILL 配置加载失败")).toBeNull();
+    expect(screen.queryByText("Skill 配置加载失败")).toBeNull();
     expect(mocks.error).not.toHaveBeenCalled();
   });
 
@@ -406,7 +607,7 @@ describe("SkillConfigPage", () => {
 
     await waitFor(() => expect(mocks.updateSkillConfig).toHaveBeenCalled());
     await waitFor(() => expect(mocks.warning).toHaveBeenCalled());
-    expect(mocks.success).toHaveBeenCalledWith("SKILL 触发规则更新成功");
+    expect(mocks.success).toHaveBeenCalledWith("Skill 触发规则更新成功");
     expect(screen.queryByRole("button", { name: /保\s*存/ })).toBeNull();
   });
 });

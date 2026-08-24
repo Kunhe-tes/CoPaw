@@ -2,6 +2,27 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## Console 代码提交后才发现 TypeScript 类型错误
+
+### 症状
+
+- pre-commit 显示 `TypeScript type check ... Passed`，但 `pnpm run build` 或 CI 仍报 TS 类型错误
+- `tsc --noEmit` 极快结束且没有检查任何源文件
+
+### 典型原因
+
+- `console/tsconfig.json` 是只包含 project references 的 solution 配置
+- 直接运行 `tsc --noEmit` 不会构建 `tsconfig.app.json` 和 `tsconfig.node.json` 引用的项目
+- 本地 pre-commit 可能未安装或被 `--no-verify` 绕过，因此不能替代远端 required check
+
+### 统一检查入口
+
+- 本地和 CI 统一运行 `pnpm --dir console run typecheck`
+- `typecheck` 必须执行 `tsc -b --noEmit`
+- pre-commit 入口位于 [`.pre-commit-config.yaml`](../../.pre-commit-config.yaml)
+- CI 的 `Console Typecheck` job 位于 [`.github/workflows/console-typecheck.yml`](../../.github/workflows/console-typecheck.yml)
+- GitHub 仓库规则中应将 `Console Typecheck` 设为 required status check
+
 ## MCP 报 mcp_transport_error
 
 ### 症状

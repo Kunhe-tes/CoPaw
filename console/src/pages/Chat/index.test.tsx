@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => {
     capturedOptions: null as Record<string, any> | null,
     planModeEnabledHistory: [] as boolean[],
     showContentOnly: false,
+    isOriginY: false,
     createChat: vi.fn(async () => ({
       id: "chat-real-created",
       meta: { plan_mode_enabled: true },
@@ -44,6 +45,7 @@ const mocks = vi.hoisted(() => {
     currentSessionId: "chat-1",
     inputDisabled: true,
     pathname: "/chat/chat-1",
+    search: "",
     getChatIdForSession: vi.fn((sessionId: string) => sessionId),
     getLogicalSessionId: vi.fn((sessionId: string) => sessionId),
     getRealIdForSession: vi.fn((sessionId: string) => sessionId),
@@ -237,7 +239,7 @@ vi.mock("@agentscope-ai/icons", () => ({
 }));
 
 vi.mock("react-router-dom", () => ({
-  useLocation: () => ({ pathname: mocks.pathname }),
+  useLocation: () => ({ pathname: mocks.pathname, search: mocks.search }),
   useNavigate: () => mocks.navigate,
 }));
 
@@ -284,8 +286,12 @@ vi.mock("../../stores/sourceSystemConfigStore", () => ({
 }));
 
 vi.mock("../../stores/iframeStore", () => {
-  const useIframeStore = (selector?: (value: { userId: string }) => unknown) =>
-    selector ? selector({ userId: "test-user" }) : { userId: "test-user" };
+  const useIframeStore = (
+    selector?: (value: { userId: string; isOriginY: boolean }) => unknown,
+  ) =>
+    selector
+      ? selector({ userId: "test-user", isOriginY: mocks.isOriginY })
+      : { userId: "test-user", isOriginY: mocks.isOriginY };
 
   useIframeStore.getState = () => ({
     sessionId: mocks.navigationSessionId,
@@ -589,8 +595,10 @@ describe("ChatPage plan mode wiring", () => {
     mocks.capturedOptions = null;
     mocks.planModeEnabledHistory = [];
     mocks.showContentOnly = false;
+    mocks.isOriginY = false;
     mocks.inputDisabled = true;
     mocks.pathname = "/chat/chat-1";
+    mocks.search = "";
     mocks.currentSessionId = "chat-1";
     mocks.getChatIdForSession.mockImplementation(
       (sessionId: string) => sessionId,

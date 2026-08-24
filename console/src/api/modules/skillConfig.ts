@@ -34,6 +34,69 @@ type SkillConfigDetailResponse = SkillConfigResponse<SkillConfigSource>;
 type SkillConfigCreateResponse = SkillConfigResponse<SkillConfigSource>;
 type SkillConfigUpdateResponse = SkillConfigResponse<SkillConfigSource>;
 
+interface SkillPreviewStatsResponseData {
+  uv: number;
+  pv: number;
+}
+
+type SkillPreviewStatsResponse =
+  SkillConfigResponse<SkillPreviewStatsResponseData>;
+
+export interface SkillPreviewStats {
+  uv: number;
+  pv: number;
+}
+
+interface SkillValueReturnStatsResponseData {
+  contact_count: number;
+  list_count: number;
+  contact_rate: number;
+  accept_count: number;
+  accept_rate: number;
+  aum_increase: number;
+  wealth_product_amount: number;
+}
+
+type SkillValueReturnStatsResponse =
+  SkillConfigResponse<SkillValueReturnStatsResponseData>;
+
+export interface SkillValueReturnStats {
+  contactCount: number;
+  listCount: number;
+  contactRate: number;
+  acceptCount: number;
+  acceptRate: number;
+  aumIncrease: number;
+  wealthProductAmount: number;
+}
+
+interface SkillExposureStatsResponseData {
+  total_count: number;
+  items: Array<{
+    seq: number;
+    event_target_id: string;
+    event_target_name: string;
+    exposure_count: number;
+    exposure_rate: string;
+  }>;
+}
+
+type SkillExposureStatsResponse =
+  SkillConfigResponse<SkillExposureStatsResponseData>;
+
+export interface SkillExposureStatsItem {
+  sequence: number;
+  targetId: string;
+  targetName: string;
+  exposureCount: number;
+  exposureRate: string;
+}
+
+export interface SkillExposureStats {
+  totalCount: number;
+  items: SkillExposureStatsItem[];
+}
+
 export interface SkillConfigFormValues {
   skillId: string;
   name: string;
@@ -271,7 +334,7 @@ export const skillConfigApi = {
       },
     );
     if (response.code !== 0) {
-      throw new Error(response.message || "SKILL 配置列表加载失败");
+      throw new Error(response.message || "Skill 配置列表加载失败");
     }
     return response.data.map(normalizeSkillConfig);
   },
@@ -288,9 +351,77 @@ export const skillConfigApi = {
       },
     );
     if (response.code !== 0) {
-      throw new Error(response.message || "SKILL 配置详情加载失败");
+      throw new Error(response.message || "Skill 配置详情加载失败");
     }
     return normalizeSkillConfig(response.data);
+  },
+
+  async getPreviewStats(
+    skillId: string,
+    bbkId: string,
+  ): Promise<SkillPreviewStats> {
+    const response = await request<SkillPreviewStatsResponse>(
+      `${SKILL_CONFIG_BASE_PATH}/preview-stats`,
+      {
+        method: "POST",
+        body: JSON.stringify({ skill_id: skillId, bbk_id: bbkId }),
+      },
+    );
+    if (response.code !== 0) {
+      throw new Error(response.message || "查看数据加载失败");
+    }
+    return { uv: response.data.uv, pv: response.data.pv };
+  },
+
+  async getValueReturnStats(
+    skillId: string,
+    bbkId: string,
+  ): Promise<SkillValueReturnStats> {
+    const response = await request<SkillValueReturnStatsResponse>(
+      `${SKILL_CONFIG_BASE_PATH}/value-return-stats`,
+      {
+        method: "POST",
+        body: JSON.stringify({ skill_id: skillId, bbk_id: bbkId }),
+      },
+    );
+    if (response.code !== 0) {
+      throw new Error(response.message || "回检数据加载失败");
+    }
+    return {
+      contactCount: response.data.contact_count,
+      listCount: response.data.list_count,
+      contactRate: response.data.contact_rate,
+      acceptCount: response.data.accept_count,
+      acceptRate: response.data.accept_rate,
+      aumIncrease: response.data.aum_increase,
+      wealthProductAmount: response.data.wealth_product_amount,
+    };
+  },
+
+  async getSkillExposureStats(
+    skillId: string,
+    bbkId: string,
+  ): Promise<SkillExposureStats> {
+    const response = await request<SkillExposureStatsResponse>(
+      `${SKILL_CONFIG_BASE_PATH}/skill-exposure-stats`,
+      {
+        method: "POST",
+        body: JSON.stringify({ skill_id: skillId, bbk_id: bbkId }),
+      },
+    );
+    if (response.code !== 0) {
+      throw new Error(response.message || "客户级方案模块曝光统计加载失败");
+    }
+    return {
+      totalCount: response.data.total_count,
+      items: response.data.items.map((item) => ({
+        sequence: item.seq,
+        targetId: item.event_target_id,
+        targetName: item.event_target_name,
+        exposureCount: item.exposure_count,
+        exposureRate: item.exposure_rate,
+      })),
+    };
   },
 
   async createSkillConfig(
@@ -304,7 +435,7 @@ export const skillConfigApi = {
       },
     );
     if (response.code !== 0) {
-      throw new Error(response.message || "SKILL 配置创建失败");
+      throw new Error(response.message || "Skill 配置创建失败");
     }
     return normalizeSkillConfig(response.data);
   },
@@ -320,7 +451,7 @@ export const skillConfigApi = {
       },
     );
     if (response.code !== 0) {
-      throw new Error(response.message || "SKILL 配置更新失败");
+      throw new Error(response.message || "Skill 配置更新失败");
     }
     return normalizeSkillConfig(response.data);
   },
