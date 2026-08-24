@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import shutil
@@ -28,6 +29,24 @@ def test_provider_services_exports_the_catalog_service() -> None:
     )
 
     assert Legacy is ProviderCatalogService
+
+
+@pytest.mark.parametrize(
+    "submodule_name",
+    ["provider_manager", "retry_chat_model"],
+)
+def test_provider_package_resolves_submodules_after_attribute_cleanup(
+    submodule_name: str,
+) -> None:
+    providers = importlib.import_module("swe.providers")
+    qualified_name = f"swe.providers.{submodule_name}"
+    expected = importlib.import_module(qualified_name)
+    providers.__dict__.pop(submodule_name, None)
+
+    resolved = getattr(providers, submodule_name)
+
+    assert resolved is expected
+    assert getattr(providers, submodule_name) is expected
 
 
 def test_catalog_constructor_resolves_optional_manager_seams() -> None:
