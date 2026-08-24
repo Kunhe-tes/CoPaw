@@ -264,12 +264,18 @@ async def test_session_lifecycle_facades_preserve_restore_snapshot_save_order(
 
 
 @pytest.mark.asyncio
-async def test_cleanup_collaborator_waits_for_every_task_then_raises_first_error() -> (
-    None
-):
+async def test_cleanup_collaborator_waits_for_every_task_then_raises_first_error(
+    monkeypatch,
+) -> None:
     from swe.app.runner import query_cleanup
 
     completed: list[str] = []
+    gather_calls: list[dict[str, Any]] = []
+    original_gather = asyncio.gather
+
+    async def gather_with_contract(*awaitables, **kwargs):
+        gather_calls.append(kwargs)
+        return await original_gather(*awaitables, **kwargs)
 
     async def cleanup(name: str, error: BaseException | None = None) -> None:
         await asyncio.sleep(0)
@@ -292,6 +298,11 @@ async def test_cleanup_collaborator_waits_for_every_task_then_raises_first_error
             "detector",
         ),
     )
+    monkeypatch.setattr(
+        query_cleanup.asyncio,
+        "gather",
+        gather_with_contract,
+    )
 
     with pytest.raises(RuntimeError, match="save failed") as error:
         await query_cleanup.cleanup_query_resources(
@@ -303,6 +314,7 @@ async def test_cleanup_collaborator_waits_for_every_task_then_raises_first_error
 
     assert error.value is first_error
     assert set(completed) == {"save", "chat", "mcp", "detector"}
+    assert gather_calls == [{"return_exceptions": True}]
 
 
 @pytest.mark.asyncio
@@ -372,6 +384,22 @@ def test_runner_keeps_only_collaborator_lifecycle_facades() -> None:
     }
 
     assert not legacy_methods.intersection(vars(AgentRunner))
+
+
+def test_turn_lifecycle_delegates_goal_and_stop_orchestration() -> None:
+    from swe.app.runner import turn_lifecycle
+
+    helpers = {
+        "_resolve_implicit_goal_steering",
+        "_begin_goal_turn",
+        "_settle_goal_turn",
+        "_wait_for_goal_wake",
+        "_stream_goal_completion_lifecycle",
+        "_stream_standard_completion_lifecycle",
+        "_resolve_stop_gate",
+    }
+
+    assert helpers.issubset(vars(turn_lifecycle))
 
 
 def test_session_lifecycle_does_not_expose_swe_agent_at_runtime() -> None:
@@ -952,3 +980,94 @@ async def test_finally_cleans_each_query_resource(
         "detector shutdown",
     }
     assert len(events) == 4
+
+
+@pytest.mark.asyncio
+async def test_cancelled_attempt_cancels_trace_then_runs_finally_cleanup_and_resets_context(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from agentscope_runtime.engine.schemas.exception import AgentException
+
+    from swe.app.runner import query_attempt
+    from swe.tracing.models import TraceStatus
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    events: list[str] = []
+    agent = SimpleNamespace(interrupt=AsyncMock())
+    runtime = SimpleNamespace(agent=agent)
+
+    class ClaimsContext:
+        def __enter__(self) -> None:
+            events.append("claims enter")
+
+        def __exit__(self, *_args) -> None:
+            events.append("claims reset")
+
+    async def cancelled_attempt(*_args, attempt_state, **_kwargs):
+        attempt_state.runtime = runtime
+        attempt_state.session_state_loaded = True
+        if attempt_state.should_return:
+            yield _blocked_msg("unreachable"), True
+        raise asyncio.CancelledError()
+
+    runner._request_file_url_network = lambda _request: None
+    runner._start_query_trace = AsyncMock(return_value="trace-1")
+    runner._end_trace_if_needed = AsyncMock()
+    runner._load_query_retry_settings = lambda *_args: (1, 0, 0.0, 0.0)
+    runner._stream_single_query_attempt = cancelled_attempt
+    runner._cleanup_query_resources = AsyncMock(
+        side_effect=lambda **_kwargs: events.append("resource cleanup"),
+    )
+    runner._cleanup_blocked_runtime_start = AsyncMock(
+        side_effect=lambda _runtime_start: events.append("blocked cleanup"),
+    )
+    runner._store_qa_content_if_needed = AsyncMock(
+        side_effect=lambda **_kwargs: events.append("qa cleanup"),
+    )
+    monkeypatch.setattr(
+        query_attempt,
+        "runtime_invocation_claims_context",
+        lambda **_kwargs: ClaimsContext(),
+    )
+    monkeypatch.setattr(
+        query_attempt,
+        "set_current_file_url_network",
+        lambda _value: "network-token",
+    )
+    monkeypatch.setattr(
+        query_attempt,
+        "reset_current_file_url_network",
+        lambda _token: events.append("network reset"),
+    )
+
+    with pytest.raises(AgentException, match="Task has been cancelled"):
+        async for _msg, _last in runner._stream_query_after_preflight(
+            [Msg(name="user", role="user", content="hello")],
+            request=_request(),
+            query="hello",
+            session_id="session-1",
+            preflight=_QueryPreflight(),
+        ):
+            pass
+
+    runner._end_trace_if_needed.assert_awaited_once_with(
+        "trace-1",
+        TraceStatus.CANCELLED,
+    )
+    agent.interrupt.assert_awaited_once_with()
+    runner._cleanup_query_resources.assert_awaited_once_with(
+        runtime=runtime,
+        session_state_loaded=True,
+        session_id="session-1",
+    )
+    runner._cleanup_blocked_runtime_start.assert_awaited_once_with(None)
+    runner._store_qa_content_if_needed.assert_awaited_once()
+    assert events == [
+        "claims enter",
+        "claims reset",
+        "network reset",
+        "resource cleanup",
+        "blocked cleanup",
+        "qa cleanup",
+    ]
