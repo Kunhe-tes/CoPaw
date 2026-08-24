@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
@@ -108,6 +109,87 @@ async def test_query_boundary_facades_delegate_to_collaborators(
         query="hello",
         preflight=preflight,
     )
+
+
+@pytest.mark.asyncio
+async def test_query_attempt_and_turn_lifecycle_facades_delegate(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.app.runner import query_attempt, turn_lifecycle
+    from swe.app.runner.runner import _QueryTurnOutcome, _TurnPlan
+
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    request = _request()
+    plan = _TurnPlan(original_user_message="hello", turn_msgs=[])
+    outcome = _QueryTurnOutcome()
+    attempt_calls: list[Any] = []
+    turn_calls: list[Any] = []
+
+    async def stream_query_attempt(owner, **kwargs):
+        attempt_calls.extend([owner, kwargs])
+        yield _blocked_msg("attempt facade"), True
+
+    async def stream_turn_lifecycle(owner, **kwargs):
+        turn_calls.extend([owner, kwargs])
+        yield _blocked_msg("turn facade"), True
+
+    monkeypatch.setattr(
+        query_attempt,
+        "stream_query_after_preflight",
+        stream_query_attempt,
+    )
+    monkeypatch.setattr(
+        turn_lifecycle,
+        "stream_completion_lifecycle",
+        stream_turn_lifecycle,
+    )
+
+    attempt_events = [
+        event
+        async for event in runner._stream_query_after_preflight(
+            [],
+            request=request,
+            query="hello",
+            session_id="session-1",
+            preflight=_QueryPreflight(),
+        )
+    ]
+    turn_events = [
+        event
+        async for event in runner._stream_completion_lifecycle(
+            request=request,
+            runtime=SimpleNamespace(),
+            plan=plan,
+            outcome=outcome,
+        )
+    ]
+
+    assert [
+        (msg.get_text_content(), last) for msg, last in attempt_events
+    ] == [("attempt facade", True)]
+    assert [(msg.get_text_content(), last) for msg, last in turn_events] == [
+        ("turn facade", True),
+    ]
+    assert attempt_calls == [
+        runner,
+        {
+            "msgs": [],
+            "request": request,
+            "query": "hello",
+            "session_id": "session-1",
+            "preflight": _QueryPreflight(),
+        },
+    ]
+    assert turn_calls == [
+        runner,
+        {
+            "request": request,
+            "runtime": turn_calls[1]["runtime"],
+            "plan": plan,
+            "outcome": outcome,
+        },
+    ]
 
 
 @pytest.mark.asyncio

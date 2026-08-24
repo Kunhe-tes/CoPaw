@@ -52,7 +52,14 @@ from .query_contracts import (
     _QueryRuntimeResources,
     _RuntimeStartResult,
 )
-from . import query_preflight, query_runtime
+from . import (
+    query_attempt,
+    query_cleanup,
+    query_preflight,
+    query_runtime,
+    session_lifecycle,
+    turn_lifecycle,
+)
 from .retry_classifier import is_query_retryable
 from .session import SafeJSONSession, SESSION_SKILL_SNAPSHOT_STATE_KEY
 from .stream_boundary import normalize_reasoning_boundary_stream
@@ -3878,52 +3885,10 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
     ) -> _SkillFreshnessRefreshResult:
-        if not _supports_session_skill_freshness_refresh(
-            session=self.session,
+        return await session_lifecycle.refresh_session_skill_freshness(
+            self,
             runtime=runtime,
-        ):
-            return _SkillFreshnessRefreshResult()
-
-        stored_snapshot = _normalize_session_skill_snapshot(
-            await self.session.get_session_skill_snapshot(
-                session_id=runtime.session_id,
-                user_id=runtime.user_id,
-                allow_not_exist=True,
-            ),
-        )
-        if not stored_snapshot:
-            return _SkillFreshnessRefreshResult(
-                stored_snapshot={},
-                refreshed_snapshot={},
-            )
-
-        workspace_dir = Path(self.workspace_dir or WORKING_DIR)
-        effective_skill_dirs = {
-            skill_name: resolved_effective_skill_dir
-            for skill_name in runtime.agent.get_effective_skills()
-            if (
-                resolved_effective_skill_dir := resolve_effective_skill_dir(
-                    workspace_dir,
-                    skill_name,
-                )
-            )
-            is not None
-        }
-
-        next_snapshot = _normalize_session_skill_snapshot(stored_snapshot)
-        changes = _refresh_session_skill_snapshot_entries(
-            next_snapshot,
-            stored_snapshot=stored_snapshot,
-            effective_skill_dirs=effective_skill_dirs,
-        )
-
-        notice_text = (
-            _skill_freshness_notice_text(changes) if changes else None
-        )
-        return _SkillFreshnessRefreshResult(
-            notice_text=notice_text,
-            stored_snapshot=stored_snapshot,
-            refreshed_snapshot=next_snapshot,
+            refresh_result_type=_SkillFreshnessRefreshResult,
         )
 
     async def _build_skill_snapshot_to_persist(
@@ -3932,28 +3897,11 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
         refresh_result: _SkillFreshnessRefreshResult,
     ) -> dict[str, dict[str, Any]] | None:
-        if (
-            runtime.skip_history
-            or self.session is None
-            or not runtime.session_id
-            or refresh_result.stored_snapshot is None
-            or refresh_result.refreshed_snapshot is None
-        ):
-            return None
-
-        next_snapshot = _normalize_session_skill_snapshot(
-            refresh_result.refreshed_snapshot,
+        return await session_lifecycle.build_skill_snapshot_to_persist(
+            self,
+            runtime=runtime,
+            refresh_result=refresh_result,
         )
-        if runtime.pending_confirmed_skill_snapshots:
-            next_snapshot.update(
-                _normalize_session_skill_snapshot(
-                    runtime.pending_confirmed_skill_snapshots,
-                ),
-            )
-
-        if next_snapshot != refresh_result.stored_snapshot:
-            return next_snapshot
-        return None
 
     async def _restore_confirmed_session_skill_context(
         self,
@@ -3961,41 +3909,65 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
     ) -> None:
         """从持久化的 session snapshot 恢复一次性 skill 续接候选。"""
-        detector = getattr(runtime, "session_skill_detector", None)
-        if runtime.skip_history or self.session is None:
-            return
-        if not _can_restore_confirmed_session_skill_context(
+        await session_lifecycle.restore_confirmed_session_skill_context(
+            self,
+            runtime=runtime,
+        )
+
+    @staticmethod
+    def _normalize_session_skill_snapshot(
+        value: Any,
+    ) -> dict[str, dict[str, Any]]:
+        return _normalize_session_skill_snapshot(value)
+
+    def _supports_session_skill_freshness_refresh(
+        self,
+        *,
+        runtime: _QueryRuntime,
+    ) -> bool:
+        return _supports_session_skill_freshness_refresh(
+            session=self.session,
+            runtime=runtime,
+        )
+
+    @staticmethod
+    def _refresh_session_skill_snapshot_entries(
+        snapshot: dict[str, dict[str, Any]],
+        *,
+        stored_snapshot: dict[str, dict[str, Any]],
+        effective_skill_dirs: dict[str, Path],
+    ) -> list[Any]:
+        return _refresh_session_skill_snapshot_entries(
+            snapshot,
+            stored_snapshot=stored_snapshot,
+            effective_skill_dirs=effective_skill_dirs,
+        )
+
+    @staticmethod
+    def _skill_freshness_notice_text(changes: list[Any]) -> str:
+        return _skill_freshness_notice_text(changes)
+
+    def _can_restore_confirmed_session_skill_context(
+        self,
+        *,
+        runtime: _QueryRuntime,
+        detector: Any,
+    ) -> bool:
+        return _can_restore_confirmed_session_skill_context(
             session_id=runtime.session_id,
             session_skill_detector=detector,
             session=self.session,
-        ):
-            return
-
-        stored_snapshot = _normalize_session_skill_snapshot(
-            await self.session.get_session_skill_snapshot(
-                session_id=runtime.session_id,
-                user_id=runtime.user_id,
-                allow_not_exist=True,
-            ),
         )
-        skill_name = _select_restorable_session_skill(
-            stored_snapshot,
-            enabled_skills=(
-                runtime.agent.get_runtime_skills()
-                if hasattr(runtime.agent, "get_runtime_skills")
-                else (
-                    runtime.agent.get_effective_skills()
-                    if hasattr(runtime.agent, "get_effective_skills")
-                    else []
-                )
-            ),
-        )
-        if not skill_name:
-            return
 
-        restored = detector.restore_confirmed_skill(
-            skill_name,
-            allow_one_shot_continuation=True,
+    @staticmethod
+    def _select_restorable_session_skill(
+        snapshot: dict[str, dict[str, Any]],
+        *,
+        enabled_skills: list[str],
+    ) -> str | None:
+        return _select_restorable_session_skill(
+            snapshot,
+            enabled_skills=enabled_skills,
         )
 
     async def _prepare_query_runtime(
@@ -4360,76 +4332,93 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ):
         """流式执行当前 agent turn。"""
-        turn_msgs = plan.turn_msgs
-        outcome.assistant_response = ""
-        memory_start = len(getattr(runtime.agent.memory, "content", []))
-        stop_turns = _resolve_max_stop_turns(
-            runtime.agent_config,
-        )
-        outcome.max_stop_turns = stop_turns
-        outcome.max_automatic_follow_up_turns = (
-            _resolve_max_automatic_follow_up_turns(
-                runtime.agent_config,
-                stop_turns,
-            )
-        )
-        reset_terminal_stop = getattr(
-            runtime.agent,
-            "reset_pre_tool_terminal_stop",
-            None,
-        )
-        if callable(reset_terminal_stop):
-            reset_terminal_stop()
+        async for item in turn_lifecycle.stream_agent_turns(
+            self,
+            runtime=runtime,
+            plan=plan,
+            outcome=outcome,
+            plan_interaction_card_metadata_key=(
+                _PLAN_INTERACTION_CARD_METADATA_KEY
+            ),
+        ):
+            yield item
 
-        try:
-            async for msg, last in self._enforce_query_timeout(
-                stream_printing_messages(
-                    agents=[runtime.agent],
-                    coroutine_task=runtime.agent(turn_msgs),
-                ),
-                session_id=runtime.session_id,
-                agent=runtime.agent,
-                run_key=(
-                    runtime.chat.id if runtime.chat is not None else None
-                ),
-            ):
-                metadata = getattr(msg, "metadata", None)
-                if isinstance(metadata, dict) and isinstance(
-                    metadata.get(_PLAN_INTERACTION_CARD_METADATA_KEY),
-                    dict,
-                ):
-                    outcome.plan_interaction_turn_boundary = True
-                yield msg, last
-        except PreToolUseTerminalStop as exc:
-            consume_terminal_stop = getattr(
-                runtime.agent,
-                "consume_pre_tool_terminal_stop",
-                None,
-            )
-            reason = (
-                consume_terminal_stop()
-                if callable(consume_terminal_stop)
-                else None
-            )
-            reason = (reason or exc.reason or "Hook requested stop").strip()
-            outcome.task_completed = False
-            outcome.completion_blocked = True
-            outcome.completion_block_reason = reason
-            outcome.pre_tool_terminal_stop = True
-            terminal_msg = Msg(
-                name="Friday",
-                role="assistant",
-                content=reason,
-            )
-            await runtime.agent.memory.add(terminal_msg)
-            yield terminal_msg, True
-            return
+    @staticmethod
+    def _stream_printing_messages(**kwargs: Any) -> Any:
+        return stream_printing_messages(**kwargs)
 
-        outcome.assistant_response = _extract_assistant_response(
-            runtime.agent,
-            memory_start=memory_start,
+    @staticmethod
+    def _resolve_max_stop_turns(agent_config: Any) -> int:
+        return _resolve_max_stop_turns(agent_config)
+
+    @staticmethod
+    def _resolve_max_automatic_follow_up_turns(
+        agent_config: Any,
+        stop_turns: int,
+    ) -> int:
+        return _resolve_max_automatic_follow_up_turns(
+            agent_config,
+            stop_turns,
         )
-        outcome.task_completed = True
+
+    @staticmethod
+    def _extract_assistant_response(
+        agent: SWEAgent,
+        *,
+        memory_start: int = 0,
+    ) -> str:
+        return _extract_assistant_response(agent, memory_start=memory_start)
+
+    @staticmethod
+    def _request_goal_id(request: AgentRequest) -> str | None:
+        return _request_goal_id(request)
+
+    def _goal_matches_runtime_scope(
+        self,
+        goal: Any,
+        runtime: _QueryRuntime,
+    ) -> bool:
+        return _goal_matches_runtime_scope(
+            goal,
+            runtime,
+            tenant_id=self.tenant_id,
+            agent_id=self.agent_id,
+        )
+
+    @staticmethod
+    def _build_goal_contract_context(goal: Any) -> str:
+        return _build_goal_contract_context(goal)
+
+    @staticmethod
+    def _append_goal_tool_observations(
+        observations: list[dict[str, str]],
+        msg: Msg,
+    ) -> None:
+        _append_goal_tool_observations(observations, msg)
+
+    @staticmethod
+    def _build_goal_follow_up_msg(
+        next_focus: str | None,
+        steering: list[str] | None = None,
+        contract_context: str | None = None,
+    ) -> Msg:
+        return _build_goal_follow_up_msg(
+            next_focus,
+            steering,
+            contract_context,
+        )
+
+    @staticmethod
+    def _should_stop_follow_up(outcome: _QueryTurnOutcome) -> bool:
+        return _should_stop_follow_up(outcome)
+
+    @staticmethod
+    def _build_stop_follow_up_msg(reason: str) -> Msg:
+        return _build_stop_follow_up_msg(reason)
+
+    @staticmethod
+    def _build_stop_incomplete_msg(reason: str) -> Msg:
+        return _build_stop_incomplete_msg(reason)
 
     async def _emit_stop_hook_if_needed(
         self,
@@ -4467,6 +4456,24 @@ class AgentRunner(Runner):
         )
 
     async def _stream_completion_lifecycle(
+        self,
+        *,
+        request: AgentRequest,
+        runtime: _QueryRuntime,
+        plan: _TurnPlan,
+        outcome: _QueryTurnOutcome,
+    ):
+        """Coordinate the extracted Goal and Stop turn lifecycle."""
+        async for item in turn_lifecycle.stream_completion_lifecycle(
+            self,
+            request=request,
+            runtime=runtime,
+            plan=plan,
+            outcome=outcome,
+        ):
+            yield item
+
+    async def _stream_completion_lifecycle_legacy(
         self,
         *,
         request: AgentRequest,
@@ -5129,19 +5136,12 @@ class AgentRunner(Runner):
             "Runner finally block executing for session %s",
             session_id,
         )
-        cleanup_results = await asyncio.gather(
-            self._save_state_during_cleanup(
-                runtime=runtime,
-                session_state_loaded=session_state_loaded,
-            ),
-            self._update_chat_during_cleanup(runtime),
-            self._cleanup_mcp_during_cleanup(runtime),
-            self._end_skill_detector_during_cleanup(runtime),
-            return_exceptions=True,
+        await query_cleanup.cleanup_query_resources(
+            self,
+            runtime=runtime,
+            session_state_loaded=session_state_loaded,
+            session_id=session_id,
         )
-        for result in cleanup_results:
-            if isinstance(result, BaseException):
-                raise result
 
     async def _cleanup_blocked_runtime_start(
         self,
@@ -5595,6 +5595,24 @@ class AgentRunner(Runner):
         retry_state: _RetryState,
         attempt_state: _QueryAttemptState,
     ):
+        """Coordinate one extracted query attempt."""
+        async for item in query_attempt.stream_single_query_attempt(
+            self,
+            attempt_input=attempt_input,
+            outcome=outcome,
+            retry_state=retry_state,
+            attempt_state=attempt_state,
+        ):
+            yield item
+
+    async def _stream_single_query_attempt_legacy(
+        self,
+        *,
+        attempt_input: _QueryAttemptInput,
+        outcome: _QueryTurnOutcome,
+        retry_state: _RetryState,
+        attempt_state: _QueryAttemptState,
+    ):
         """执行一次 query 尝试，调用方负责重试和 finally 清理。"""
         attempt_state.runtime_start = await self._prepare_query_runtime(
             request=attempt_input.request,
@@ -5709,7 +5727,47 @@ class AgentRunner(Runner):
         retry_state.task_completed = outcome.task_completed
         attempt_state.succeeded = True
 
+    def _new_query_turn_outcome(self) -> _QueryTurnOutcome:
+        return _QueryTurnOutcome()
+
+    def _new_retry_state(self) -> _RetryState:
+        return _RetryState()
+
+    def _new_query_attempt_input(self, **kwargs: Any) -> _QueryAttemptInput:
+        return _QueryAttemptInput(**kwargs)
+
+    def _new_query_attempt_state(self) -> _QueryAttemptState:
+        return _QueryAttemptState()
+
+    @staticmethod
+    def _request_file_url_network(request: AgentRequest) -> Any:
+        return _request_file_url_network(request)
+
+    @staticmethod
+    def _build_skill_freshness_notice_msg(text: str) -> Msg:
+        return _build_skill_freshness_notice_msg(text)
+
     async def _stream_query_after_preflight(
+        self,
+        msgs,
+        *,
+        request: AgentRequest,
+        query: str | None,
+        session_id: str,
+        preflight: _QueryPreflight,
+    ):
+        """Coordinate retry and attempt execution after preflight."""
+        async for item in query_attempt.stream_query_after_preflight(
+            self,
+            msgs=msgs,
+            request=request,
+            query=query,
+            session_id=session_id,
+            preflight=preflight,
+        ):
+            yield item
+
+    async def _stream_query_after_preflight_legacy(
         self,
         msgs,
         *,
@@ -5971,30 +6029,16 @@ class AgentRunner(Runner):
         skip_history: bool | Any,
         user_id: str | None,
     ) -> bool:
-        # 对于 cron 任务，跳过会话历史加载（不读取旧历史）
-        storage_session_id = _coerce_session_storage_id(session_id)
-        storage_user_id = _coerce_session_storage_user_id(user_id)
-        if skip_history:
-            logger.info(
-                "Cron task: skipping session state load (session_id=%s)",
-                session_id,
-            )
-            session_state_loaded = True
-        else:
-            try:
-                await self.session.load_session_state(
-                    session_id=storage_session_id,
-                    user_id=storage_user_id,
-                    agent=agent,
-                )
-            except KeyError as e:
-                logger.warning(
-                    "load_session_state skipped (state schema mismatch): %s; "
-                    "will save fresh state on completion to recover file",
-                    e,
-                )
-            session_state_loaded = True
-        return session_state_loaded
+        return await session_lifecycle.get_state_loaded(
+            self,
+            agent,
+            session_id,
+            session_state_loaded,
+            skip_history,
+            user_id,
+            coerce_session_id=_coerce_session_storage_id,
+            coerce_user_id=_coerce_session_storage_user_id,
+        )
 
     async def _save_cron_session_state(
         self,
@@ -6157,18 +6201,11 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
     ):
         """按请求类型保存 session state。"""
-        if skip_history:
-            await self._save_cron_session_state(
-                agent,
-                session_id,
-                user_id,
-                hook_overlay,
-            )
-            return
-
-        await self._save_regular_session_state(
+        await session_lifecycle.save_job_session_state(
+            self,
             agent,
             session_id,
+            skip_history,
             user_id,
             hook_overlay,
         )
