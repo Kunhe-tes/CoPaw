@@ -23,7 +23,6 @@ from swe.app.runner.runner import (
     _QueryPreflight,
     _QueryRuntime,
     _QueryRuntimeInputs,
-    _RuntimeStartResult,
 )
 
 
@@ -218,28 +217,61 @@ async def test_session_start_block_cleans_previously_created_chat_and_mcp(
 ) -> None:
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
     runner._prepare_query_preflight = AsyncMock(return_value=_QueryPreflight())
-    chat = SimpleNamespace(id="chat-1")
+    chat = SimpleNamespace(id="chat-1", meta={})
     mcp_client = object()
-    runner._prepare_query_runtime = AsyncMock(
-        return_value=_RuntimeStartResult(
-            block_response=_blocked_msg("session start blocked"),
-            blocked_chat=chat,
-            blocked_mcp_clients=[mcp_client],
-            blocked_session_id="session-1",
-        ),
-    )
     events: list[object] = []
 
+    async def get_or_create_chat(*_args, **_kwargs):
+        events.append(("chat created", chat))
+        return chat
+
     async def update_chat(updated_chat):
-        events.append(("chat", updated_chat))
+        events.append(("chat cleaned", updated_chat))
 
     async def cleanup_mcp(clients):
-        events.append(("mcp", clients))
+        events.append(("mcp cleaned", clients))
 
-    runner._chat_manager = SimpleNamespace(update_chat=update_chat)
+    runner._chat_manager = SimpleNamespace(
+        get_or_create_chat=get_or_create_chat,
+        update_chat=update_chat,
+    )
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",
         cleanup_mcp,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: [mcp_client],
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.build_env_context",
+        lambda **_kwargs: "base",
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            id="test-agent",
+            mcp=None,
+            hooks=HookConfig(enabled=True),
+            running=SimpleNamespace(),
+        ),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *_args, **_kwargs: HookConfig(enabled=True),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._resolve_active_model_label",
+        lambda *_args, **_kwargs: "openai/gpt-test",
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        AsyncMock(
+            return_value=MergedHookResult(
+                decision=HookDecision.BLOCK,
+                reason="session start blocked",
+            ),
+        ),
     )
     runner._start_query_trace = AsyncMock(return_value=None)
     runner._end_trace_if_needed = AsyncMock()
@@ -255,7 +287,11 @@ async def test_session_start_block_cleans_previously_created_chat_and_mcp(
     ]
 
     assert outputs[-1][0].get_text_content() == "session start blocked"
-    assert events == [("chat", chat), ("mcp", [mcp_client])]
+    assert events == [
+        ("chat created", chat),
+        ("chat cleaned", chat),
+        ("mcp cleaned", [mcp_client]),
+    ]
 
 
 @pytest.mark.asyncio
@@ -281,27 +317,38 @@ async def test_retry_notice_is_streamed_before_the_next_attempt(
 
     runner._stream_single_query_attempt = attempt
 
-    outputs = [
-        item
-        async for item in runner._stream_query_after_preflight(
-            [Msg(name="user", role="user", content="hello")],
-            request=_request(),
-            query="hello",
-            session_id="session-1",
-            preflight=_QueryPreflight(),
-        )
-    ]
+    stream = runner._stream_query_after_preflight(
+        [Msg(name="user", role="user", content="hello")],
+        request=_request(),
+        query="hello",
+        session_id="session-1",
+        preflight=_QueryPreflight(),
+    )
 
-    assert [msg.get_text_content() for msg, _last in outputs] == [
-        "请求频率超限，正在重试 (1/1)...",
-        "正在重试 (1/1)...",
-        "second attempt response",
-    ]
-    assert attempts == ["attempt-1", "attempt-2"]
+    try:
+        first_notice, first_last = await anext(stream)
+        assert (
+            first_notice.get_text_content()
+            == "请求频率超限，正在重试 (1/1)..."
+        )
+        assert first_last is False
+        assert attempts == ["attempt-1"]
+
+        retry_notice, retry_last = await anext(stream)
+        assert retry_notice.get_text_content() == "正在重试 (1/1)..."
+        assert retry_last is False
+        assert attempts == ["attempt-1"]
+
+        response, response_last = await anext(stream)
+        assert response.get_text_content() == "second attempt response"
+        assert response_last is True
+        assert attempts == ["attempt-1", "attempt-2"]
+    finally:
+        await stream.aclose()
 
 
 @pytest.mark.asyncio
-async def test_final_cleanup_dispatches_resources_in_declared_order(
+async def test_finally_cleans_each_query_resource(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -343,15 +390,35 @@ async def test_final_cleanup_dispatches_resources_in_declared_order(
         pending_confirmed_skill_snapshots={},
     )
 
-    await runner._cleanup_query_resources(
-        runtime=runtime,
-        session_state_loaded=True,
-        session_id="session-1",
-    )
+    async def successful_attempt(*_args, attempt_state, **_kwargs):
+        attempt_state.runtime = runtime
+        attempt_state.session_state_loaded = True
+        attempt_state.succeeded = True
+        if attempt_state.should_return:
+            yield _blocked_msg("unreachable"), True
 
-    assert events == [
+    runner._start_query_trace = AsyncMock(return_value=None)
+    runner._load_query_retry_settings = lambda *_args: (1, 0, 0.0, 0.0)
+    runner._stream_single_query_attempt = successful_attempt
+    runner._cleanup_blocked_runtime_start = AsyncMock()
+    runner._store_qa_content_if_needed = AsyncMock()
+
+    outputs = [
+        item
+        async for item in runner._stream_query_after_preflight(
+            [Msg(name="user", role="user", content="hello")],
+            request=_request(),
+            query="hello",
+            session_id="session-1",
+            preflight=_QueryPreflight(),
+        )
+    ]
+
+    assert outputs == []
+    assert set(events) == {
         "session save",
         "chat update",
         "mcp close",
         "detector shutdown",
-    ]
+    }
+    assert len(events) == 4
