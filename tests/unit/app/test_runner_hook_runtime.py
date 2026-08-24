@@ -28,6 +28,7 @@ from swe.app.runner.runner import (
     _create_session_skill_detector,
     _QueryAttemptInput,
     _QueryAttemptState,
+    _QueryRuntimeInputs,
     _hook_config_enabled,
     _QueryPreflight,
     _QueryRuntime,
@@ -44,6 +45,7 @@ from swe.tracing.manager import (
     get_current_trace,
     set_current_trace,
 )
+from swe.tracing.models import TraceStatus
 
 
 def _agent_config(hooks: HookConfig | None = None):
@@ -135,8 +137,8 @@ async def _fake_stream_printing_messages(*, agents, coroutine_task):
 
 def _patch_normal_agent_path(monkeypatch):
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
-        AsyncMock(return_value=[]),
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr("swe.app.runner.runner.SWEAgent", _FakeAgent)
     monkeypatch.setattr(
@@ -173,6 +175,93 @@ def test_query_runtime_inputs_keep_request_scoped_values() -> None:
     assert inputs.session_id == "session-1"
     assert inputs.selected_context_directives == ["<SKILL-USE>"]
     assert inputs.passthrough_headers == {"cookie": "session=abc"}
+
+
+@pytest.mark.asyncio
+async def test_selected_skill_hooks_load_after_session_start_without_detector_use(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.app.runner.skill_selection import SkillUseDirective
+
+    skill_root = tmp_path / "skills" / "sample"
+    (skill_root / "hooks").mkdir(parents=True)
+    (skill_root / "scripts").mkdir()
+    (skill_root / "SKILL.md").write_text("# sample\n", encoding="utf-8")
+    (skill_root / "scripts" / "stop.py").write_text(
+        "print('ok')\n",
+        encoding="utf-8",
+    )
+    (skill_root / "hooks" / "hooks.json").write_text(
+        '{"enabled": true, "events": {"Stop": [{"hooks": '
+        '[{"id": "stop", "type": "command", "argv": ["python", "scripts/stop.py"]}]}]}}',
+        encoding="utf-8",
+    )
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    inputs = _QueryRuntimeInputs(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        skip_history=False,
+        agent_config=_agent_config(),
+        tenant_hooks=HookConfig(),
+        hook_overlay=HookSessionOverlay(),
+        env_context="base",
+        selected_context_directives=[],
+        auth_token=None,
+        passthrough_headers={},
+        selected_skill_directives=[
+            SkillUseDirective(
+                name="sample",
+                description="sample",
+                path=skill_root / "SKILL.md",
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_get_or_create_chat",
+        AsyncMock(return_value=SimpleNamespace(id="chat-1")),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        runner,
+        "_generate_session_title_before_stream",
+        AsyncMock(),
+    )
+    directive = inputs.selected_skill_directives[0]
+    monkeypatch.setattr(
+        "swe.app.runner.context_references.build_context_reference_directives",
+        AsyncMock(return_value=[directive]),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.skill_selection.build_skill_use_directives",
+        lambda **kwargs: [],
+    )
+    session_start = AsyncMock(return_value=("base", None))
+    monkeypatch.setattr(runner, "_emit_session_start_hook", session_start)
+
+    resources, blocked = await runner._start_query_runtime_resources(
+        request=SimpleNamespace(channel_meta={}),
+        msgs=[Msg(name="user", role="user", content="hello")],
+        inputs=inputs,
+        mcp_clients=[],
+    )
+
+    assert blocked is None
+    assert resources.env_context == "base"
+    assert (
+        session_start.await_args.kwargs["hook_overlay"].loaded_skill_sources
+        == []
+    )
+    assert [
+        source.source_id for source in inputs.hook_overlay.loaded_skill_sources
+    ] == [
+        "skill:sample",
+    ]
 
 
 def test_hook_config_enabled_accepts_loaded_skill_sources() -> None:
@@ -264,6 +353,7 @@ async def test_create_session_skill_detector_loads_skill_hooks(
         "xlsx",
         trigger_tool="user_message",
         trigger_reason="declared",
+        load_hooks=True,
     )
 
     assert state.loaded_skill_sources[0].source_id == "skill:xlsx"
@@ -329,6 +419,7 @@ async def test_create_session_skill_detector_loads_http_skill_hooks_without_appr
         "xlsx",
         trigger_tool="user_message",
         trigger_reason="declared",
+        load_hooks=True,
     )
 
     handler = (
@@ -699,6 +790,56 @@ async def test_query_handler_no_config_does_not_emit_hook(
 
 
 @pytest.mark.asyncio
+async def test_query_handler_traces_conversation_commands(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SimpleNamespace(
+        get_session_state_dict=AsyncMock(return_value={}),
+        mutate_session_state=AsyncMock(return_value={}),
+    )
+    setattr(runner, "_chat_manager", None)
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(),
+    )
+    runner._start_query_trace = AsyncMock(return_value="trace-command")
+    runner._end_trace_if_needed = AsyncMock()
+
+    async def fake_run_command_path(request, msgs, runner):
+        del request, msgs, runner
+        yield Msg(name="Friday", role="assistant", content="command"), True
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner.run_command_path",
+        fake_run_command_path,
+    )
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    msgs = [Msg(name="user", role="user", content="/compact")]
+
+    outputs = [
+        item async for item in runner.query_handler(msgs, request=request)
+    ]
+
+    assert outputs[-1][0].get_text_content() == "command"
+    runner._start_query_trace.assert_awaited_once_with(request, msgs)
+    runner._end_trace_if_needed.assert_awaited_once_with(
+        "trace-command",
+        TraceStatus.COMPLETED,
+    )
+
+
+@pytest.mark.asyncio
 async def test_query_handler_loads_session_skill_hooks_for_media_message(
     monkeypatch,
     tmp_path,
@@ -985,8 +1126,8 @@ async def test_query_handler_session_start_block_yields_before_cleanup(
         await cleanup_release.wait()
 
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
-        AsyncMock(return_value=["mcp-client"]),
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: ["mcp-client"],
     )
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",
@@ -1143,6 +1284,67 @@ async def test_build_and_connect_mcp_clients_passes_explicit_connect_timeout(
 
 
 @pytest.mark.asyncio
+async def test_build_lazy_mcp_clients_defers_client_creation_until_discovery(
+    monkeypatch,
+) -> None:
+    import swe.app.runner.runner as runner_module
+
+    tool = SimpleNamespace(
+        name="weather",
+        description="Return weather.",
+        inputSchema={"type": "object", "properties": {}},
+    )
+    created_client = SimpleNamespace(
+        connect=AsyncMock(),
+        list_tools=AsyncMock(return_value=[tool]),
+        close=AsyncMock(),
+    )
+    create_client = AsyncMock(return_value=created_client)
+    monkeypatch.setattr(
+        runner_module,
+        "_create_mcp_client_with_headers",
+        create_client,
+    )
+
+    clients = runner_module._build_lazy_mcp_clients(
+        SimpleNamespace(
+            clients={
+                "weather": SimpleNamespace(
+                    name="weather-mcp",
+                    enabled=True,
+                    model_dump=lambda **_kwargs: {"name": "weather-mcp"},
+                ),
+            },
+        ),
+        tenant_id="tenant-a",
+        user_id="user-a",
+        passthrough_headers={"Authorization": "Bearer secret"},
+        session_id="session-a",
+        chat_id="chat-a",
+        trace_id="trace-a",
+    )
+
+    assert len(clients) == 1
+    assert create_client.await_count == 0
+
+    assert [tool.name for tool in await clients[0].list_tools()] == ["weather"]
+
+    create_client.assert_awaited_once()
+    assert create_client.await_args.args[1] == {
+        "Authorization": "Bearer secret",
+    }
+    assert create_client.await_args.kwargs == {
+        "session_id": "session-a",
+        "chat_id": "chat-a",
+        "trace_id": "trace-a",
+    }
+    created_client.connect.assert_awaited_once_with(
+        timeout=runner_module._MCP_CONNECT_TIMEOUT_SECONDS,
+    )
+    created_client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_prepare_query_runtime_logs_agent_build_duration(
     monkeypatch,
     tmp_path,
@@ -1235,13 +1437,13 @@ async def test_prepare_query_runtime_resolves_chat_before_connecting_mcp(
     )
     _patch_normal_agent_path(monkeypatch)
 
-    async def build_clients(*args, **kwargs):
+    def build_clients(*args, **kwargs):
         del args
         events.append(("mcp", kwargs.get("chat_id")))
         return []
 
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
+        "swe.app.runner.runner._build_lazy_mcp_clients",
         build_clients,
     )
     monkeypatch.setattr(
@@ -1338,7 +1540,7 @@ async def test_prepare_query_runtime_returns_blocked_start_result(
 
 
 @pytest.mark.asyncio
-async def test_prepare_query_runtime_restores_confirmed_skill_from_session_snapshot(
+async def test_prepare_query_runtime_does_not_restore_skill_continuation_from_snapshot(
     monkeypatch,
     tmp_path,
 ) -> None:
@@ -1440,7 +1642,7 @@ async def test_prepare_query_runtime_restores_confirmed_skill_from_session_snaps
     )
 
     assert result.runtime is not None
-    assert restored == [("fill-metadata", True)]
+    assert restored == []
 
 
 @pytest.mark.asyncio

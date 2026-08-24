@@ -520,16 +520,32 @@ class ConsoleChannel(BaseChannel):
                     else None
                 )
                 if obj == "message" and isinstance(boundary, dict):
+                    latest_channel_meta = getattr(
+                        request,
+                        "channel_meta",
+                        None,
+                    )
+                    metadata_chat_id = (
+                        latest_channel_meta.get("chat_id")
+                        if isinstance(latest_channel_meta, dict)
+                        else None
+                    )
+                    if (
+                        not isinstance(metadata_chat_id, str)
+                        or not metadata_chat_id
+                    ):
+                        metadata_chat_id = getattr(request, "chat_id", "")
+                    chat_id = (
+                        metadata_chat_id
+                        if isinstance(metadata_chat_id, str)
+                        else ""
+                    )
                     yield (
                         "data: "
                         + json.dumps(
                             {
                                 "object": "conversation_compacted",
-                                "chat_id": getattr(
-                                    request,
-                                    "chat_id",
-                                    "",
-                                ),
+                                "chat_id": chat_id,
                                 "boundary": boundary,
                             },
                             ensure_ascii=False,

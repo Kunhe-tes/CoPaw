@@ -85,7 +85,7 @@ def _resolve_file_path(file_path: str) -> str:
 def _resolve_writable_file_path(file_path: str) -> str:
     base_dir = get_current_tool_base_dir()
     try:
-        return _resolve_file_path(file_path)
+        resolved = Path(_resolve_file_path(file_path))
     except TenantPathBoundaryError:
         expanded_path = os.path.expanduser(file_path)
         path_obj = Path(expanded_path)
@@ -103,7 +103,30 @@ def _resolve_writable_file_path(file_path: str) -> str:
             ) from exc
 
         candidate.parent.mkdir(parents=True, exist_ok=True)
-        return str(candidate)
+        resolved = candidate
+    _raise_if_protected_skill_write_target(resolved, base_dir)
+    return str(resolved)
+
+
+def _raise_if_protected_skill_write_target(
+    target: Path,
+    workspace_dir: Path,
+) -> None:
+    resolved_target = target.resolve(strict=False)
+    resolved_workspace = workspace_dir.resolve(strict=False)
+    protected_roots = (
+        resolved_workspace / "skills",
+        resolved_workspace / ".disabled_skills",
+    )
+    if any(
+        resolved_target == root or resolved_target.is_relative_to(root)
+        for root in protected_roots
+    ):
+        raise TenantPathBoundaryError(
+            "Direct writes to workspace skill directories are not allowed; "
+            "use the skill import or edit APIs so security scanning runs.",
+            resolved_path=resolved_target,
+        )
 
 
 def _get_encoding_for_file(file_path: str) -> str:

@@ -48,4 +48,3 @@ The canonical structured failed `tool_result` contract SHALL preserve raw failur
 - **WHEN** a failed tool invocation is persisted as a structured failed `tool_result`
 - **THEN** the system SHALL treat bounded `tool_error` summaries as a separate presentation-layer derivation
 - **AND** the persisted structured failure result SHALL remain the canonical source for raw failure detail and failure type
-

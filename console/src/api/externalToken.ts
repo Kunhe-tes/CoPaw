@@ -74,7 +74,6 @@ export async function fetchNewToken(): Promise<{ token: string; expiresIn: numbe
   if (!token) {
     throw new Error("Token not found in response");
   }
-  console.log('token', token, expiresIn)
   return { token, expiresIn };
 }
 

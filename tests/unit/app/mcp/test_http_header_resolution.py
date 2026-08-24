@@ -182,6 +182,85 @@ async def test_runner_http_client_injects_runtime_scope_headers_and_dedupes_rese
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "header_name",
+    [
+        "authorization",
+        "x-header-authorization",
+        "X-Header-Authorization",
+    ],
+)
+async def test_runner_sandbox_mcp_client_filters_passthrough_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+    header_name: str,
+) -> None:
+    from swe.app.runner import runner as runner_module
+
+    captured: dict[str, Any] = {}
+
+    class _FakeHttpStatefulClient:
+        def __init__(self, **kwargs):
+            captured["stateful_client_kwargs"] = kwargs
+
+    monkeypatch.setattr(
+        runner_module,
+        "HttpStatefulClient",
+        _FakeHttpStatefulClient,
+    )
+
+    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+        await runner_module._create_mcp_client_with_headers(
+            MCPClientConfig(
+                name="sandbox",
+                transport="streamable_http",
+                url=(
+                    "https://mcpmarket-sandbox.platform.cmbchina.cn"
+                    "/mcp/stream"
+                ),
+                headers={
+                    "Authorization": "Bearer configured-token",
+                    "X-Static": "static",
+                },
+            ),
+            passthrough_headers={
+                header_name: "Bearer frontend-token",
+                "cookie": "session=abc",
+            },
+        )
+
+    assert captured["stateful_client_kwargs"]["headers"] == {
+        "Authorization": "Bearer configured-token",
+        "X-Static": "static",
+        "cookie": "session=abc",
+        "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
+        "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
+    }
+
+
+def test_mcp_http_headers_keeps_passthrough_authorization_for_other_hosts() -> (
+    None
+):
+    from swe.app.mcp.http_headers import build_mcp_http_headers
+
+    headers = build_mcp_http_headers(
+        None,
+        passthrough_headers={
+            "X-Header-Authorization": "Bearer frontend-token",
+            "cookie": "session=abc",
+        },
+        url="https://mcpmarket-sandbox.platform.cmbchina.cn.example.test/mcp",
+    )
+
+    assert headers == {
+        "X-Header-Authorization": "Bearer frontend-token",
+        "cookie": "session=abc",
+    }
+
+
+@pytest.mark.asyncio
 async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -284,3 +363,71 @@ async def test_rebuild_mcp_client_reresolves_scope_headers_on_reconnect(
         captured[1]["sse_read_timeout"]
         == runner_module._MCP_HTTP_SSE_READ_TIMEOUT_SECONDS
     )
+
+
+@pytest.mark.asyncio
+async def test_rebuild_sandbox_mcp_client_filters_passthrough_authorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from swe.app.runner import runner as runner_module
+    from swe.agents.react_agent import SWEAgent
+
+    captured: list[dict[str, Any]] = []
+
+    class _FakeHttpStatefulClient:
+        def __init__(self, **kwargs):
+            captured.append(kwargs)
+
+    with (
+        patch(
+            "swe.app.runner.runner.HttpStatefulClient",
+            _FakeHttpStatefulClient,
+        ),
+        patch(
+            "swe.agents.react_agent.HttpStatefulClient",
+            _FakeHttpStatefulClient,
+        ),
+    ):
+        with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+            original_client = (
+                await runner_module._create_mcp_client_with_headers(
+                    MCPClientConfig(
+                        name="sandbox",
+                        transport="streamable_http",
+                        url=(
+                            "https://mcpmarket-sandbox.platform.cmbchina.cn"
+                            "/mcp/stream"
+                        ),
+                        headers={
+                            "Authorization": "Bearer configured-token",
+                        },
+                    ),
+                    passthrough_headers={
+                        "x-header-authorization": "Bearer frontend-token",
+                        "cookie": "session=abc",
+                    },
+                    session_id="session-1",
+                    chat_id="chat-uuid-1",
+                    trace_id="trace-1",
+                )
+            )
+            rebuilt = SWEAgent._rebuild_mcp_client(original_client)
+
+    expected_headers = {
+        "Authorization": "Bearer configured-token",
+        "cookie": "session=abc",
+        "x-swe-tenant-id": "tenant-a",
+        "tenantid": "tenant-a",
+        "x-swe-source-id": "source-a",
+        "sourceid": "source-a",
+        "x-swe-runtime-scope-id": encode_scope_id("tenant-a", "source-a"),
+        "x-swe-session-id": "session-1",
+        "sessionid": "session-1",
+        "x-swe-chat-id": "chat-uuid-1",
+        "chatid": "chat-uuid-1",
+        "x-swe-trace-id": "trace-1",
+        "traceid": "trace-1",
+    }
+    assert rebuilt is not None
+    assert captured[0]["headers"] == expected_headers
+    assert captured[1]["headers"] == expected_headers

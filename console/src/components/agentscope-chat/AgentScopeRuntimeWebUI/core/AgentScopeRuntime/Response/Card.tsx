@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { type ReactNode, useMemo } from "react";
 import {
   AgentScopeRuntimeContentType,
   AgentScopeRuntimeMessageType,
@@ -19,7 +19,6 @@ import { getCompletedReasoningFallbackText } from "./reasoningFallback";
 import ProcessDisclosure from "./ProcessDisclosure";
 import { resolveToolName } from "./ToolTitle";
 // import { Avatar, Flex } from "antd";
-// import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
 
 type RetryMetadata = {
   retry_status?: unknown;
@@ -254,6 +253,7 @@ function renderResponseItem(item: IAgentScopeRuntimeMessage) {
 export default function AgentScopeRuntimeResponseCard(props: {
   data: IAgentScopeRuntimeResponse;
   isLast?: boolean;
+  beforeActions?: ReactNode;
 }) {
   // const avatar = useChatAnywhereOptions((v) => v.welcome.avatar);
   // const nick = useChatAnywhereOptions((v) => v.welcome.nick);
@@ -312,7 +312,13 @@ export default function AgentScopeRuntimeResponseCard(props: {
   const durationText = useMemo(() => {
     return getMessagesDurationText(messages);
   }, [messages]);
-
+  const hasModelCallFailed =
+    props.data.error?.code === "model_call_failed" ||
+    messages.some(
+      (message) =>
+        message.type === AgentScopeRuntimeMessageType.ERROR &&
+        message.code === "model_call_failed",
+    );
   if (
     !messages?.length &&
     AgentScopeRuntimeResponseBuilder.maybeGenerating(props.data)
@@ -345,7 +351,8 @@ export default function AgentScopeRuntimeResponseCard(props: {
       {groupedMessages.direct.map(renderResponseItem)}
       {reasoningFallbackText && <Markdown content={reasoningFallbackText} />}
       {props.data.error && <Error data={props.data.error} />}
-      <Actions {...props} />
+      {props.beforeActions}
+      <Actions {...props} hideReplace={hasModelCallFailed} />
       {props.data.suggestions?.length > 0 && (
         <Suggestions
           suggestions={props.data.suggestions}

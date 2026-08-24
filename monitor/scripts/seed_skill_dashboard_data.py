@@ -119,6 +119,13 @@ CLICK_EVENT_COLUMNS = {
     "customer_id": "VARCHAR(128) NULL COMMENT '客户唯一标识'",
     "customer_name": "VARCHAR(255) NULL COMMENT '客户展示名称'",
     "customer_info": "JSON NULL COMMENT '客户扩展信息'",
+    "event_type": "VARCHAR(32) NOT NULL DEFAULT 'button_click' COMMENT '事件类型'",
+    "template_type": "VARCHAR(16) NULL COMMENT '模板类型：main/sub'",
+    "template_id": "BIGINT NULL COMMENT '当前事件所在模板ID'",
+    "result_id": "VARCHAR(128) NULL COMMENT '当前模板生成结果ID'",
+    "event_target_id": "VARCHAR(255) NULL COMMENT '事件对象稳定标识'",
+    "event_target_name": "VARCHAR(512) NULL COMMENT '事件对象展示名称'",
+    "trace_id": "VARCHAR(128) NULL COMMENT '方案生成与浏览链路标识'",
     "clicked_at": "DATETIME NULL COMMENT '前端点击时间'",
 }
 
@@ -126,6 +133,10 @@ CLICK_EVENT_INDEXES = {
     "idx_clicked_at": "CREATE INDEX idx_clicked_at ON swe_html_preview_click_events (clicked_at)",
     "idx_task_clicked": "CREATE INDEX idx_task_clicked ON swe_html_preview_click_events (cron_task_id, clicked_at)",
     "idx_button_type_clicked": "CREATE INDEX idx_button_type_clicked ON swe_html_preview_click_events (button_type, clicked_at)",
+    "idx_source_event_target_clicked": "CREATE INDEX idx_source_event_target_clicked ON swe_html_preview_click_events (source_id, event_type, event_target_id, clicked_at)",
+    "idx_source_template_type_event_clicked": "CREATE INDEX idx_source_template_type_event_clicked ON swe_html_preview_click_events (source_id, template_type, event_type, clicked_at)",
+    "idx_source_template_result_clicked": "CREATE INDEX idx_source_template_result_clicked ON swe_html_preview_click_events (source_id, template_id, result_id, clicked_at)",
+    "idx_trace_clicked": "CREATE INDEX idx_trace_clicked ON swe_html_preview_click_events (trace_id, clicked_at)",
     "idx_source_clicked": "CREATE INDEX idx_source_clicked ON swe_html_preview_click_events (source_id, clicked_at)",
 }
 

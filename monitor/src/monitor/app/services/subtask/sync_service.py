@@ -6,6 +6,7 @@ Provides methods for:
 - Computing execution async_status from subtask statuses
 """
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Optional, Tuple
@@ -17,6 +18,10 @@ from ....config.constant import (
     ASYNC_TASK_APP_KEY,
     ASYNC_TASK_ENV_TAG,
     ASYNC_TASK_API_KEY,
+    RESULT_INDEX_PUSH_PLUGIN_ID,
+    RESULT_INDEX_PUSH_PLUGIN_NAME,
+    RESULT_INDEX_PUSH_QUESTION,
+    RESULT_INDEX_PUSH_URL,
 )
 from .query_service import QueryService, get_query_service
 from ...models.subtask import (
@@ -30,6 +35,8 @@ logger = logging.getLogger(__name__)
 
 # 外部 API 超时
 API_TIMEOUT = 10.0
+
+RESULT_INDEX_PUSH_TIMEOUT = 10.0
 
 # 每批处理数量
 BATCH_SIZE = 50
@@ -73,6 +80,87 @@ class SyncService:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+    def _is_result_index_push_configured(self) -> bool:
+        """Check if result-index push API is configured."""
+        return bool(
+            RESULT_INDEX_PUSH_URL
+            and RESULT_INDEX_PUSH_PLUGIN_ID
+            and RESULT_INDEX_PUSH_PLUGIN_NAME
+            and RESULT_INDEX_PUSH_QUESTION,
+        )
+
+    @staticmethod
+    def _dedupe_result_index_users(
+        users: list[dict[str, str]],
+    ) -> list[dict[str, str]]:
+        """Deduplicate result-index users by custUid and bbkId."""
+        deduped = []
+        seen = set()
+        for user in users:
+            cust_uid = (user.get("custUid") or "").strip()
+            bbk_id = (user.get("bbkId") or "").strip()
+            if not cust_uid or not bbk_id:
+                continue
+            key = (cust_uid, bbk_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append({"custUid": cust_uid, "bbkId": bbk_id})
+        return deduped
+
+    async def _push_result_index_users(
+        self,
+        users: list[dict[str, str]],
+    ) -> None:
+        """Push successful result-index users to third party."""
+        user_info_list = self._dedupe_result_index_users(users)
+        if not user_info_list:
+            return
+        if not self._is_result_index_push_configured():
+            logger.info(
+                "Result-index push API not configured, skipped: users=%d",
+                len(user_info_list),
+            )
+            return
+
+        payload = {
+            "pluginId": RESULT_INDEX_PUSH_PLUGIN_ID,
+            "pluginName": RESULT_INDEX_PUSH_PLUGIN_NAME,
+            "question": RESULT_INDEX_PUSH_QUESTION,
+            "userInfoList": user_info_list,
+        }
+        try:
+            async with httpx.AsyncClient(
+                timeout=RESULT_INDEX_PUSH_TIMEOUT,
+            ) as client:
+                response = await client.post(
+                    RESULT_INDEX_PUSH_URL,
+                    headers={"Content-Type": "application/json"},
+                    json=payload,
+                )
+            if response.status_code >= 400:
+                logger.warning(
+                    "Result-index user push failed: status=%d users=%d",
+                    response.status_code,
+                    len(user_info_list),
+                )
+                return
+            logger.info(
+                "Result-index users pushed: users=%d",
+                len(user_info_list),
+            )
+        except Exception as e:
+            logger.warning("Result-index user push failed: %s", e)
+
+    def _schedule_result_index_user_push(
+        self,
+        users: list[dict[str, str]],
+    ) -> None:
+        """Schedule result-index user push without blocking sync response."""
+        if not users:
+            return
+        asyncio.create_task(self._push_result_index_users(users))
 
     def _build_api_url(self, task_id: str) -> str:
         """Build external API URL for task status query."""
@@ -311,9 +399,17 @@ class SyncService:
         (
             success_count,
             error_count,
+            indexed_count,
+            indexed_users,
         ) = await self.query_service.batch_update_execution_async_status()
+        self._schedule_result_index_user_push(indexed_users)
 
         total_updated = success_count + error_count
+        logger.info(
+            "Execution async_status sync completed: updated=%d indexed=%d",
+            total_updated,
+            indexed_count,
+        )
 
         return ExecutionAsyncStatusResponse(
             success=True,

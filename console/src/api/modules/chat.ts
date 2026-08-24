@@ -13,6 +13,8 @@ import type {
   ChatArchivePage,
   ChatDeleteResponse,
   Session,
+  SubAgentRunCancelResponse,
+  SubAgentRunSnapshot,
 } from "../types";
 
 /** Response from POST /console/upload. url = filename only; agent_id from header. */
@@ -49,6 +51,7 @@ export interface GeneratedFilesResponse {
 
 export type FileManagerRoot =
   | "working"
+  | "source_scope"
   | "upload"
   | "download"
   | "conversation"
@@ -339,6 +342,12 @@ export const chatApi = {
         { method: "DELETE" },
       ),
 
+    deleteDirectory: (params: FileManagerPathParams) =>
+      request<void>(
+        `/console/file-manager/directories?${fileManagerQuery(params)}`,
+        { method: "DELETE" },
+      ),
+
     restore: (archiveItemId: string) =>
       request<FileManagerRecycleMutation>(
         `/console/file-manager/recycle/${encodeURIComponent(
@@ -358,6 +367,20 @@ export const chatApi = {
     request<void>(`/console/chat/stop?chat_id=${encodeURIComponent(chatId)}`, {
       method: "POST",
     }),
+
+  getSubAgentRuns: (chatId: string) =>
+    request<SubAgentRunSnapshot>(
+      `/subagents/runs?chat_id=${encodeURIComponent(chatId)}`,
+    ),
+
+  cancelSubAgentRun: (chatId: string, runId: string) =>
+    request<SubAgentRunCancelResponse>(
+      `/subagents/runs/${encodeURIComponent(runId)}/cancel`,
+      {
+        method: "POST",
+        body: JSON.stringify({ chat_id: chatId }),
+      },
+    ),
 };
 
 export const sessionApi = {

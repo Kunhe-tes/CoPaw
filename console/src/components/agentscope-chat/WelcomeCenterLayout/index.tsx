@@ -1,9 +1,19 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
-import { Input, Upload, Tooltip, message } from "antd";
+import React, {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useMemo,
+} from "react";
+import { Input, Upload, message } from "antd";
 import type { GetRef, UploadFile } from "antd";
 import { SparkAttachmentLine } from "@agentscope-ai/icons";
-import { IconButton } from "@agentscope-ai/design";
-import { Attachments } from "@/components/agentscope-chat";
+import {
+  Attachments,
+  type IAgentScopeRuntimeWebUIInputData,
+  type IAgentScopeRuntimeWebUISenderOptions,
+  useChatAnywhereInput,
+} from "@/components/agentscope-chat";
 import { chatApi } from "@/api/modules/chat";
 import Style from "./style";
 import FeaturedCases from "../FeaturedCases";
@@ -14,7 +24,12 @@ import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
 import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
-import VoiceRecorderTrigger from "@/components/GlobalVoiceRecorder/VoiceRecorderTrigger";
+import VoiceRecorderQuickMenuItem from "@/components/GlobalVoiceRecorder/VoiceRecorderQuickMenuItem";
+import { useVoiceRecorderTrigger } from "@/components/GlobalVoiceRecorder/context";
+import ComposerQuickMenu, {
+  ComposerQuickMenuItem,
+} from "@/components/agentscope-chat/ComposerQuickMenu";
+import quickMenuStyles from "@/components/agentscope-chat/ComposerQuickMenu/index.module.less";
 import {
   appendChatInputText,
   CHAT_INPUT_APPEND_TEXT_EVENT,
@@ -32,17 +47,40 @@ const PLACEHOLDER_OPTIONS = [
 
 interface WelcomeCenterLayoutProps {
   greeting?: string;
-  onSubmit: (data: {
-    query: string;
-    fileList?: UploadFile[];
-  }) => void | Promise<void>;
+  placeholder?: string;
+  beforeSubmit?: IAgentScopeRuntimeWebUISenderOptions["beforeSubmit"];
+  quickMenuItems?: React.ReactNode | React.ReactNode[];
+  prefixItems?: React.ReactNode | React.ReactNode[];
+  onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void | Promise<void>;
   skillMentions?: SkillMentionsData;
-  beforeSubmit?: () => Promise<boolean>;
+}
+
+function isSubmitCancelled(result: unknown): result is {
+  shouldSubmit: false;
+  clearInput?: boolean;
+} {
+  return (
+    Boolean(result) &&
+    typeof result === "object" &&
+    (result as { shouldSubmit?: unknown }).shouldSubmit === false
+  );
 }
 
 export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
-  const { greeting, onSubmit, skillMentions, beforeSubmit } = props;
+  const {
+    greeting,
+    onSubmit,
+    skillMentions,
+    beforeSubmit,
+    placeholder,
+    quickMenuItems,
+    prefixItems,
+  } = props;
   const { t } = useTranslation();
+  const inputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+  const inputDisabled = Boolean(inputState.disabled);
   const [inputValue, setInputValue] = useState("");
   const [fileList, setFileList] = useState<UploadFile[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -53,6 +91,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const [mentionMenuContainer, setMentionMenuContainer] =
     useState<HTMLDivElement | null>(null);
   const uploadRef = useRef<GetRef<typeof Upload>>(null);
+  const voiceRecorder = useVoiceRecorderTrigger();
   const inputValueRef = useRef(inputValue);
   const fileListRef = useRef(fileList);
   const isSubmittingRef = useRef(false);
@@ -121,15 +160,28 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     const uploadedFiles = fileListRef.current.filter((file) =>
       Boolean(file.response?.url),
     );
+    const inputData: IAgentScopeRuntimeWebUIInputData = {
+      query,
+      fileList: uploadedFiles,
+    };
 
     isSubmittingRef.current = true;
     setIsSubmitting(true);
 
     try {
-      if (beforeSubmit && !(await beforeSubmit())) return;
+      const next = beforeSubmit ? await beforeSubmit(inputData) : inputData;
+      if (!next) return;
+      if (isSubmitCancelled(next)) {
+        if (next.clearInput) {
+          setCurrentInputValue("");
+          setCurrentFileList([]);
+        }
+        return;
+      }
 
-      // Submit with file list
-      await Promise.resolve(onSubmit({ query, fileList: uploadedFiles }));
+      await Promise.resolve(
+        onSubmit(typeof next === "object" ? next : inputData),
+      );
       if (inputValueRef.current === submittedInputValue) {
         setCurrentInputValue("");
       }
@@ -156,9 +208,10 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
 
   const handleFillInput = useCallback(
     (text: string) => {
+      if (inputDisabled) return;
       setCurrentInputValue(text);
     },
-    [setCurrentInputValue],
+    [inputDisabled, setCurrentInputValue],
   );
 
   // Handle "看案例" click - fetch detail from API
@@ -187,6 +240,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   // Handle file upload - use chatApi to upload files (same as bottom Input)
   const handleBeforeUpload = useCallback(
     (file: File) => {
+      if (inputDisabled) return false;
       const uid = `welcome-${Date.now()}-${Math.random()
         .toString(36)
         .slice(2)}`;
@@ -245,8 +299,52 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
 
       return false; // Prevent default upload behavior
     },
-    [setCurrentFileList, t],
+    [inputDisabled, setCurrentFileList, t],
   );
+
+  const mergedQuickMenuItems = useMemo(() => {
+    const externalItems =
+      React.Children.toArray(quickMenuItems).filter(Boolean);
+    const uploadItem = (
+      <div
+        key="welcome-upload"
+        className={quickMenuStyles.uploadTrigger}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <Upload
+          ref={uploadRef}
+          showUploadList={false}
+          accept="*/*"
+          beforeUpload={handleBeforeUpload}
+          disabled={inputDisabled || isSubmitting}
+        >
+          <ComposerQuickMenuItem
+            icon={<SparkAttachmentLine />}
+            interactive
+            label={t("chat.quickMenu.upload", "上传文件")}
+          />
+        </Upload>
+      </div>
+    );
+
+    return [
+      uploadItem,
+      voiceRecorder ? (
+        <VoiceRecorderQuickMenuItem
+          key="voice-recorder"
+          control={voiceRecorder}
+        />
+      ) : null,
+      ...externalItems,
+    ].filter(Boolean);
+  }, [
+    handleBeforeUpload,
+    inputDisabled,
+    isSubmitting,
+    quickMenuItems,
+    t,
+    voiceRecorder,
+  ]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -289,7 +387,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
               mentionMenuPlacement="bottom"
               onKeyDown={handleKeyDown}
               onValueChange={setCurrentInputValue}
-              placeholder={randomPlaceholder}
+              placeholder={placeholder || randomPlaceholder}
               skillMentions={skillMentions}
               value={inputValue}
             />
@@ -299,38 +397,29 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
               value={inputValue}
               onChange={(e) => setCurrentInputValue(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder={randomPlaceholder}
+              placeholder={placeholder || randomPlaceholder}
               autoSize={{ minRows: 1, maxRows: 5 }}
               bordered={false}
-              disabled={isSubmitting}
+              disabled={inputDisabled || isSubmitting}
             />
           )}
           <div className="welcome-input-actions">
             <div className="welcome-input-actions-left">
-              <VoiceRecorderTrigger />
-              <Tooltip title="上传附件">
-                <div>
-                  <Upload
-                    ref={uploadRef}
-                    showUploadList={false}
-                    accept="*/*"
-                    beforeUpload={handleBeforeUpload}
-                  >
-                    <IconButton
-                      icon={<SparkAttachmentLine />}
-                      bordered={false}
-                    />
-                  </Upload>
-                </div>
-              </Tooltip>
+              <ComposerQuickMenu
+                disabled={inputDisabled || isSubmitting}
+                triggerLabel={t("chat.quickMenu.trigger", "快捷操作")}
+              >
+                {mergedQuickMenuItems}
+              </ComposerQuickMenu>
+              {prefixItems}
             </div>
             <button
               className="welcome-input-send-btn"
               onClick={handleSend}
-              disabled={isSubmitting || !inputValue.trim()}
+              disabled={inputDisabled || isSubmitting || !inputValue.trim()}
               type="button"
             >
-              <img src={sendIcon} alt="发送" width={28} height={28} />
+              <img src={sendIcon} alt="发送" width={24} height={24} />
             </button>
           </div>
         </div>

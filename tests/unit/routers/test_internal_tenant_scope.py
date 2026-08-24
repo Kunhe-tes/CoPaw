@@ -10,10 +10,12 @@ from unittest.mock import AsyncMock
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+import pytest
 
 from swe.app.identity_resolver import ResolvedIdentity
 from swe.app.routers import internal as internal_router
 from swe.app.routers.internal import router
+from swe.app.workspace.tenant_pool import BootstrapOutcome
 from swe.config.context import encode_scope_id
 
 
@@ -954,52 +956,19 @@ def test_internal_batch_initialize_requires_identity_resolution(
     pool.ensure_bootstrap.assert_not_awaited()
 
 
-def test_internal_batch_initialize_marks_existing_tenant_as_skipped(
+@pytest.mark.parametrize(
+    ("outcome_status", "expected_status"),
+    [
+        ("already_ready", "skipped"),
+        ("bootstrapped", "created"),
+    ],
+)
+def test_internal_batch_initialize_task_uses_bootstrap_outcome(
     monkeypatch,
+    outcome_status,
+    expected_status,
 ) -> None:
-    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
-    client = _build_client(SimpleNamespace())
-    client.app.state.tenant_workspace_pool = pool
-    _enable_async_task_submission(client, monkeypatch)
-
-    async def fake_resolve_user_identity(**kwargs):
-        tenant_id = kwargs["tenant_id"]
-        return ResolvedIdentity(
-            user_name=f"name-{tenant_id}",
-            bbk_id=f"bbk-{tenant_id}",
-        )
-
-    async def fake_existing_check(_pool, tenant_id, source_id):
-        return tenant_id == "111"
-
-    monkeypatch.setattr(
-        internal_router,
-        "resolve_user_identity",
-        fake_resolve_user_identity,
-    )
-    monkeypatch.setattr(
-        internal_router,
-        "_is_tenant_already_bootstrapped",
-        fake_existing_check,
-    )
-
-    response = client.post(
-        "/internal/tenants/batch-initialize",
-        json={
-            "tenant_ids": "111,222",
-            "source_id": "RMASSIST",
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "queued"
-    pool.ensure_bootstrap.assert_not_awaited()
-
-
-def test_internal_batch_initialize_task_marks_item_detail_statuses(
-    monkeypatch,
-) -> None:
-    """后台初始化明细应区分已跳过和新创建状态。"""
+    """Batch item status must come from the pool bootstrap outcome."""
 
     class FakeStore:
         def __init__(self) -> None:
@@ -1022,24 +991,24 @@ def test_internal_batch_initialize_task_marks_item_detail_statuses(
             bbk_id=f"bbk-{tenant_id}",
         )
 
-    async def fake_existing_check(_pool, tenant_id, _source_id):
-        return tenant_id == "111"
-
     monkeypatch.setattr(
         internal_router,
         "resolve_user_identity",
         fake_resolve_user_identity,
     )
-    monkeypatch.setattr(
-        internal_router,
-        "_is_tenant_already_bootstrapped",
-        fake_existing_check,
-    )
 
     store = FakeStore()
-    pool = SimpleNamespace(ensure_bootstrap=AsyncMock())
+    pool = SimpleNamespace(
+        ensure_bootstrap=AsyncMock(
+            return_value=BootstrapOutcome(
+                tenant_id="111",
+                status=outcome_status,
+                duration_ms=1,
+            ),
+        ),
+    )
     payload = internal_router.InternalBatchInitializeTenantsRequest(
-        tenant_ids="111,222",
+        tenant_ids="111",
         source_id="RMASSIST",
     )
 
@@ -1049,100 +1018,21 @@ def test_internal_batch_initialize_task_marks_item_detail_statuses(
             store=store,
             pool=pool,
             payload=payload,
-            tenant_ids=["111", "222"],
+            tenant_ids=["111"],
             headers={},
         ),
     )
 
     assert [item["item_status"] for item in store.item_results] == [
-        "skipped",
-        "created",
+        expected_status,
     ]
     assert [item["result"]["status"] for item in store.item_results] == [
-        "skipped",
-        "created",
+        expected_status,
     ]
     pool.ensure_bootstrap.assert_awaited_once()
     assert store.finished is not None
     assert store.finished["status"] == "succeeded"
-    assert store.finished["done_count"] == 2
-
-
-def test_internal_batch_initialize_marks_existing_tenant_as_skipped_from_fs(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    from swe.app.workspace.tenant_initializer import TenantInitializer
-
-    monkeypatch.setattr(
-        TenantInitializer,
-        "_has_skill_pool_state",
-        lambda self: True,
-    )
-
-    existing_init = TenantInitializer(tmp_path, "111", source_id="RMASSIST")
-    tenant_dir = existing_init.tenant_dir
-    default_workspace = tenant_dir / "workspaces" / "default"
-    default_workspace.mkdir(parents=True, exist_ok=True)
-    (tenant_dir / "config.json").write_text("{}", encoding="utf-8")
-    (default_workspace / "agent.json").write_text("{}", encoding="utf-8")
-    (default_workspace / "chats.json").write_text("{}", encoding="utf-8")
-    (default_workspace / "jobs.json").write_text("{}", encoding="utf-8")
-    (default_workspace / "token_usage.json").write_text(
-        "{}",
-        encoding="utf-8",
-    )
-    (default_workspace / "sessions").mkdir(exist_ok=True)
-    (default_workspace / "memory").mkdir(exist_ok=True)
-    for file_name in (
-        "AGENTS.md",
-        "HEARTBEAT.md",
-        "MEMORY.md",
-        "PROFILE.md",
-        "SOUL.md",
-    ):
-        (default_workspace / file_name).write_text("", encoding="utf-8")
-    skill_pool_dir = tenant_dir / "skill_pool"
-    skill_pool_dir.mkdir(parents=True, exist_ok=True)
-    (skill_pool_dir / "skill.json").write_text(
-        json.dumps({"skills": {"default-skill": {"name": "default-skill"}}}),
-        encoding="utf-8",
-    )
-
-    assert existing_init.has_seeded_bootstrap() is True
-
-    pool = SimpleNamespace(
-        ensure_bootstrap=AsyncMock(),
-        _base_working_dir=tmp_path,
-    )
-    client = _build_client(SimpleNamespace())
-    client.app.state.tenant_workspace_pool = pool
-    _enable_async_task_submission(client, monkeypatch)
-
-    async def fake_resolve_user_identity(**kwargs):
-        tenant_id = kwargs["tenant_id"]
-        return ResolvedIdentity(
-            user_name=f"name-{tenant_id}",
-            bbk_id=f"bbk-{tenant_id}",
-        )
-
-    monkeypatch.setattr(
-        internal_router,
-        "resolve_user_identity",
-        fake_resolve_user_identity,
-    )
-
-    response = client.post(
-        "/internal/tenants/batch-initialize",
-        json={
-            "tenant_ids": "111",
-            "source_id": "RMASSIST",
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["status"] == "queued"
-    pool.ensure_bootstrap.assert_not_awaited()
+    assert store.finished["done_count"] == 1
 
 
 def test_internal_batch_initialize_rejects_empty_tenant_ids() -> None:

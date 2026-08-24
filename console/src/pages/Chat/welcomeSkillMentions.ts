@@ -1,3 +1,4 @@
+import type { IAgentScopeRuntimeWebUIInputData } from "@/components/agentscope-chat";
 import type {
   SkillMentionItem,
   SkillMentionsData,
@@ -24,14 +25,16 @@ export function createWelcomeSkillMentions({
   selectedContextReferences,
   setSelectedContextReferences,
 }: CreateWelcomeSkillMentionsOptions): {
-  beforeSubmit: () => Promise<boolean>;
+  beforeSubmit: (
+    inputData: IAgentScopeRuntimeWebUIInputData,
+  ) => Promise<IAgentScopeRuntimeWebUIInputData | false>;
   skillMentions: SkillMentionsData;
 } {
-  const beforeSubmit = async () => {
+  const beforeSubmit = async (inputData: IAgentScopeRuntimeWebUIInputData) => {
     if (isComposingRef.current) return false;
     pendingContextReferencesRef.current = selectedContextReferences;
     setSelectedContextReferences([]);
-    return true;
+    return inputData;
   };
 
   return {

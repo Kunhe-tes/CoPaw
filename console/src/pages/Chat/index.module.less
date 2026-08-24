@@ -38,6 +38,13 @@
       display: flex;
       align-items: center;
     }
+
+    [class*="-chat-anywhere-input-wrapper"]:has(
+        [data-plan-clarification-active="true"]
+      )
+      > [class*="-sender"] {
+      display: none;
+    }
   }
 
   /* Custom scrollbar — thin, rounded, always visible */
@@ -80,24 +87,6 @@
   :global(.dark-mode) & {
     scrollbar-color: rgba(255, 255, 255, 0.12) transparent;
   }
-}
-
-.chatMessagesLayout {
-  display: flex;
-  width: 100%;
-  height: 100%;
-  min-width: 0;
-}
-
-.chatMessagesViewport {
-  flex: 1 1 auto;
-  min-width: 0;
-}
-
-.chatQuickNavRail {
-  display: flex;
-  flex: 0 0 auto;
-  min-height: 0;
 }
 
 .suggestionLabel {
@@ -263,6 +252,162 @@
 
   .suggestionDescription {
     color: rgba(255, 255, 255, 0.65);
+  }
+}
+
+.planModeToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 8px;
+  color: rgba(0, 0, 0, 0.72);
+  font-size: 13px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.planModeToggleLabel {
+  font-weight: 500;
+  padding: 0 8px;
+}
+
+:global(.dark-mode) {
+  .planModeToggle {
+    color: rgba(255, 255, 255, 0.78);
+  }
+}
+
+.planModeActiveButton {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #8a8d93;
+  font-size: 15px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 0.2s ease,
+    color 0.2s ease,
+    opacity 0.2s ease;
+
+  &::before {
+    position: absolute;
+    left: -12px;
+    top: 50%;
+    width: 1px;
+    height: 24px;
+    background: rgba(0, 0, 0, 0.08);
+    content: "";
+    opacity: 0;
+    transform: translateY(-50%);
+    transition: opacity 0.2s ease;
+  }
+
+  &:hover:not(:disabled) {
+    background: #eeeeee;
+    color: #85898f;
+
+    &::before {
+      opacity: 1;
+    }
+
+    .planModeActiveIcon {
+      display: none;
+    }
+
+    .planModeCloseIcon {
+      display: inline-flex;
+    }
+  }
+
+  &:focus-visible {
+    outline: 2px solid rgba(138, 141, 147, 0.28);
+    outline-offset: 2px;
+  }
+
+  &:disabled {
+    opacity: 0.48;
+    cursor: not-allowed;
+  }
+
+  &[data-plan-mode-exiting="true"] {
+    pointer-events: none;
+    animation: planModeActiveButtonExit 0.18s ease forwards;
+  }
+}
+
+.planModeActiveIcon,
+.planModeCloseIcon {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  font-size: 18px;
+}
+
+.planModeCloseIcon {
+  display: none;
+  color: #84888f;
+}
+
+:global(.dark-mode) {
+  .planModeActiveButton {
+    background: transparent;
+    color: rgba(255, 255, 255, 0.64);
+
+    &::before {
+      background: rgba(255, 255, 255, 0.12);
+    }
+
+    &:hover:not(:disabled) {
+      background: rgba(255, 255, 255, 0.1);
+      color: rgba(255, 255, 255, 0.72);
+    }
+
+    &:focus-visible {
+      outline-color: rgba(255, 255, 255, 0.24);
+    }
+  }
+
+  .planModeCloseIcon {
+    color: rgba(255, 255, 255, 0.58);
+  }
+}
+
+@keyframes planModeActiveButtonExit {
+  from {
+    opacity: 0.48;
+    transform: translateY(0) scale(1);
+  }
+
+  to {
+    opacity: 0;
+    transform: translateY(2px) scale(0.92);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .planModeActiveButton[data-plan-mode-exiting="true"] {
+    animation: planModeActiveButtonExitReduced 0.18s linear forwards;
+  }
+}
+
+@keyframes planModeActiveButtonExitReduced {
+  from {
+    opacity: 0.48;
+  }
+
+  to {
+    opacity: 0;
   }
 }
 

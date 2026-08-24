@@ -45,8 +45,47 @@ async def test_branch_skills_raw_data_uses_bound_skill_ids():
     assert "t.skills_used" not in db.last_sql
     assert "j.skill_ids" in db.last_sql
     assert "swe_marketplace_skills" in db.last_sql
-    assert "s.include_in_statistics = 1" in db.last_sql
+    assert "s.skill_id" in db.last_sql
+    assert "include_in_statistics = 1" in db.last_sql
+    assert "GROUP BY source_id, skill_id" in db.last_sql
     assert "s.source_id = j.source_id" in db.last_sql
+
+
+def test_branch_skill_aggregation_uses_skill_id_not_display_name():
+    """分行技能汇总不应把展示名相同的不同 skill_id 合并。"""
+    service = QueryService()
+
+    stats = service._aggregate_branch_skills(
+        [
+            {
+                "skill_id": "skill-a",
+                "skill_name": "同名技能",
+                "job_id": "job-a",
+                "status": "success",
+                "async_status": "success",
+                "is_read": 1,
+            },
+            {
+                "skill_id": "skill-b",
+                "skill_name": "同名技能",
+                "job_id": "job-b",
+                "status": "success",
+                "async_status": "success",
+                "is_read": 1,
+            },
+        ],
+    )
+    items = service._build_branch_skill_items(
+        stats["skill_jobs"],
+        stats["skill_total"],
+        stats["skill_success"],
+        stats["skill_read"],
+        stats["skill_error"],
+        stats["skill_names"],
+    )
+
+    assert len(items) == 2
+    assert {item.cron_task_count for item in items} == {1}
 
 
 @pytest.mark.asyncio
@@ -71,7 +110,8 @@ async def test_branch_skill_manager_query_filters_by_bound_skill_id():
     assert "JSON_CONTAINS(t.skills_used" not in sql
     assert "FIND_IN_SET(s.skill_id, j.skill_ids)" in sql
     assert "swe_marketplace_skills" in sql
-    assert "s.include_in_statistics = 1" in sql
+    assert "include_in_statistics = 1" in sql
+    assert "GROUP BY source_id, skill_id" in sql
     assert "s.source_id = j.source_id" in sql
     assert (
         "COALESCE(NULLIF(s.cn_name, ''), NULLIF(s.skill_name, ''), s.skill_id)"
@@ -97,9 +137,10 @@ async def test_manager_skill_detail_uses_marketplace_source_isolated_binding():
     sql = db.last_sql
     assert "JOIN swe_tracing_traces" not in sql
     assert "skills_used" not in sql
-    assert "JOIN swe_marketplace_skills s" in sql
+    assert "FROM swe_marketplace_skills" in sql
+    assert "GROUP BY source_id, skill_id" in sql
     assert "FIND_IN_SET(s.skill_id, j.skill_ids)" in sql
-    assert "s.include_in_statistics = 1" in sql
+    assert "include_in_statistics = 1" in sql
     assert "s.source_id = j.source_id" in sql
 
 

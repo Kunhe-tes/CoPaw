@@ -791,6 +791,78 @@ async def test_distribution_preserves_disabled_result_without_reload(
 
 
 @pytest.mark.asyncio
+async def test_distribute_skill_reports_copy_exception_per_user(
+    tmp_path,
+    monkeypatch,
+):
+    """单用户复制异常必须进入分发结果，不能被外层误判成功。"""
+    from market.marketplace.fs import save_index
+    from market.marketplace.models import MarketItem
+    from market.marketplace.schemas import DistributeRequest
+    from market.marketplace import service as service_module
+
+    svc = _make_service(tmp_path)
+    svc._resolve_target_users = AsyncMock(
+        return_value=[
+            {"tenant_id": "user-ok", "tenant_name": "OK"},
+            {"tenant_id": "user-fail", "tenant_name": "FAIL"},
+        ],
+    )
+    svc._trigger_agent_reload = AsyncMock()
+    svc.skill_registry.insert_skill = AsyncMock(return_value=True)
+    svc.register_skill_in_manifest = Mock(return_value=True)
+    save_index(
+        tmp_path / "market",
+        "source",
+        [
+            MarketItem(
+                item_id="item",
+                name="demo",
+                description="new description",
+                version="1.0.0",
+                creator_id="owner",
+            ),
+        ],
+    )
+
+    def fake_copy_skill_to_user(**kwargs):
+        if kwargs["user_id"] == "user-fail":
+            raise RuntimeError("copy failed")
+        return {
+            "status": "distributed",
+            "metadata": {},
+            "package_path": tmp_path / "active" / "demo",
+            "final_enabled": True,
+            "promoted": False,
+        }
+
+    monkeypatch.setattr(
+        service_module,
+        "copy_skill_to_user",
+        fake_copy_skill_to_user,
+    )
+
+    result = await svc.distribute_skill(
+        "source",
+        "item",
+        "operator",
+        "Operator",
+        DistributeRequest(target_type="user_id", target_values=["user-ok"]),
+    )
+
+    assert result.distributed_count == 1
+    assert result.failed_count == 1
+    assert {item.user_id: item.success for item in result.results} == {
+        "user-ok": True,
+        "user-fail": False,
+    }
+    failed = next(
+        item for item in result.results if item.user_id == "user-fail"
+    )
+    assert failed.error == "copy failed"
+
+
+@pytest.mark.asyncio
 async def test_publish_skill_creates_index_entry(tmp_path):
     from market.marketplace.schemas import PublishSkillRequest
 

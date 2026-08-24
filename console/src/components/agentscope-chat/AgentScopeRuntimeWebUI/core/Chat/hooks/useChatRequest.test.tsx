@@ -201,6 +201,69 @@ describe("useChatRequest", () => {
     mocks.streamGate.resolve = resolveGate;
   });
 
+  it("finishes a W+ entry proposal as a structured Chat card", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+    } as Response);
+    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
+      data: JSON.stringify({
+        object: "wplus_sop_entry_proposal",
+        status: "completed",
+        proposal_id: "proposal-1",
+        mode: "explicit",
+        chat_id: "chat-real-a",
+        session_id: "logical-a",
+        title: "进入 W+ SOP 工作台",
+        message: "确认后进入独立工作台。",
+      }),
+    });
+    const onFinish = vi.fn();
+    const currentQARef = {
+      current: {
+        response: {
+          id: "ui-response-a",
+          msgStatus: "generating",
+          cards: [
+            {
+              code: "AgentScopeRuntimeResponseCard",
+              data: {
+                id: "response-1",
+                status: "created",
+                created_at: 0,
+                output: [],
+              },
+            },
+          ],
+        },
+        activeRequestOwner: createOwner(),
+      },
+    } as CurrentQARef;
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={vi.fn()}
+        onFinish={onFinish}
+      />,
+    );
+
+    await act(async () => {
+      await hookApi.request([], undefined, createOwner());
+    });
+
+    expect(currentQARef.current.response?.cards).toEqual([
+      {
+        code: "WPlusSopEntryProposal",
+        data: expect.objectContaining({
+          proposal_id: "proposal-1",
+          mode: "explicit",
+        }),
+      },
+    ]);
+    expect(onFinish).toHaveBeenCalledWith(createOwner());
+  });
+
   it("ignores delayed SSE chunks after another request owns the active response", async () => {
     mocks.fetch.mockResolvedValue({
       ok: true,
@@ -533,6 +596,152 @@ describe("useChatRequest", () => {
     expect(onFinish).toHaveBeenCalledWith(createOwner());
   });
 
+  it("places plan review before the response feedback card", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+    } as Response);
+    mocks.streamChunks[1] = {
+      data: JSON.stringify({
+        object: "response",
+        id: "response-1",
+        status: "completed",
+        created_at: 1,
+        completed_at: 2,
+        plan_interaction_card: {
+          card_type: "plan_review",
+          plan_id: "plan-1",
+          title: "Implementation plan",
+          summary: "Review before execution",
+          steps: [],
+          risks: [],
+          verification: [],
+        },
+        output: [
+          {
+            object: "message",
+            id: "message-1",
+            role: "assistant",
+            type: "message",
+            status: "completed",
+            content: [
+              {
+                object: "content",
+                type: "text",
+                text: "Plan ready",
+                status: "completed",
+              },
+            ],
+          },
+        ],
+      }),
+    };
+
+    const currentQARef = {
+      current: {
+        response: {
+          id: "ui-response-a",
+          msgStatus: "generating",
+          cards: [],
+        },
+        activeRequestOwner: createOwner(),
+      },
+    } as CurrentQARef;
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={vi.fn()}
+        onFinish={vi.fn()}
+      />,
+    );
+
+    const requestPromise = hookApi.request([], undefined, createOwner());
+    mocks.streamGate.resolve();
+
+    await act(async () => {
+      await requestPromise;
+    });
+
+    expect(
+      currentQARef.current.response?.cards?.map((card) => card.code),
+    ).toEqual([
+      "AgentScopeRuntimeResponseCard",
+      "PlanInteraction",
+      "ResponseFeedback",
+    ]);
+    expect(currentQARef.current.response?.cards?.[0]?.data).toMatchObject({
+      planReviewCard: {
+        card_type: "plan_review",
+        plan_id: "plan-1",
+      },
+    });
+  });
+
+  it("finishes exit_plan short-circuit frames without adding assistant content", async () => {
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+    } as Response);
+    mocks.streamChunks.splice(0, mocks.streamChunks.length, {
+      data: JSON.stringify({
+        object: "response",
+        id: "response-1",
+        status: "completed",
+        type: "exit_plan",
+        created_at: 1,
+        completed_at: 2,
+        output: [],
+      }),
+    });
+
+    const updateMessage = vi.fn();
+    const onFinish = vi.fn();
+    const currentQARef = {
+      current: {
+        response: {
+          id: "ui-response-a",
+          msgStatus: "generating",
+          cards: [
+            {
+              code: "AgentScopeRuntimeResponseCard",
+              data: {
+                id: "response-1",
+                status: "created",
+                created_at: 0,
+                output: [],
+              },
+            },
+          ],
+        },
+        activeRequestOwner: createOwner(),
+      },
+    } as CurrentQARef;
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={updateMessage}
+        onFinish={onFinish}
+      />,
+    );
+
+    const requestPromise = hookApi.request([], undefined, createOwner());
+    mocks.streamGate.resolve();
+
+    await act(async () => {
+      await requestPromise;
+    });
+
+    const responseCardData = currentQARef.current.response?.cards?.[0]
+      ?.data as { output?: unknown[]; status?: string };
+
+    expect(onFinish).toHaveBeenCalledWith(createOwner());
+    expect(responseCardData.status).toBe("completed");
+    expect(responseCardData.output).toEqual([]);
+    expect(updateMessage).not.toHaveBeenCalled();
+  });
+
   it("preserves the latest assistant output on terminal empty response frames", async () => {
     mocks.fetch.mockResolvedValue({
       ok: true,
@@ -592,7 +801,10 @@ describe("useChatRequest", () => {
     });
 
     const responseCardData = currentQARef.current.response?.cards?.[0]
-      ?.data as { output?: Array<{ content?: Array<{ text?: string }> }>; status?: string };
+      ?.data as {
+      output?: Array<{ content?: Array<{ text?: string }> }>;
+      status?: string;
+    };
 
     expect(responseCardData.status).toBe("failed");
     expect(responseCardData.output?.[0]?.content?.[0]?.text).toBe("hello");

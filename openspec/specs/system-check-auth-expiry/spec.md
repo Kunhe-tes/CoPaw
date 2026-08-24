@@ -120,4 +120,3 @@ The "鉴权过期查询" check SHALL display returned tenant results in a table 
 - **WHEN** the backend rejects or fails the auth expiry query
 - **THEN** the Console SHALL show an error message
 - **AND** it SHALL keep the submitted form inputs available for correction or retry
-

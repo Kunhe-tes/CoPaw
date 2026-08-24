@@ -5,7 +5,11 @@
 
 import asyncio
 import ast
-from contextlib import AbstractContextManager, asynccontextmanager
+from contextlib import (
+    AbstractContextManager,
+    asynccontextmanager,
+    contextmanager,
+)
 import locale
 import os
 import re
@@ -16,7 +20,7 @@ import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Iterator, Optional
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
@@ -168,6 +172,20 @@ _ALLOWED_SYSTEM_PATH_TOKENS = frozenset({"/dev/null"})
 
 _SHELL_SLOT_CONDITION = asyncio.Condition()
 _SHELL_SLOT_COUNTS: dict[str, int] = {}
+
+_SHELL_WRITE_DESTINATION_COMMANDS = frozenset(
+    {
+        "cp",
+        "install",
+        "mkdir",
+        "mv",
+        "touch",
+        "unzip",
+    },
+)
+_SHELL_REDIRECT_OPERATORS = frozenset(
+    {">", ">>", "1>", "1>>", "2>", "2>>", "&>", "&>>"},
+)
 
 
 def _is_path_like(token: str) -> bool:
@@ -567,6 +585,124 @@ def _validate_python_script_contents(
     return None
 
 
+def _resolve_shell_path_token(token: str, base_dir: Path) -> Path:
+    path_obj = Path(os.path.expanduser(token))
+    if not path_obj.is_absolute():
+        path_obj = base_dir / path_obj
+    return path_obj.resolve(strict=False)
+
+
+def _is_workspace_skill_write_target(path: Path, base_dir: Path) -> bool:
+    workspace_dir = get_current_tool_base_dir().resolve(strict=False)
+    try:
+        workspace_dir.relative_to(get_current_tenant_root().resolve())
+    except ValueError:
+        workspace_dir = base_dir.resolve(strict=False)
+    protected_roots = (
+        workspace_dir / "skills",
+        workspace_dir / ".disabled_skills",
+    )
+    resolved = path.resolve(strict=False)
+    return any(
+        resolved == root or resolved.is_relative_to(root)
+        for root in protected_roots
+    )
+
+
+def _append_shell_redirect_targets(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        if token in _SHELL_REDIRECT_OPERATORS:
+            if i + 1 < len(tokens):
+                destinations.append(tokens[i + 1])
+            i += 2
+            continue
+        for op in sorted(_SHELL_REDIRECT_OPERATORS, key=len, reverse=True):
+            if token.startswith(op) and len(token) > len(op):
+                destinations.append(token[len(op) :])
+                break
+        i += 1
+
+
+def _append_unzip_destinations(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "-d" and i + 1 < len(tokens):
+            destinations.append(tokens[i + 1])
+            i += 2
+            continue
+        if token.startswith("-d") and len(token) > 2:
+            destinations.append(token[2:])
+        i += 1
+
+
+def _append_copy_move_destinations(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    operands = [
+        token for token in tokens[1:] if token and not token.startswith("-")
+    ]
+    if len(operands) >= 2:
+        destinations.append(operands[-1])
+
+
+def _append_multi_target_destinations(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    destinations.extend(
+        token for token in tokens[1:] if token and not token.startswith("-")
+    )
+
+
+def _extract_shell_write_destinations(command: str) -> list[str]:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        tokens = command.split()
+    if not tokens:
+        return []
+
+    destinations: list[str] = []
+    command_name = Path(tokens[0]).name
+    if command_name == "unzip":
+        _append_unzip_destinations(tokens, destinations)
+    elif command_name in {"cp", "mv", "install"}:
+        _append_copy_move_destinations(tokens, destinations)
+    elif command_name in {"mkdir", "touch"}:
+        _append_multi_target_destinations(tokens, destinations)
+    elif command_name in _SHELL_WRITE_DESTINATION_COMMANDS:
+        _append_copy_move_destinations(tokens, destinations)
+    _append_shell_redirect_targets(tokens, destinations)
+    return destinations
+
+
+def _validate_workspace_skill_write_targets(
+    command: str,
+    base_dir: Path,
+) -> Optional[str]:
+    for destination in _extract_shell_write_destinations(command):
+        if not destination or destination in {".", ".."}:
+            continue
+        resolved = _resolve_shell_path_token(destination, base_dir)
+        if _is_workspace_skill_write_target(resolved, base_dir):
+            return (
+                "Error: Shell command writes directly into the workspace "
+                "skill directory. Use the skill import or edit APIs so "
+                f"security scanning runs: '{destination}'"
+            )
+    return None
+
+
 def _validate_shell_paths(command: str, base_dir: Path) -> Optional[str]:
     """Validate that all explicit file paths in the command are within tenant boundary.
 
@@ -611,6 +747,13 @@ def _validate_shell_paths(command: str, base_dir: Path) -> Optional[str]:
     python_error = _validate_python_script_contents(command, base_dir)
     if python_error:
         return python_error
+
+    skill_write_error = _validate_workspace_skill_write_targets(
+        command,
+        base_dir,
+    )
+    if skill_write_error:
+        return skill_write_error
 
     return None
 
@@ -1000,6 +1143,14 @@ class PreparedShellCommand:
     python_runtime_guard: AbstractContextManager[None]
 
 
+@contextmanager
+def _python_runtime_guard_context(
+    guard: AbstractContextManager[str],
+) -> Iterator[None]:
+    with guard:
+        yield
+
+
 def prepare_shell_command(
     command: str,
     cwd: Optional[Path | str] = None,
@@ -1041,7 +1192,9 @@ def prepare_shell_command(
         command=cmd,
         working_dir=working_dir,
         env=env,
-        python_runtime_guard=python_runtime_guard,
+        python_runtime_guard=_python_runtime_guard_context(
+            python_runtime_guard,
+        ),
     )
 
 

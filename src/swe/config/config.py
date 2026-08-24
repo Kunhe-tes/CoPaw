@@ -194,6 +194,20 @@ class ZhaohuConfig(BaseChannelConfig):
         ),
     )
     session_end_push_enabled: bool = False
+    # 会话结束推送跳转链接前缀（使用人在招乎配置页自行配置，配置后推送附带跳转链接）
+    session_end_push_link_prefix: str = Field(
+        default_factory=lambda: EnvVarLoader.get_str(
+            "SWE_ZHAOHU_SESSION_END_PUSH_LINK_PREFIX",
+            "",
+        ),
+    )
+    # 跳转链接使用的 ID 类型："chat_id" 或 "session_id"
+    session_end_push_link_id_type: str = Field(
+        default_factory=lambda: EnvVarLoader.get_str(
+            "SWE_ZHAOHU_SESSION_END_PUSH_LINK_ID_TYPE",
+            "session_id",
+        ),
+    )
 
 
 class ConsoleConfig(BaseChannelConfig):
@@ -398,13 +412,44 @@ class ContextCompactConfig(BaseModel):
         description="Whether to enable automatic context compaction",
     )
 
-    memory_compact_ratio: float = Field(
-        default=0.75,
-        ge=0.3,
-        le=0.9,
+    lightweight_governance_ratio: float = Field(
+        default=0.65,
+        ge=0.30,
+        le=0.79,
         description=(
-            "Compaction trigger threshold ratio: compaction is triggered when "
-            "the context length reaches this fraction of max_input_length"
+            "Start asynchronously preparing checkpoint-compaction candidates "
+            "when context usage reaches this fraction of max_input_length"
+        ),
+    )
+
+    precompaction_step_ratio: float = Field(
+        default=0.05,
+        ge=0.01,
+        le=0.20,
+        description=(
+            "Prepare at most one newer checkpoint-compaction candidate for "
+            "each additional fraction of max_input_length consumed"
+        ),
+    )
+
+    memory_compact_ratio: float = Field(
+        default=0.80,
+        ge=0.31,
+        le=0.89,
+        description=(
+            "Active compaction threshold ratio: install a valid prepared "
+            "candidate or compact when context reaches this fraction of "
+            "max_input_length"
+        ),
+    )
+
+    emergency_compact_ratio: float = Field(
+        default=0.90,
+        ge=0.32,
+        le=0.95,
+        description=(
+            "Emergency degradation threshold ratio: preferentially install a "
+            "valid prepared candidate before deterministic fallback compaction"
         ),
     )
 
@@ -422,6 +467,65 @@ class ContextCompactConfig(BaseModel):
         default=True,
         description="Whether to include thinking blocks when compacting",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_context_compact_stages(cls, data: Any) -> Any:
+        """Backfill valid stages for persisted pre-checkpoint configs.
+
+        Old configs contain only ``memory_compact_ratio``. Preserve that active
+        threshold when possible and place the lightweight stage below it, so an
+        existing agent can load before its configuration is next saved.
+        """
+        if not isinstance(data, dict):
+            return data
+
+        stage_fields = (
+            "lightweight_governance_ratio",
+            "precompaction_step_ratio",
+            "emergency_compact_ratio",
+        )
+        if "memory_compact_ratio" not in data or any(
+            field in data for field in stage_fields
+        ):
+            return data
+
+        try:
+            legacy_active_ratio = float(data["memory_compact_ratio"])
+        except (TypeError, ValueError):
+            return data
+
+        active_ratio = min(max(legacy_active_ratio, 0.31), 0.89)
+        lightweight_ratio = max(0.30, min(0.65, active_ratio - 0.05))
+        step_ratio = round(
+            max(0.01, min(0.05, active_ratio - lightweight_ratio)),
+            2,
+        )
+        emergency_ratio = round(
+            max(0.90, min(0.95, active_ratio + 0.05)),
+            2,
+        )
+
+        return {
+            **data,
+            "lightweight_governance_ratio": lightweight_ratio,
+            "precompaction_step_ratio": step_ratio,
+            "memory_compact_ratio": active_ratio,
+            "emergency_compact_ratio": emergency_ratio,
+        }
+
+    @model_validator(mode="after")
+    def validate_context_compact_stages(self) -> "ContextCompactConfig":
+        """Require the ordered lightweight, active, and emergency stages."""
+        if not (
+            self.lightweight_governance_ratio
+            < self.memory_compact_ratio
+            < self.emergency_compact_ratio
+        ):
+            raise ValueError(
+                "lightweight, active, and emergency ratios must increase",
+            )
+        return self
 
 
 class ToolResultCompactConfig(BaseModel):
@@ -1389,6 +1493,12 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             description="update task progress state",
             display_to_user=False,
         ),
+        "emit_wplus_sop_event": BuiltinToolConfig(
+            name="emit_wplus_sop_event",
+            enabled=True,
+            description="commit a typed W+ SOP workspace event",
+            display_to_user=False,
+        ),
     }
 
 
@@ -1523,7 +1633,7 @@ class ProcessLimitsConfig(BaseModel):
     shell: bool = True
     mcp_stdio: bool = False
     cpu_time_limit_seconds: int | None = Field(default=30, ge=1)
-    memory_max_mb: int | None = Field(default=150, ge=1)
+    memory_max_mb: int | None = Field(default=34000, ge=1)
     shell_max_concurrent: int | None = Field(default=5, ge=1)
     shell_acquire_timeout_seconds: float = Field(default=5, gt=0)
 

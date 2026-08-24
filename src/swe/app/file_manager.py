@@ -46,6 +46,7 @@ _FILE_READ_CHUNK_BYTES = 64 * 1024
 _FILE_MANAGER_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 _LARGE_PREVIEW_PROBE_BYTES = 4
 _WORKING_HIDDEN_TOP_LEVEL = frozenset({"sessions", "governance"})
+_WORKING_BACKING_TOP_LEVEL = frozenset({"media", "static"})
 _NATURAL_PARTS = re.compile(r"(\d+)")
 _CURSOR_SECRET_ENV_VAR = "SWE_FILE_MANAGER_CURSOR_SECRET"
 _CURSOR_SECRET_FILE_NAME = "file-manager-cursor-secret"
@@ -73,6 +74,7 @@ class FileManagerOutcomeUncertainError(FileManagerPathError):
 
 class FileManagerRoot(str, Enum):
     WORKING = "working"
+    SOURCE_SCOPE = "source_scope"
     UPLOAD = "upload"
     DOWNLOAD = "download"
     CONVERSATION = "conversation"
@@ -172,9 +174,9 @@ class _DirectorySnapshot:
     expires_at: float
 
 
-_DIRECTORY_SNAPSHOT_TTL_SECONDS = 10.0
+_DIRECTORY_SNAPSHOT_TTL_SECONDS = 30.0
 _DIRECTORY_SNAPSHOT_CAPACITY = 128
-_DIRECTORY_SNAPSHOT_WORKSPACE_CAPACITY = 8
+_DIRECTORY_SNAPSHOT_WORKSPACE_CAPACITY = 16
 _DIRECTORY_SNAPSHOTS: OrderedDict[
     tuple[str, str, str, str],
     _DirectorySnapshot,
@@ -336,12 +338,19 @@ def _serialized_mutation(method):
     return wrapped
 
 
-def get_file_manager_service(workspace_dir: Path) -> "FileManagerService":
+def get_file_manager_service(
+    workspace_dir: Path,
+    *,
+    source_scope_base_dir: Path | None = None,
+    source_scope_component: str | None = None,
+) -> "FileManagerService":
     """Create the only service route handlers may use for a tenant workspace."""
 
     return FileManagerService(
         workspace_dir,
         cursor_secret=_load_or_create_cursor_secret(),
+        source_scope_base_dir=source_scope_base_dir,
+        source_scope_component=source_scope_component,
     )
 
 
@@ -353,8 +362,12 @@ class FileManagerService:
         workspace_dir: Path,
         *,
         cursor_secret: bytes | str,
+        source_scope_base_dir: Path | None = None,
+        source_scope_component: str | None = None,
     ) -> None:
         self._workspace_dir = workspace_dir.resolve()
+        self._source_scope_base_dir = source_scope_base_dir
+        self._source_scope_component = source_scope_component
         self._workspace_lock = _workspace_lock(self._workspace_dir)
         self._cursor_secret = (
             cursor_secret.encode("utf-8")
@@ -829,6 +842,9 @@ class FileManagerService:
         directory_fd = self._open_directory_fd(
             resolved_root,
             normalised_directory,
+            create_source_scope_root=(
+                resolved_root is FileManagerRoot.SOURCE_SCOPE
+            ),
         )
         assert directory_fd is not None
         temporary_name = self._temporary_name(safe_filename)
@@ -925,12 +941,14 @@ class FileManagerService:
                     "Only regular files can be archived",
                 )
             archive_item_id = os.urandom(16).hex()
-            original_path = self._workspace_relative_path(
+            original_path = self._archive_display_path(
                 resolved_root,
                 normalised_path,
             )
             item = {
                 "id": archive_item_id,
+                "root": resolved_root.value,
+                "relative_path": normalised_path,
                 "original_path": original_path,
                 "archive_path": f"{ARCHIVE_FILES_DIR}/{archive_item_id}",
                 "size_bytes": source_stat.st_size,
@@ -981,6 +999,84 @@ class FileManagerService:
         assert archive_item_id is not None
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
+    @_serialized_mutation
+    def delete_directory(
+        self,
+        root: FileManagerRoot | str,
+        relative_path: str,
+    ) -> None:
+        """Permanently delete one controlled directory without following links."""
+
+        resolved_root, normalised_path = self._validate_root_and_path(
+            root,
+            relative_path,
+        )
+        if not normalised_path:
+            raise FileManagerPathError("Path is not a directory")
+        if not root_capabilities(resolved_root).archive:
+            raise FileManagerPathError(
+                "Directory deletion is not available for this root",
+            )
+        parts = tuple(filter(None, normalised_path.split("/")))
+        if (
+            resolved_root is FileManagerRoot.WORKING
+            and len(parts) == 1
+            and parts[0] in _WORKING_BACKING_TOP_LEVEL
+        ):
+            raise FileManagerPathError("Directory is managed by file manager")
+        parent_fd = self._open_directory_fd(
+            resolved_root,
+            "/".join(parts[:-1]),
+        )
+        assert parent_fd is not None
+        try:
+            directory_fd = os.open(
+                parts[-1],
+                self._directory_open_flags(),
+                dir_fd=parent_fd,
+            )
+            try:
+                self._delete_directory_contents(directory_fd)
+            finally:
+                os.close(directory_fd)
+            os.rmdir(parts[-1], dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileNotFoundError as exc:
+            raise FileManagerNotFoundError("Directory was not found") from exc
+        except OSError as exc:
+            raise FileManagerPathError("Unable to delete directory") from exc
+        finally:
+            os.close(parent_fd)
+
+    def _delete_directory_contents(self, directory_fd: int) -> None:
+        """Remove one opened directory's entries without traversing links."""
+
+        try:
+            with os.scandir(directory_fd) as entries:
+                names = [entry.name for entry in entries]
+            for name in names:
+                entry_stat = os.stat(
+                    name,
+                    dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+                if stat_module.S_ISDIR(entry_stat.st_mode):
+                    child_fd = os.open(
+                        name,
+                        self._directory_open_flags(),
+                        dir_fd=directory_fd,
+                    )
+                    try:
+                        self._delete_directory_contents(child_fd)
+                    finally:
+                        os.close(child_fd)
+                    os.rmdir(name, dir_fd=directory_fd)
+                else:
+                    os.unlink(name, dir_fd=directory_fd)
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise FileManagerPathError("Unable to delete directory") from exc
+
     # The staged archive transition intentionally keeps all rollback-free
     # boundaries in one auditable method.
     # pylint: disable=too-many-statements
@@ -994,8 +1090,7 @@ class FileManagerService:
         """Restore exactly one archived payload to its original safe path."""
 
         index, item = self._recycle_index_item(archive_item_id)
-        original_path = self._validate_archive_original_path(item)
-        root, relative_path = self._root_from_workspace_relative(original_path)
+        root, relative_path, original_path = self._archive_item_location(item)
         parts = tuple(filter(None, relative_path.split("/")))
         target_parent_fd = self._open_directory_fd(root, "/".join(parts[:-1]))
         assert target_parent_fd is not None
@@ -1026,7 +1121,7 @@ class FileManagerService:
                     target_parent_fd,
                     parts[-1],
                 )
-                target_identity = self._workspace_file_identity(original_path)
+                target_identity = self._root_file_identity(root, relative_path)
                 if target_identity is None:
                     raise FileManagerConflictError(
                         "Restored target disappeared during recovery",
@@ -1121,6 +1216,13 @@ class FileManagerService:
         return FileManagerRecycleMutation(archive_item_id, original_path)
 
     def _root_path(self, root: FileManagerRoot) -> Path:
+        if root is FileManagerRoot.SOURCE_SCOPE:
+            if (
+                self._source_scope_base_dir is None
+                or self._source_scope_component is None
+            ):
+                raise FileManagerPathError("Source-scope root is unavailable")
+            return self._source_scope_base_dir / self._source_scope_component
         suffixes = {
             FileManagerRoot.WORKING: (),
             FileManagerRoot.UPLOAD: ("media",),
@@ -1133,6 +1235,7 @@ class FileManagerService:
     def _root_components(root: FileManagerRoot) -> tuple[str, ...]:
         suffixes = {
             FileManagerRoot.WORKING: (),
+            FileManagerRoot.SOURCE_SCOPE: (),
             FileManagerRoot.UPLOAD: ("media",),
             FileManagerRoot.DOWNLOAD: ("static",),
             FileManagerRoot.CONVERSATION: ("sessions",),
@@ -1179,17 +1282,19 @@ class FileManagerService:
         relative_path: str,
         *,
         allow_missing_root: bool = False,
+        create_source_scope_root: bool = False,
     ) -> int | None:
         parts = self._root_components(root) + tuple(
             filter(None, relative_path.split("/")),
         )
-        try:
-            directory_fd = os.open(
-                self._workspace_dir,
-                self._directory_open_flags(),
-            )
-        except OSError as exc:
-            raise FileManagerPathError("Unable to open workspace") from exc
+        directory_fd = self._open_root_fd(
+            root,
+            create_source_scope_root=create_source_scope_root,
+        )
+        if directory_fd is None:
+            if allow_missing_root:
+                return None
+            raise FileManagerNotFoundError("Directory was not found")
         try:
             for index, part in enumerate(parts):
                 try:
@@ -1222,6 +1327,59 @@ class FileManagerService:
             except OSError:
                 pass
             raise
+
+    def _open_root_fd(
+        self,
+        root: FileManagerRoot,
+        *,
+        create_source_scope_root: bool,
+    ) -> int | None:
+        if root is not FileManagerRoot.SOURCE_SCOPE:
+            try:
+                return os.open(
+                    self._workspace_dir,
+                    self._directory_open_flags(),
+                )
+            except OSError as exc:
+                raise FileManagerPathError("Unable to open workspace") from exc
+        if (
+            self._source_scope_base_dir is None
+            or self._source_scope_component is None
+        ):
+            raise FileManagerPathError("Source-scope root is unavailable")
+        try:
+            base_fd = os.open(
+                self._source_scope_base_dir,
+                self._directory_open_flags(),
+            )
+        except OSError as exc:
+            raise FileManagerPathError(
+                "Unable to open source-scope root",
+            ) from exc
+        try:
+            if create_source_scope_root:
+                try:
+                    os.mkdir(
+                        self._source_scope_component,
+                        0o700,
+                        dir_fd=base_fd,
+                    )
+                except FileExistsError:
+                    pass
+            try:
+                return os.open(
+                    self._source_scope_component,
+                    self._directory_open_flags(),
+                    dir_fd=base_fd,
+                )
+            except FileNotFoundError:
+                return None
+            except OSError as exc:
+                raise FileManagerPathError(
+                    "Unable to open directory",
+                ) from exc
+        finally:
+            os.close(base_fd)
 
     def _open_file_fd(self, root: FileManagerRoot, relative_path: str) -> int:
         parts = tuple(filter(None, relative_path.split("/")))
@@ -1529,9 +1687,10 @@ class FileManagerService:
             archive_item_id,
             payload_exists,
         )
+        root, relative_path, _ = self._archive_item_location(item)
         target_identity = transition.get("target_identity")
         target_matches = isinstance(target_identity, dict) and (
-            target_identity == self._workspace_file_identity(original_path)
+            target_identity == self._root_file_identity(root, relative_path)
         )
         if target_matches and not payload_exists:
             return self._remove_archive_item(recovered, archive_item_id)
@@ -1613,6 +1772,15 @@ class FileManagerService:
         """Return a content-bound identity for one safely opened workspace file."""
 
         root, relative_path = self._root_from_workspace_relative(original_path)
+        return self._root_file_identity(root, relative_path)
+
+    def _root_file_identity(
+        self,
+        root: FileManagerRoot,
+        relative_path: str,
+    ) -> dict[str, int | str] | None:
+        """Return a content-bound identity for one safely opened root file."""
+
         try:
             file_fd = self._open_file_fd(root, relative_path)
         except FileManagerNotFoundError:
@@ -1647,14 +1815,43 @@ class FileManagerService:
         self,
         item: Mapping[str, object],
     ) -> str:
-        original_path = self._normalise_relative_path(
-            str(item.get("original_path") or ""),
-        )
-        self._root_from_workspace_relative(original_path)
+        return self._archive_item_location(item)[2]
+
+    def _archive_item_location(
+        self,
+        item: Mapping[str, object],
+    ) -> tuple[FileManagerRoot, str, str]:
         expected_archive_path = f"{ARCHIVE_FILES_DIR}/{self._validate_archive_item_id(str(item.get('id') or ''))}"
         if str(item.get("archive_path") or "") != expected_archive_path:
             raise FileManagerPathError("Invalid archived payload")
-        return original_path
+        if "root" in item or "relative_path" in item:
+            try:
+                root = FileManagerRoot(str(item.get("root") or ""))
+            except ValueError as exc:
+                raise FileManagerPathError(
+                    "Invalid archived original path",
+                ) from exc
+            relative_path = self._normalise_relative_path(
+                str(item.get("relative_path") or ""),
+            )
+            self._validate_root_and_path(root, relative_path)
+            if not relative_path:
+                raise FileManagerPathError(
+                    "Archived original path must be a file",
+                )
+            return (
+                root,
+                relative_path,
+                self._archive_display_path(
+                    root,
+                    relative_path,
+                ),
+            )
+        original_path = self._normalise_relative_path(
+            str(item.get("original_path") or ""),
+        )
+        root, relative_path = self._root_from_workspace_relative(original_path)
+        return root, relative_path, original_path
 
     def _root_from_workspace_relative(
         self,
@@ -1683,6 +1880,15 @@ class FileManagerService:
         relative_path: str,
     ) -> str:
         return "/".join((*self._root_components(root), relative_path))
+
+    def _archive_display_path(
+        self,
+        root: FileManagerRoot,
+        relative_path: str,
+    ) -> str:
+        if root is FileManagerRoot.SOURCE_SCOPE:
+            return f"{root.value}/{relative_path}"
+        return self._workspace_relative_path(root, relative_path)
 
     @staticmethod
     def _validate_upload_filename(filename: str) -> str:
@@ -2190,6 +2396,13 @@ class FileManagerService:
             capabilities = capabilities.model_copy(
                 update={"browse": False, "upload": False},
             )
+        elif (
+            kind is FileManagerItemKind.DIRECTORY
+            and root is FileManagerRoot.WORKING
+            and not parent_path
+            and name in _WORKING_BACKING_TOP_LEVEL
+        ):
+            capabilities = capabilities.model_copy(update={"archive": False})
         elif kind is FileManagerItemKind.SPECIAL:
             capabilities = FileManagerCapabilities()
         return FileManagerItem(

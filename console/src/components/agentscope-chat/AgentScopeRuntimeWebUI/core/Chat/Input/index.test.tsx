@@ -23,10 +23,27 @@ const attachmentState = {
     attachmentState.currentFileList = next;
   }),
   handlePasteFile: vi.fn<(file: File) => void>(),
+  uploadQuickMenuItem: null as React.ReactNode,
 };
 
-vi.mock("@/components/GlobalVoiceRecorder/VoiceRecorderTrigger", () => ({
-  default: () => null,
+const senderOptions = {
+  current: {} as Record<string, unknown>,
+};
+
+vi.mock("@/components/GlobalVoiceRecorder/VoiceRecorderQuickMenuItem", () => ({
+  default: () => <span data-testid="voice-recorder-trigger">语音录制</span>,
+}));
+
+vi.mock("@/components/GlobalVoiceRecorder/context", () => ({
+  useVoiceRecorderTrigger: () => ({
+    disabled: false,
+    label: "开始语音录制",
+    loading: false,
+    panelOpen: false,
+    recording: false,
+    unsupported: false,
+    trigger: () => undefined,
+  }),
 }));
 
 function renderActiveInput(onSubmit = vi.fn()) {
@@ -48,8 +65,10 @@ vi.mock("@/components/agentscope-chat", () => ({
     value?: string;
     onChange?: (value: string) => void;
     onSubmit?: () => void;
+    prefix?: React.ReactNode;
   }) => (
     <div>
+      {props.prefix}
       <textarea
         data-testid="chat-input"
         value={props.value || ""}
@@ -68,7 +87,7 @@ vi.mock("@/components/agentscope-chat", () => ({
 
 vi.mock("../../Context/ChatAnywhereOptionsContext", () => ({
   useChatAnywhereOptions: (selector: (value: { sender: object }) => unknown) =>
-    selector({ sender: {} }),
+    selector({ sender: senderOptions.current }),
 }));
 
 vi.mock("../../Context/ChatAnywhereInputContext", () => ({
@@ -83,9 +102,15 @@ vi.mock("./useAttachments", () => ({
     getFileList: attachmentState.getFileList,
     setFileList: attachmentState.setFileList,
     handlePasteFile: attachmentState.handlePasteFile,
-    uploadIconButton: null,
+    uploadQuickMenuItem: attachmentState.uploadQuickMenuItem,
     uploadFileListHeader: null,
   }),
+}));
+
+vi.mock("@/components/agentscope-chat/ComposerQuickMenu", () => ({
+  default: ({ children }: { children?: React.ReactNode }) => (
+    <div data-testid="composer-quick-menu">{children}</div>
+  ),
 }));
 
 describe("Chat Input restore flow", () => {
@@ -97,6 +122,8 @@ describe("Chat Input restore flow", () => {
     attachmentState.getFileList.mockClear();
     attachmentState.setFileList.mockClear();
     attachmentState.handlePasteFile.mockClear();
+    attachmentState.uploadQuickMenuItem = null;
+    senderOptions.current = {};
   });
 
   afterEach(() => {
@@ -244,6 +271,25 @@ describe("Chat Input restore flow", () => {
     );
 
     expect(attachmentState.handlePasteFile).toHaveBeenCalledWith(file);
+  });
+
+  it("combines upload, voice recording, and caller actions in one quick menu", () => {
+    attachmentState.uploadQuickMenuItem = <span>上传文件</span>;
+    senderOptions.current = {
+      quickMenuItems: <span>计划模式</span>,
+    };
+
+    renderActiveInput();
+
+    expect(screen.getByTestId("composer-quick-menu")).toHaveTextContent(
+      "上传文件",
+    );
+    expect(screen.getByTestId("composer-quick-menu")).toHaveTextContent(
+      "计划模式",
+    );
+    expect(screen.getByTestId("composer-quick-menu")).toContainElement(
+      screen.getByTestId("voice-recorder-trigger"),
+    );
   });
 
   it("appends transcribed text to the active conversation draft without submitting", async () => {

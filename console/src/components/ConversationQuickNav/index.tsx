@@ -9,7 +9,6 @@ import Style from "./style";
 
 export default function ConversationQuickNav({
   minQuestions = 1,
-  placement = "overlay",
   messages,
   scrollRootRef,
 }: ConversationQuickNavProps) {
@@ -136,19 +135,23 @@ export default function ConversationQuickNav({
     <>
       <Style />
       <div
-        className={[
-          "conversation-quick-nav",
-          placement === "rail" && "conversation-quick-nav--rail",
-          isContainerHovered && "conversation-quick-nav--hovered",
-        ]
-          .filter(Boolean)
-          .join(" ")}
+        className={`conversation-quick-nav ${
+          isContainerHovered ? "conversation-quick-nav--hovered" : ""
+        }`}
         onMouseEnter={() => setIsContainerHovered(true)}
         onMouseLeave={() => setIsContainerHovered(false)}
       >
         <div
           ref={navScrollRef}
-          className="conversation-quick-nav__scroll"
+          className={`conversation-quick-nav__scroll ${
+            hiddenQuestionCount.above > 0
+              ? "conversation-quick-nav__scroll--fade-top"
+              : ""
+          } ${
+            hiddenQuestionCount.below > 0
+              ? "conversation-quick-nav__scroll--fade-bottom"
+              : ""
+          }`}
           aria-label="会话快速导航"
           onScroll={updateHiddenQuestionCount}
         >

@@ -164,4 +164,3 @@ export function truncateName(name: string, maxLength = 20): string {
   }
   return `${name.slice(0, maxLength)}...`;
 }
-

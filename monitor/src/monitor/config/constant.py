@@ -219,6 +219,48 @@ SWE_WARMUP_HEADERS_JSON = EnvVarLoader.get_str(
     "",
 )
 
+# ============================================================
+# 高频问题分析工作流配置
+# ============================================================
+
+HFQ_WORKFLOW_URL = EnvVarLoader.get_str(
+    "MONITOR_HFQ_WORKFLOW_URL",
+    "",
+).strip()
+
+HFQ_WORKFLOW_API_KEY = EnvVarLoader.get_str(
+    "MONITOR_HFQ_WORKFLOW_API_KEY",
+    "",
+).strip()
+
+HFQ_WORKFLOW_OPEN_ID = EnvVarLoader.get_str(
+    "MONITOR_HFQ_WORKFLOW_OPEN_ID",
+    "",
+).strip()
+
+HFQ_WORKFLOW_RESPONSE_MODE = EnvVarLoader.get_str(
+    "MONITOR_HFQ_WORKFLOW_RESPONSE_MODE",
+    "noStreaming",
+).strip()
+
+HFQ_WORKFLOW_TIMEOUT_SECONDS = EnvVarLoader.get_float(
+    "MONITOR_HFQ_WORKFLOW_TIMEOUT_SECONDS",
+    600.0,
+    min_value=1.0,
+)
+
+HFQ_RESULT_WAIT_SECONDS = EnvVarLoader.get_float(
+    "MONITOR_HFQ_RESULT_WAIT_SECONDS",
+    420.0,
+    min_value=0.0,
+)
+
+HFQ_RESULT_POLL_INTERVAL_SECONDS = EnvVarLoader.get_float(
+    "MONITOR_HFQ_RESULT_POLL_INTERVAL_SECONDS",
+    10.0,
+    min_value=1.0,
+)
+
 # 定时任务定义表名。生产库使用 swe_cron_jobs，允许环境变量覆盖 schema 前缀。
 SWE_WARMUP_CRON_TABLE = EnvVarLoader.get_str(
     "MONITOR_SWE_WARMUP_CRON_TABLE",
@@ -258,6 +300,10 @@ SWE_WARMUP_TIMEOUT_SECONDS = EnvVarLoader.get_float(
 # ============================================================
 
 USER_INFO_API_URL = EnvVarLoader.get_str("MONITOR_USER_INFO_API_URL", "")
+CUSTOMER_NAME_QUERY_URL = EnvVarLoader.get_str(
+    "MONITOR_CUSTOMER_NAME_QUERY_URL",
+    "",
+)
 
 # ============================================================
 # 客户姓名提取 API 配置
@@ -276,6 +322,23 @@ ASYNC_TASK_QUERY_URL = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_QUERY_URL", "")
 ASYNC_TASK_APP_KEY = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_APP_KEY", "")
 ASYNC_TASK_ENV_TAG = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_ENV_TAG", "")
 ASYNC_TASK_API_KEY = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_API_KEY", "")
+
+RESULT_INDEX_PUSH_URL = EnvVarLoader.get_str(
+    "MONITOR_RESULT_INDEX_PUSH_URL",
+    "",
+).strip()
+RESULT_INDEX_PUSH_PLUGIN_ID = EnvVarLoader.get_str(
+    "MONITOR_RESULT_INDEX_PUSH_PLUGIN_ID",
+    "",
+).strip()
+RESULT_INDEX_PUSH_PLUGIN_NAME = EnvVarLoader.get_str(
+    "MONITOR_RESULT_INDEX_PUSH_PLUGIN_NAME",
+    "",
+).strip()
+RESULT_INDEX_PUSH_QUESTION = EnvVarLoader.get_str(
+    "MONITOR_RESULT_INDEX_PUSH_QUESTION",
+    "",
+).strip()
 
 # 超时时间阈值（小时），超过该时间不再查询状态，直接标记为 timeout
 ASYNC_TASK_TIMEOUT_HOUR = EnvVarLoader.get_int(

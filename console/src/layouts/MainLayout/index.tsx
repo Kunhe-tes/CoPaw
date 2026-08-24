@@ -33,6 +33,7 @@ import SecurityPage from "../../pages/Settings/Security";
 import TokenUsagePage from "../../pages/Settings/TokenUsage";
 import VoiceTranscriptionPage from "../../pages/Settings/VoiceTranscription";
 import AgentsPage from "../../pages/Settings/Agents";
+import SkillConfigPage from "../../pages/Settings/SkillConfig";
 import AnalyticsPage from "../../pages/Analytics";
 import InstancePage from "../../pages/Instance";
 import MonitorPage from "../../pages/Monitor";
@@ -45,6 +46,8 @@ import ReportViewPage from "../../pages/ReportView";
 import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
 import MyMCPPage from "../../pages/MyMCP";
+import WPlusSopWorkspace from "../../pages/WPlusSopWorkspace";
+import ExpertsPage from "../../pages/Experts";
 
 import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
 
@@ -73,6 +76,7 @@ const pathToKey: Record<string, string> = {
   "/security": "security",
   "/token-usage": "token-usage",
   "/voice-transcription": "voice-transcription",
+  "/skill-config": "skill-config",
   "/analytics/users": "analytics-users",
   "/analytics/sessions": "analytics-sessions",
   "/analytics/messages": "analytics-messages",
@@ -91,6 +95,7 @@ const pathToKey: Record<string, string> = {
   "/market": "market",
   "/my-skills": "my-skills",
   "/my-mcp": "my-mcp",
+  "/experts": "experts",
 };
 
 export default function MainLayout() {
@@ -119,6 +124,7 @@ export default function MainLayout() {
     (state) => state.loadEffectiveConfig,
   );
   const hideGlobalShell = hideMenu || showContentOnly;
+  const hideHeader = hideGlobalShell || activeSourceId === "ruice";
 
   useEffect(() => {
     loadEffectiveConfig(activeSourceId);
@@ -131,9 +137,11 @@ export default function MainLayout() {
 
   return (
     <Layout className={styles.mainLayout}>
-      {!hideGlobalShell && <Header />}
+      {!hideHeader && <Header />}
       <Layout>
-        {!hideGlobalShell && <Sidebar selectedKey={selectedKey} />}
+        {!hideGlobalShell && (
+          <Sidebar selectedKey={selectedKey} withoutHeader={hideHeader} />
+        )}
         <Content
           className={`page-container${
             hideGlobalShell ? "" : " page-container--with-sidebar"
@@ -154,6 +162,10 @@ export default function MainLayout() {
                 <Route path="/" element={<Navigate to="/chat" replace />} />
               )}
               <Route path="/chat/*" element={<Chat />} />
+              <Route
+                path="/wplus-sop/:sessionId"
+                element={<WPlusSopWorkspace />}
+              />
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
               <Route path="/cron-jobs" element={<CronJobsPage />} />
@@ -184,6 +196,7 @@ export default function MainLayout() {
                 path="/voice-transcription"
                 element={<VoiceTranscriptionPage />}
               />
+              <Route path="/skill-config" element={<SkillConfigPage />} />
               <Route path="/analytics/*" element={<AnalyticsPage />} />
               <Route path="/monitor/*" element={<MonitorPage />} />
               <Route path="/instance/*" element={<InstancePage />} />
@@ -205,6 +218,7 @@ export default function MainLayout() {
               <Route path="/market" element={<MarketPage />} />
               <Route path="/my-skills" element={<MySkillsPage />} />
               <Route path="/my-mcp" element={<MyMCPPage />} />
+              <Route path="/experts" element={<ExpertsPage />} />
             </Routes>
           </div>
         </Content>

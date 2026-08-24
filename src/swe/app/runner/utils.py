@@ -31,6 +31,20 @@ from .tool_status import apply_running_tool_status, apply_terminal_tool_status
 
 logger = logging.getLogger(__name__)
 _MISSING_SOURCE_ID_PLACEHOLDER = "(not provided)"
+_RUNTIME_MESSAGE_ROLES = {"assistant", "system", "user", "tool"}
+
+
+def _normalize_runtime_message_role(
+    role: str | None,
+    metadata: dict,
+) -> str:
+    """把不被 runtime schema 接受的角色降级为 system。"""
+    if not isinstance(role, str) or not role:
+        return "assistant"
+    if role in _RUNTIME_MESSAGE_ROLES:
+        return role
+    metadata["original_role"] = role
+    return "system"
 
 
 def build_env_context(
@@ -345,12 +359,12 @@ def agentscope_msg_to_message(
         return ChatMessage.model_validate(payload)
 
     for msg in msgs:
-        role = msg.role or "assistant"
         metadata = {
             "original_id": msg.id,
             "original_name": msg.name,
             "metadata": msg.metadata,
         }
+        role = _normalize_runtime_message_role(msg.role, metadata)
 
         if isinstance(msg.content, str):
             message = Message(type=MessageType.MESSAGE, role=role)

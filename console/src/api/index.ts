@@ -32,6 +32,7 @@ import { htmlPreviewEventsApi } from "./modules/htmlPreviewEvents";
 import { systemCheckApi } from "./modules/systemCheck";
 import { skillReadinessApi } from "./modules/skillReadiness";
 import { sourceToolsApi } from "./modules/sourceTools";
+import { expertsApi } from "./modules/experts";
 
 export const api = {
   // Root
@@ -115,6 +116,7 @@ export const api = {
   ...skillReadinessApi,
   // Source-owned custom built-in tools
   ...sourceToolsApi,
+  ...expertsApi,
 };
 
 export default api;

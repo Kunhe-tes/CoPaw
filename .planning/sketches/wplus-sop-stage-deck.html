@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="icon" href="data:," />
+  <title>W+ SOP 工作台 · 环节分镜</title>
+  <style>
+    :root {
+      --canvas: #f7f9fc;
+      --surface: #fff;
+      --ink: #111827;
+      --secondary: #4b5563;
+      --muted: #8a94a6;
+      --line: #e5e7eb;
+      --line-strong: #d0d7e2;
+      --blue: #3769fc;
+      --blue-soft: #eef4ff;
+      --green: #2f7d5b;
+      --amber: #a56a24;
+      --font: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+      --editorial: Georgia, "Songti SC", "SimSun", serif;
+    }
+
+    * { box-sizing: border-box; }
+    body { min-height: 100vh; margin: 0; color: var(--ink); font-family: var(--font); background: var(--canvas); }
+    button, textarea { font: inherit; }
+    button { min-height: 42px; cursor: pointer; border-radius: 8px; transition: 160ms ease; }
+    button:focus-visible, textarea:focus-visible { outline: 3px solid rgba(55,105,252,.23); outline-offset: 2px; }
+
+    .shell { min-height: 100vh; display: grid; grid-template-rows: 56px minmax(0, 1fr); }
+    .topbar { padding: 0 24px; display: flex; align-items: center; justify-content: space-between; gap: 18px; background: #fff; border-bottom: 1px solid var(--line); }
+    .brand, .top-actions, .session, .chapter-meta, .selection, .summary-row { display: flex; align-items: center; }
+    .brand { gap: 10px; font-size: 15px; font-weight: 650; }
+    .brand-mark { width: 30px; height: 30px; display: grid; place-items: center; color: #fff; background: var(--blue); border-radius: 9px; }
+    .session { min-width: 0; gap: 8px; color: var(--muted); font-size: 12px; }
+    .session strong { overflow: hidden; color: var(--ink); text-overflow: ellipsis; white-space: nowrap; }
+    .top-actions { gap: 8px; }
+    .ghost, .outline, .primary { padding: 0 14px; border: 1px solid transparent; background: transparent; }
+    .ghost { color: var(--secondary); }
+    .ghost:hover { background: #f3f6fb; color: var(--ink); }
+    .outline { color: var(--secondary); background: #fff; border-color: var(--line-strong); }
+    .primary { color: #fff; font-weight: 650; background: var(--blue); border-color: var(--blue); box-shadow: 0 8px 18px rgba(55,105,252,.18); }
+    .primary:hover { background: #2957dc; }
+
+    .layout { min-height: 0; display: grid; grid-template-columns: 88px minmax(0, 1fr); }
+    .chapter-index { padding: 24px 15px; background: #fff; border-right: 1px solid var(--line); }
+    .chapter-index ol { margin: 0; padding: 0; display: grid; gap: 11px; list-style: none; }
+    .chapter-button { width: 56px; height: 56px; display: grid; place-items: center; color: var(--muted); font: 600 13px var(--editorial); background: #fff; border: 1px solid var(--line); border-radius: 12px; }
+    .chapter-button:hover { color: var(--ink); border-color: #aeb9ca; }
+    .chapter-button.active { color: #fff; background: var(--blue); border-color: var(--blue); box-shadow: 0 10px 24px rgba(55,105,252,.22); }
+    .chapter-button.done { color: var(--green); background: #edf8f2; border-color: rgba(47,125,91,.18); }
+
+    .stage { min-width: 0; min-height: 0; padding: clamp(28px, 5vw, 68px) clamp(22px, 7vw, 100px) 118px; overflow: auto; }
+    .stage-inner { width: min(1080px, 100%); margin: 0 auto; }
+    .chapter-meta { justify-content: space-between; gap: 18px; }
+    .chapter-no { color: var(--blue); font: 600 12px var(--editorial); letter-spacing: .08em; text-transform: uppercase; }
+    .stage-state { padding: 5px 9px; color: var(--amber); font-size: 10px; font-weight: 700; background: #fff7e8; border-radius: 999px; }
+    h1, h2, h3, p { margin: 0; }
+    h1 { max-width: 800px; margin-top: 14px; font: 500 clamp(34px, 5vw, 58px)/1.08 var(--editorial); letter-spacing: -.035em; }
+    .lede { max-width: 710px; margin-top: 17px; color: var(--secondary); font-size: 14px; line-height: 1.75; }
+
+    .stage-card { margin-top: 32px; display: grid; grid-template-columns: minmax(0, 1.25fr) minmax(300px, .75fr); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 14px 36px rgba(29,36,51,.08); overflow: hidden; }
+    .question-area { padding: clamp(22px, 4vw, 40px); }
+    .evidence-area { padding: clamp(20px, 3vw, 30px); background: #f6f8fc; border-left: 1px solid var(--line); }
+    .question-kicker, .panel-kicker { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+    .question-area h2 { margin-top: 9px; font-size: 20px; font-weight: 650; line-height: 1.4; }
+    .question-help { margin-top: 7px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+    .selections { margin-top: 22px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .selection { min-height: 72px; padding: 12px 13px; gap: 11px; color: var(--secondary); text-align: left; background: #fff; border: 1px solid var(--line); }
+    .selection:hover { color: var(--ink); border-color: #aeb9ca; }
+    .selection.selected { color: #244fc8; background: var(--blue-soft); border-color: rgba(55,105,252,.45); }
+    .choice-mark { width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center; color: var(--muted); font-size: 10px; font-weight: 700; border: 1px solid var(--line-strong); border-radius: 7px; }
+    .selection.selected .choice-mark { color: #fff; background: var(--blue); border-color: var(--blue); }
+    .choice-copy strong { display: block; font-size: 13px; }
+    .choice-copy span { display: block; margin-top: 4px; color: var(--muted); font-size: 10px; }
+
+    .evidence-area h3 { margin-top: 8px; font-size: 15px; }
+    .capability { margin-top: 16px; padding: 13px; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+    .capability strong { font-size: 12px; }
+    .capability p { margin-top: 5px; color: var(--secondary); font-size: 11px; line-height: 1.55; }
+    .status { margin-top: 9px; display: flex; gap: 6px; flex-wrap: wrap; }
+    .tag { padding: 3px 6px; color: var(--green); font-size: 9px; font-weight: 700; background: #edf8f2; border-radius: 999px; }
+    .tag.neutral { color: var(--secondary); background: #eef1f5; }
+
+    details { margin-top: 11px; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+    summary { min-height: 40px; padding: 10px 11px; color: var(--secondary); font-size: 11px; cursor: pointer; list-style: none; }
+    summary::-webkit-details-marker { display: none; }
+    .tree { padding: 10px 12px 12px; color: #3d4b64; font: 10px/1.8 SFMono-Regular, Consolas, monospace; border-top: 1px solid var(--line); }
+    .tree div { padding-left: 12px; }
+    .tree .nested { padding-left: 24px; color: #6d4aad; }
+
+    .summary-strip { margin-top: 18px; padding-top: 18px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; border-top: 1px solid var(--line); }
+    .summary-row { align-items: flex-start; gap: 8px; }
+    .summary-mark { width: 18px; height: 18px; flex: 0 0 auto; display: grid; place-items: center; color: var(--blue); font-size: 10px; background: var(--blue-soft); border-radius: 5px; }
+    .summary-copy strong { display: block; font-size: 10px; }
+    .summary-copy span { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+
+    .bottom-bar { position: fixed; right: 0; bottom: 0; left: 88px; z-index: 12; min-height: 84px; padding: 14px clamp(22px, 7vw, 100px); display: flex; align-items: center; justify-content: space-between; gap: 18px; background: rgba(255,255,255,.96); border-top: 1px solid var(--line); backdrop-filter: blur(12px); }
+    .bottom-progress { color: var(--muted); font-size: 11px; }
+    .bottom-progress strong { display: block; margin-bottom: 5px; color: var(--ink); font-size: 12px; }
+    .bottom-actions { display: flex; gap: 9px; }
+
+    .toast { position: fixed; right: 25px; bottom: 102px; z-index: 20; padding: 10px 13px; color: #fff; font-size: 11px; background: #24334f; border-radius: 8px; opacity: 0; transform: translateY(8px); transition: 180ms ease; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+
+    @media (max-width: 900px) {
+      .stage-card { grid-template-columns: 1fr; }
+      .evidence-area { border-top: 1px solid var(--line); border-left: 0; }
+      .summary-strip { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 640px) {
+      .topbar { height: auto; min-height: 52px; padding: 9px 14px; }
+      .session, .top-actions .ghost { display: none; }
+      .layout { grid-template-columns: 1fr; }
+      .chapter-index { padding: 10px 12px; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      .chapter-index ol { min-width: 310px; display: flex; }
+      .chapter-button { width: 48px; height: 42px; border-radius: 9px; }
+      .stage { padding: 26px 14px 114px; }
+      h1 { font-size: 34px; }
+      .selections { grid-template-columns: 1fr; }
+      .bottom-bar { left: 0; padding: 11px 14px; }
+      .bottom-progress { display: none; }
+      .bottom-actions { width: 100%; }
+      .bottom-actions button { flex: 1; min-height: 44px; }
+      .toast { right: 14px; bottom: 94px; left: 14px; }
+    }
+
+    @media (prefers-reduced-motion: reduce) { * { transition-duration: .01ms !important; } }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div class="brand"><span class="brand-mark">C</span><span>CoPaw · W+ SOP</span></div>
+      <div class="session"><strong>产品到期客户筛选与跟进</strong><span>·</span><span>SOP-0728-04</span><span>·</span><span>所属 Chat</span></div>
+      <div class="top-actions"><button class="ghost" id="back">返回 Chat</button><button class="outline" id="exit">保存并退出</button></div>
+    </header>
+
+    <div class="layout">
+      <nav class="chapter-index" aria-label="环节索引">
+        <ol>
+          <li><button class="chapter-button active">01</button></li>
+          <li><button class="chapter-button">02</button></li>
+          <li><button class="chapter-button">03</button></li>
+          <li><button class="chapter-button">04</button></li>
+        </ol>
+      </nav>
+
+      <section class="stage">
+        <div class="stage-inner">
+          <div class="chapter-meta"><span class="chapter-no">Chapter 01 / 04</span><span class="stage-state">澄清中</span></div>
+          <h1>产品到期名单</h1>
+          <p class="lede">把一个环节当成一张“分镜”：当前问题、能力证据和下一步动作同时出现，但一次只解决一个关键分支。</p>
+
+          <article class="stage-card">
+            <section class="question-area">
+              <div class="question-kicker">Question 02 · Single select</div>
+              <h2>本次到期名单采用哪个时间窗口？</h2>
+              <p class="question-help">这个答案会决定预跑命令的日期范围。当前已确认产品类型为“存款到期”。</p>
+              <div class="selections">
+                <button class="selection"><span class="choice-mark">A</span><span class="choice-copy"><strong>未来 7 天</strong><span>适合紧急跟进</span></span></button>
+                <button class="selection"><span class="choice-mark">B</span><span class="choice-copy"><strong>未来 30 天</strong><span>覆盖完整月度窗口</span></span></button>
+                <button class="selection"><span class="choice-mark">C</span><span class="choice-copy"><strong>未来 90 天</strong><span>适合提前规划</span></span></button>
+                <button class="selection"><span class="choice-mark">D</span><span class="choice-copy"><strong>自定义区间</strong><span>按实际开始和结束日期</span></span></button>
+              </div>
+              <div class="summary-strip">
+                <div class="summary-row"><span class="summary-mark">1</span><span class="summary-copy"><strong>当前入口</strong><span>重要商机 → 产品到期</span></span></div>
+                <div class="summary-row"><span class="summary-mark">2</span><span class="summary-copy"><strong>已确认范围</strong><span>存款到期 · 待处理</span></span></div>
+                <div class="summary-row"><span class="summary-mark">3</span><span class="summary-copy"><strong>下一动作</strong><span>生成脱敏预跑卡</span></span></div>
+              </div>
+            </section>
+
+            <aside class="evidence-area">
+              <div class="panel-kicker">Evidence</div>
+              <h3>能力证据与出参结构</h3>
+              <div class="capability">
+                <strong>product-expire-list</strong>
+                <p>按状态、产品分类、到期日期或产品名称读取产品到期商机列表。</p>
+                <div class="status"><span class="tag">verified</span><span class="tag neutral">read only</span><span class="tag neutral">documented</span></div>
+              </div>
+              <details open>
+                <summary>records[] · 对象列表</summary>
+                <div class="tree">
+                  records[]: object
+                  <div>custNmSm: string</div>
+                  <div>remainDays: number</div>
+                  <div>product: object</div>
+                  <div class="nested">prodName: string</div>
+                  <div class="nested">expiry: object</div>
+                  <div class="nested">date: date *</div>
+                  <div class="nested">amount: number</div>
+                </div>
+              </details>
+              <div class="capability">
+                <strong>隐私提醒</strong>
+                <p>这里只展示字段契约。请勿粘贴真实客户姓名、UID、卡号、余额或原始响应。</p>
+              </div>
+            </aside>
+          </article>
+        </div>
+      </section>
+    </div>
+
+    <footer class="bottom-bar">
+      <div class="bottom-progress"><strong id="progress-title">已完成 1 / 2 题</strong><span>完整题组校验后统一提交</span></div>
+      <div class="bottom-actions"><button class="outline" id="unknown">明确未知</button><button class="primary" id="continue" disabled>确认答案并继续</button></div>
+    </footer>
+    <div class="toast" id="toast">状态已更新</div>
+  </main>
+
+  <script>
+    const choices = [...document.querySelectorAll(".selection")];
+    const next = document.getElementById("continue");
+    const progress = document.getElementById("progress-title");
+    const toast = document.getElementById("toast");
+
+    function notify(copy) {
+      toast.textContent = copy;
+      toast.classList.add("show");
+      clearTimeout(notify.timer);
+      notify.timer = setTimeout(() => toast.classList.remove("show"), 2100);
+    }
+
+    choices.forEach((choice) => {
+      choice.addEventListener("click", () => {
+        choices.forEach((item) => item.classList.remove("selected"));
+        choice.classList.add("selected");
+        next.disabled = false;
+        progress.textContent = "已完成 2 / 2 题";
+      });
+    });
+
+    next.addEventListener("click", () => notify("题组已完成：下一步生成当前环节预跑卡"));
+    document.getElementById("unknown").addEventListener("click", () => {
+      choices.forEach((item) => item.classList.remove("selected"));
+      next.disabled = false;
+      progress.textContent = "已将本题标记为明确未知";
+      notify("已记录明确未知，不会由模型补全");
+    });
+    document.getElementById("back").addEventListener("click", () => notify("原型：返回所属 Chat"));
+    document.getElementById("exit").addEventListener("click", () => notify("原型：保存为 Paused，Chat 输入恢复"));
+  </script>
+</body>
+</html>

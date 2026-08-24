@@ -11,6 +11,11 @@
   gap: 16px;
   margin-bottom: 20px;
 }
+.headerActions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
 .header h1 {
   margin: 0;
   font-size: 20px;
@@ -88,6 +93,48 @@
 }
 .uploadResult p {
   margin: 4px 0;
+}
+.distributionContent {
+  display: grid;
+  gap: 20px;
+}
+.distributionSection h3,
+.distributionResults h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+.distributionGroupList {
+  display: grid;
+  gap: 8px;
+}
+.distributionGroupList :global(.ant-checkbox-wrapper) {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  padding: 8px;
+  border: 1px solid var(--console-management-border);
+  border-radius: 6px;
+}
+.distributionGroupName,
+.distributionGroupMeta {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.distributionGroupName {
+  font-weight: 600;
+}
+.distributionGroupMeta {
+  margin-top: 3px;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+}
+.distributionResults {
+  padding-top: 12px;
+  border-top: 1px solid var(--console-management-border);
+}
+.distributionResults p {
+  margin: 4px 0;
+  overflow-wrap: anywhere;
 }
 .summary {
   max-height: 240px;

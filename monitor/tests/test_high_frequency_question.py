@@ -12,7 +12,10 @@ from pydantic import ValidationError
 from monitor.app.models.high_frequency_question import (
     HighFrequencyQuestionMessageQueryRequest,
     HighFrequencyQuestionResultSaveRequest,
+    HighFrequencyQuestionTaskSubmitRequest,
 )
+from monitor.app.routers.high_frequency_question import _resolve_source_id
+from monitor.app.services.tracing import high_frequency_question as hfq_service_module
 from monitor.app.services.tracing.high_frequency_question import (
     HighFrequencyQuestionService,
 )
@@ -30,6 +33,7 @@ def test_message_query_requires_valid_time_range():
 def test_result_save_rejects_invalid_scope_bbk_pair():
     with pytest.raises(ValidationError):
         HighFrequencyQuestionResultSaveRequest(
+            source_id="RMASSIST",
             batch_id="HFQ_20260730_030000",
             stat_start_time="2026-07-23 00:00:00",
             stat_end_time="2026-07-30 00:00:00",
@@ -40,7 +44,6 @@ def test_result_save_rejects_invalid_scope_bbk_pair():
                     "rank_no": 1,
                     "topic_name": "查询客户保险持仓",
                     "message_count": 10,
-                    "user_count": 5,
                     "valid_message_count": 20,
                     "sample_questions": [],
                 },
@@ -51,6 +54,7 @@ def test_result_save_rejects_invalid_scope_bbk_pair():
 def test_result_save_rejects_duplicate_rank_key():
     with pytest.raises(ValidationError):
         HighFrequencyQuestionResultSaveRequest(
+            source_id="RMASSIST",
             batch_id="HFQ_20260730_030000",
             stat_start_time="2026-07-23 00:00:00",
             stat_end_time="2026-07-30 00:00:00",
@@ -59,6 +63,12 @@ def test_result_save_rejects_duplicate_rank_key():
                 _result_item(),
             ],
         )
+
+
+def test_resolve_source_id_prefers_header_then_body_then_default():
+    assert _resolve_source_id(" RMASSIST ", "default") == "RMASSIST"
+    assert _resolve_source_id(None, " body-source ") == "body-source"
+    assert _resolve_source_id(None, None) == "default"
 
 
 @pytest.mark.asyncio
@@ -106,6 +116,7 @@ async def test_save_results_deletes_and_batch_inserts_in_transaction():
     db = _FakeDb()
     service = HighFrequencyQuestionService(db)
     request = HighFrequencyQuestionResultSaveRequest(
+        source_id="RMASSIST",
         batch_id="HFQ_20260730_030000",
         stat_start_time="2026-07-23 00:00:00",
         stat_end_time="2026-07-30 00:00:00",
@@ -119,8 +130,84 @@ async def test_save_results_deletes_and_batch_inserts_in_transaction():
     assert db.conn.committed is True
     assert db.conn.rolled_back is False
     assert "DELETE FROM swe_high_frequency_question_result" in db.cursor.executes[0][0]
+    assert db.cursor.executes[0][1] == ("RMASSIST", "HFQ_20260730_030000")
     assert "INSERT INTO swe_high_frequency_question_result" in db.cursor.many[0][0]
-    assert db.cursor.many[0][1][0][0] == "HFQ_20260730_030000"
+    assert "source_id" in db.cursor.many[0][0]
+    assert "user_count" not in db.cursor.many[0][0]
+    assert db.cursor.many[0][1][0][0] == "RMASSIST"
+    assert db.cursor.many[0][1][0][1] == "HFQ_20260730_030000"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_result_rows_polls_until_rows_exist(monkeypatch):
+    db = _FakeDb(fetch_one_results=[{"count": 0}, {"count": 3}])
+    service = HighFrequencyQuestionService(db)
+    monkeypatch.setattr(hfq_service_module, "HFQ_RESULT_WAIT_SECONDS", 1.0)
+    monkeypatch.setattr(
+        hfq_service_module,
+        "HFQ_RESULT_POLL_INTERVAL_SECONDS",
+        1.0,
+    )
+    monkeypatch.setattr(hfq_service_module.asyncio, "sleep", _noop_sleep)
+
+    result_count = await service._wait_for_result_rows(
+        source_id="RMASSIST",
+        batch_id="task-001",
+    )
+
+    assert result_count == 3
+    assert len(db.fetch_one_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_submit_task_force_bypasses_recent_result(monkeypatch):
+    created_tasks: list[tuple[str, object]] = []
+    scheduled_tasks: list[object] = []
+    db = _FakeDb(
+        fetch_one_results=[
+            {
+                "batch_id": "existing-batch",
+                "stat_start_time": datetime(2026, 7, 23, 0, 0, 0),
+                "stat_end_time": datetime(2026, 7, 30, 23, 59, 59),
+                "result_updated_at": datetime(2026, 7, 30, 10, 0, 0),
+                "result_count": 1,
+            },
+        ],
+    )
+    service = HighFrequencyQuestionService(db)
+
+    async def fake_create_async_task(**kwargs):
+        created_tasks.append((kwargs["task_id"], kwargs["criteria"]))
+
+    async def fake_run_workflow_and_finish_task(**_kwargs):
+        return None
+
+    def fake_create_task(coro):
+        scheduled_tasks.append(coro)
+        coro.close()
+        return None
+
+    monkeypatch.setattr(service, "_create_async_task", fake_create_async_task)
+    monkeypatch.setattr(
+        service,
+        "_run_workflow_and_finish_task",
+        fake_run_workflow_and_finish_task,
+    )
+    monkeypatch.setattr(hfq_service_module.asyncio, "create_task", fake_create_task)
+
+    response = await service.submit_task(
+        HighFrequencyQuestionTaskSubmitRequest(
+            source_id="RMASSIST",
+            start_time="2026-07-23 00:00:00",
+            end_time="2026-07-30 23:59:59",
+            bbk_id="110",
+            force=True,
+        ),
+    )
+
+    assert response.state == "RUNNING"
+    assert created_tasks
+    assert scheduled_tasks
 
 
 def _result_item() -> dict:
@@ -130,16 +217,21 @@ def _result_item() -> dict:
         "rank_no": 1,
         "topic_name": "查询客户保险持仓",
         "message_count": 10,
-        "user_count": 5,
         "valid_message_count": 20,
         "sample_questions": ["查保险"],
     }
 
 
 class _FakeDb:
-    def __init__(self, rows: list[dict] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[dict] | None = None,
+        fetch_one_results: list[dict | None] | None = None,
+    ) -> None:
         self.rows = rows or []
+        self.fetch_one_results = fetch_one_results or []
         self.fetch_all_calls: list[tuple[str, tuple]] = []
+        self.fetch_one_calls: list[tuple[str, tuple]] = []
         self.cursor = _FakeCursor()
         self.conn = _FakeConnection(self.cursor)
 
@@ -147,9 +239,19 @@ class _FakeDb:
         self.fetch_all_calls.append((query, params))
         return self.rows
 
+    async def fetch_one(self, query: str, params: tuple) -> dict | None:
+        self.fetch_one_calls.append((query, params))
+        if self.fetch_one_results:
+            return self.fetch_one_results.pop(0)
+        return None
+
     @asynccontextmanager
     async def acquire(self):
         yield self.conn
+
+
+async def _noop_sleep(_delay: float) -> None:
+    return None
 
 
 class _FakeConnection:

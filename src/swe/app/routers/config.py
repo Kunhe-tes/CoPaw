@@ -646,7 +646,7 @@ def _apply_distributed_channel_values(
     setattr(target_channels, channel_name, fields_to_distribute)
 
 
-def _prepare_target_tenant(
+async def _prepare_target_tenant(
     request: Request,
     tenant_id: str,
 ):
@@ -667,7 +667,20 @@ def _prepare_target_tenant(
     )
     was_bootstrapped = initializer.has_seeded_bootstrap()
     if not was_bootstrapped:
-        initializer.ensure_seeded_bootstrap()
+        pool = getattr(
+            getattr(getattr(request, "app", None), "state", request.state),
+            "tenant_workspace_pool",
+            None,
+        )
+        if pool is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Tenant pool not available",
+            )
+        await pool.ensure_bootstrap(
+            validated_tenant_id,
+            source_id=_request_source_id(request),
+        )
 
     effective_target_tenant_id = getattr(
         initializer,
@@ -784,7 +797,7 @@ async def distribute_channel_config(
                 validated_tenant_id,
                 effective_target_tenant_id,
                 was_bootstrapped,
-            ) = _prepare_target_tenant(request, tenant_id)
+            ) = await _prepare_target_tenant(request, tenant_id)
 
             target_config = load_agent_config(
                 "default",

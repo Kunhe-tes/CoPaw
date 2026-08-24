@@ -11,6 +11,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from swe.app.channels.base import ContentType, TextContent
+from swe.app.channels.console.channel import ConsoleChannel
+from swe.app.agent_context import FileManagerSourceScopeLocation
 from src.swe.app.file_manager import FileManagerService
 from src.swe.app.routers import console as console_router
 
@@ -60,6 +63,175 @@ class _FakeTaskTracker:
         yield 'data: {"done": true}\n\n'
 
 
+class _TaskStartCountingTracker:
+    def __init__(self) -> None:
+        self.start_calls = 0
+
+    async def attach_or_start(self, _run_key, _payload, _stream_fn):
+        self.start_calls += 1
+        return object(), True
+
+
+def _build_authenticated_console_chat_client(
+    monkeypatch,
+    *,
+    authenticated_user_id: str,
+    authenticated_agent_id: str,
+    workspace_agent_id: str,
+) -> tuple[TestClient, _TaskStartCountingTracker]:
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _set_authenticated_identity(request, call_next):
+        request.state.user_id = authenticated_user_id
+        request.state.agent_id = authenticated_agent_id
+        return await call_next(request)
+
+    app.include_router(console_router.router)
+    tracker = _TaskStartCountingTracker()
+    workspace = SimpleNamespace(
+        agent_id=workspace_agent_id,
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=tracker,
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    return TestClient(app), tracker
+
+
+def _console_chat_payload(user_id: str) -> dict[str, Any]:
+    return {
+        "input": [
+            {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+        ],
+        "session_id": "session-1",
+        "user_id": user_id,
+        "channel": "console",
+    }
+
+
+def test_console_chat_authenticated_user_mismatch_is_rejected_before_starting_task(
+    monkeypatch,
+) -> None:
+    client, tracker = _build_authenticated_console_chat_client(
+        monkeypatch,
+        authenticated_user_id="authenticated-user",
+        authenticated_agent_id="agent-1",
+        workspace_agent_id="agent-1",
+    )
+
+    response = client.post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=_console_chat_payload("other-user"),
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Console sender does not match authenticated user",
+    }
+    assert tracker.start_calls == 0
+
+
+def test_console_chat_authenticated_agent_mismatch_is_rejected_before_starting_task(
+    monkeypatch,
+) -> None:
+    client, tracker = _build_authenticated_console_chat_client(
+        monkeypatch,
+        authenticated_user_id="user-1",
+        authenticated_agent_id="authenticated-agent",
+        workspace_agent_id="workspace-agent",
+    )
+
+    response = client.post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=_console_chat_payload("user-1"),
+    )
+
+    assert response.status_code == 403
+    assert response.json() == {
+        "detail": "Console Agent does not match authenticated Agent",
+    }
+    assert tracker.start_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_start_new_chat_propagates_created_chat_id_to_compaction_sse():
+    """A new-chat /compact stream must carry the created chat ID to SSE."""
+
+    class _ChatManager:
+        async def get_or_create_chat(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="chat-created-by-router",
+                channel="console",
+            )
+
+    class _TaskTracker:
+        payload = None
+
+        async def attach_or_start(self, _run_key, payload, _stream_fn):
+            self.payload = payload
+            return object(), True
+
+    async def process(_request):
+        yield SimpleNamespace(
+            object="message",
+            status=None,
+            type="message",
+            output=[],
+            metadata={
+                "conversation_compaction_boundary": {
+                    "id": "boundary-1",
+                    "archived_message_count": 1,
+                },
+            },
+        )
+
+    console_channel = ConsoleChannel(
+        process=process,
+        enabled=True,
+        bot_prefix="Friday",
+    )
+    tracker = _TaskTracker()
+    workspace = SimpleNamespace(
+        agent_id="agent-1",
+        chat_manager=_ChatManager(),
+    )
+    native_payload = {
+        "sender_id": "user-1",
+        "channel_id": "console",
+        "content_parts": [
+            TextContent(type=ContentType.TEXT, text="/compact"),
+        ],
+        "meta": {"session_id": "session-1", "existing": "preserved"},
+    }
+
+    _queue, chat_id, _msgid = await console_router._start_new_chat(
+        workspace,
+        tracker,
+        console_channel,
+        "session-1",
+        native_payload,
+    )
+    events = [
+        event async for event in console_channel.stream_one(tracker.payload)
+    ]
+
+    assert chat_id == "chat-created-by-router"
+    assert tracker.payload["meta"]["chat_id"] == chat_id
+    assert tracker.payload["meta"]["existing"] == "preserved"
+    assert any(f'"chat_id": "{chat_id}"' in event for event in events)
+
+
 def _build_upload_client(monkeypatch, media_dir):
     app = FastAPI()
     app.include_router(console_router.router)
@@ -87,9 +259,17 @@ def _build_upload_client(monkeypatch, media_dir):
 def _build_file_manager_client(monkeypatch, workspace_dir):
     app = FastAPI()
     app.include_router(console_router.router)
+    source_scope_base = workspace_dir.parent / "source-scope"
+    source_scope_base.mkdir(exist_ok=True)
 
     async def _fake_resolve_file_manager_workspace_dir(_request):
         return workspace_dir
+
+    def _fake_resolve_file_manager_source_scope_location(_request):
+        return FileManagerSourceScopeLocation(
+            base_dir=source_scope_base,
+            component="tenant-a",
+        )
 
     async def _fail_if_runtime_requested(_request):
         raise AssertionError("File Manager must not resolve an Agent runtime")
@@ -101,15 +281,21 @@ def _build_file_manager_client(monkeypatch, workspace_dir):
     )
     monkeypatch.setattr(
         console_router,
+        "resolve_file_manager_source_scope_location",
+        _fake_resolve_file_manager_source_scope_location,
+    )
+    monkeypatch.setattr(
+        console_router,
         "get_agent_for_request",
         _fail_if_runtime_requested,
     )
     monkeypatch.setattr(
         console_router,
         "get_file_manager_service",
-        lambda directory: FileManagerService(
+        lambda directory, **kwargs: FileManagerService(
             directory,
             cursor_secret=b"test-file-manager-secret",
+            **kwargs,
         ),
     )
     return TestClient(app)
@@ -132,6 +318,116 @@ def test_file_manager_listing_is_bound_to_request_workspace(
     assert body["path"] == ""
     assert [item["name"] for item in body["items"]] == ["visible.txt"]
     assert str(tmp_path) not in response.text
+
+
+def test_file_manager_routes_bind_the_tenant_source_scope_location(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source_scope_base = tmp_path / "source-scope"
+    source_scope_base.mkdir()
+    observed_locations: list[tuple[Path, Path | None, str | None]] = []
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    async def _fake_resolve_file_manager_workspace_dir(_request):
+        return tmp_path
+
+    def _fake_resolve_file_manager_source_scope_location(_request):
+        return FileManagerSourceScopeLocation(
+            base_dir=source_scope_base,
+            component="tenant-a",
+        )
+
+    def _fake_get_file_manager_service(directory, **kwargs):
+        observed_locations.append(
+            (
+                directory,
+                kwargs.get("source_scope_base_dir"),
+                kwargs.get("source_scope_component"),
+            ),
+        )
+        return FileManagerService(
+            directory,
+            cursor_secret=b"test-file-manager-secret",
+            **kwargs,
+        )
+
+    monkeypatch.setattr(
+        console_router,
+        "resolve_file_manager_workspace_dir",
+        _fake_resolve_file_manager_workspace_dir,
+    )
+    monkeypatch.setattr(
+        console_router,
+        "resolve_file_manager_source_scope_location",
+        _fake_resolve_file_manager_source_scope_location,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        console_router,
+        "get_file_manager_service",
+        _fake_get_file_manager_service,
+    )
+    client = TestClient(app)
+
+    listed = client.get(
+        "/console/file-manager/directories",
+        params={"root": "source_scope"},
+    )
+    assert listed.status_code == 200
+
+    uploaded = client.post(
+        "/console/file-manager/files/upload?root=source_scope&path=",
+        files={"file": ("report.txt", b"before", "text/plain")},
+    )
+    assert uploaded.status_code == 200
+    preview = client.get(
+        "/console/file-manager/files/read",
+        params={"root": "source_scope", "path": "report.txt"},
+    )
+    assert preview.status_code == 200
+    downloaded = client.get(
+        "/console/file-manager/files/download",
+        params={"root": "source_scope", "path": "report.txt"},
+    )
+    assert downloaded.content == b"before"
+    saved = client.put(
+        "/console/file-manager/files/text",
+        json={
+            "root": "source_scope",
+            "path": "report.txt",
+            "content": "after",
+            "revision": preview.json()["revision"],
+        },
+    )
+    assert saved.status_code == 200
+
+    archived = client.delete(
+        "/console/file-manager/files",
+        params={"root": "source_scope", "path": "report.txt"},
+    )
+    assert archived.status_code == 200
+    archive_item_id = archived.json()["archive_item_id"]
+    restored = client.post(
+        f"/console/file-manager/recycle/{archive_item_id}/restore",
+    )
+    assert restored.status_code == 200
+    archived_again = client.delete(
+        "/console/file-manager/files",
+        params={"root": "source_scope", "path": "report.txt"},
+    )
+    assert archived_again.status_code == 200
+    purged = client.delete(
+        f"/console/file-manager/recycle/{archived_again.json()['archive_item_id']}",
+    )
+    assert purged.status_code == 200
+
+    assert observed_locations
+    assert all(
+        location == (tmp_path, source_scope_base, "tenant-a")
+        for location in observed_locations
+    )
 
 
 @pytest.mark.parametrize("path", ["../outside", "/etc/passwd"])
@@ -314,6 +610,34 @@ def test_file_manager_upload_and_delete_enforce_root_and_name_contracts(
     )
     assert deleted.status_code == 200
     assert not (tmp_path / "media" / "fresh.txt").exists()
+
+
+def test_file_manager_deletes_directory_and_audits_outcome(
+    tmp_path,
+    monkeypatch,
+    caplog,
+) -> None:
+    (tmp_path / "reports" / "weekly").mkdir(parents=True)
+    client = _build_file_manager_client(monkeypatch, tmp_path)
+
+    with caplog.at_level("INFO", logger="src.swe.app.routers.console"):
+        response = client.delete(
+            "/console/file-manager/directories",
+            params={"root": "working", "path": "reports"},
+        )
+
+    assert response.status_code == 204
+    assert not (tmp_path / "reports").exists()
+    audit = next(
+        record
+        for record in caplog.records
+        if record.getMessage() == "file_manager.audit"
+    )
+    assert (audit.action, audit.path, audit.outcome) == (
+        "delete_directory",
+        "reports",
+        "success",
+    )
 
 
 def test_file_manager_oversized_upload_audits_failure_without_content(

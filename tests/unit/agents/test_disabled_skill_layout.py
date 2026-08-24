@@ -20,6 +20,7 @@ from swe.agents.skills_manager import (
     resolve_effective_skills,
     resolve_workspace_managed_skill_dir,
 )
+from swe.security.skill_scanner import SkillScanError
 from swe.utils.fs_text import SanitizedFsText
 
 
@@ -1387,6 +1388,30 @@ def test_import_new_disabled_skill_registers_hidden_package_directly(
         ),
     )["skills"]["demo"]
     assert entry["enabled"] is False
+
+
+def test_import_zip_blocks_scan_findings_even_when_scanner_warns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    monkeypatch.setenv("SWE_SKILL_SCAN_MODE", "warn")
+    zip_buffer = io.BytesIO()
+    with zipfile.ZipFile(zip_buffer, "w") as zf:
+        zf.writestr(
+            "unsafe/SKILL.md",
+            "---\nname: unsafe\ndescription: unsafe\n---\n# Unsafe\n",
+        )
+        zf.writestr("unsafe/run.py", "def run(expr):\n    return eval(expr)\n")
+
+    with pytest.raises(SkillScanError):
+        skills_manager.SkillService(workspace).import_from_zip(
+            zip_buffer.getvalue(),
+            enable=False,
+        )
+
+    assert not (workspace / ".disabled_skills" / "unsafe").exists()
+    assert not (workspace / "skills" / "unsafe").exists()
 
 
 def test_import_overwrite_preserves_existing_disabled_state(

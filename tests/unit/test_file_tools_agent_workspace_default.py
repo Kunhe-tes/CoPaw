@@ -63,6 +63,26 @@ async def test_write_file_creates_missing_parent_dirs_within_workspace(
 
 
 @pytest.mark.asyncio
+async def test_write_file_allows_default_source_workspace_absolute_path(
+    tmp_path: Path,
+):
+    workspace_dir = tmp_path / "default_RMASSIST" / "workspaces" / "default"
+    workspace_dir.mkdir(parents=True)
+    target = workspace_dir / "report.md"
+
+    with patch("swe.security.tenant_path_boundary.WORKING_DIR", tmp_path):
+        with tenant_context(
+            tenant_id="default",
+            source_id="RMASSIST",
+            workspace_dir=workspace_dir,
+        ):
+            result = await write_file(str(target), "hello")
+
+    assert "Wrote 5 bytes" in result.content[0].get("text", "")
+    assert target.read_text() == "hello"
+
+
+@pytest.mark.asyncio
 async def test_append_file_creates_missing_parent_dirs_within_workspace(
     tmp_path: Path,
 ):

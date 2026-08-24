@@ -1474,7 +1474,22 @@ describe("archived conversation card conversion", () => {
     const cards = convertArchivedPage(
       [
         { id: "user-1", role: "user", content: "first" },
-        { id: "assistant-1", role: "assistant", content: "answer" },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          content: "answer",
+          metadata: {
+            plan_interaction_card: {
+              card_type: "plan_review",
+              plan_id: "plan-1",
+              title: "Implementation plan",
+              summary: "Review before execution",
+              steps: [],
+              risks: [],
+              verification: [],
+            },
+          },
+        },
         { id: "user-2", role: "user", content: "second" },
       ],
       [
@@ -1494,5 +1509,59 @@ describe("archived conversation card conversion", () => {
       "ConversationCompactionBoundary",
       "AgentScopeRuntimeRequestCard",
     ]);
+    expect(cards[1]?.cards?.map((card) => card.code)).toEqual([
+      "AgentScopeRuntimeResponseCard",
+      "PlanInteraction",
+      "ResponseFeedback",
+    ]);
+    expect(cards[1]?.cards?.[0]?.data).toMatchObject({
+      planReviewCard: {
+        card_type: "plan_review",
+        plan_id: "plan-1",
+      },
+    });
+  });
+
+  it("places a compaction boundary after the final runtime fragment of its source message", () => {
+    const cards = convertArchivedPage(
+      [
+        {
+          id: "runtime-fragment-1",
+          role: "assistant",
+          content: "thinking",
+          metadata: { original_id: "source-message-1" },
+        },
+        {
+          id: "runtime-fragment-2",
+          role: "assistant",
+          content: "answer",
+          metadata: { original_id: "source-message-1" },
+        },
+        {
+          id: "runtime-message-3",
+          role: "user",
+          content: "follow-up",
+          metadata: { original_id: "source-message-2" },
+        },
+      ],
+      [
+        {
+          id: "boundary-1",
+          archived_message_count: 1,
+          first_message_id: "source-message-1",
+          last_message_id: "source-message-1",
+          created_at: "2026-08-01T12:00:00+00:00",
+        },
+      ],
+    );
+
+    expect(cards.map((card) => card.cards?.[0]?.code)).toEqual([
+      "AgentScopeRuntimeResponseCard",
+      "ConversationCompactionBoundary",
+      "AgentScopeRuntimeRequestCard",
+    ]);
+    expect(
+      (cards[0]?.cards?.[0]?.data as { output?: unknown[] }).output,
+    ).toHaveLength(2);
   });
 });

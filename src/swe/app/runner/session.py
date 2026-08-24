@@ -33,6 +33,7 @@ _SESSION_WRITE_LOCKS_GUARD = threading.Lock()
 
 # Characters forbidden in Windows filenames
 _UNSAFE_FILENAME_RE = re.compile(r'[\\/:*?"<>|]')
+_ALLOWED_MESSAGE_ROLES = {"user", "assistant", "system"}
 
 
 def sanitize_filename(name: str) -> str:
@@ -44,6 +45,28 @@ def sanitize_filename(name: str) -> str:
     'normal-name'
     """
     return _UNSAFE_FILENAME_RE.sub("--", name)
+
+
+def _normalize_state_for_load(value):
+    """在反序列化前把旧角色单向迁移到 AgentScope 可接受角色。"""
+    if isinstance(value, list):
+        return [_normalize_state_for_load(item) for item in value]
+
+    if not isinstance(value, dict):
+        return value
+
+    normalized = {
+        key: _normalize_state_for_load(item) for key, item in value.items()
+    }
+    role = normalized.get("role")
+    if (
+        isinstance(role, str)
+        and role not in _ALLOWED_MESSAGE_ROLES
+        and "name" in normalized
+        and "content" in normalized
+    ):
+        normalized["role"] = "system"
+    return normalized
 
 
 def _get_session_write_lock(file_path: str) -> asyncio.Lock:
@@ -280,7 +303,10 @@ class SafeJSONSession(SessionBase):
         if exists:
             for name, state_module in state_modules_mapping.items():
                 if name in states:
-                    state_module.load_state_dict(states[name])
+                    normalized_state = _normalize_state_for_load(
+                        states[name],
+                    )
+                    state_module.load_state_dict(normalized_state)
             logger.info(
                 "Load session state from %s successfully.",
                 session_save_path,

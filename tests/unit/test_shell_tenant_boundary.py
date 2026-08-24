@@ -403,6 +403,26 @@ class TestValidateShellPaths:
             result = _validate_shell_paths("cat file.txt", base_dir=tenant_dir)
             assert result is None
 
+    def test_direct_workspace_skill_write_target_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "unzip uploaded.zip -d skills/uploaded",
+                base_dir=workspace_dir,
+            )
+
+        assert result is not None
+        assert "skills/uploaded" in result
+
     def test_python_script_content_outside_path_denied(
         self,
         mock_working_dir: Path,
@@ -777,12 +797,9 @@ class TestResolveCwd:
         self,
         mock_working_dir: Path,
     ):
-        """default + source should accept cwd under encoded scope."""
+        """default + source should accept cwd under default_{source}."""
         workspace_dir = (
-            mock_working_dir
-            / encode_scope_id("default", "RMASSIST")
-            / "workspaces"
-            / "default"
+            mock_working_dir / "default_RMASSIST" / "workspaces" / "default"
         )
         workspace_dir.mkdir(parents=True)
 

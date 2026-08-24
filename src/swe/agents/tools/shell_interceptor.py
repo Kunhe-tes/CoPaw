@@ -42,6 +42,11 @@ class InterceptRule:
 # 更具体的规则放在前面，避免被通用前缀提前匹配。
 INTERCEPT_RULES: List[InterceptRule] = [
     InterceptRule(
+        command_prefix="swe auth refresh-token",
+        inject_params=["--tenant-id", "--source-id"],
+        inject_position="at_end",
+    ),
+    InterceptRule(
         command_prefix="swe cron create",
         inject_params=[
             "--tenant-id",

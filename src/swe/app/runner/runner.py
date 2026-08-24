@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -26,6 +27,7 @@ from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
 
 from ..mcp.http_headers import build_mcp_http_headers
+from ..mcp.lazy_client import LazyMCPClient, get_mcp_tool_discovery_cache
 from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
@@ -107,6 +109,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 TASK_RUNS_STATE_KEY = "task_runs"
 _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
+_PLAN_MODE_META_KEY = "plan_mode_enabled"
+_PLAN_REQUEST_MODE_KEY = "mode"
+_PLAN_INTERACTION_RESPONSE_KEY = "plan_interaction_response"
+_ACCEPTED_PLAN_SOURCE_META_KEY = "accepted_plan_source"
+_ACCEPTED_PLAN_SERVER_SOURCE = "server_plan_store"
+_PLAN_INTERACTION_CARD_METADATA_KEY = "plan_interaction_card"
 _SKILL_FRESHNESS_NOTICE_METADATA_KEY = "swe_skill_freshness_notice"
 _EXTERNAL_APPROVAL_MESSAGE_META_KEY = "external_approval_message"
 _APPROVAL_REQUEST_ID_META_KEY = "approval_request_id"
@@ -146,6 +154,49 @@ _DENY_EXACT = frozenset(
 )
 
 
+def _plan_decision_from_meta(channel_meta: dict[str, Any]) -> str | None:
+    """从计划交互响应中提取审核动作。"""
+    response = channel_meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
+    if not isinstance(response, dict):
+        return None
+    decision = response.get("decision")
+    return decision if isinstance(decision, str) else None
+
+
+def _requested_plan_mode_update(
+    channel_meta: dict[str, Any],
+) -> bool | None:
+    """解析本次请求是否显式要求更新 Plan Mode 状态。"""
+    decision = _plan_decision_from_meta(channel_meta)
+    if decision == "revise":
+        return True
+    if decision in {"execute", "exit_plan"}:
+        return False
+
+    mode = channel_meta.get(_PLAN_REQUEST_MODE_KEY)
+    if mode == "plan":
+        return True
+    if mode == "normal":
+        return False
+    return None
+
+
+def _resolve_plan_mode_enabled(
+    channel_meta: dict[str, Any],
+    chat: Any,
+) -> bool:
+    """优先使用请求显式状态，否则沿用 ChatSpec.meta 中的持久状态。"""
+    requested_update = _requested_plan_mode_update(channel_meta)
+    if requested_update is not None:
+        return requested_update
+    if isinstance(channel_meta.get(_PLAN_MODE_META_KEY), bool):
+        return channel_meta[_PLAN_MODE_META_KEY]
+    chat_meta = getattr(chat, "meta", None)
+    if isinstance(chat_meta, dict):
+        return bool(chat_meta.get(_PLAN_MODE_META_KEY, False))
+    return False
+
+
 @dataclass
 class _QueryPreflight:
     """保存进入 Agent 主流程前已经解析出的请求状态。"""
@@ -175,6 +226,7 @@ class _QueryRuntimeInputs:
     selected_context_directives: list[str]
     auth_token: str | None
     passthrough_headers: dict[str, str]
+    selected_skill_directives: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -234,6 +286,7 @@ class _QueryTurnOutcome:
     max_stop_turns: int = 0
     automatic_follow_up_turns: int = 0
     max_automatic_follow_up_turns: int = 0
+    plan_interaction_turn_boundary: bool = False
     stop_hook_active: bool = False
     completion_blocked: bool = False
     completion_block_reason: str = ""
@@ -1021,6 +1074,83 @@ async def _build_and_connect_mcp_clients(
     return clients
 
 
+def _build_lazy_mcp_clients(
+    mcp_config: MCPConfig | None,
+    *,
+    tenant_id: str | None,
+    user_id: str | None,
+    passthrough_headers: dict[str, str] | None = None,
+    session_id: str | None = None,
+    chat_id: str | None = None,
+    trace_id: str | None = None,
+) -> list[LazyMCPClient]:
+    """Build request-lazy MCP clients without opening transport sessions."""
+    if mcp_config is None or not mcp_config.clients:
+        return []
+
+    clients: list[LazyMCPClient] = []
+    for key, client_config in mcp_config.clients.items():
+        if not client_config.enabled:
+            continue
+
+        config_payload = client_config.model_dump(mode="json")
+        config_fingerprint = hashlib.sha256(
+            json.dumps(
+                config_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        ).hexdigest()
+        request_scope_headers = {
+            header_name.casefold(): header_value
+            for header_name, header_value in (
+                passthrough_headers or {}
+            ).items()
+        }
+        request_scope_fingerprint = hashlib.sha256(
+            json.dumps(
+                request_scope_headers,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        ).hexdigest()
+        discovery_key = ":".join(
+            [
+                tenant_id or "default",
+                user_id or "default",
+                key,
+                config_fingerprint,
+                request_scope_fingerprint,
+            ],
+        )
+
+        async def create_client(
+            config: MCPClientConfig = client_config,
+            headers: dict[str, str] | None = passthrough_headers,
+            request_session_id: str | None = session_id,
+            request_chat_id: str | None = chat_id,
+            request_trace_id: str | None = trace_id,
+        ) -> Any:
+            return await _create_mcp_client_with_headers(
+                config,
+                headers,
+                session_id=request_session_id,
+                chat_id=request_chat_id,
+                trace_id=request_trace_id,
+            )
+
+        clients.append(
+            LazyMCPClient(
+                name=client_config.name,
+                discovery_key=discovery_key,
+                create_client=create_client,
+                discovery_cache=get_mcp_tool_discovery_cache(),
+                connect_timeout=_MCP_CONNECT_TIMEOUT_SECONDS,
+            ),
+        )
+    return clients
+
+
 async def _create_mcp_client_with_headers(
     client_config: MCPClientConfig,
     passthrough_headers: dict[str, str] | None = None,
@@ -1092,6 +1222,7 @@ async def _create_mcp_client_with_headers(
     merged_headers = build_mcp_http_headers(
         client_config.headers,
         passthrough_headers=passthrough_headers,
+        url=client_config.url,
         session_id=session_id,
         chat_id=chat_id,
         trace_id=trace_id,
@@ -1932,6 +2063,8 @@ def _build_cron_merged_state(
             mode="json",
             by_alias=True,
         )
+    else:
+        merged_state.pop("hook_overlay", None)
 
     task_run = _build_task_run_record(
         current_content,
@@ -2558,10 +2691,20 @@ class AgentRunner(Runner):
             meta={"agent_id": self.agent_id},
         )
         logger.debug(f"Runner: Got chat: {chat.id}")
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        plan_mode_enabled = _resolve_plan_mode_enabled(channel_meta, chat)
+        requested_plan_mode = _requested_plan_mode_update(channel_meta)
+        if requested_plan_mode is not None:
+            chat.meta = {
+                **(getattr(chat, "meta", None) or {}),
+                _PLAN_MODE_META_KEY: requested_plan_mode,
+            }
+            await self._chat_manager.update_chat(chat)
         request.channel_meta = {
-            **(getattr(request, "channel_meta", None) or {}),
+            **channel_meta,
             "chat_id": chat.id,
             "turn_id": turn_id,
+            _PLAN_MODE_META_KEY: plan_mode_enabled,
         }
         return chat
 
@@ -2616,8 +2759,19 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay,
         auth_token: str | None,
         approved_tool_call: dict[str, Any] | None,
+        current_user_text: str = "",
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
+        request_enable_subagents = getattr(request, "enable_subagents", False)
+        if isinstance(request_enable_subagents, str):
+            request_enable_subagents = (
+                request_enable_subagents.strip().lower()
+                in {
+                    "true",
+                    "1",
+                    "yes",
+                }
+            )
         request_context = {
             "session_id": session_id,
             "user_id": user_id,
@@ -2626,10 +2780,13 @@ class AgentRunner(Runner):
             "turn_id": turn_id,
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
+            "agent_role": "main",
+            "enable_subagents": bool(request_enable_subagents),
             "source_id": _request_source_id(request),
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "current_user_text": current_user_text,
             "channel_manager": getattr(
                 getattr(self, "_workspace", None),
                 "channel_manager",
@@ -2646,6 +2803,25 @@ class AgentRunner(Runner):
             ),
             "_hook_overlay_model": hook_overlay,
         }
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        plan_mode_enabled = bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
+        request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
+        request_context[_PLAN_REQUEST_MODE_KEY] = (
+            "plan" if plan_mode_enabled else "normal"
+        )
+        plan_response = channel_meta.get(_PLAN_INTERACTION_RESPONSE_KEY)
+        if isinstance(plan_response, dict):
+            request_context[_PLAN_INTERACTION_RESPONSE_KEY] = plan_response
+        accepted_plan = channel_meta.get("accepted_plan")
+        if (
+            isinstance(accepted_plan, dict)
+            and channel_meta.get(_ACCEPTED_PLAN_SOURCE_META_KEY)
+            == _ACCEPTED_PLAN_SERVER_SOURCE
+        ):
+            request_context["accepted_plan"] = accepted_plan
+            request_context[_ACCEPTED_PLAN_SOURCE_META_KEY] = (
+                _ACCEPTED_PLAN_SERVER_SOURCE
+            )
         if auth_token:
             request_context["auth_token"] = auth_token
         if approved_tool_call:
@@ -2954,20 +3130,6 @@ class AgentRunner(Runner):
             allow_one_shot_continuation=True,
         )
 
-    async def _start_declared_session_skill(
-        self,
-        *,
-        runtime: _QueryRuntime,
-        user_message: str,
-    ) -> None:
-        """预热消息级技能候选缓存，不在开局直接启动技能。"""
-        if not user_message:
-            return
-
-        runtime.session_skill_detector.detect_from_user_message(
-            user_message,
-        )
-
     async def _prepare_query_runtime(
         self,
         *,
@@ -3089,6 +3251,7 @@ class AgentRunner(Runner):
                 ),
             ),
             selected_context_directives=[],
+            selected_skill_directives=[],
             auth_token=getattr(request, "auth_token", None),
             passthrough_headers=passthrough_headers,
         )
@@ -3142,16 +3305,23 @@ class AgentRunner(Runner):
                     if name not in selected_context_skill_names
                 ],
             )
+            all_context_directives = [
+                *selected_skill_directives,
+                *context_reference_directives,
+            ]
+            inputs.selected_skill_directives = [
+                directive
+                for directive in all_context_directives
+                if isinstance(directive, SkillUseDirective)
+            ]
             inputs.selected_context_directives = [
-                directive.render()
-                for directive in [
-                    *selected_skill_directives,
-                    *context_reference_directives,
-                ]
+                directive.render() for directive in all_context_directives
             ]
         mcp_clients.extend(
-            await _build_and_connect_mcp_clients(
+            _build_lazy_mcp_clients(
                 inputs.agent_config.mcp,
+                tenant_id=self.tenant_id,
+                user_id=inputs.user_id,
                 passthrough_headers=inputs.passthrough_headers or None,
                 session_id=inputs.session_id,
                 chat_id=chat.id if chat is not None else None,
@@ -3178,12 +3348,47 @@ class AgentRunner(Runner):
             env_context=env_context,
         )
         if block_response is None:
+            inputs.hook_overlay = await self._load_selected_skill_hooks(
+                inputs=inputs,
+            )
             return resources, None
         return resources, _RuntimeStartResult(
             block_response=block_response,
             blocked_chat=chat,
             blocked_mcp_clients=mcp_clients,
             blocked_session_id=inputs.session_id,
+        )
+
+    async def _load_selected_skill_hooks(
+        self,
+        *,
+        inputs: _QueryRuntimeInputs,
+    ) -> HookSessionOverlay:
+        """Load validated selected skill hooks after startup hooks complete."""
+        state: HookSessionState = inputs.hook_overlay
+        workspace = Path(self.workspace_dir or WORKING_DIR)
+        approvals = _load_tenant_approved_skill_hook_http_urls(self.tenant_id)
+
+        for directive in inputs.selected_skill_directives:
+            try:
+                next_state = load_skill_hooks_for_session(
+                    skill_name=directive.name,
+                    skill_root=directive.path.parent,
+                    workspace_dir=workspace,
+                    session_state=state,
+                    approved_http_urls=approvals,
+                )
+            except SkillHookLoadError as exc:
+                logger.warning(
+                    "Rejected hooks for explicitly selected skill '%s': %s",
+                    directive.name,
+                    exc,
+                )
+                continue
+            state = next_state
+
+        return HookSessionOverlay.model_validate(
+            state.model_dump(mode="json", by_alias=True),
         )
 
     async def _finalize_query_runtime(
@@ -3212,6 +3417,7 @@ class AgentRunner(Runner):
             hook_overlay=inputs.hook_overlay,
             auth_token=inputs.auth_token,
             approved_tool_call=preflight.approved_tool_call,
+            current_user_text=query or _get_last_user_text(msgs) or "",
         )
         await agent.register_mcp_clients()
         agent.set_console_output_enabled(enabled=False)
@@ -3239,11 +3445,6 @@ class AgentRunner(Runner):
             selected_context_directives=inputs.selected_context_directives,
         )
         self._attach_session_skill_detector(runtime=runtime, request=request)
-        await self._restore_confirmed_session_skill_context(runtime=runtime)
-        await self._start_declared_session_skill(
-            runtime=runtime,
-            user_message=query or _get_last_user_text(msgs) or "",
-        )
         return runtime
 
     async def _build_turn_plan(
@@ -3313,6 +3514,12 @@ class AgentRunner(Runner):
                     runtime.chat.id if runtime.chat is not None else None
                 ),
             ):
+                metadata = getattr(msg, "metadata", None)
+                if isinstance(metadata, dict) and isinstance(
+                    metadata.get(_PLAN_INTERACTION_CARD_METADATA_KEY),
+                    dict,
+                ):
+                    outcome.plan_interaction_turn_boundary = True
                 yield msg, last
         except PreToolUseTerminalStop as exc:
             consume_terminal_stop = getattr(
@@ -3355,6 +3562,8 @@ class AgentRunner(Runner):
     ) -> MergedHookResult | None:
         """执行 Stop completion gate，active guard 已设置时跳过递归触发。"""
         if outcome.stop_hook_active:
+            return None
+        if outcome.plan_interaction_turn_boundary:
             return None
         if not outcome.assistant_response:
             return None
@@ -3416,7 +3625,9 @@ class AgentRunner(Runner):
                 ) or "Stop blocked completion"
                 if (
                     not stop_result.has_blocking_failure
-                    and _should_stop_follow_up(outcome)
+                    and _should_stop_follow_up(
+                        outcome,
+                    )
                 ):
                     outcome.stop_follow_up_turns += 1
                     outcome.automatic_follow_up_turns += 1
@@ -4575,8 +4786,27 @@ class AgentRunner(Runner):
 
         if not preflight.approval_consumed and query and _is_command(query):
             logger.info("Command path: %s", query.strip()[:50])
-            async for msg, last in run_command_path(request, msgs, self):
-                yield msg, last
+            trace_id = await self._start_query_trace(request, msgs)
+            try:
+                async for msg, last in run_command_path(request, msgs, self):
+                    yield msg, last
+            except asyncio.CancelledError:
+                await self._end_trace_if_needed(
+                    trace_id,
+                    TraceStatus.CANCELLED,
+                )
+                raise
+            except Exception as exc:
+                await self._end_trace_if_needed(
+                    trace_id,
+                    TraceStatus.ERROR,
+                    str(exc),
+                )
+                raise
+            await self._end_trace_if_needed(
+                trace_id,
+                TraceStatus.COMPLETED,
+            )
             return
 
         async for msg, last in self._stream_query_after_preflight(
@@ -4709,6 +4939,16 @@ class AgentRunner(Runner):
             agent=agent,
         )
         if hook_overlay is None:
+            await self.session.mutate_session_state(
+                session_id=storage_session_id,
+                mutator=lambda state: {
+                    key: value
+                    for key, value in state.items()
+                    if key != "hook_overlay"
+                },
+                user_id=storage_user_id,
+                create_if_not_exist=True,
+            )
             return
 
         await self.session.update_session_state(

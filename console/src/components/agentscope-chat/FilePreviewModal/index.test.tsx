@@ -200,6 +200,7 @@ describe("FilePreviewModal HTML preview recording", () => {
           "https://example.test/report[auto-preview].html?resultId=result-1&templateId=1",
         listName: "report[auto-preview].html",
         customerInfo: { customer_id: "CUST-001", name: "张三" },
+        custUid: "CUST-001",
       });
     });
 

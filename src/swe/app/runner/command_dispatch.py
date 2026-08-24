@@ -6,7 +6,9 @@ Yields (Msg, last) compatible with query_handler stream.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from dataclasses import dataclass
 from typing import AsyncIterator
 from typing import TYPE_CHECKING
 
@@ -72,7 +74,217 @@ def _is_command(query: str | None) -> bool:
     return _is_conversation_command(query)
 
 
-async def run_command_path(  # pylint: disable=too-many-statements
+@dataclass(frozen=True)
+class _CommandRequestContext:
+    """Normalized request fields shared by command handlers."""
+
+    session_id: str
+    user_id: str
+    chat_id: str
+    channel: str
+
+
+async def _resolve_command_context(
+    request,
+    runner: AgentRunner,
+) -> _CommandRequestContext:
+    """Resolve command identifiers, including the legacy chat lookup."""
+    session_id = getattr(request, "session_id", "") or ""
+    user_id = getattr(request, "user_id", "") or ""
+    channel = getattr(request, "channel", "") or ""
+    request_meta = getattr(request, "channel_meta", None) or {}
+    chat_id = (
+        getattr(request, "chat_id", "") or request_meta.get("chat_id") or ""
+    )
+    if not chat_id:
+        chat_manager = getattr(runner, "_chat_manager", None)
+        if chat_manager is not None and session_id:
+            chat_id = (
+                await chat_manager.get_chat_id_by_session(
+                    session_id,
+                    channel or "console",
+                )
+                or ""
+            )
+    return _CommandRequestContext(session_id, user_id, chat_id, channel)
+
+
+def _restart_hint() -> Msg:
+    """Build the status message yielded before an async daemon restart."""
+    return Msg(
+        name="Friday",
+        role="assistant",
+        content=[
+            TextBlock(
+                type="text",
+                text=(
+                    "**Restart in progress**\n\n"
+                    "- Reloading agent with zero-downtime. Please wait."
+                ),
+            ),
+        ],
+    )
+
+
+async def _run_daemon_command(
+    query: str,
+    parsed: tuple,
+    context: _CommandRequestContext,
+    runner: AgentRunner,
+) -> AsyncIterator[tuple]:
+    """Run a daemon command, yielding its optional restart hint first."""
+    handler = DaemonCommandHandlerMixin()
+    manager = getattr(runner, "_manager", None)
+    if parsed[0] == "restart":
+        logger.info(
+            "run_command_path: daemon restart, manager=%s",
+            "set" if manager is not None else "None",
+        )
+        yield _restart_hint(), True
+
+    workspace = getattr(runner, "_workspace", None)
+    tenant_id = getattr(workspace, "tenant_id", None)
+    agent_id = runner.agent_id
+    daemon_ctx = DaemonContext(
+        load_config_fn=lambda: load_agent_config(
+            agent_id,
+            tenant_id=tenant_id,
+        ),
+        memory_manager=runner.memory_manager,
+        manager=manager,
+        agent_id=agent_id,
+        tenant_id=tenant_id,
+        session_id=context.session_id,
+    )
+    msg = await handler.handle_daemon_command(query, daemon_ctx)
+    yield msg, True
+    logger.info("handle_daemon_command %s completed", query)
+
+
+async def _run_control_command(
+    query: str,
+    request,
+    context: _CommandRequestContext,
+    runner: AgentRunner,
+) -> AsyncIterator[tuple]:
+    """Run a control command with its resolved channel and workspace."""
+    workspace = runner._workspace  # pylint: disable=protected-access
+    if workspace is None:
+        logger.error("run_command_path: control command but workspace not set")
+        yield _command_error(
+            "Control command unavailable (workspace not initialized)",
+        ), True
+        return
+
+    channel = None
+    channel_manager = workspace.channel_manager
+    if channel_manager is not None:
+        channel = await channel_manager.get_channel(context.channel)
+    if channel is None:
+        logger.error(
+            "run_command_path: channel not found: %s",
+            context.channel,
+        )
+        yield _command_error(f"Channel not found: {context.channel}"), True
+        return
+
+    control_ctx = control_commands.ControlContext(
+        workspace=workspace,
+        payload=request,
+        channel=channel,
+        session_id=context.session_id,
+        user_id=context.user_id,
+        args={},
+    )
+    try:
+        response_text = await control_commands.handle_control_command(
+            query,
+            control_ctx,
+        )
+    except Exception as exc:
+        logger.exception("Control command failed: %s", query)
+        yield _command_error(
+            str(exc),
+            prefix="**Command Failed**\n\n",
+        ), True
+        return
+    yield Msg(
+        name="Friday",
+        role="assistant",
+        content=[TextBlock(type="text", text=response_text)],
+    ), True
+    logger.info("handle_control_command %s completed", query)
+
+
+def _command_error(text: str, *, prefix: str = "**Error**\n\n") -> Msg:
+    """Build the unchanged command-path error response shape."""
+    return Msg(
+        name="Friday",
+        role="assistant",
+        content=[TextBlock(type="text", text=prefix + text)],
+    )
+
+
+async def _run_conversation_command(
+    query: str,
+    request,
+    context: _CommandRequestContext,
+    runner: AgentRunner,
+) -> AsyncIterator[tuple]:
+    """Run a conversation command and persist its in-memory state."""
+    memory = runner.memory_manager.get_in_memory_memory(
+        chat_id=context.chat_id or None,
+    )
+    session_state = await runner.session.get_session_state_dict(
+        session_id=context.session_id,
+        user_id=context.user_id,
+    )
+    memory_state = session_state.get("agent", {}).get("memory", {})
+    memory.load_state_dict(memory_state, strict=False)
+
+    conv_handler = CommandHandler(
+        agent_name="Friday",
+        memory=memory,
+        memory_manager=runner.memory_manager,
+        enable_memory_manager=runner.memory_manager is not None,
+        request_context={
+            "session_id": context.session_id,
+            "user_id": context.user_id,
+            "channel": context.channel,
+            "chat_id": context.chat_id or None,
+            "trace_id": getattr(request, "trace_id", None),
+        },
+    )
+    try:
+        response_msg = await conv_handler.handle_conversation_command(query)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        logger.exception("Conversation command failed: %s", query)
+        command = query.strip().split(maxsplit=1)[0]
+        response_msg = _command_error(
+            f"- `{command}` could not be completed. "
+            "Please retry or check server logs.",
+            prefix="**Command Failed**\n\n",
+        )
+    yield response_msg, True
+    if context.session_id and context.user_id:
+        await runner.session.update_session_state(
+            session_id=context.session_id,
+            key="agent.memory",
+            value=memory.state_dict(),
+            user_id=context.user_id,
+        )
+        return
+    logger.warning(
+        "Skipping session_state update for conversation memory due to missing "
+        "session_id or user_id (session_id=%r, user_id=%r)",
+        context.session_id,
+        context.user_id,
+    )
+
+
+async def run_command_path(
     request,
     msgs,
     runner: AgentRunner,
@@ -90,218 +302,25 @@ async def run_command_path(  # pylint: disable=too-many-statements
     query = _get_last_user_text(msgs)
     if not query:
         return
-
-    session_id = getattr(request, "session_id", "") or ""
-    user_id = getattr(request, "user_id", "") or ""
-    request_meta = getattr(request, "channel_meta", None) or {}
-    chat_id = (
-        getattr(request, "chat_id", "") or request_meta.get("chat_id") or ""
-    )
-    if not chat_id:
-        chat_manager = getattr(runner, "_chat_manager", None)
-        if chat_manager is not None and session_id:
-            chat_id = (
-                await chat_manager.get_chat_id_by_session(
-                    session_id,
-                    getattr(request, "channel", "console") or "console",
-                    user_id,
-                )
-                or ""
-            )
-
-    # Daemon path
+    context = await _resolve_command_context(request, runner)
     parsed = parse_daemon_query(query)
     if parsed is not None:
-        handler = DaemonCommandHandlerMixin()
-        manager = getattr(runner, "_manager", None)
-        if parsed[0] == "restart":
-            logger.info(
-                "run_command_path: daemon restart, manager=%s",
-                "set" if manager is not None else "None",
-            )
-            # Yield hint first so user sees it before restart runs.
-            hint = Msg(
-                name="Friday",
-                role="assistant",
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=(
-                            "**Restart in progress**\n\n"
-                            "- Reloading agent with zero-downtime. "
-                            "Please wait."
-                        ),
-                    ),
-                ],
-            )
-            yield hint, True
-
-        agent_id = runner.agent_id
-        daemon_ctx = DaemonContext(
-            load_config_fn=lambda: load_agent_config(
-                agent_id,
-                tenant_id=getattr(
-                    getattr(runner, "_workspace", None),
-                    "tenant_id",
-                    None,
-                ),
-            ),
-            memory_manager=runner.memory_manager,
-            manager=manager,
-            agent_id=agent_id,
-            tenant_id=getattr(
-                getattr(runner, "_workspace", None),
-                "tenant_id",
-                None,
-            ),
-            session_id=session_id,
-        )
-        msg = await handler.handle_daemon_command(query, daemon_ctx)
-        yield msg, True
-        logger.info("handle_daemon_command %s completed", query)
+        async for item in _run_daemon_command(query, parsed, context, runner):
+            yield item
         return
-
-    # Control command path (e.g. /stop)
     if _is_control_command(query):
-        workspace = runner._workspace  # pylint: disable=protected-access
-        if workspace is None:
-            logger.error(
-                "run_command_path: control command but workspace not set",
-            )
-            error_msg = Msg(
-                name="Friday",
-                role="assistant",
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=(
-                            "**Error**\n\n"
-                            "Control command unavailable "
-                            "(workspace not initialized)"
-                        ),
-                    ),
-                ],
-            )
-            yield error_msg, True
-            return
-
-        # Get channel instance from request
-        channel_id = getattr(request, "channel", "")
-        channel = None
-
-        # Get channel_manager from workspace
-        channel_manager = workspace.channel_manager
-        if channel_manager is not None:
-            channel = await channel_manager.get_channel(channel_id)
-
-        if channel is None:
-            logger.error(
-                f"run_command_path: channel not found: {channel_id}",
-            )
-            error_msg = Msg(
-                name="Friday",
-                role="assistant",
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=f"**Error**\n\nChannel not found: {channel_id}",
-                    ),
-                ],
-            )
-            yield error_msg, True
-            return
-
-        # Extract user_id from request
-        user_id = getattr(request, "user_id", "")
-
-        # Build control context
-        control_ctx = control_commands.ControlContext(
-            workspace=workspace,
-            payload=request,
-            channel=channel,
-            session_id=session_id,
-            user_id=user_id,
-            args={},
-        )
-
-        # Handle control command
-        try:
-            response_text = await control_commands.handle_control_command(
-                query,
-                control_ctx,
-            )
-            response_msg = Msg(
-                name="Friday",
-                role="assistant",
-                content=[TextBlock(type="text", text=response_text)],
-            )
-            yield response_msg, True
-            logger.info("handle_control_command %s completed", query)
-        except Exception as e:
-            logger.exception(
-                f"Control command failed: {query}",
-            )
-            error_msg = Msg(
-                name="Friday",
-                role="assistant",
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=f"**Command Failed**\n\n{str(e)}",
-                    ),
-                ],
-            )
-            yield error_msg, True
+        async for item in _run_control_command(
+            query,
+            request,
+            context,
+            runner,
+        ):
+            yield item
         return
-
-    # Conversation path: lightweight memory + CommandHandler
-    memory = runner.memory_manager.get_in_memory_memory(
-        chat_id=chat_id or None,
-    )
-    session_state = await runner.session.get_session_state_dict(
-        session_id=session_id,
-        user_id=user_id,
-    )
-    memory_state = session_state.get("agent", {}).get("memory", {})
-    memory.load_state_dict(memory_state, strict=False)
-
-    conv_handler = CommandHandler(
-        agent_name="Friday",
-        memory=memory,
-        memory_manager=runner.memory_manager,
-        enable_memory_manager=runner.memory_manager is not None,
-        request_context={
-            "session_id": session_id,
-            "user_id": user_id,
-            "channel": getattr(request, "channel", "") or "",
-            "chat_id": chat_id or None,
-            "trace_id": getattr(request, "trace_id", None),
-        },
-    )
-    try:
-        response_msg = await conv_handler.handle_conversation_command(query)
-    except RuntimeError as e:
-        response_msg = Msg(
-            name="Friday",
-            role="assistant",
-            content=[TextBlock(type="text", text=str(e))],
-        )
-    yield response_msg, True
-
-    # Update memory key with session_id & user_id to session,
-    # but only if identifiers are present
-    if session_id and user_id:
-        await runner.session.update_session_state(
-            session_id=session_id,
-            key="agent.memory",
-            value=memory.state_dict(),
-            user_id=user_id,
-        )
-    else:
-        logger.warning(
-            "Skipping session_state update for conversation"
-            " memory due to missing session_id or user_id (session_id=%r, "
-            "user_id=%r)",
-            session_id,
-            user_id,
-        )
+    async for item in _run_conversation_command(
+        query,
+        request,
+        context,
+        runner,
+    ):
+        yield item

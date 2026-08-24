@@ -28,4 +28,3 @@ The final SystemPrompt SHALL include the current request `source_id` as part of 
 - **THEN** the final SystemPrompt SHALL still include the runtime source field
 - **AND** the field SHALL use an explicit missing-value placeholder instead of omitting the field
 - **AND** the system SHALL NOT substitute `"default"` unless the request actually provided `source_id=default`
-

@@ -15,8 +15,42 @@ from typing import Any
 from ..migration import (
     ensure_default_agent_exists,
 )
+from .bootstrap_state import (
+    BootstrapRecoveryFailure,
+    inspect_bootstrap_readiness,
+    move_to_recovery_backup,
+    write_bootstrap_json,
+    write_bootstrap_ready_marker,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _inherit_zhaohu_from_template(
+    base_channels: dict[str, Any],
+    template_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """新租户 zhaohu 配置继承自 source 模板（default 用户）agent.json。
+
+    以 base_channels（config.json + env 默认）为基准，用模板 agent.json 的
+    zhaohu 非空字段覆盖同名字段；空值不覆盖，保留默认兜底。
+    """
+    channels = dict(base_channels)
+    template_channels = template_payload.get("channels") or {}
+    tpl_zhaohu = template_channels.get("zhaohu")
+    if not isinstance(tpl_zhaohu, dict) or not tpl_zhaohu:
+        return channels
+    merged = dict(channels.get("zhaohu") or {})
+    for key, value in tpl_zhaohu.items():
+        if (
+            value is None
+            or value == ""
+            or (isinstance(value, (list, dict)) and not value)
+        ):
+            continue
+        merged[key] = value
+    channels["zhaohu"] = merged
+    return channels
 
 
 class TenantInitializer:
@@ -60,7 +94,6 @@ class TenantInitializer:
         self.base_working_dir = Path(base_working_dir).expanduser().resolve()
         self.tenant_id = tenant_id
         self.source_id = source_id or None
-        self._template_created_from_default = False  # 标记模板是否动态创建
         self.scope_id = scope_id or None
         self.template_name = self._resolve_template_name()
         self.effective_tenant_id = (
@@ -74,123 +107,10 @@ class TenantInitializer:
         self.tenant_dir = self.base_working_dir / self.effective_tenant_id
 
     def _resolve_template_name(self) -> str:
-        """Determine which default_xxx template directory to use.
-
-        If source_id is provided and default_{source_id} doesn't exist,
-        automatically creates it from the default template.
-
-        Default tenant without source_id uses "default" directory directly.
-        Non-default tenants without source_id use the "default" template for initialization.
-
-        Returns:
-            Template directory name (e.g., "default_ruice" or "default").
-        """
+        """Return the explicitly provisioned source template name."""
         if not self.source_id:
-            # No source_id: use default template/directory
             return "default"
-        template_name = f"default_{self.source_id}"
-        template_dir = self.base_working_dir / template_name
-        if template_dir.exists():
-            logger.info(
-                f"Using template {template_name} for tenant {self.tenant_id} "
-                f"(source_id={self.source_id})",
-            )
-            return template_name
-
-        # Dynamic template creation: copy from default if not exists
-        default_dir = self.base_working_dir / "default"
-        if default_dir.exists():
-            logger.info(
-                f"Template dir {template_name} not found, "
-                f"creating from default for source_id={self.source_id}",
-            )
-            try:
-                self._create_source_template_from_default(template_dir)
-                self._template_created_from_default = (
-                    True  # 标记模板已动态创建
-                )
-                logger.info(
-                    f"Created template {template_name} from default, "
-                    f"using for tenant {self.tenant_id}",
-                )
-                return template_name
-            except Exception as e:
-                logger.warning(
-                    f"Failed to create template {template_name}: {e}, "
-                    f"falling back to default",
-                )
-                return "default"
-
-        logger.info(
-            f"Template dir {template_name} not found and no default template, "
-            f"falling back to default for tenant {self.tenant_id}",
-        )
-        return "default"
-
-    def _create_source_template_from_default(self, target_dir: Path) -> None:
-        """Create a source-specific template directory from default.
-
-        Also fixes workspace paths in config.json to reference the new
-        template directory instead of the original default directory.
-
-        Args:
-            target_dir: Path to the new template directory (e.g., default_ruice).
-        """
-        default_dir = self.base_working_dir / "default"
-        if not default_dir.exists():
-            return
-
-        if target_dir.exists():
-            return
-
-        try:
-            shutil.copytree(default_dir, target_dir)
-            self._fix_template_config_paths(target_dir)
-            logger.info(
-                f"Created source template directory: {target_dir}",
-            )
-        except OSError:
-            if not target_dir.exists():
-                raise
-            logger.debug(
-                f"Template {target_dir} created by concurrent request",
-            )
-
-    def _fix_template_config_paths(self, template_dir: Path) -> None:
-        """Fix workspace paths in template config.json after copying from default.
-
-        Updates workspace_dir paths from default/... to template_dir/...
-
-        Args:
-            template_dir: The newly created template directory.
-        """
-        config_path = template_dir / "config.json"
-        if not config_path.exists():
-            return
-
-        try:
-            source_content = config_path.read_text(encoding="utf-8")
-            config = json.loads(source_content)
-
-            old_prefix = str(self.base_working_dir / "default" / "workspaces")
-            new_prefix = str(template_dir / "workspaces")
-
-            if "agents" in config and "profiles" in config["agents"]:
-                for profile in config["agents"]["profiles"].values():
-                    if "workspace_dir" in profile:
-                        old_path = profile["workspace_dir"]
-                        if old_path.startswith(old_prefix):
-                            profile["workspace_dir"] = old_path.replace(
-                                old_prefix,
-                                new_prefix,
-                            )
-
-            config_path.write_text(
-                json.dumps(config, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to fix template config paths: {e}")
+        return f"default_{self.source_id}"
 
     def ensure_directory_structure(self) -> None:
         """Create the tenant directory skeleton (minimal bootstrap)."""
@@ -211,27 +131,58 @@ class TenantInitializer:
         ensure_default_agent_exists(working_dir=self.tenant_dir)
 
     def has_seeded_bootstrap(self) -> bool:
-        """Return True when the tenant bootstrap scaffold is present."""
-        default_workspace = self.tenant_dir / "workspaces" / "default"
-        required_paths = [
-            self.tenant_dir / "config.json",
-            default_workspace,
-            default_workspace / "agent.json",
-            default_workspace / "chats.json",
-            default_workspace / "jobs.json",
-            default_workspace / "token_usage.json",
-            default_workspace / "sessions",
-            default_workspace / "memory",
-        ]
-        required_paths.extend(
-            default_workspace / filename
-            for filename in self._WORKSPACE_REQUIRED_FILES
-        )
+        """Return True only when real bootstrap artifacts are strictly ready."""
+        return inspect_bootstrap_readiness(self.tenant_dir).ready
 
-        return (
-            all(path.exists() for path in required_paths)
-            and self._has_skill_pool_state()
-        )
+    def recover_seeded_bootstrap(
+        self,
+        *,
+        enable_bootstrap_chat: bool = True,
+    ) -> dict[str, list[str]]:
+        """Repair missing or invalid bootstrap-owned artifacts.
+
+        Only JSON paths rejected by strict readiness are moved aside. Backups
+        from this recovery are removed immediately after final readiness.
+        """
+        readiness = inspect_bootstrap_readiness(self.tenant_dir)
+        if readiness.ready:
+            return {"recovered_paths": []}
+
+        backups: list[Path] = []
+        recovered_paths: list[str] = []
+        try:
+            for invalid_path in readiness.invalid_json_paths:
+                if invalid_path.is_file():
+                    backups.append(move_to_recovery_backup(invalid_path))
+                    recovered_paths.append(str(invalid_path))
+            self._reconcile_stale_workspace_skills()
+            self.ensure_seeded_bootstrap(
+                enable_bootstrap_chat=enable_bootstrap_chat,
+            )
+            final_readiness = inspect_bootstrap_readiness(self.tenant_dir)
+            if not final_readiness.ready:
+                raise BootstrapRecoveryFailure(
+                    f"tenant bootstrap remains {final_readiness.reason}",
+                )
+            write_bootstrap_ready_marker(self.tenant_dir)
+        except Exception as exc:
+            if isinstance(exc, BootstrapRecoveryFailure):
+                raise
+            raise BootstrapRecoveryFailure(
+                "tenant bootstrap recovery failed",
+            ) from exc
+        for backup_path in backups:
+            backup_path.unlink(missing_ok=True)
+        return {"recovered_paths": recovered_paths}
+
+    def _reconcile_stale_workspace_skills(self) -> None:
+        """Remove stale registered workspace skills before bootstrap seeding."""
+        from ...agents.skills_manager import reconcile_workspace_manifest
+
+        workspace_dir = self.tenant_dir / "workspaces" / "default"
+        manifest_path = workspace_dir / "skill.json"
+        if manifest_path.is_file():
+            reconcile_workspace_manifest(workspace_dir)
 
     def initialize_minimal(self) -> None:
         """Run minimal bootstrap sequence (idempotent).
@@ -495,11 +446,7 @@ class TenantInitializer:
                             )
 
             # Write the modified config
-            target_config_path.parent.mkdir(parents=True, exist_ok=True)
-            target_config_path.write_text(
-                json.dumps(source_config, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
+            write_bootstrap_json(target_config_path, source_config)
             result["seeded"] = True
             result["source"] = self.template_name
         except Exception as e:
@@ -539,31 +486,13 @@ class TenantInitializer:
         source_providers_dir = SECRET_DIR / self.template_name / "providers"
         result: dict[str, Any] = {"seeded": False, "source": None}
 
-        # Special case: when template_name == effective_tenant_id (default user via source),
-        # the template IS the target - no copying needed, just ensure it exists
+        # When template and target are identical, no copying is needed.
         if self.template_name == self.effective_tenant_id:
-            if not source_providers_dir.exists():
-                self._ensure_source_template_providers(
-                    SECRET_DIR,
-                    self.template_name,
-                )
             if source_providers_dir.exists():
                 result["seeded"] = True
                 result["source"] = self.template_name
             return result
 
-        # Dynamic creation: if source-specific providers template doesn't exist,
-        # create it from default
-        if (
-            not source_providers_dir.exists()
-            or not any(source_providers_dir.iterdir())
-        ) and self.template_name != "default":
-            self._ensure_source_template_providers(
-                SECRET_DIR,
-                self.template_name,
-            )
-
-        # Re-check after potential creation
         if not source_providers_dir.exists():
             return result
         if not any(source_providers_dir.iterdir()):
@@ -593,47 +522,6 @@ class TenantInitializer:
             )
 
         return result
-
-    def _ensure_source_template_providers(
-        self,
-        secret_dir: Path,
-        template_name: str,
-    ) -> None:
-        """Ensure source-specific providers template exists, creating from default if needed.
-
-        Args:
-            secret_dir: Base secret directory (e.g., ~/.swe.secret).
-            template_name: Template directory name (e.g., "default_ruice").
-        """
-        default_providers = secret_dir / "default" / "providers"
-        target_providers = secret_dir / template_name / "providers"
-
-        if not default_providers.exists():
-            return
-
-        target_parent = target_providers.parent
-        try:
-            # Use exist_ok for concurrency safety
-            if not target_parent.exists():
-                shutil.copytree(
-                    secret_dir / "default",
-                    target_parent,
-                )
-                logger.info(
-                    f"Created source template providers: {target_parent}",
-                )
-            elif not target_providers.exists():
-                shutil.copytree(default_providers, target_providers)
-                logger.info(
-                    f"Created source template providers: {target_providers}",
-                )
-        except OSError:
-            if not target_providers.exists():
-                raise
-            logger.debug(
-                f"Source template providers {target_providers} "
-                f"created by concurrent request",
-            )
 
     def ensure_default_workspace_scaffold(
         self,
@@ -673,17 +561,16 @@ class TenantInitializer:
                 source_agent_config_path.read_text(encoding="utf-8"),
             )
             agent_payload["workspace_dir"] = str(default_workspace)
-            agent_payload["channels"] = tenant_config.channels.model_dump(
-                exclude_none=True,
+            channels = tenant_config.channels.model_dump(exclude_none=True)
+            # 继承 source 下 default 用户（模板）agent.json 的 zhaohu 配置
+            agent_payload["channels"] = _inherit_zhaohu_from_template(
+                channels,
+                agent_payload,
             )
             agent_config_model = AgentProfileConfig(**agent_payload)
-            target_agent_config_path.write_text(
-                json.dumps(
-                    agent_config_model.model_dump(exclude_none=True),
-                    ensure_ascii=False,
-                    indent=2,
-                ),
-                encoding="utf-8",
+            write_bootstrap_json(
+                target_agent_config_path,
+                agent_config_model.model_dump(exclude_none=True),
             )
         elif not target_agent_config_path.exists():
             save_agent_config(
@@ -746,7 +633,7 @@ class TenantInitializer:
 
         token_usage_path = default_workspace / "token_usage.json"
         if not token_usage_path.exists():
-            token_usage_path.write_text("{}", encoding="utf-8")
+            write_bootstrap_json(token_usage_path, {})
 
         return {
             "agent_json": (default_workspace / "agent.json").exists(),

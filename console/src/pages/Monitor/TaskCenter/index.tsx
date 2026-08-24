@@ -20,6 +20,7 @@ import {
   type AsyncTaskDetailRecord,
   type AsyncTaskRecord,
 } from "../../../api/modules/monitor";
+import { getBbkDisplayName } from "../../../constants/bbk";
 import { DEFAULT_SOURCE_ID } from "../../../constants/identity";
 import { useIframeStore } from "../../../stores/iframeStore";
 import styles from "./index.module.less";
@@ -57,6 +58,7 @@ const TASK_TYPE_TITLE_MAP: Record<string, string> = {
   "cron.broadcast.distribute": "定时任务分发",
   "market.mcp.distribute": "MCP 分发",
   "market.skill.distribute": "技能分发",
+  "monitor.high.freq.question": "用户高频问题分析",
   "provider.active_model.distribute": "模型分发",
   "provider.providers.distribute": "供应商分发",
   "tenant.bootstrap": "用户初始化",
@@ -77,6 +79,55 @@ function formatDateTime(value?: string | null) {
 
 function formatCount(done: number, total: number, failed: number) {
   return `${done}/${total} · 失败 ${failed}`;
+}
+
+function isHighFrequencyQuestionTask(
+  record?: Pick<AsyncTaskRecord, "task_type" | "title"> | null,
+) {
+  return (
+    record?.task_type === "monitor.high.freq.question" ||
+    record?.title === "用户高频问题分析"
+  );
+}
+
+function readTaskRequest(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const request = (value as Record<string, unknown>).request;
+  return request && typeof request === "object" && !Array.isArray(request)
+    ? (request as Record<string, unknown>)
+    : null;
+}
+
+function normalizeRequestText(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+function formatHighFrequencyQuestionSummary(record: AsyncTaskRecord) {
+  if (!isHighFrequencyQuestionTask(record)) {
+    return record.summary || record.task_id;
+  }
+
+  const request = readTaskRequest(record.result_json);
+  if (request) {
+    const startDate = normalizeRequestText(request.start_date);
+    const endDate = normalizeRequestText(request.end_date);
+    const bbkId = normalizeRequestText(request.bbk_id);
+    const scopeType = normalizeRequestText(request.scope_type);
+    const scopeText =
+      scopeType === "ALL" || bbkId === "ALL"
+        ? "全部机构"
+        : getBbkDisplayName(bbkId);
+    if (startDate && endDate) {
+      return `${startDate} 至 ${endDate}，${scopeText}`;
+    }
+  }
+
+  return (record.summary || record.task_id).replace(
+    /，(\d{3,})$/,
+    (_, bbkId: string) => `，${getBbkDisplayName(bbkId)}`,
+  );
 }
 
 function StatusTag({ status }: { status: string }) {
@@ -139,6 +190,8 @@ export default function TaskCenterPage() {
     }
   };
 
+  const selectedTaskIsHighFrequency = isHighFrequencyQuestionTask(selectedTask);
+
   const columns: ColumnsType<AsyncTaskRecord> = [
     {
       title: "任务标题",
@@ -153,7 +206,7 @@ export default function TaskCenterPage() {
           }}
         >
           <span>{record.title}</span>
-          <small>{record.summary || record.task_id}</small>
+          <small>{formatHighFrequencyQuestionSummary(record)}</small>
         </button>
       ),
     },
@@ -348,49 +401,51 @@ export default function TaskCenterPage() {
 
               <section className={styles.detailBlock}>
                 <h3>摘要</h3>
-                <p>{selectedTask.summary || "-"}</p>
+                <p>{formatHighFrequencyQuestionSummary(selectedTask)}</p>
               </section>
 
-              <section className={styles.detailBlock}>
-                <h3>分发明细</h3>
-                <Table
-                  rowKey="target_id"
-                  size="small"
-                  pagination={{
-                    defaultPageSize: 10,
-                    showSizeChanger: true,
-                    pageSizeOptions: PAGE_SIZE_OPTIONS,
-                    showTotal: (count) => `共 ${count} 条`,
-                  }}
-                  dataSource={selectedTask.items}
-                  columns={[
-                    {
-                      title: "目标",
-                      dataIndex: "target_id",
-                      key: "target_id",
-                      render: (value, record) => (
-                        <div className={styles.metaCell}>
-                          <strong>{value}</strong>
-                          <span>{record.target_name || "-"}</span>
-                        </div>
-                      ),
-                    },
-                    {
-                      title: "状态",
-                      dataIndex: "status",
-                      key: "status",
-                      width: 120,
-                      render: (value) => <StatusTag status={String(value)} />,
-                    },
-                    {
-                      title: "错误信息",
-                      dataIndex: "error_message",
-                      key: "error_message",
-                      render: (value) => value || "-",
-                    },
-                  ]}
-                />
-              </section>
+              {selectedTaskIsHighFrequency ? null : (
+                <section className={styles.detailBlock}>
+                  <h3>分发明细</h3>
+                  <Table
+                    rowKey="target_id"
+                    size="small"
+                    pagination={{
+                      defaultPageSize: 10,
+                      showSizeChanger: true,
+                      pageSizeOptions: PAGE_SIZE_OPTIONS,
+                      showTotal: (count) => `共 ${count} 条`,
+                    }}
+                    dataSource={selectedTask.items}
+                    columns={[
+                      {
+                        title: "目标",
+                        dataIndex: "target_id",
+                        key: "target_id",
+                        render: (value, record) => (
+                          <div className={styles.metaCell}>
+                            <strong>{value}</strong>
+                            <span>{record.target_name || "-"}</span>
+                          </div>
+                        ),
+                      },
+                      {
+                        title: "状态",
+                        dataIndex: "status",
+                        key: "status",
+                        width: 120,
+                        render: (value) => <StatusTag status={String(value)} />,
+                      },
+                      {
+                        title: "错误信息",
+                        dataIndex: "error_message",
+                        key: "error_message",
+                        render: (value) => value || "-",
+                      },
+                    ]}
+                  />
+                </section>
+              )}
             </div>
           ) : null}
         </Spin>
