@@ -323,6 +323,23 @@ ASYNC_TASK_APP_KEY = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_APP_KEY", "")
 ASYNC_TASK_ENV_TAG = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_ENV_TAG", "")
 ASYNC_TASK_API_KEY = EnvVarLoader.get_str("MONITOR_ASYNC_TASK_API_KEY", "")
 
+RESULT_INDEX_PUSH_URL = EnvVarLoader.get_str(
+    "MONITOR_RESULT_INDEX_PUSH_URL",
+    "",
+).strip()
+RESULT_INDEX_PUSH_PLUGIN_ID = EnvVarLoader.get_str(
+    "MONITOR_RESULT_INDEX_PUSH_PLUGIN_ID",
+    "",
+).strip()
+RESULT_INDEX_PUSH_PLUGIN_NAME = EnvVarLoader.get_str(
+    "MONITOR_RESULT_INDEX_PUSH_PLUGIN_NAME",
+    "",
+).strip()
+RESULT_INDEX_PUSH_QUESTION = EnvVarLoader.get_str(
+    "MONITOR_RESULT_INDEX_PUSH_QUESTION",
+    "",
+).strip()
+
 # 超时时间阈值（小时），超过该时间不再查询状态，直接标记为 timeout
 ASYNC_TASK_TIMEOUT_HOUR = EnvVarLoader.get_int(
     "MONITOR_ASYNC_TASK_TIMEOUT_HOUR",
