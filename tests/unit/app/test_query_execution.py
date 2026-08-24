@@ -60,3 +60,46 @@ async def test_query_handler_preserves_query_execution_frame_order(
         ("first", False),
         ("final", True),
     ]
+
+
+@pytest.mark.asyncio
+async def test_runner_uses_live_query_execution_adapter_by_default(
+    tmp_path,
+) -> None:
+    """A normal runner reaches the legacy flow through QueryExecution."""
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+    messages = [Msg(name="user", role="user", content="hello")]
+    calls: list[tuple[object, ...]] = []
+
+    async def legacy_entry(*args, **kwargs):
+        calls.append((args, kwargs))
+        yield Msg(name="Friday", role="assistant", content="legacy"), True
+
+    runner._stream_query_entry = legacy_entry
+
+    frames = [
+        frame
+        async for frame in runner.query_handler(messages, request=request)
+    ]
+
+    assert isinstance(runner._query_execution, QueryExecution)
+    assert calls == [
+        (
+            (messages,),
+            {
+                "request": request,
+                "query": "hello",
+                "session_id": "session-1",
+                "user_id": "user-1",
+            },
+        ),
+    ]
+    assert [(msg.get_text_content(), last) for msg, last in frames] == [
+        ("legacy", True),
+    ]

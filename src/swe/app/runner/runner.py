@@ -45,7 +45,8 @@ from .model_call_error_detail import (
     extract_model_call_failure_detail,
 )
 from .query_error_dump import write_query_error_dump
-from .query_execution import QueryInvocation
+from .query_execution import QueryExecution, QueryInvocation
+from .query_execution.adapters import LegacyQueryExecutionAdapter
 from .query_contracts import (
     _QueryPreflight,
     _QueryRuntime,
@@ -2539,6 +2540,9 @@ class AgentRunner(Runner):
         self._task_tracker = task_tracker  # Task tracker for background tasks
         self._query_background_tasks: set[asyncio.Task[None]] = set()
         self.session: Any | None = None
+        self._query_execution = QueryExecution(
+            LegacyQueryExecutionAdapter(self),
+        )
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
