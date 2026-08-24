@@ -357,6 +357,72 @@ async def test_cleanup_module_saves_state_with_enabled_hook_overlay() -> None:
 
 
 @pytest.mark.asyncio
+async def test_runtime_input_builder_keeps_request_context_and_headers(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from swe.app.runner import query_runtime
+
+    owner = SimpleNamespace(
+        agent_id="agent-1",
+        tenant_id="tenant-1",
+        workspace_dir=tmp_path,
+    )
+    request = _request(
+        source_id="source-1",
+        user_name="Ada",
+        cookie="session=cookie",
+        passthrough_headers={"x-request-id": "request-1"},
+        system_prompt_injections=["request instruction"],
+    )
+    preflight = _QueryPreflight(
+        hook_additional_context="hook instruction",
+    )
+    monkeypatch.setattr(
+        query_runtime,
+        "get_system_prompt_injections",
+        lambda: ["global instruction"],
+    )
+
+    inputs = await query_runtime.build_query_runtime_inputs(
+        owner,
+        request=request,
+        msgs=[Msg(name="user", role="user", content="hello")],
+        preflight=preflight,
+        build_environment_context=lambda **kwargs: (
+            f"context:{kwargs['source_id']}:{kwargs['user_name']}"
+        ),
+        request_source_id=lambda value: value.source_id,
+        request_user_name=lambda value: value.user_name,
+        request_passthrough_headers=lambda value: value.passthrough_headers,
+        with_hook_context=lambda context, hook: f"{context}|{hook}",
+        merge_system_prompt_injections=lambda *parts: [
+            item for part in parts for item in part
+        ],
+        with_system_prompt_injections=lambda context, injections: (
+            f"{context}|{'|'.join(injections)}"
+        ),
+        request_system_prompt_injections=lambda value: (
+            value.system_prompt_injections
+        ),
+        load_tenant_hooks=lambda _tenant_id: HookConfig(),
+        load_agent_configuration=lambda *_args, **_kwargs: SimpleNamespace(
+            id="agent-1",
+        ),
+        current_passthrough_headers=lambda: {},
+    )
+
+    assert inputs.env_context == (
+        "context:source-1:Ada|hook instruction|global instruction|"
+        "request instruction"
+    )
+    assert inputs.passthrough_headers == {
+        "x-request-id": "request-1",
+        "cookie": "session=cookie",
+    }
+
+
+@pytest.mark.asyncio
 async def test_blocked_runtime_cleanup_updates_chat_before_closing_mcp(
     monkeypatch,
 ) -> None:

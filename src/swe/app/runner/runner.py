@@ -3998,81 +3998,24 @@ class AgentRunner(Runner):
         preflight: _QueryPreflight,
     ) -> _QueryRuntimeInputs:
         """Resolve request values needed before connecting runtime resources."""
-        session_id = request.session_id
-        user_id = request.user_id
-        channel = getattr(request, "channel", DEFAULT_CHANNEL)
-        skip_history = getattr(request, "skip_history", False)
-        logger.info(
-            "Handle agent query:\n%s",
-            json.dumps(
-                {
-                    "session_id": session_id,
-                    "user_id": user_id,
-                    "channel": channel,
-                    "msgs_len": len(msgs) if msgs else 0,
-                    "msgs_str": str(msgs)[:300] + "...",
-                },
-                ensure_ascii=False,
-                indent=2,
+        return await query_runtime.build_query_runtime_inputs(
+            self,
+            request=request,
+            msgs=msgs,
+            preflight=preflight,
+            build_environment_context=build_env_context,
+            request_source_id=_request_source_id,
+            request_user_name=_request_user_name,
+            request_passthrough_headers=_request_passthrough_headers,
+            with_hook_context=_with_hook_context,
+            merge_system_prompt_injections=_merge_system_prompt_injections,
+            with_system_prompt_injections=_with_system_prompt_injections,
+            request_system_prompt_injections=(
+                _request_system_prompt_injections
             ),
-        )
-        env_context = _with_hook_context(
-            build_env_context(
-                session_id=session_id,
-                user_id=user_id,
-                channel=channel,
-                working_dir=str(self.workspace_dir or WORKING_DIR),
-                source_id=_request_source_id(request),
-                user_name=_request_user_name(request),
-            ),
-            preflight.hook_additional_context,
-        )
-        from ..source_system_config.runtime import (
-            get_system_prompt_injections,
-        )
-
-        agent_config = (
-            preflight.agent_config
-            if preflight.agent_config is not None
-            else load_agent_config(
-                self.agent_id,
-                tenant_id=self.tenant_id,
-            )
-        )
-        passthrough_headers = dict[str, str](
-            get_current_passthrough_headers() or {},
-        )
-        passthrough_headers.update(_request_passthrough_headers(request))
-        cookie_header = getattr(request, "cookie", None)
-        if cookie_header:
-            passthrough_headers["cookie"] = cookie_header
-        return _QueryRuntimeInputs(
-            session_id=session_id,
-            user_id=user_id,
-            channel=channel,
-            skip_history=skip_history,
-            agent_config=agent_config,
-            tenant_hooks=(
-                preflight.tenant_hooks
-                if preflight.tenant_hooks is not None
-                else _load_tenant_hook_config(self.tenant_id)
-            ),
-            hook_overlay=(
-                preflight.hook_overlay
-                if preflight.hook_overlay is not None
-                else HookSessionOverlay()
-            ),
-            env_context=_with_system_prompt_injections(
-                env_context,
-                _merge_system_prompt_injections(
-                    get_system_prompt_injections(),
-                    _request_system_prompt_injections(request),
-                ),
-            ),
-            selected_context_directives=[],
-            selected_skill_directives=[],
-            auth_token=getattr(request, "auth_token", None),
-            passthrough_headers=passthrough_headers,
+            load_tenant_hooks=_load_tenant_hook_config,
+            load_agent_configuration=load_agent_config,
+            current_passthrough_headers=get_current_passthrough_headers,
         )
 
     async def _start_query_runtime_resources(
