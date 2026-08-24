@@ -30,6 +30,35 @@ def test_provider_services_exports_the_catalog_service() -> None:
     assert Legacy is ProviderCatalogService
 
 
+def test_catalog_constructor_resolves_optional_manager_seams() -> None:
+    from swe.providers.provider_catalog_service import ProviderCatalogService
+
+    class FakeManager:
+        def __init__(self) -> None:
+            self.repository = object()
+            self.runtime_cache = object()
+
+        def _catalog_seams(self) -> tuple[object, object]:
+            return self.repository, self.runtime_cache
+
+    manager = FakeManager()
+
+    catalog = ProviderCatalogService(manager)
+
+    assert catalog._repository is manager.repository
+    assert catalog._runtime_cache is manager.runtime_cache
+
+
+def test_runtime_cache_uses_injected_model_cache_reset() -> None:
+    cache = ProviderRuntimeCache()
+    invalidated_scopes: list[str] = []
+    cache.set_model_cache_reset(invalidated_scopes.append)
+
+    cache.invalidate_provider_scope("tenant-a")
+
+    assert invalidated_scopes == ["tenant-a"]
+
+
 def test_catalog_deletes_custom_provider_through_repository_seam() -> None:
     from swe.providers.provider_catalog_service import ProviderCatalogService
 

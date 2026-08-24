@@ -97,11 +97,7 @@ class ProviderManager:
         self._builtin_provider_defaults: Dict[str, Provider] = {}
         self.custom_providers: Dict[str, Provider] = {}
         self.active_model: ModelSlotConfig | None = None
-        self._catalog = ProviderCatalogService(
-            self,
-            repository=self._repository,
-            runtime_cache=self._runtime_cache,
-        )
+        self._catalog = ProviderCatalogService(self)
         self._file_freshness_tokens: dict[str, tuple[int, int]] = {}
         self._next_freshness_check_at = (
             time.monotonic() + _PROVIDER_FRESHNESS_TTL_SECONDS
@@ -846,15 +842,21 @@ class ProviderManager:
     def _get_runtime_cache(self) -> ProviderRuntimeCache:
         return ProviderManager._runtime_cache
 
+    def _catalog_seams(
+        self,
+    ) -> tuple[TenantProviderRepository | None, ProviderRuntimeCache]:
+        """Supply catalog dependencies without exposing storage internals."""
+        runtime_cache = self._get_runtime_cache()
+        runtime_cache.set_model_cache_reset(
+            reset_scope_bound_model_caches,
+        )
+        return getattr(self, "_repository", None), runtime_cache
+
     def _catalog_service(self) -> ProviderCatalogService:
         """Return the catalog service, including for legacy test fixtures."""
         catalog = getattr(self, "_catalog", None)
         if catalog is None:
-            catalog = ProviderCatalogService(
-                self,
-                repository=getattr(self, "_repository", None),
-                runtime_cache=self._get_runtime_cache(),
-            )
+            catalog = ProviderCatalogService(self)
             self._catalog = catalog
         return catalog
 

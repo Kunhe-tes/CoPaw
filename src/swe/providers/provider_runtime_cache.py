@@ -31,6 +31,7 @@ class ProviderRuntimeCache:
         self._instance_inflight: dict[str, concurrent.futures.Future[Any]] = {}
         self._instance_reset_epoch = 0
         self._instances_lock = threading.Lock()
+        self._model_cache_reset: Callable[[str], None] | None = None
         self._init_executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=8,
         )
@@ -163,12 +164,20 @@ class ProviderRuntimeCache:
         self.mark_freshness_due(scope)
         self.reset_scope_bound_model_caches(scope)
 
-    @staticmethod
-    def reset_scope_bound_model_caches(scope: str) -> None:
+    def set_model_cache_reset(
+        self,
+        reset_model_caches: Callable[[str], None],
+    ) -> None:
+        """Configure the provider-scope model cache invalidation callback."""
+        self._model_cache_reset = reset_model_caches
+
+    def reset_scope_bound_model_caches(self, scope: str) -> None:
         """Clear model instances coupled to one provider scope."""
-        from swe.providers.provider_manager import (
-            reset_scope_bound_model_caches,
-        )
+        if self._model_cache_reset is not None:
+            self._model_cache_reset(scope)
+            return
+
+        from swe.runtime_cache import reset_scope_bound_model_caches
 
         reset_scope_bound_model_caches(scope)
 

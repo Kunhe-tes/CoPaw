@@ -36,9 +36,15 @@ class ProviderCatalogService:
         self,
         manager: "ProviderManager",
         *,
-        repository: TenantProviderRepository | None,
-        runtime_cache: ProviderRuntimeCache,
+        repository: TenantProviderRepository | None = None,
+        runtime_cache: ProviderRuntimeCache | None = None,
     ) -> None:
+        if repository is None or runtime_cache is None:
+            manager_repository, manager_runtime_cache = (
+                manager._catalog_seams()
+            )
+            repository = repository or manager_repository
+            runtime_cache = runtime_cache or manager_runtime_cache
         self._manager = manager
         self._repository = repository
         self._runtime_cache = runtime_cache
