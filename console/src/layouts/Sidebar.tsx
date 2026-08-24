@@ -247,12 +247,16 @@ export default function Sidebar({
       path: "/security",
       label: t("nav.security"),
     },
-    {
-      key: "skill-config",
-      icon: <SlidersHorizontal size={18} />,
-      path: "/skill-config",
-      label: t("nav.skillConfig", "Skill 配置"),
-    },
+    ...(isRMassistSource
+      ? [
+          {
+            key: "skill-config",
+            icon: <SlidersHorizontal size={18} />,
+            path: "/skill-config",
+            label: t("nav.skillConfig", "Skill 配置"),
+          },
+        ]
+      : []),
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -452,11 +456,15 @@ export default function Sidebar({
           label: collapsed ? null : t("nav.security"),
           icon: <SparkBrowseLine size={16} />,
         },
-        {
-          key: "skill-config",
-          label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
-          icon: <SlidersHorizontal size={16} />,
-        },
+        ...(isRMassistSource
+          ? [
+              {
+                key: "skill-config",
+                label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
+                icon: <SlidersHorizontal size={16} />,
+              },
+            ]
+          : []),
         ...(canManageCurrentSourceConfig
           ? [
               {
