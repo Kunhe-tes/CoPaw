@@ -11,6 +11,7 @@ from typing import Any, AsyncGenerator, Protocol
 
 from agentscope.message import Msg, TextBlock
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
+from trace_sdk import global_tracer
 
 from ...config.context import (
     reset_current_file_url_network,
@@ -482,17 +483,21 @@ async def stream_query_after_preflight(
             ):
                 yield msg, last
             try:
-                async for msg, last in owner._stream_single_query_attempt(
-                    attempt_input=attempt_input,
-                    outcome=outcome,
-                    retry_state=retry_state,
-                    attempt_state=attempt_state,
-                ):
-                    yield msg, last
-                if attempt_state.should_return:
-                    return
-                if attempt_state.succeeded:
-                    break
+                async with global_tracer.start_as_current_span(
+                    "agent.attempt",
+                ) as span:
+                    span.set_attribute("retry.index", retry_attempt)
+                    async for msg, last in owner._stream_single_query_attempt(
+                        attempt_input=attempt_input,
+                        outcome=outcome,
+                        retry_state=retry_state,
+                        attempt_state=attempt_state,
+                    ):
+                        yield msg, last
+                    if attempt_state.should_return:
+                        return
+                    if attempt_state.succeeded:
+                        break
             except asyncio.CancelledError as exc:
                 await owner._handle_query_cancelled(
                     trace_id=trace_id,
