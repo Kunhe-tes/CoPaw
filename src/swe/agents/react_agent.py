@@ -1445,9 +1445,18 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         # Register memory_search tool if enabled and available
         if self._enable_memory_manager and self.memory_manager is not None:
             # update memory manager
-            self.memory = self.memory_manager.get_in_memory_memory(
-                chat_id=self._request_context.get("chat_id") or None,
+            chat_id = self._request_context.get("chat_id") or None
+            create_request_memory = getattr(
+                self.memory_manager,
+                "create_request_memory",
+                None,
             )
+            if chat_id and callable(create_request_memory):
+                self.memory = create_request_memory(chat_id)
+            else:
+                self.memory = self.memory_manager.get_in_memory_memory(
+                    chat_id=chat_id,
+                )
 
             # Register memory_search as a tool function
             self.toolkit.register_tool_function(

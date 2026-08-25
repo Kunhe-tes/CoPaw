@@ -121,6 +121,7 @@ class BaseMemoryManager(ABC):
         chat_id: str,
         messages: list[Msg],
         candidate_id: str,
+        memory: Any,
     ) -> Any:
         """Archive source messages while activating a Chat checkpoint."""
 
@@ -131,6 +132,7 @@ class BaseMemoryManager(ABC):
         chat_id: str,
         watermark: int,
         messages: list[Msg],
+        memory: Any,
         **kwargs,
     ) -> bool:
         """Schedule a non-blocking candidate for a stable Chat snapshot."""
@@ -141,6 +143,7 @@ class BaseMemoryManager(ABC):
         *,
         chat_id: str,
         messages: list[Msg] | None = None,
+        memory: Any,
     ) -> bool:
         """Install the newest valid candidate for a Chat, if available."""
 
@@ -155,7 +158,13 @@ class BaseMemoryManager(ABC):
         """Recover bounded evidence for the request-bound Chat and epoch."""
 
     @abstractmethod
-    async def reset_context_epoch(self, *, chat_id: str, reason: str) -> Any:
+    async def reset_context_epoch(
+        self,
+        *,
+        chat_id: str,
+        reason: str,
+        memory: Any,
+    ) -> Any:
         """Start a fresh Context Epoch without deleting Chat evidence."""
 
     @abstractmethod
