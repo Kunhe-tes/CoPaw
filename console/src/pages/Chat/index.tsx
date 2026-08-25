@@ -601,7 +601,7 @@ function ActiveGoalModeControl({
     <ActivePlanModeButton
       enabled={enabled}
       disabled={Boolean(inputState.disabled)}
-      label="目标模式"
+      label="目标"
       showIcon={false}
       onDisable={onDisable}
     />
