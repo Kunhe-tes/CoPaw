@@ -241,6 +241,28 @@ describe("HookManagementPage", () => {
       "title",
       expect.stringContaining("转换最终回复"),
     );
+    expect(screen.getByLabelText("仅执行一次")).toHaveAttribute(
+      "aria-describedby",
+      "once-output-transform-reason",
+    );
+    expect(
+      screen.getByText("转换最终回复开启后，必须在每次 Stop 时执行。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        '有效替换格式为 decision: "allow"，可选 hookSpecificOutput.replacementText。',
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "处理器执行失败或输出无效时遵循失败策略：allow 保留当前文本继续，block 终止。",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Prompt 返回仍仅支持 allow；command/http 的 Stop 返回 block 会终止。",
+      ),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "保存并激活 Stop" }));
     await waitFor(() =>

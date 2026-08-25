@@ -679,17 +679,26 @@ function HookManagementPage() {
             {handler.outputTransform && (
               <div className={styles.outputTransformDetails}>
                 <p>
-                  候选回复会暂存，只有最终文本会交付。处理器必须返回
-                  <code>decision: "allow"</code>；可选返回
-                  <code>hookSpecificOutput.replacementText</code>
-                  ，此处不提供返回字段配置。
+                  候选回复会暂存，只有最终文本会交付；此处不提供返回字段配置。
+                </p>
+                <p>
+                  有效替换格式为 decision: "allow"，可选
+                  hookSpecificOutput.replacementText。
                 </p>
                 <pre className={styles.transformContract}>
                   {outputTransformContract}
                 </pre>
                 <p>
-                  allow 保留当前文本继续；block 终止。总转换预算默认 30
-                  秒，耗尽时必定终止，且不属于失败策略的可编辑项。
+                  处理器执行失败或输出无效时遵循失败策略：allow
+                  保留当前文本继续，block 终止。
+                </p>
+                <p>
+                  Prompt 返回仍仅支持 allow；command/http 的 Stop 返回 block
+                  会终止。
+                </p>
+                <p>
+                  总转换预算默认 30
+                  秒，耗尽时硬终止，且不属于失败策略的可编辑项。
                 </p>
               </div>
             )}
@@ -756,9 +765,22 @@ function HookManagementPage() {
                           ? "转换最终回复开启时必须在每次 Stop 时执行"
                           : undefined
                       }
+                      aria-describedby={
+                        handler.outputTransform
+                          ? "once-output-transform-reason"
+                          : undefined
+                      }
                       onChange={(once) => onHandlerChange({ once })}
                     />
                   </label>
+                  {handler.outputTransform && (
+                    <p
+                      id="once-output-transform-reason"
+                      className={styles.onceTransformReason}
+                    >
+                      转换最终回复开启后，必须在每次 Stop 时执行。
+                    </p>
+                  )}
                   <label className={styles.switchLine}>
                     附带会话快照
                     <Switch
