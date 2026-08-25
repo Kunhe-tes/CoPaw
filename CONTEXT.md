@@ -157,8 +157,8 @@ The provider-and-model identifier carried by a Community Expert Package without 
 _Avoid_: exported API key, shared provider configuration, credential-bearing expert package
 
 **Expert Community Scope**:
-The source-scoped community boundary for Community Expert Packages. It is a dedicated top-level Console destination immediately after Application Marketplace, rather than an Application Marketplace resource page; users browse and receive experts within their source, while source administrators own publication, update, withdrawal, and distribution actions.
-_Avoid_: global expert marketplace, Application Marketplace expert tab, Creation Center submenu, tenant-global expert catalog, author-managed market publication
+The source-scoped community boundary for Community Expert Packages. It is a dedicated top-level Console destination immediately after Application Marketplace, rather than an Application Marketplace resource page; users browse and receive experts within their source and assigned institution visibility, while source administrators own publication, update, withdrawal, and distribution actions.
+_Avoid_: global expert marketplace, institution-bypassing expert catalog, Application Marketplace expert tab, Creation Center submenu, tenant-global expert catalog, author-managed market publication
 
 **Expert Community Administrator**:
 The existing Marketplace manager authorized to publish, maintain versions, unpublish, withdraw, and distribute Community Expert Packages under the established Skills and MCPs manager convention. Ordinary users may browse, install, and locally manage received experts but cannot mutate community items.
@@ -185,8 +185,8 @@ The enablement rule for a Received Community Expert: a first user installation o
 _Avoid_: always-disabled community install, update-forces-enable, publish-state inheritance
 
 **Community Expert Variant**:
-A locally edited Received Community Expert whose frozen bundled Skill and MCP content remains read-only. To change dependencies, its owner creates a new local Community Expert Source and binds the owner's own resources; the variant otherwise remains local unless its owner is an Expert Community Administrator and explicitly synchronizes it as that new source. It never overwrites or synchronizes back to the original community item.
-_Avoid_: bundled-dependency editor, ordinary-user publication, reverse synchronization, forkless community update, publisher-definition mutation
+A locally edited Received Community Expert whose frozen bundled Skill and MCP content remains read-only. It remains local and cannot be synchronized to the Expert Community, including by an Expert Community Administrator. To change dependencies or share a variant, its owner separately creates a new local Community Expert Source and binds the owner's own resources; no received-expert copy action is provided. It never overwrites or synchronizes back to the original community item.
+_Avoid_: bundled-dependency editor, received-expert copy action, received-expert publication, ordinary-user publication, reverse synchronization, forkless community update, publisher-definition mutation
 
 **Community Expert Name**:
 The source-scoped unique display name of a Community Expert Package. A same-name publication requires explicit administrator confirmation, then continues the existing community item as a new version while preserving its version history.
@@ -547,6 +547,94 @@ _Avoid_: audit database table, hook execution log, full script archive, hook pay
 **Agent Profile Hook**:
 A lifecycle-hook configuration owned by exactly one **Agent Profile**. It applies only while that Agent Profile runs, rather than across a tenant or through a reusable Skill.
 _Avoid_: agent-level hook, tenant hook, skill hook
+
+**Stop Response Replacement**:
+The complete replacement text supplied by a Stop Hook for one candidate Assistant Response. A replacement-capable Stop Hook makes that candidate subject to Strict Completion Finalization, so only the approved or replacement text is retained and delivered; it is not a patch, token-stream transformation, or an instruction for the Agent to produce a later answer.
+_Avoid_: output patch, stream rewrite, follow-up response, completion block
+
+**Strict Completion Finalization**:
+The delivery rule that a candidate Assistant Response subject to a replacement-capable Stop Hook is withheld until every matched Stop Hook completes. The user, session record, and downstream channel receive only the approved or replaced final text, never the original candidate.
+_Avoid_: optimistic replacement, provisional final response, client-side correction
+
+**Final Response Memory Replacement**:
+The atomic substitution of the current turn's final Assistant Response in Agent memory with its approved Stop Response Replacement before completion is persisted or derived. The replacement is the sole response available to later reasoning, session restoration, tracing indexes, and response-derived features.
+_Avoid_: presentation-only replacement, split conversation history, dual final response
+
+**Original Candidate Audit Boundary**:
+The retention rule for a candidate Assistant Response changed by a Stop Output Transformation Pipeline. Swe-controlled persistence retains only minimal transformation metadata in application logs and never the original candidate plaintext, while a configured external Handler or model provider remains responsible for any content it has already received.
+_Avoid_: raw response audit log, audit database record, recoverable original response, external-handler data erasure
+
+**Stop Transformation Log Record**:
+A best-effort application log for one output-transformation attempt that identifies participating Handler IDs and sources, replacement occurrence, input and final lengths and SHA-256 summaries, duration, and failure or time-budget status without retaining either text. A logging failure never changes completion delivery.
+_Avoid_: transformation audit store, raw response log, delivery-blocking logger
+
+**Stop Transformation Manual Test**:
+The existing single-Handler Hook manual test when applied to a Stop Output Transformer with an editable sample Assistant Response. It reports that Handler's real result without running a full pipeline, altering a live session, or delivering a response; automated tests establish pipeline behavior.
+_Avoid_: live response preview, full-pipeline console simulator, persisted manual transformation
+
+**Blocked Transformation Continuation**:
+The automatic Stop follow-up rule that retains only the final text produced by the Stop Output Transformation Pipeline in Agent memory when the Stop Validation Phase blocks completion. The next Agent turn receives that transformed text and the blocking reason, never the original candidate.
+_Avoid_: original-candidate retry context, raw response restoration, split blocked attempt
+
+**Stop Transformation Failure Policy**:
+The fail-closed or diagnostic-only outcome when a Stop Output Transformer times out, errors, or returns an invalid replacement. An allowing failure preserves the current text and continues the pipeline; a blocking failure ends the request incomplete without executing later handlers or starting an automatic follow-up.
+_Avoid_: unsafe fallback delivery, automatic failure retry, best-effort blocking transformation
+
+**Stop Transformation Time Budget**:
+The Agent Profile-owned bounded wall-clock allowance for one Stop Output Transformation Pipeline, defaulting to thirty seconds. Each Transformer receives no more than its own timeout and the remaining pipeline budget; tenant and Skill configuration cannot raise it, and exhaustion ends the request incomplete without delivery or an automatic follow-up.
+_Avoid_: Skill-raised transformation budget, tenant-raised transformation budget, unbounded serial transformation, per-handler-only timeout, retry-after-budget-exhaustion
+
+**Stop Output Transformation Pipeline**:
+The ordered phase of a Stop completion attempt that applies each matched output-transforming Handler's complete replacement to the current candidate Assistant Response. Each later transformation receives the prior transformation's result, rather than the original candidate.
+_Avoid_: concurrent replacement conflict, output patch chain, Agent follow-up
+
+**Stop Output Transformer**:
+A Stop Hook Handler explicitly admitted to the Stop Output Transformation Pipeline. A command, HTTP, or prompt Handler may be a Stop Output Transformer; a Handler's technical type alone does not grant it output-replacement authority.
+_Avoid_: implicitly transforming Stop Handler, prompt-only rewriter, general Stop Handler
+
+**Stop Output Transformation Declaration**:
+The explicit Handler configuration that admits one Stop Hook Handler to the Stop Output Transformation Pipeline and makes its completion attempt subject to Strict Completion Finalization. An undeclared Handler has no output-replacement authority even if it returns replacement-shaped data.
+_Avoid_: inferred transformation, response-output heuristic, global Stop rewrite switch
+
+**Potential Stop Output Transformer**:
+A declared Stop Output Transformer whose event and matcher scope can apply to the current completion attempt before its text-dependent condition is evaluated. Its presence requires Text-only Strict Completion Delivery even when every later transformation condition passes through the candidate unchanged.
+_Avoid_: post-stream transformation decision, condition-only buffering, leaked conditional candidate
+
+**Output Transformation Source Order**:
+The fixed precedence order for matched Stop Output Transformers: tenant-level Handlers, then Agent Profile Handlers, then Handlers from explicitly activated Skills. Multiple Skill sources run by lexical `skill_name`; a source's matcher groups and Handlers retain their declaration order. A Skill that is not activated for the current session has no output-transformation authority.
+_Avoid_: activation-order transformer, unactivated Skill transformer, source-order inversion, tenant-bypassing Skill rewrite
+
+**Valid Stop Response Replacement**:
+A Stop Response Replacement whose complete text contains non-whitespace content. Its text is preserved exactly as supplied; an empty or whitespace-only value is not a response-suppression request and is invalid.
+_Avoid_: empty replacement, implicit output suppression, normalized replacement text
+
+**Stop Replacement Output Contract**:
+The shared Handler result contract in which an allowing Stop Output Transformer may place one Valid Stop Response Replacement in `hookSpecificOutput.replacementText`. Command, HTTP, and prompt Handlers use the same contract; omitting it preserves the current candidate text.
+_Avoid_: handler-specific replacement schema, top-level replacement field, implicit textual output
+
+**Stop Transformation Snapshot Continuity**:
+The rule that an output-transforming or validating Stop Handler that explicitly requests a Hook Conversation Snapshot receives the existing snapshot without filtering or substituting the current candidate Assistant Response. Its `assistant_response` field still carries the Handler's current pipeline text, while the snapshot may contain the original candidate under ordinary snapshot rules.
+_Avoid_: transformed snapshot, candidate redaction, snapshot-payload rewriting
+
+**Dynamic Stop Transformation Matching**:
+The rule that each Stop Output Transformer's conditional eligibility is evaluated immediately before it processes the current pipeline text, while Stop Validation Phase eligibility is evaluated only after the pipeline produces its final text. Conditions therefore assess the text their Handler can actually process.
+_Avoid_: original-only pipeline condition, pre-transformation validation condition, static completion plan
+
+**Per-attempt Stop Transformation Requirement**:
+The rule that a Stop Output Transformer participates in every candidate completion attempt for which it is eligible. A once-only Handler cannot be a Stop Output Transformer because it would allow a later candidate to bypass the declared transformation.
+_Avoid_: once-only transformer, first-candidate-only rewrite, optional later transformation
+
+**Text-only Stop Output Transformation**:
+The first-release boundary that applies Stop Response Replacements only to an extractable final Assistant Response text. It neither changes nor suppresses media, attachments, tool cards, or other structured output, and does not start a transformation pipeline for a turn with no extractable Assistant Response text.
+_Avoid_: media rewrite, attachment suppression, structured-output transformation, universal response filter
+
+**Text-only Strict Completion Delivery**:
+The delivery rule that withholds only candidate Assistant Response text while Strict Completion Finalization is active. Tool status, progress, approval, and other non-response events remain live and are not part of the output-transformation contract.
+_Avoid_: whole-turn buffering, hidden tool progress, transformed progress card
+
+**Stop Validation Phase**:
+The concurrent phase of a Stop completion attempt after its Stop Output Transformation Pipeline has produced its final candidate. Its non-transforming Handlers audit or gate that final candidate without changing it.
+_Avoid_: ordered validator chain, pre-transformation validation, output transform
 
 **Agent Profile Hook Distribution**:
 The explicit one-time copying of a source tenant's complete executable **Agent Profile Hook** unit to selected target tenants' Default Agent Profiles. The unit contains the Hook configuration and every referenced **Agent Profile Hook Script**; each target receives its own independent copy.
@@ -2113,6 +2201,10 @@ _Avoid_: built-in capability, tenant capability, skill
 The strict one-to-many hierarchy in a **Scenario Preset Catalog**: each **Source-owned Capability** has exactly one **Source-owned Capability Domain** parent, and each **Source-owned Scenario Preset** has exactly one **Source-owned Capability** parent. Nodes are not shared across parents; reuse requires creating a separate preset.
 _Avoid_: tag graph, many-to-many catalog, shared preset reference
 
+**Three-level New-chat Selector**:
+The visible new-chat browse-and-compose structure for a **Scenario Preset Catalog**: independent Capability Domain cards first, the selected domain's Capability tabs second, and the selected Capability's Scenario Presets in a recommended-scenario strip inside the composer third. Capability Domain browsing is visible but is not included in the submitted message.
+_Avoid_: flat capability list, hidden first level, domain marker, separate scenario page
+
 **Effective Catalog Visibility**:
 The condition for a catalog node to appear in new-chat selection: the node itself and every ancestor in its **Capability Catalog Tree** are enabled. Disabling a parent does not change descendant enablement, so eligible descendants reappear if the parent is enabled again.
 _Avoid_: child-state cascade, visible descendant of disabled parent, global catalog state
@@ -2129,9 +2221,9 @@ _Avoid_: scenario, Prompt, command, automatic task
 The user-editable starting text placed in a new chat's composer when a **Scenario Preset** is selected. It is ordinary user-message content until the user submits it.
 _Avoid_: system prompt, instruction, skill directive, generated answer
 
-**Prompt Draft Replacement Confirmation**:
-The explicit confirmation required before selecting a different **Scenario Preset** replaces non-empty composer content. Empty composers may be filled directly; cancelling the confirmation preserves the current text and selection.
-_Avoid_: silent overwrite, append-by-default, discarded user draft
+**Prompt Draft Replacement**:
+Selecting a **Scenario Preset** immediately replaces the composer Prompt Draft with that preset's Prompt Draft. The user may then edit it freely before submission.
+_Avoid_: confirmation dialog, append-by-default, locked template text
 
 **Preset Context Reference**:
 A Skill or Callable MCP Tool declared by a **Scenario Preset** and resolved against the current chat's available or provisionally session-enabled Context References. Resolved references are sent through the ordinary structured context-reference parameter and backend revalidation, but are not inserted as `@` text into the user's **Prompt Draft**.
@@ -2320,6 +2412,318 @@ _Avoid_: tenant preset, personal template, Skill preset
 **Scenario Preset Catalog**:
 The Source-managed hierarchy of **Source-owned Capability Domains**, their **Source-owned Capabilities**, and their enabled **Source-owned Scenario Presets** exposed to new-chat capability selection. Catalog management is separate from submitting a **Prompt Draft**.
 _Avoid_: prompt library, skill registry, chat history
+
+**Goal Runtime**:
+The host-owned, persistent control layer that advances one **Goal** across Main Agent turns while enforcing lifecycle, resource, and verification rules. It does not replace the Main Agent Runtime or create a second delegation system.
+_Avoid_: agent loop, autonomous tool, subagent orchestrator
+
+**Goal**:
+A stable user-desired outcome, expressed as a revisioned Contract with completion criteria and execution constraints. A Goal is distinct from its changeable Plan and the individual Tasks used to advance it.
+_Avoid_: plan, task list, agent turn, SubAgent Run
+
+**Goal Runtime First Phase**:
+The first deliverable of Goal Runtime: one Goal at a time with durable state, automatic continuation, pause/resume/cancel, budgets, and independent natural-language completion review. Task-graph and multi-Goal orchestration are later phases.
+_Avoid_: task graph, multi-goal scheduler, full team orchestration
+
+**Goal Scope**:
+The immutable execution identity captured when a Goal is created: its Tenant, Source, Agent Profile, and Chat. At most one non-terminal Goal belongs to one Chat, while Goals in distinct Chats can proceed independently.
+_Avoid_: tenant-wide Goal, Agent-wide Goal, globally serialized Goal
+
+**Goal Lifecycle State**:
+The host-authoritative state of a Goal: `ACTIVE`, `WAITING`, `PAUSED`, `BLOCKED`, `LIMITED`, `INTERRUPTED`, `COMPLETE`, or `CANCELLED`. `COMPLETE` and `CANCELLED` are terminal; the remaining states are recoverable only through their defined transition conditions.
+_Avoid_: Agent-declared completion, terminal wait, failed-as-blocked
+
+**Waiting Goal**:
+A non-terminal Goal with no useful immediate Main Agent action and one or more explicit external wake events, such as approval, a Background SubAgent result, or a managed job result.
+_Avoid_: polling loop, idle ACTIVE Goal, user-paused Goal
+
+**Blocked Goal**:
+A non-terminal Goal for which no valid action can currently advance the Goal and resolution needs user input, a Direct Goal Edit, or a change in an external condition. Budget exhaustion is not a Blocked Goal.
+_Avoid_: action failure, waiting Goal, resource limit
+
+**Limited Goal**:
+A non-terminal Goal stopped by an exhausted resource budget. In the first phase, the only budget is a code-defined Main Agent turn limit; it is not user-visible or user-adjustable, but the user may explicitly resume the Goal to reset that limit and begin a new execution-budget cycle.
+_Avoid_: Blocked Goal, completed budget, automatic retry, user-configurable budget
+
+**Goal Turn Resolution**:
+The structured recommendation returned after one Main Agent turn: `continue`, `wait`, `propose_completion`, or `blocked`, with the evidence or wake conditions required by that recommendation. The Goal Runtime validates it and alone performs the resulting lifecycle transition or continuation scheduling.
+_Avoid_: natural-language handoff, Agent-controlled state transition, implicit loop continuation
+
+**Goal Contract**:
+The user-confirmed agreement for one Goal Revision that defines objective, completion criteria, constraints, and autonomy boundary. It is immutable within that Revision and is not weakened or replaced by planning, Steering, or execution; only a user-submitted Direct Goal Edit can create a later Revision. The code-defined Goal Turn Budget remains an internal runtime guard outside the Contract.
+_Avoid_: Agent plan, prompt summary, mutable task list, inferred permission
+
+**Goal Constraint**:
+A user-confirmed execution boundary within a Goal Contract, represented in the first phase as short `must_preserve` and `must_not_do` text lists. It is distinct from a Completion Criterion and does not itself grant or revoke tool permission; actual enforcement remains with the existing Tool Guard and approval path.
+_Avoid_: acceptance test, Tool Guard policy, implementation plan, constraint compiler
+
+**Goal Autonomy Boundary**:
+The user-confirmed statement of which Goal actions may proceed automatically and which must use existing approval. It never enlarges the ordinary runtime's Tool Guard, data-access, sandbox, or approval permissions.
+_Avoid_: Goal-specific privilege, approval bypass, inferred consent
+
+**Goal Creation Confirmation**:
+The user's explicit approval of a proposed Goal Contract before the Goal Runtime creates and activates its persistent Goal. A direct-start interaction may shorten the UI path but does not omit the user-visible Contract or its confirmation.
+_Avoid_: inferred acceptance, first-turn execution, silent autonomous start
+
+**Completion Criterion**:
+A Goal Contract acceptance condition expressed in natural language as a requirement, observable assertion, verification method, and expected outcome. It directs an independent Completion Judge, rather than requiring an executable verification DSL or constituting an objectively repeatable proof by itself. A Main Agent cannot satisfy a criterion by self-assessment.
+_Avoid_: Agent self-assessment, raw tool-call criterion, executable-only acceptance condition, automatically provable success claim
+
+**Goal Verification Method**:
+The Contract-bound natural-language guidance for how a Completion Judge should assess a Completion Criterion. It can describe commands, file or artifact state, API state, database state, or other relevant observation without being an executable tool-call schema.
+_Avoid_: Main Agent self-assessment, raw Tool Call contract, completion-time criterion replacement
+
+**Completion Judge**:
+The runtime-owned, independent model evaluation that decides whether each Contract-bound Completion Criterion is satisfied after a Main Agent proposes completion. It uses the Goal's creation-time frozen Effective Model in a separate, restricted invocation; receives the active Contract and candidate evidence; may use existing read-only tools under ordinary Tool Guard, path-boundary, and approval rules; and returns an accept or reject decision with a reason. It cannot modify the Contract, execute Goal work, or declare new acceptance conditions.
+_Avoid_: Main Agent self-assessment, mutating reviewer, free-form Contract rewrite, unguarded tool access
+
+**Bounded Completion Review Package**:
+The minimum runtime-built context supplied to a Completion Judge: the frozen active Contract and Revision, the Main Agent's completion proposal and candidate evidence references, relevant current-turn tool results, and authorised read-only workspace access. It excludes the full Chat history, the Main Agent's private Plan and reasoning, and raw Background SubAgent logs.
+_Avoid_: full transcript replay, private-plan review, hidden reasoning audit, raw SubAgent-log injection
+
+**Plan Mutability Boundary**:
+The distinction between the user-confirmed Goal Contract and the private, changeable Initial Execution Plan. Replanning may replace steps, risks, or next focus without changing the Goal; changing the Contract requires a Direct Goal Edit and a new confirmed Goal Revision.
+_Avoid_: user-approved steps, immutable plan, plan-as-acceptance, silent Contract rewrite
+
+**Contract-bound Completion Review**:
+The rule that each Completion Criterion and its natural-language Verification Method are approved as part of the Goal Contract. A Main Agent may provide candidate evidence and a Completion Judge may perform proportionate read-only inspection, but neither may replace, weaken, or add acceptance conditions during execution.
+_Avoid_: completion-time criterion substitution, easier acceptance test, Agent-chosen Contract rewrite
+
+**Goal Turn Budget**:
+The code-defined first-phase resource guard limiting how many Main Agent turns one Goal may consume in its current Budget Cycle. It is not included in the Goal Contract or exposed for user modification; exhaustion transitions the Goal to `LIMITED`, never to `COMPLETE`.
+_Avoid_: completion threshold, success quota, user-configurable budget, automatic completion
+
+**Goal Budget Cycle**:
+One allocation of the code-defined Goal Turn Budget for a Goal. A user-initiated resume from `LIMITED` resets the budget and starts a new Budget Cycle; a Direct Goal Edit does not reset it or silently restart the Goal.
+_Avoid_: automatic retry, budget increase, hidden continuation
+
+**Goal Wake Event**:
+An observed event permitted to reactivate a Waiting Goal in the first phase: completion of a Goal-owned Background SubAgent Run, resolution of a pending tool approval, or an explicit user interaction in that Goal's Chat. Other external asynchronous systems are not Goal wake sources in this phase.
+_Avoid_: polling signal, generic event bus, arbitrary external callback
+
+**Goal-owned Background SubAgent Run**:
+An existing Background SubAgent Run started by a Main Agent while advancing one Goal and recorded with that Goal's identity. It remains a bounded delegated task rather than a Goal owner; it may produce candidate evidence only for its matching Goal.
+_Avoid_: Goal SubAgent type, autonomous Goal owner, recursive Goal worker
+
+**Goal Steering**:
+Any user input received while a Goal is active, initially treated as execution context for the current Goal Revision. It cannot change the Contract through text; a Contract change requires the separate Direct Goal Edit interaction.
+_Avoid_: implicit Goal change, model-proposed revision, unclassified user message
+
+**Goal Edit**:
+The user-initiated direct editing of a confirmed Goal Contract's objective, Completion Criteria, verification definitions, Constraints, or Autonomy Boundary. Main Agent output and ordinary Steering cannot initiate or populate a Goal Edit; after explicit user confirmation, it creates a new Goal Revision.
+_Avoid_: model-proposed revision, implicit Contract patch, text-only scope expansion
+
+**Direct Goal Edit**:
+The Goal Monitor interaction in which the user edits Contract fields directly and submits the complete resulting Contract. Submission is confirmation; it does not block or interrupt the current Main Agent turn, and the new Contract becomes a pending Goal Revision applied atomically at the current turn's settlement boundary.
+_Avoid_: Agent-suggested edit, conversational auto-edit, partial field mutation, blocking edit
+
+**Goal Control Command**:
+A user-requested pause, resume, cancellation, or confirmed Direct Goal Edit control recorded durably against a Goal. In the first phase, every command takes effect only at the current Main Agent turn's settlement boundary: that turn may finish and persist its result, but no subsequent continuation begins before the Goal Runtime applies the command.
+_Avoid_: immediate turn interruption, discarded turn result, concurrent transition
+
+**Goal Control Command Precedence**:
+When more than one Goal Control Command is pending at a Main Agent turn's settlement boundary, the Goal Runtime applies only the highest-precedence command: `CANCEL`, then Direct Goal Edit, then `PAUSE`, then `RESUME`. Lower-precedence commands remain auditable as superseded and cause no intermediate state transition.
+_Avoid_: command race, sequential conflicting transition, last-write-wins control
+
+**Goal Turn Settlement Boundary**:
+The point after a Main Agent naturally finishes its current reasoning loop and any tool call it has already begun, when the Goal Runtime persists its result and applies pending Goal Control Commands. The first phase does not preempt an executing tool or promise stronger cancellation than the ordinary runtime provides.
+_Avoid_: forced tool termination, immediate control transition, rollback guarantee
+
+**Completion Review Rejection**:
+A Completion Judge decision that a Contract-bound Completion Criterion is not yet satisfied or lacks sufficient evidence for acceptance. It prevents `COMPLETE` and becomes durable review feedback for the next Main Agent turn; an evidence-insufficiency rejection must state what further evidence is needed. It is not by itself a Blocked Goal.
+_Avoid_: successful completion, Main Agent opinion, immediate blocker
+
+**Completion Review Circuit Breaker**:
+The first-phase liveness guard that independently moves a Goal to `BLOCKED` after three consecutive Completion Review Rejections for one Completion Criterion within one Goal Revision. Other criteria do not consume that counter; its recorded review feedback remains available for user Steering, Direct Goal Edit, or a later manual resume.
+_Avoid_: terminal failure, budget limit, unrelated verification failures
+
+**First-phase Goal Liveness Guard**:
+The limited first-phase protection against useless autonomous work: the code-defined Goal Turn Budget and the Completion Review Circuit Breaker. Generic progress scoring or no-progress detection is intentionally deferred until it can be defined with auditable evidence.
+_Avoid_: subjective progress score, heuristic stagnation blocker, unlimited continuation
+
+**Goal Store**:
+The MySQL-backed source of truth for Goal lifecycle state, Goal Revisions and their Contracts, turn settlements, verification evidence/results, pending control commands, and budget cycles. In-memory execution state and Chat Checkpoint projections are not authoritative Goal state.
+_Avoid_: workspace JSON state, Chat Checkpoint, process-local Goal registry
+
+**Goal Execution Owner**:
+The single application instance that owns a Goal's continuous first-phase execution through its sticky request. It runs automatic continuation turns locally until a terminal or user-controlled boundary; cross-instance lease acquisition and scheduler takeover are outside the first phase.
+_Avoid_: distributed Goal lease, scheduler owner, cross-Pod continuation
+
+**Interrupted Goal**:
+The `INTERRUPTED` non-terminal Goal State, entered when its Goal Execution Owner stops before a later continuation can begin. Its last persisted turn settlement remains authoritative; it does not auto-resume after instance loss, and the user must explicitly resume it from the Chat.
+_Avoid_: user-paused Goal, orphaned Goal takeover, automatic crash recovery, lost Goal state
+
+**Frozen Goal Execution Identity**:
+The Goal Scope's Tenant, Source, Agent Profile, and effective Model captured when a Goal is created. They cannot be switched during any Revision of that Goal; a Direct Goal Edit changes only the Contract.
+_Avoid_: mid-Goal Agent switch, live model rebinding, revision-based identity change, mixed-identity evidence
+
+**Goal Runtime Snapshot**:
+The MySQL-persisted recovery state for a Goal: current lifecycle state and Revision, active Contract, progress and verified evidence references, remaining Goal Turn Budget, active Goal-owned Background SubAgent links, and pending Goal Control Commands. It is sufficient to resume after a later user action without making runtime logs authoritative.
+_Avoid_: audit log snapshot, conversation summary, in-memory-only state
+
+**Goal Audit Log**:
+Structured append-only runtime logging for Goal creation and confirmation, turn resolutions, verification calls/results, state transitions, control commands, and interruption/recovery. Entries are correlated by Goal ID, Revision, and turn ID; complete prompts and raw tool output are not required as the audit record.
+_Avoid_: MySQL audit table, unstructured print trace, prompt archive
+
+**Structured Goal Turn Resolution**:
+The runtime-validated JSON envelope returned by a Main Agent turn. It contains a `decision` (`continue`, `wait`, `propose_completion`, or `blocked`) plus the decision-specific summary, next focus, evidence references, wake conditions, completion proposal, or blocker fields. Invalid or unparseable envelopes do not trigger continuation or completion.
+_Avoid_: Markdown status guess, regex-derived lifecycle, free-form handoff
+
+**In-request Goal Event Loop**:
+The single Goal Execution Owner's asynchronous loop that runs automatic turns and waits without LLM polling for permitted Goal Wake Events. It resumes directly on those events within the sticky request and deliberately has no independent cross-instance scheduler in the first phase.
+_Avoid_: polling loop, distributed scheduler, background takeover
+
+**Explicit Goal Control Action**:
+A dedicated user-facing control/API operation for pausing, resuming, cancelling, or opening a Direct Goal Edit. It writes a Goal Control Command directly instead of interpreting ordinary chat text; ordinary user messages remain Goal Steering and cannot alter the Contract.
+_Avoid_: text-command parsing, implicit pause keyword, hidden cancellation
+
+**Goal Monitor Entry**:
+A compact Chat-level shortcut, analogous to the existing Background SubAgent monitor entry, that opens a user-requested Goal summary and its explicit control actions. It follows the same compact-trigger and collapsible-panel interaction pattern, while remaining a distinct Goal surface rather than a displayed SubAgent Run. Goal intermediate turns do not create Chat timeline messages.
+_Avoid_: per-turn chat message, exposed internal reasoning, SubAgent Run display
+
+**Goal Monitor Summary**:
+The user-visible content of a Goal Monitor Entry: the confirmed Goal Contract summary, lifecycle state, passed and remaining Completion Criteria, the latest verification failure or waiting/blocker reason, and current turn sequence, with available explicit controls. It excludes internal Plans, model reasoning, raw tool output, and raw SubAgent logs.
+_Avoid_: reasoning trace, full execution transcript, SubAgent detail pane
+
+**Goal Contract Confirmation Card**:
+The blocking Composer interaction that presents only a proposed Goal Contract for explicit user confirmation before Goal creation and activation. The private Initial Execution Plan is not shown for approval. Rejecting it returns to ordinary message editing and does not create a Goal or begin autonomous execution.
+_Avoid_: assistant timeline message, implicit acceptance, post-start contract edit
+
+**Goal-ready Proposal**:
+The redesigned `submit_proposed_plan` output that directly contains a user-reviewable Goal Contract Draft. It replaces the legacy generic title/summary/steps/risks/verification plan shape, rather than mapping those fields into Goal terms after submission; any execution approach remains internal Main Agent context.
+_Avoid_: legacy Proposed Plan mapping, inferred Contract, user-approved step list
+
+**Goal Contract Draft**:
+The proposed pre-confirmation form of a Goal Contract, containing the objective, Completion Criteria with deterministic verification definitions, Constraints, and Autonomy Boundary. User confirmation makes it the active Contract for a new Goal or Goal Revision.
+_Avoid_: accepted execution plan, mutable task list, implicit Goal
+
+**Editable Goal Proposal**:
+The pre-creation Goal-ready Proposal state in which the user may directly edit every Goal Contract Draft field: objective, Completion Criteria and their verification definitions, Constraints, and Autonomy Boundary. Edits are revalidated and reconfirmed as one proposal; they do not create a Goal until confirmation succeeds. The Initial Execution Plan remains private to the Main Agent.
+_Avoid_: post-start Contract patch, implicit Contract revision, partial confirmation, read-only generated criterion
+
+**Confirmed Goal Contract Boundary**:
+The lifecycle boundary after which objective, Completion Criteria, Constraints, and Autonomy Boundary are editable only through Direct Goal Edit. A submitted direct edit creates a pending Goal Revision and becomes active at the next Goal Turn settlement boundary; direct editing is not available through ordinary Steering or Main Agent output.
+_Avoid_: mutable active Contract, field-level silent rewrite, model-initiated revision
+
+**Pending Goal Revision**:
+The user-submitted Direct Goal Edit that has passed Contract validation but is waiting for the current Main Agent turn to settle. It does not alter the active Contract or current turn; at settlement the Goal Runtime atomically activates it, discards the old Revision's pending decision effects, and starts later execution from the new Contract.
+_Avoid_: immediate in-turn rewrite, Main Agent revision proposal, partially active Contract
+
+**Immediate Goal Revision Activation**:
+The no-turn rule for Direct Goal Edit: when a Goal has no running Main Agent turn, a validated submitted edit activates its new Revision immediately. An edited `WAITING` Goal becomes `ACTIVE` and starts a new turn so old wait conditions cannot hold the new Contract; `PAUSED`, `BLOCKED`, `LIMITED`, and `INTERRUPTED` retain their state until explicit Resume. Only an edit submitted during a running turn remains Pending until the turn settlement boundary.
+_Avoid_: waiting for nonexistent turn, stale waiting condition, edit-triggered non-waiting auto-resume, stale Revision resume
+
+**Prior Revision SubAgent Run**:
+A Goal-owned Background SubAgent Run launched under an earlier Goal Revision after a newer Revision becomes active. It is allowed to finish under existing lifecycle rules, but its result cannot automatically satisfy the newer Revision or produce its completion evidence; a Main Agent must explicitly reverify any reused result for the active Revision.
+_Avoid_: forced edit cancellation, automatic cross-Revision evidence, stale completion result
+
+**Prior Revision Verification Run**:
+A Verification Run launched under an earlier Goal Revision after a newer Revision becomes active. It may naturally finish or receive its existing approval outcome, but its result is recorded only for the earlier Revision and cannot transition the active Revision to `COMPLETE`; the active Revision begins with every Completion Criterion unverified.
+_Avoid_: cross-Revision completion, forced verification cancellation, inherited verification pass
+
+**Goal Edit Validation Failure**:
+The rejected Direct Goal Edit outcome when the submitted Contract fails field or deterministic-verification validation. The active Revision and lifecycle state remain unchanged; the Monitor receives field-level errors and no partial Revision is created or filled by the Main Agent.
+_Avoid_: partial Contract activation, model auto-completion, invalid Revision
+
+**Initial Execution Plan**:
+The private first execution approach generated by the Main Agent after a Goal Contract is confirmed, such as first steps and next focus. It is never shown for user approval, may be replaced through replanning, and does not belong to the Goal Contract.
+_Avoid_: user-approved plan, Goal objective, Completion Criterion, permanent plan
+
+**Unified Goal Proposal Entry**:
+The rule that explicit Goal Mode and Plan Mode both produce the same Goal-ready Proposal and use the same Goal Contract Confirmation Card. On confirmation, Plan Mode atomically exits and Goal Mode begins; Contract and verification semantics have no entry-specific variant.
+_Avoid_: Plan-to-Goal field mapping, parallel proposal schema, implicit mode crossover
+
+**Goal Contract Clarification**:
+The use of the existing structured clarification interaction before a Goal-ready Proposal when objective, Completion Criteria, deterministic verification, Constraints, or Autonomy Boundary remain materially unresolved. No Goal is created until these points can form an editable, valid Goal Contract Draft.
+_Avoid_: implicit Contract gap, premature Goal creation, unverified criterion
+
+**Goal Monitor API**:
+The read-only Goal snapshot endpoint plus independent pause, resume, cancel, and Direct Goal Edit action endpoints used by the Goal Monitor Entry. Contract mutation never uses ordinary text or a generic PATCH; it follows the direct-edit submission flow.
+_Avoid_: mutable snapshot endpoint, text control API, Agent-proposed Contract patch
+
+**Recent Goal Monitor Selection**:
+The Chat-scoped selection rule that returns the most recently created Goal still in any non-terminal lifecycle state; when none exists, it returns the most recently created Goal in that Chat. A Chat may contain multiple sequential Goals, but the shortcut exposes only one.
+_Avoid_: all-Goal dashboard, oldest active Goal, concurrent Goal chooser
+
+**Sequential Chat Goals**:
+The rule that one Chat may create multiple Goals only in order: a new Goal is allowed after the previous Goal reaches `COMPLETE` or `CANCELLED`; `PAUSED`, `BLOCKED`, `LIMITED`, and `Interrupted Goal` remain non-terminal and cannot be bypassed by starting or switching to another Goal.
+_Avoid_: parallel Goals, suspended Goal switching, hidden Goal queue
+
+**Goal Mode Release**:
+The automatic return to ordinary Chat behavior when a Goal reaches `COMPLETE` or `CANCELLED`. Later user messages require a fresh Explicit Goal Mode Entry and a newly confirmed Goal Contract to create another Goal.
+_Avoid_: sticky Goal mode, post-completion autonomous loop, implicit next Goal
+
+**Goal Non-terminal Control Hold**:
+The rule that `PAUSED`, `BLOCKED`, `LIMITED`, and `Interrupted Goal` retain the current Goal's control ownership and prevent a sequential Chat Goal from bypassing it. Explicit Resume continues the current Revision from its persisted state; `LIMITED` starts a new Goal Budget Cycle and `BLOCKED` preserves its failure count. Direct Goal Edit creates a newly confirmed Revision.
+_Avoid_: non-terminal release, implicit retry, bypass Goal
+
+**Completion Review Run**:
+The Goal Runtime's independent Completion Judge evaluation after a Main Agent proposes completion. The Judge may use only first-phase read-only tools through the existing Tool Guard, path boundaries, and approval flow; its decisions, reasons, evidence references, and pending approval are persisted in the Goal Runtime Snapshot. If a tool needs approval, the Goal enters `WAITING` and approval resumes the same Run without consuming a Main Agent turn; denied approval is a Completion Review Rejection with its explicit reason.
+_Avoid_: Main Agent self-test claim, unguarded host check, mutating completion check
+
+**Mandatory Completion Set**:
+The complete set of Completion Criteria in a first-phase Goal Contract. Every member must be accepted by Contract-bound Completion Review before the Goal Runtime can enter `COMPLETE`; the first phase has no optional criteria or partial-completion state.
+_Avoid_: best-effort criterion, optional acceptance check, partial success
+
+**Completion Review Evidence**:
+The candidate evidence references considered by a Completion Review Run for one Completion Criterion in one Goal Revision, together with that Run's accepted decision. An accepted decision marks the criterion satisfied and resets its rejection counter; a new Revision does not inherit it as satisfied evidence.
+_Avoid_: Main Agent claim, cross-Revision proof, permanently valid test result
+
+**Incremental Goal Verification**:
+The first-phase revalidation rule: after an environment-writing Main Agent turn, its Structured Goal Turn Resolution identifies the Completion Criteria affected by that change, and the Goal Runtime reruns only their Contract-bound Verification. Unaffected verified evidence remains valid within the same Goal Revision; `COMPLETE` still requires valid successful evidence for every Mandatory Completion Criterion.
+_Avoid_: global verification invalidation, dependency graph, unchecked changed criterion
+
+**Goal Continuation Context**:
+The bounded, runtime-built input for the next Main Agent turn when a prior turn settles with `continue` or after a permitted Goal Wake Event. It carries the confirmed Contract and current Revision, pending Steering, verified and remaining Completion Criteria, relevant verification failures, and the next focus. Goal-owned Background SubAgent links are runtime-internal wake and lifecycle state; the Main Agent obtains all SubAgent information through its existing tools and its own conversation context rather than receiving it inline. It is not a full replay of the chat transcript.
+_Avoid_: Agent self-recursion, full conversation replay, inline SubAgent state or result injection, free-form continuation guess
+
+**Completion Proposal Turn**:
+A Main Agent turn that proposes Goal completion and supplies evidence references, but does not itself finish the Goal Chat Stream. Its conclusion remains pending until the independent Verification Run passes every Mandatory Completion Criterion.
+_Avoid_: final answer, Agent-declared completion, unverified success message
+
+**Goal Finalization Turn**:
+The final short, read-only and tool-free Main Agent turn started after every required Verification Run passes, or when a Goal request must close in a non-active state. It produces the formal Chat response and ends the Goal Chat Stream; it neither advances the Goal nor consumes the Goal Turn Budget.
+_Avoid_: pre-verification final answer, Goal Runtime-authored delivery, budgeted execution turn, failed-verification completion
+
+**Finalization Fallback**:
+The fixed minimal system response emitted when a Goal Finalization Turn cannot produce text because of a model or infrastructure failure. The Goal Runtime closes the current request without retrying or changing the persisted Goal state; the user can inspect the authoritative Goal Monitor Summary.
+_Avoid_: fabricated Agent conclusion, finalization retry loop, implicit Goal transition
+
+**Goal Mode Exclusivity**:
+The Composer and runtime rule that Goal Mode cannot coexist with Plan Mode or Explicit Expert Selection. Entering Goal Mode clears those selections; a non-terminal Goal prevents switching to them until the Goal is released, while Goal-owned Background SubAgent delegation remains available under existing rules.
+_Avoid_: expert-assisted Goal, Plan Goal overlap, mid-Goal identity switch
+
+**Explicit Goal Mode Entry**:
+The user's deliberate selection of Goal Mode in the Chat Composer before submitting a request. It authorizes Contract proposal and later confirmation, but a Main Agent in ordinary chat may only recommend Goal Mode and cannot create a Goal by itself.
+_Avoid_: inferred Goal start, Agent-initiated autonomous run, normal chat continuation
+
+**Goal Steering Queue**:
+The ordered durable collection of ordinary user messages received while a Goal is `ACTIVE` or `WAITING`. They do not create parallel normal Agent requests; after the current turn settles, the next Goal Turn receives them as execution context in arrival order.
+_Avoid_: concurrent chat request, immediate turn interruption, unordered prompt merge
+
+**Goal-as-Chat Controller**:
+The first-phase role of Goal Runtime as an invisible controller of one Chat request: it decides whether the Main Agent execution continues or the request ends, while the Chat UI continues to show only the existing Main Agent/tool process and final response. Goal lifecycle summaries and controls are exposed only through the Goal Monitor Entry.
+_Avoid_: Goal chat message, Goal status transcript, separate Goal conversation
+
+**Goal Chat Stream**:
+The existing Chat request stream carrying Main Agent and tool events across automatic Goal turns. It has no Goal-specific timeline messages; it remains open through `ACTIVE` and `WAITING`, then ends after a Goal Finalization Turn when the current request is concluded.
+_Avoid_: per-turn Goal message, hidden autonomous stream, premature response completion
+
+**Waiting Goal Stream**:
+The open Goal Chat Stream state while a Goal waits for a permitted Goal Wake Event. It emits no LLM status message; a wake event resumes the same in-request Goal Event Loop. If the transport disconnects first, the Goal becomes an Interrupted Goal rather than completing or cancelling.
+_Avoid_: waiting poll output, synthetic assistant response, disconnect cancellation
+
+**Goal Request Finalization**:
+The end of the current Goal Chat Stream after a Goal Finalization Turn. `COMPLETE` and `CANCELLED` also release Goal Mode, while `PAUSED`, `BLOCKED`, and `LIMITED` remain non-terminal Goal states that retain control ownership and require a later explicit resume in a new sticky request.
+_Avoid_: terminal-only stream closure, non-terminal Goal release, runtime-authored final reply
+
+**Non-active Goal Request Closure**:
+The first-phase connection rule that closes the current Chat request after Finalization when a Goal is `PAUSED`, `BLOCKED`, or `LIMITED`. `INTERRUPTED` instead loses its request with the owner instance and has no Finalization Turn. Only `ACTIVE` and `WAITING` retain the current request; explicit Resume starts a new sticky request for the same Goal.
+_Avoid_: long-held paused connection, reconnect auto-resume, terminal-only closure, impossible crash finalization
+
+**Internal Goal Turn Boundary**:
+The intercepted normal-completion signal from a Main Agent turn while Goal Mode remains in control. The runtime settles the turn and may continue, wait, verify, or finalize without emitting a terminal Chat completion event; only the Goal Finalization Turn completes the frontend response stream.
+_Avoid_: per-turn SSE completion, hidden loop recursion, duplicate assistant response
 
 ## Example Dialogue
 
