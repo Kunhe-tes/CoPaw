@@ -25,9 +25,7 @@ async def test_initialize_history_store_and_recorder_on_connected_database():
 
     assert app.state.skill_scan_history_store.is_available is True
     assert app.state.skill_scan_history_recorder is not None
-    assert "CREATE TABLE IF NOT EXISTS swe_skill_scan_history" in (
-        db.execute.await_args.args[0]
-    )
+    db.execute.assert_not_awaited()
 
     await app.state.skill_scan_history_recorder.stop()
     skill_scanner.install_skill_scan_history_recorder(None)
