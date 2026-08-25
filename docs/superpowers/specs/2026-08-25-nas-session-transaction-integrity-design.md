@@ -90,6 +90,11 @@ async with session.execution(session_id, user_id, timeout_seconds) as tx:
 事务内禁止调用会再次取锁的 `load_session_state()`、`save_session_state()`、
 `mutate_session_state()`。所有同请求 session 更新都修改 `tx.state`，仅由最终 commit 写文件。
 
+请求入口必须先建立 `execution()`，再派生同请求的 Agent、retry 或 cleanup 子任务，并显式传递
+同一个 `SessionExecution`。会话层会拒绝当前任务上下文中对短锁 API 的重入；对于事务建立前就
+创建且没有可观察父子关系的 asyncio task，运行时无法可靠地区分它与独立请求，因此不得让该类任务
+调用短锁 API。Task 2 通过请求级 transaction 传递落实这项约束，独立请求仍按文件锁正常排队。
+
 锁策略：
 
 | 调用方 | 获取锁等待 | 锁忙行为 |

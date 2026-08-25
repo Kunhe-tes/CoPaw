@@ -17,7 +17,9 @@ import threading
 import tempfile
 
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, Callable, Sequence, Union
+from contextvars import ContextVar, Token
+from types import MappingProxyType
+from typing import Any, AsyncIterator, Callable, Mapping, Sequence, Union
 
 from agentscope.session import SessionBase
 
@@ -35,6 +37,15 @@ _SESSION_WRITE_LOCKS: dict[
     asyncio.Lock,
 ] = {}
 _SESSION_WRITE_LOCKS_GUARD = threading.Lock()
+_EMPTY_ACTIVE_SESSION_EXECUTIONS: Mapping[str, "SessionExecution"] = (
+    MappingProxyType({})
+)
+_ACTIVE_SESSION_EXECUTIONS: ContextVar[Mapping[str, "SessionExecution"]] = (
+    ContextVar(
+        "active_session_executions",
+        default=_EMPTY_ACTIVE_SESSION_EXECUTIONS,
+    )
+)
 
 
 # Characters forbidden in Windows filenames
@@ -87,12 +98,27 @@ def _get_session_write_lock(file_path: str) -> asyncio.Lock:
         return lock
 
 
+def _get_normalized_session_path(file_path: str) -> str:
+    return os.path.normcase(os.path.abspath(file_path))
+
+
+def _reject_short_lock_during_execution(session_save_path: str) -> None:
+    normalized_path = _get_normalized_session_path(session_save_path)
+    execution = _ACTIVE_SESSION_EXECUTIONS.get().get(normalized_path)
+    if execution is not None and execution.is_active:
+        raise RuntimeError(
+            "cannot use a short-lock API during an active session execution; "
+            "use its transaction instead",
+        )
+
+
 @asynccontextmanager
 async def _session_write_scope(
     session_save_path: str,
     *,
     timeout_seconds: float | None = None,
 ) -> AsyncIterator[None]:
+    _reject_short_lock_during_execution(session_save_path)
     lock = _get_session_write_lock(session_save_path)
     if timeout_seconds is None:
         await lock.acquire()
@@ -138,16 +164,13 @@ def _write_json_text(file_path: str, content: str) -> None:
 
 
 def _sync_parent_directory(file_path: str) -> None:
-    """Persist the replacement directory entry when the platform supports it."""
+    """Persist a replacement directory entry when the platform supports it."""
     directory_path = os.path.dirname(file_path) or "."
     directory_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         directory_flags |= os.O_DIRECTORY
 
-    try:
-        directory_fd = os.open(directory_path, directory_flags)
-    except OSError:
-        return
+    directory_fd = os.open(directory_path, directory_flags)
 
     try:
         try:
@@ -155,6 +178,7 @@ def _sync_parent_directory(file_path: str) -> None:
         except OSError as exc:
             unsupported_errors = {
                 errno.EINVAL,
+                getattr(errno, "ENOSYS", errno.EINVAL),
                 getattr(errno, "ENOTSUP", errno.EINVAL),
                 getattr(errno, "EOPNOTSUPP", errno.EINVAL),
             }
@@ -257,6 +281,9 @@ class SessionExecution:
         self._revision = 0
         self._schema_version = 1
         self._entered = False
+        self._active_executions_token: (
+            Token[Mapping[str, "SessionExecution"]] | None
+        ) = None
 
     @property
     def revision(self) -> int:
@@ -275,6 +302,8 @@ class SessionExecution:
         return self._state
 
     async def __aenter__(self) -> "SessionExecution":
+        if self._entered or self._scope is not None:
+            raise RuntimeError("session execution is already active")
         self._scope = _session_write_scope(
             self._session_save_path,
             timeout_seconds=self._timeout_seconds,
@@ -289,28 +318,47 @@ class SessionExecution:
             )
             self._schema_version = self._get_schema_version(self._state)
             self._revision = self._get_revision(self._state)
+            active_executions = dict(_ACTIVE_SESSION_EXECUTIONS.get())
+            active_executions[
+                _get_normalized_session_path(self._session_save_path)
+            ] = self
+            self._active_executions_token = _ACTIVE_SESSION_EXECUTIONS.set(
+                active_executions,
+            )
             self._entered = True
             return self
         except BaseException:
+            self._reset_active_executions()
             if self._scope is not None:
                 await self._scope.__aexit__(None, None, None)
                 self._scope = None
             raise
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
-        self._entered = False
-        if self._scope is not None:
-            try:
+        try:
+            if self._scope is not None:
                 await self._scope.__aexit__(exc_type, exc, traceback)
-            finally:
-                self._scope = None
+        finally:
+            self._entered = False
+            self._scope = None
+            self._reset_active_executions()
+
+    @property
+    def is_active(self) -> bool:
+        """Return whether this transaction still owns its session lock."""
+        return self._entered
+
+    def _reset_active_executions(self) -> None:
+        if self._active_executions_token is not None:
+            _ACTIVE_SESSION_EXECUTIONS.reset(self._active_executions_token)
+            self._active_executions_token = None
 
     async def read_state(self) -> dict[str, Any]:
         """Return the single state snapshot read while acquiring the lock."""
         return self.state
 
     async def commit_state(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Atomically replace the transaction state without reacquiring its lock."""
+        """Replace transaction state without reacquiring its held lock."""
         self._require_entered()
         if not isinstance(state, dict):
             raise ValueError("state must be a dict")
@@ -402,7 +450,7 @@ class SafeJSONSession(SessionBase):
         user_id: str = "",
         timeout_seconds: float | None = None,
     ) -> AsyncIterator[SessionExecution]:
-        """Hold one session lock while reading and committing a state snapshot."""
+        """Hold one session lock while reading and committing a snapshot."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
         transaction = SessionExecution(
             session_save_path,
@@ -417,6 +465,7 @@ class SafeJSONSession(SessionBase):
         *,
         allow_not_exist: bool,
     ) -> tuple[bool, dict[str, Any]]:
+        _reject_short_lock_during_execution(session_save_path)
         async with _get_session_write_lock(session_save_path):
             return await run_runtime_state_work(
                 _read_json_state_sync,

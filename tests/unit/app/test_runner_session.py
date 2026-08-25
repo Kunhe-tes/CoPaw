@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 import asyncio
 import builtins
+import errno
 import json
 import multiprocessing
+import os
 import threading
 import time
 from pathlib import Path
@@ -10,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from swe.app.runner import session as session_module
-from swe.app.runner.session import SafeJSONSession
+from swe.app.runner.session import SafeJSONSession, SessionExecution
 from swe.app.runner.session_lock import SessionLockTimeout
 
 
@@ -157,6 +159,161 @@ async def test_second_execution_times_out_until_first_exits(
             pass
     release.set()
     await holder
+
+
+@pytest.mark.asyncio
+async def test_short_lock_apis_reject_the_active_execution_session(
+    tmp_path: Path,
+) -> None:
+    class StateModule:
+        def state_dict(self) -> dict[str, bool]:
+            return {"saved": True}
+
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    async with session.execution("shared"):
+        for operation in (
+            lambda: session.load_session_state("shared"),
+            lambda: session.save_session_state("shared", agent=StateModule()),
+            lambda: session.mutate_session_state(
+                "shared",
+                lambda state: state,
+            ),
+        ):
+            with pytest.raises(RuntimeError, match="active session execution"):
+                await asyncio.wait_for(operation(), timeout=0.1)
+
+        assert await session.mutate_session_state(
+            "other",
+            lambda state: {**state, "allowed": True},
+        ) == {"allowed": True}
+
+
+@pytest.mark.asyncio
+async def test_child_task_in_active_execution_rejects_short_lock_api(
+    tmp_path: Path,
+) -> None:
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    async def mutate_current_session() -> None:
+        await session.mutate_session_state("shared", lambda state: state)
+
+    async with session.execution("shared"):
+        child_task = asyncio.create_task(mutate_current_session())
+        with pytest.raises(RuntimeError, match="active session execution"):
+            await asyncio.wait_for(child_task, timeout=0.1)
+
+
+@pytest.mark.asyncio
+async def test_second_execution_without_timeout_waits_for_first_to_exit(
+    tmp_path: Path,
+) -> None:
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def hold_first_execution() -> None:
+        async with session.execution("shared"):
+            first_entered.set()
+            await release_first.wait()
+
+    async def enter_second_execution() -> None:
+        async with session.execution("shared"):
+            second_entered.set()
+
+    first_task = asyncio.create_task(hold_first_execution())
+    await first_entered.wait()
+    second_task = asyncio.create_task(enter_second_execution())
+    await asyncio.sleep(0)
+    assert not second_entered.is_set()
+
+    release_first.set()
+    await first_task
+    await asyncio.wait_for(second_task, timeout=1)
+    assert second_entered.is_set()
+
+
+@pytest.mark.asyncio
+async def test_execution_reentry_does_not_release_the_outer_lock(
+    tmp_path: Path,
+) -> None:
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    transaction = SessionExecution(session._get_save_path("shared", ""))
+
+    async def reenter_transaction() -> None:
+        async with transaction:
+            pass
+
+    start_contender = asyncio.Event()
+
+    async def enter_competing_execution() -> None:
+        await start_contender.wait()
+        async with session.execution("shared", timeout_seconds=0.01):
+            pass
+
+    contender_task = asyncio.create_task(enter_competing_execution())
+
+    async with transaction:
+        with pytest.raises(RuntimeError, match="already active"):
+            await asyncio.wait_for(reenter_transaction(), timeout=0.1)
+        with pytest.raises(TimeoutError):
+            start_contender.set()
+            await asyncio.wait_for(contender_task, timeout=0.1)
+
+    async with session.execution("shared", timeout_seconds=0.1):
+        pass
+
+
+@pytest.mark.asyncio
+async def test_child_task_can_use_short_lock_after_execution_exits(
+    tmp_path: Path,
+) -> None:
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    start_short_lock = asyncio.Event()
+
+    async def mutate_current_session() -> dict[str, bool]:
+        await start_short_lock.wait()
+        return await session.mutate_session_state(
+            "shared",
+            lambda state: {**state, "mutated": True},
+        )
+
+    async with session.execution("shared"):
+        child_task = asyncio.create_task(mutate_current_session())
+
+    start_short_lock.set()
+    assert await child_task == {"mutated": True}
+
+
+def test_parent_directory_sync_propagates_open_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    def deny_open(*args, **kwargs):
+        raise PermissionError(errno.EACCES, "permission denied")
+
+    monkeypatch.setattr(session_module.os, "open", deny_open)
+
+    with pytest.raises(PermissionError, match="permission denied"):
+        session_module._sync_parent_directory(str(tmp_path / "session.json"))
+
+
+def test_parent_directory_sync_propagates_supported_fsync_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    directory_fd = os.open(tmp_path, os.O_RDONLY)
+
+    monkeypatch.setattr(session_module.os, "open", lambda *args: directory_fd)
+
+    def fail_fsync(file_descriptor: int) -> None:
+        raise OSError(errno.EIO, "I/O error")
+
+    monkeypatch.setattr(session_module.os, "fsync", fail_fsync)
+
+    with pytest.raises(OSError, match="I/O error"):
+        session_module._sync_parent_directory(str(tmp_path / "session.json"))
 
 
 @pytest.mark.asyncio
