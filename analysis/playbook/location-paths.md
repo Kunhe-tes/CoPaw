@@ -1,5 +1,21 @@
 # 定位路径
 
+## NAS session lock release gate
+
+在生产等价 StorageClass 上运行以下检查；`/mnt/sessions` 必须是所有 Runner Pod 共享的同一 NAS 挂载：
+
+```bash
+python3 scripts/verify_session_nas_lock.py /mnt/sessions
+kubectl apply -f deploy/session-nas-lock-verification-job.yaml
+kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --timeout=10m
+```
+
+检查必须同时证明：第二个进程在持锁期间拿不到 `.verification.json.lock`、持锁进程退出后可以接管、
+原子 JSON 替换始终可解析且 revision 连续递增。失败时禁止以无锁写入或 Redis 锁替代；先保留旧版本。
+
+通过后暂停 cron dispatch，排空现有 session 请求，将旧 Runner Pod 缩容到零，再部署新版本，确认所有新 Pod
+使用同一绝对 session 路径后恢复 cron。禁止新旧 Runner writer 混跑，否则旧逻辑仍可能覆盖新事务快照。
+
 按问题类型给出优先查看的路径，减少无效搜索。
 
 ## Shell 子进程 / Python runtime guard / `/opt/.swe`

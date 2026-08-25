@@ -1,6 +1,6 @@
 # NAS 会话事务完整性设计
 
-**状态：** 已确认
+**状态：** 已确认，Task 1-5 已实现；Task 6 为上线前验收
 **日期：** 2026-08-25
 
 ## 1. 目标与范围
@@ -193,3 +193,31 @@ Console 的历史加载按此稳定 ID 替换或去重卡片；流式期间的�
 6. retry 不产生中间 JSON 写入，最终只提交一次。
 7. `/clear`、`/new` 与 memory compaction 操作当前 request memory。
 8. 同一 JSON 连续读取两次，返回消息 ID 完全一致。
+
+## 11. 当前实现状态与边界
+
+已落地的代码提交：
+
+- `05b11d8a6`：NAS 稳定 lock 文件、全生命周期 `SessionExecution`、schema/revision、原子写与文件/父目录 fsync。
+- `0c1b2a4d2`：query admission、preflight、retry、cleanup 共用同一 transaction；retry 不产生中间 session JSON。
+- `dc7c5eaff`：请求级 ReMe memory lease；移除按 chat 复用的可变在线 memory。
+- `e81f3f6e9`：cron 增量 append、稳定 execution key、重复 callback 幂等、内部 follow-up 过滤。
+- `af96d8c55`：后端与 Console 历史消息稳定 ID。
+
+实现边界：
+
+1. `execution_key` 只由 scheduler 或外部 callback 提供的稳定身份组成；不使用 worker 本地当前时间。
+2. 没有稳定 dispatch identity 的 legacy callback 保持兼容，但不承诺 exactly-once；不能伪造 key。
+3. 已存在的重复消息和没有 `execution_key` 的旧 `task_runs` 不在线自动重写；离线去重另行设计。
+4. `dispatch_meta` 不增加 `cron_is_manual`，避免改变既有 metadata 契约；手动运行自然得到空幂等 key。
+5. NAS 必须是所有 Pod 共享且支持跨客户端 POSIX `flock` 的同一文件系统；验证失败时不得降级为无锁写入。
+
+## 12. 发布门禁
+
+上线前必须在生产等价 StorageClass 上运行两 Pod lock verification Job，验证争锁、持锁 Pod 退出后的接管、
+原子 JSON 替换和 revision 连续性。发布时暂停 cron dispatch，排空 query，旧 Runner 缩容到零，再启动新版本，
+禁止新旧 session writer 混跑。对同一 task session 完成一次普通和一次 cron smoke test，确认基线不重复、
+execution key 只产生一个 task run、重复 callback 不再追加。
+
+本方案不包含 Redis 锁、MySQL 会话事件表、删除流程、历史自动去重、运行日志/指标新增，以及模型或工具
+外部副作用的 exactly-once 保证。

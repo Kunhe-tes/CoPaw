@@ -21,7 +21,7 @@
 - Modify `src/swe/app/runner/utils.py` and the Console history mapper: preserve raw message IDs.
 - Add or extend focused tests under `tests/unit/app/`, `tests/unit/agents/`, and the existing Console session API tests.
 
-### Task 1: Define and test the JSON execution transaction
+### Task 1: Define and test the JSON execution transaction — completed (`05b11d8a6`)
 
 **Files:**
 
@@ -96,7 +96,7 @@ git add src/swe/app/runner/session.py src/swe/app/runner/session_lock.py tests/u
 git commit -m "feat(session): add NAS-backed execution transaction"
 ```
 
-### Task 2: Keep one transaction through query attempts and cleanup
+### Task 2: Keep one transaction through query attempts and cleanup — completed (`0c1b2a4d2`)
 
 **Files:**
 
@@ -155,7 +155,7 @@ git add src/swe/app/runner/query_attempt.py src/swe/app/runner/query_runtime.py 
 git commit -m "fix(runner): keep session state in one query transaction"
 ```
 
-### Task 3: Make online ReMe memory request-owned
+### Task 3: Make online ReMe memory request-owned — completed (`dc7c5eaff`)
 
 **Files:**
 
@@ -216,7 +216,7 @@ git add src/swe/agents/memory/reme_light_memory_manager.py src/swe/agents/react_
 git commit -m "fix(memory): isolate chat memory per request"
 ```
 
-### Task 4: Replace cron full merge with an idempotent append patch
+### Task 4: Replace cron full merge with an idempotent append patch — completed (`e81f3f6e9`)
 
 **Files:**
 
@@ -280,7 +280,7 @@ git add src/swe/app/crons/executor.py src/swe/app/runner/runner.py src/swe/app/r
 git commit -m "fix(cron): append idempotent session deltas"
 ```
 
-### Task 5: Preserve persisted message identity through history and Console
+### Task 5: Preserve persisted message identity through history and Console — completed (`af96d8c55`)
 
 **Files:**
 
@@ -336,7 +336,7 @@ git add src/swe/app/runner/utils.py src/swe/app/runner/api.py console/src/pages/
 git commit -m "fix(chat): preserve persisted history message ids"
 ```
 
-### Task 6: Verify release readiness on NAS and perform the cutover
+### Task 6: Verify release readiness on NAS and perform the cutover — pending production validation
 
 **Files:**
 
@@ -391,3 +391,12 @@ git commit -m "test(session): verify NAS lock contract"
   new runtime logging appear in any task.
 - Consistency: `SessionExecution`, `create_request_memory`, `cron_execution_key`, `execution_key`, `commit_regular`, and
   `commit_cron_append` are defined before use and retain the same spelling across tasks.
+
+## Current execution note
+
+Tasks 1-5 are implemented and independently reviewed. Remaining work is operational: create/run the NAS verification
+Job, record the result in the playbook, and perform a stop-the-world rollout so old and new writers never overlap.
+Task 6 does not add Redis locking, deletion, automatic historical deduplication, or runtime logging.
+
+The step checkboxes in Tasks 1-5 document the original TDD sequence; the completion state is recorded in each task
+heading and by the commit IDs above.

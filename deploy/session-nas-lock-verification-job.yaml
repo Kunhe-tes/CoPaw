@@ -1,0 +1,20 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: swe-session-nas-lock-verification
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: verifier
+          image: your-registry/swe:<release>
+          command: ["python3", "/app/scripts/verify_session_nas_lock.py", "/mnt/sessions"]
+          volumeMounts:
+            - name: sessions
+              mountPath: /mnt/sessions
+      volumes:
+        - name: sessions
+          persistentVolumeClaim:
+            claimName: swe-sessions-nas
