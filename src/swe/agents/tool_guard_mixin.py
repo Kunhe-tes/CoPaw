@@ -23,6 +23,7 @@ import uuid as _uuid
 from typing import Any, Literal, NoReturn
 
 from agentscope.message import Msg, ToolResultBlock
+from trace_sdk import execute_tool_traced
 
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
 from ..app.runner.tool_output_frames import tool_output_invocation
@@ -1896,6 +1897,13 @@ class ToolGuardMixin:
             )
         return bool(consumed)
 
+    @execute_tool_traced(
+        tool_name_factory=lambda self, tool_call, tool_name, tool_input: (tool_name),
+        input_arguments_factory=lambda self, tool_call, tool_name, tool_input: (
+            tool_input
+        ),
+        output_arguments_factory=lambda result: {},
+    )
     async def _run_approved_tool_call(
         self,
         tool_call: dict[str, Any],

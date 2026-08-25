@@ -67,6 +67,7 @@ describe("Plan Mode frontend helpers", () => {
     );
 
     expect(screen.getByText("计划")).toBeInTheDocument();
+    expect(screen.getByText("计划")).toHaveClass(quickMenuStyles.label);
     expect(screen.queryByLabelText("ordered-list")).not.toBeInTheDocument();
     expect(
       screen.getByText("计划").closest(`.${quickMenuStyles.item}`),

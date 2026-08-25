@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from agentscope_runtime.engine.app import AgentApp
+from trace_sdk.global_tracer import shutdown_global_tracer
 
 from ..config import load_config  # pylint: disable=no-name-in-module
 from ..config.utils import get_config_path
@@ -772,6 +773,11 @@ async def _shutdown_lifespan_resources(
         logger.info("Tracing manager closed")
     except Exception as e:
         logger.warning("Error closing tracing manager: %s", e)
+
+    try:
+        shutdown_global_tracer()
+    except Exception as e:
+        logger.warning("Error closing AgentTraceSDK global tracer: %s", e)
 
     try:
         await stop_service_heartbeat()

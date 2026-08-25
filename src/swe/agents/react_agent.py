@@ -21,6 +21,7 @@ from agentscope.agent._react_agent import _MemoryMark
 from agentscope.message import Msg, ToolResultBlock, ToolUseBlock
 from agentscope.tool import Toolkit
 from pydantic import BaseModel
+from trace_sdk import chat_traced
 
 from . import mcp_tool_registrar
 from .agent_runtime_builder import AgentRuntimeBuilder
@@ -1768,6 +1769,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """
         return self._strip_media_blocks_from_memory()
 
+    @chat_traced(
+        request_model_factory=lambda self, *args, **kwargs: (
+            self._resolved_model_slot.get("model")
+        ),
+        provider_name_factory=lambda self, *args, **kwargs: (
+            self._resolved_model_slot.get("provider_id")
+        ),
+        output_arguments_factory=lambda result: {},
+    )
     async def _run_reasoning_with_internal_context(
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,
@@ -1846,6 +1856,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     tool_choice=tool_choice,
                 )
 
+    @chat_traced(
+        request_model_factory=lambda self, *args, **kwargs: (
+            self._resolved_model_slot.get("model")
+        ),
+        provider_name_factory=lambda self, *args, **kwargs: (
+            self._resolved_model_slot.get("provider_id")
+        ),
+        output_arguments_factory=lambda result: {},
+    )
     async def _summarizing(self) -> Msg:
         """Override summarizing with proactive media filtering,
         passive fallback, and tool_use block filtering.
