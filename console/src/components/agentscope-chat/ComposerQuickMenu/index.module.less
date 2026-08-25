@@ -56,7 +56,7 @@
   margin-bottom: 6px;
   border-bottom: 1px solid rgba(15, 23, 42, 0.08);
 
-  :global(.swe-upload){
+  :global(.swe-upload) {
     width: 100%;
   }
 }
@@ -135,6 +135,12 @@
 
 .submenu {
   position: relative;
+
+  > .item:focus-visible {
+    outline: 2px solid #3769fc;
+    outline-offset: 2px;
+    background: rgba(55, 105, 252, 0.08);
+  }
 }
 
 .submenuArrow {
@@ -159,6 +165,11 @@
     left: -8px;
     width: 8px;
     content: "";
+  }
+
+  &[data-opens-left="true"]::before {
+    right: -8px;
+    left: auto;
   }
 
   .itemWrap:first-child {

@@ -3,12 +3,15 @@ import { DESIGN_TOKENS } from "@/config/designTokens";
 
 export default createGlobalStyle`
 .welcome-center-layout {
+  box-sizing: border-box;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   height: 100%;
   width: 100%;
+  min-width: 0;
+  min-height: 0;
   padding: 40px 20px;
   gap: 0;
   background: url('/chat-bg.png') center/cover no-repeat;
@@ -26,8 +29,10 @@ export default createGlobalStyle`
 
 .welcome-input-card {
   position: relative;
-  width: ${DESIGN_TOKENS.inputCardWidth}px;
+  box-sizing: border-box;
+  width: ${DESIGN_TOKENS.inputCardWidth + 40}px;
   max-width: 100%;
+  min-width: 0;
   background-color: ${DESIGN_TOKENS.colorBgCard};
   border-radius: ${DESIGN_TOKENS.radiusCard}px;
   padding: 16px 20px;
@@ -122,9 +127,18 @@ export default createGlobalStyle`
   --capsule-active-text: #FFFFFF;
   --capsule-active-hover-bg: #5E6D87;
   --capsule-pressed-bg: #53627C;
-  width: ${DESIGN_TOKENS.inputCardWidth}px;
+  box-sizing: border-box;
+  width: ${DESIGN_TOKENS.inputCardWidth + 40}px;
   max-width: 100%;
+  min-width: 0;
   margin-bottom: 0;
+}
+
+.scenario-preset-selector-shell {
+  box-sizing: border-box;
+  width: ${DESIGN_TOKENS.inputCardWidth + 40}px;
+  max-width: 100%;
+  min-width: 0;
 }
 
 .scenario-preset-domain-selector,

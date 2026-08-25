@@ -19,6 +19,7 @@ export interface ExpertSelectorProps {
   onChange: (expertId: string | null) => void;
   onDisablePlanMode: () => void;
   disabled?: boolean;
+  inline?: boolean;
 }
 
 export default function ExpertSelector({
@@ -28,6 +29,7 @@ export default function ExpertSelector({
   onChange,
   onDisablePlanMode,
   disabled = false,
+  inline = false,
 }: ExpertSelectorProps) {
   const { message } = useAppMessage();
   const [experts, setExperts] = useState<SelectableExpert[]>([]);
@@ -56,8 +58,10 @@ export default function ExpertSelector({
     void loadExperts();
   }, [loadExperts]);
 
+  const selectionDisabled = disabled || goalModeEnabled;
+
   const handleSelect = (expert: SelectableExpert) => {
-    if (disabled) return;
+    if (selectionDisabled) return;
     if (planModeEnabled) {
       onDisablePlanMode();
     }
@@ -66,6 +70,51 @@ export default function ExpertSelector({
   };
 
   const label = selectedExpert ? resolveExpertLabel(selectedExpert) : "专家";
+
+  const menu = (
+    <div
+      className={inline ? styles.quickMenuPanel : styles.panel}
+      role="menu"
+      aria-label="专家选择"
+    >
+      {loading ? (
+        <div className={styles.state}>
+          <Spin size="small" />
+        </div>
+      ) : experts.length === 0 ? (
+        <div className={styles.state}>暂无可用专家</div>
+      ) : (
+        experts.map((expert) => (
+          <button
+            key={expert.id}
+            type="button"
+            className={`${styles.item} ${
+              expert.id === selectedExpertId ? styles.itemActive : ""
+            }`}
+            disabled={selectionDisabled}
+            onClick={() => handleSelect(expert)}
+            role="menuitem"
+          >
+            <span className={styles.itemText}>
+              <span className={styles.itemName}>{expert.name}</span>
+              {expert.description ? (
+                <span className={styles.itemDescription}>
+                  {expert.description}
+                </span>
+              ) : null}
+            </span>
+            {expert.id === selectedExpertId ? (
+              <CheckOutlined className={styles.check} />
+            ) : null}
+          </button>
+        ))
+      )}
+    </div>
+  );
+
+  if (inline) {
+    return menu;
+  }
 
   return (
     <Dropdown
@@ -77,41 +126,7 @@ export default function ExpertSelector({
       trigger={["click"]}
       placement="bottomRight"
       disabled={disabled || goalModeEnabled}
-      dropdownRender={() => (
-        <div className={styles.panel} role="menu" aria-label="专家选择">
-          {loading ? (
-            <div className={styles.state}>
-              <Spin size="small" />
-            </div>
-          ) : experts.length === 0 ? (
-            <div className={styles.state}>暂无可用专家</div>
-          ) : (
-            experts.map((expert) => (
-              <button
-                key={expert.id}
-                type="button"
-                className={`${styles.item} ${
-                  expert.id === selectedExpertId ? styles.itemActive : ""
-                }`}
-                onClick={() => handleSelect(expert)}
-                role="menuitem"
-              >
-                <span className={styles.itemText}>
-                  <span className={styles.itemName}>{expert.name}</span>
-                  {expert.description ? (
-                    <span className={styles.itemDescription}>
-                      {expert.description}
-                    </span>
-                  ) : null}
-                </span>
-                {expert.id === selectedExpertId ? (
-                  <CheckOutlined className={styles.check} />
-                ) : null}
-              </button>
-            ))
-          )}
-        </div>
-      )}
+      dropdownRender={() => menu}
     >
       <Tooltip title="选择专家" mouseEnterDelay={0.5}>
         <button

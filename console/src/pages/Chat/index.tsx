@@ -27,7 +27,6 @@ import { useAppMessage } from "../../hooks/useAppMessage";
 import {
   ControlOutlined,
   ExclamationCircleOutlined,
-  FlagOutlined,
   SettingOutlined,
 } from "@ant-design/icons";
 import { SparkCopyLine } from "@agentscope-ai/icons";
@@ -136,9 +135,7 @@ import { isResponseFeedbackUserAllowed } from "./components/ResponseFeedbackCard
 import ApprovalActionCard from "./components/ApprovalActionCard";
 import WPlusSopActiveBar from "./components/WPlusSopActiveBar";
 import WPlusSopEntryCard from "./components/WPlusSopEntryCard";
-import {
-  ActivePlanInteractionComposer,
-} from "./components/PlanInteractionCards";
+import { ActivePlanInteractionComposer } from "./components/PlanInteractionCards";
 import TaskRunGroupCard from "./components/TaskRunGroupCard";
 import TaskProgressFloatingCard from "./components/TaskProgressFloatingCard";
 import {
@@ -584,6 +581,28 @@ function ActivePlanModeControl({
       disabled={disabled}
       label={label}
       displayLabel={displayLabel}
+      onDisable={onDisable}
+    />
+  );
+}
+
+function ActiveGoalModeControl({
+  enabled,
+  onDisable,
+}: {
+  enabled: boolean;
+  onDisable: () => void;
+}) {
+  const inputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+
+  return (
+    <ActivePlanModeButton
+      enabled={enabled}
+      disabled={Boolean(inputState.disabled)}
+      label="目标模式"
+      showIcon={false}
       onDisable={onDisable}
     />
   );
@@ -1332,6 +1351,16 @@ export default function ChatPage() {
       />
     ),
     [persistPlanMode, planModeEnabled, t],
+  );
+
+  const activeGoalModeControl = useMemo(
+    () => (
+      <ActiveGoalModeControl
+        enabled={goalModeEnabled}
+        onDisable={() => setGoalModeEnabled(false)}
+      />
+    ),
+    [goalModeEnabled],
   );
 
   useEffect(() => {
@@ -2094,10 +2123,11 @@ export default function ChatPage() {
     const senderConfig = i18nConfig.sender as
       | IAgentScopeRuntimeWebUISenderOptions
       | undefined;
-    const senderPrefixNodes = [
-      ...Children.toArray(activePlanModeControl),
-      ...Children.toArray(senderConfig?.prefix),
-    ].filter(Boolean);
+    const senderPrefixNodes = Children.toArray([
+      activePlanModeControl,
+      activeGoalModeControl,
+      senderConfig?.prefix,
+    ]).filter(Boolean);
 
     const { beforeSubmit: handleSkillMentionsBeforeSubmit, skillMentions } =
       createWelcomeSkillMentions({
@@ -2183,15 +2213,14 @@ export default function ChatPage() {
         />
         <ComposerQuickMenuItem
           key="goal-mode"
-          icon={<FlagOutlined />}
           interactive
-          label="Goal"
+          label="目标"
           extra={
             <Switch
               size="small"
               checked={goalModeEnabled}
               disabled={composerDisabled}
-              aria-label="Goal 模式"
+              aria-label="目标模式"
               onChange={(enabled) => {
                 setGoalModeEnabled(enabled);
                 if (enabled) {
@@ -2201,6 +2230,24 @@ export default function ChatPage() {
               }}
             />
           }
+        />
+      </ComposerQuickMenuSubmenu>,
+      <ComposerQuickMenuSubmenu
+        key="expert"
+        label="专家"
+        disabled={composerDisabled || goalModeEnabled}
+        panelWidth="min(240px, calc(100vw - 32px))"
+      >
+        <ExpertSelector
+          planModeEnabled={planModeEnabled}
+          goalModeEnabled={goalModeEnabled}
+          selectedExpertId={selectedExpertId}
+          onChange={setSelectedExpertId}
+          onDisablePlanMode={() => {
+            void persistPlanMode(false);
+          }}
+          disabled={composerDisabled}
+          inline
         />
       </ComposerQuickMenuSubmenu>,
     ];
@@ -2221,18 +2268,6 @@ export default function ChatPage() {
             <span style={{ flex: 1 }} />
             {!isContentOnly && <FileManager />}
             {!isContentOnly && <ModelSelector />}
-            {!isContentOnly && (
-              <ExpertSelector
-                planModeEnabled={planModeEnabled}
-                goalModeEnabled={goalModeEnabled}
-                selectedExpertId={selectedExpertId}
-                onChange={setSelectedExpertId}
-                onDisablePlanMode={() => {
-                  void persistPlanMode(false);
-                }}
-                disabled={composerDisabled}
-              />
-            )}
             {/* <ChatActionGroup /> */}
           </>
         ),
@@ -2256,7 +2291,12 @@ export default function ChatPage() {
             placeholder={t("chat.inputPlaceholder")}
             beforeSubmit={handleBeforeSubmit}
             quickMenuItems={planModeQuickMenuItems}
-            prefixItems={activePlanModeControl}
+            prefixItems={
+              <>
+                {activePlanModeControl}
+                {activeGoalModeControl}
+              </>
+            }
             onSubmit={(data) => onSubmit(data)}
             onScenarioPresetSubmit={(scenarioPresetId) => {
               pendingScenarioPresetIdRef.current = scenarioPresetId;
@@ -2384,6 +2424,7 @@ export default function ChatPage() {
       },
     } as unknown as IAgentScopeRuntimeWebUIOptions;
   }, [
+    activeGoalModeControl,
     activePlanModeControl,
     brandTheme.avatar,
     brandTheme.brandName,
@@ -2405,7 +2446,6 @@ export default function ChatPage() {
     planModeEnabled,
     resolveLogicalRequestSessionId,
     resolveRequestChatId,
-    runtimeLocale,
     setPlanModeEnabledForActiveScope,
     selectedExpertId,
     selectedContextReferences,
@@ -2520,8 +2560,8 @@ export default function ChatPage() {
                   />
                 )}
                 <ConversationQuickNav />
+              </div>
             </div>
-          </div>
           </AutoPreviewHtmlProvider>
         </HtmlPreviewTrackingProvider>
       </ChatFeedbackRenderProvider>

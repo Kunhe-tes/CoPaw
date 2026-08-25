@@ -26,6 +26,7 @@ const stylesheet = readFileSync(
 describe("ComposerQuickMenu", () => {
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
   });
 
   it("opens and closes the menu from the plus trigger", async () => {
@@ -120,6 +121,49 @@ describe("ComposerQuickMenu", () => {
     expect(screen.getByText("模式")).toBeInTheDocument();
   });
 
+  it("opens a wide submenu to the left near the viewport edge", async () => {
+    vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: HTMLElement) {
+        if (this.classList.contains(styles.submenu)) {
+          return {
+            bottom: 40,
+            height: 40,
+            left: 900,
+            right: 1000,
+            top: 0,
+            width: 100,
+          } as DOMRect;
+        }
+        return {
+          bottom: 240,
+          height: 240,
+          left: 0,
+          right: 240,
+          top: 0,
+          width: 240,
+        } as DOMRect;
+      },
+    );
+
+    render(
+      <ComposerQuickMenu triggerLabel="快捷操作">
+        <ComposerQuickMenuSubmenu label="专家" panelWidth="240px">
+          <ComposerQuickMenuItem label="专家一号" />
+        </ComposerQuickMenuSubmenu>
+      </ComposerQuickMenu>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "快捷操作" }));
+    fireEvent.click(await screen.findByRole("button", { name: "专家" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("menu")).toHaveAttribute(
+        "data-opens-left",
+        "true",
+      );
+    });
+  });
+
   it("allows externally handled items to render with hover affordance", () => {
     render(<ComposerQuickMenuItem interactive label="上传文件" />);
 
@@ -134,5 +178,13 @@ describe("ComposerQuickMenu", () => {
   it("keeps Ant Upload trigger layers full width for row-sized hover", () => {
     expect(stylesheet).toContain(":global(.ant-upload-select)");
     expect(stylesheet).toContain(":global(.ant-upload-select > span)");
+  });
+
+  it("keeps keyboard focus visible on submenu triggers", () => {
+    expect(stylesheet).toContain("> .item:focus-visible");
+  });
+
+  it("moves the submenu hover bridge to the matching side", () => {
+    expect(stylesheet).toContain('[data-opens-left="true"]');
   });
 });

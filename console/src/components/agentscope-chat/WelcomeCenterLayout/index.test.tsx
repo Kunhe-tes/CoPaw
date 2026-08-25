@@ -133,6 +133,65 @@ describe("WelcomeCenterLayout", () => {
     getEffectiveCatalog.mockResolvedValue({ domains: [] });
   });
 
+  it("sets the welcome input card width before runtime styles are injected", () => {
+    const { container } = render(
+      <WelcomeCenterLayout greeting="你好" onSubmit={vi.fn()} />,
+    );
+
+    expect(container.querySelector(".welcome-input-card")).toHaveStyle({
+      boxSizing: "border-box",
+      maxWidth: "100%",
+      width: "840px",
+    });
+  });
+
+  it("keeps the selector width stable when the scenario catalog finishes loading", async () => {
+    let resolveCatalog!: (catalog: {
+      domains: Array<{
+        id: string;
+        name: string;
+        capabilities: Array<{
+          id: string;
+          name: string;
+          scenarios: [];
+        }>;
+      }>;
+    }) => void;
+    getEffectiveCatalog.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveCatalog = resolve;
+      }),
+    );
+
+    const { container } = render(
+      <WelcomeCenterLayout greeting="你好" onSubmit={vi.fn()} />,
+    );
+
+    resolveCatalog({
+      domains: [
+        {
+          id: "domain-a",
+          name: "文档处理",
+          capabilities: [
+            { id: "capability-a", name: "信息提取", scenarios: [] },
+          ],
+        },
+      ],
+    });
+    await waitFor(() => {
+      expect(
+        container.querySelector(".scenario-preset-selector"),
+      ).toBeInTheDocument();
+    });
+
+    expect(container.querySelector(".welcome-input-card")).toHaveStyle({
+      width: "840px",
+    });
+    expect(container.querySelector(".scenario-preset-selector")).toHaveStyle({
+      width: "840px",
+    });
+  });
+
   it("handles files dispatched by the chat drag-and-drop bridge", async () => {
     const file = new File(["hello"], "demo.txt", { type: "text/plain" });
 

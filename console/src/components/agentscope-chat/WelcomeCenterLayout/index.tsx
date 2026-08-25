@@ -31,6 +31,7 @@ import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
 import VoiceRecorderQuickMenuItem from "@/components/GlobalVoiceRecorder/VoiceRecorderQuickMenuItem";
 import { useVoiceRecorderTrigger } from "@/components/GlobalVoiceRecorder/context";
+import { DESIGN_TOKENS } from "@/config/designTokens";
 import ComposerQuickMenu, {
   ComposerQuickMenuItem,
 } from "@/components/agentscope-chat/ComposerQuickMenu";
@@ -44,6 +45,11 @@ import {
 } from "../chatInputDraft";
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
+const WELCOME_INPUT_CARD_STYLE = {
+  boxSizing: "border-box",
+  maxWidth: "100%",
+  width: `${DESIGN_TOKENS.inputCardWidth + 40}px`,
+} as const;
 const PLACEHOLDER_OPTIONS = [
   "告诉我你要做什么，我将召唤相应专家，为你执行...",
   "有什么要求都告诉我，我会越用越懂你...",
@@ -430,7 +436,11 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
             scenarios,
             selectedScenarioId,
           }) => (
-            <div className="welcome-input-card" ref={setMentionMenuContainer}>
+            <div
+              className="welcome-input-card"
+              ref={setMentionMenuContainer}
+              style={WELCOME_INPUT_CARD_STYLE}
+            >
               {capability && scenarios.length > 0 && (
                 <div className="welcome-scene-strip" aria-label="推荐场景">
                   <span className="welcome-scene-title">推荐场景</span>
