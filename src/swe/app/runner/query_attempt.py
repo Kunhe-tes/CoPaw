@@ -11,7 +11,6 @@ from typing import Any, AsyncGenerator, Protocol
 
 from agentscope.message import Msg, TextBlock
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
-from trace_sdk import global_tracer
 
 from ...config.context import (
     reset_current_file_url_network,
@@ -19,6 +18,7 @@ from ...config.context import (
 )
 from ...runtime_invocation_claims import runtime_invocation_claims_context
 from ...tracing.models import TraceStatus
+from ...tracing.agent_trace_sdk import global_tracer
 from ..agent_context import set_current_agent_id
 from .query_contracts import _QueryPreflight, _QueryRuntime
 from .retry_classifier import is_query_retryable

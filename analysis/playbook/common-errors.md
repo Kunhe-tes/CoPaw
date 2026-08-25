@@ -2,6 +2,29 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## 后端启动报 ModuleNotFoundError: No module named 'trace_sdk'
+
+### 症状
+
+- 开发环境启动 `swe app` 或导入 `swe.app._app` 时，在 AgentTraceSDK
+  导入阶段报 `ModuleNotFoundError: No module named 'trace_sdk'`
+- 环境无法安装私有分发包 `LR34.05-AgentTraceSDK`
+
+### 第一落点
+
+- [src/swe/tracing/agent_trace_sdk.py](../../src/swe/tracing/agent_trace_sdk.py)
+- 私有依赖仍由 [pyproject.toml](../../pyproject.toml) 声明，生产环境默认
+  保持缺包即失败
+
+### 开发环境处理
+
+- 仅在本地无法安装私有包时，显式启动：
+  `SWE_ALLOW_MISSING_TRACE_SDK=true swe app`
+- 该开关只把 AgentTraceSDK 替换为 no-op 实现，不会关闭 Swe 自身的
+  tracing manager
+- 不要将该变量加入部署环境。变量未设置或不是 `true` 时，会重新抛出
+  原始导入错误，防止生产环境静默失去 Agent Trace
+
 ## MCP 报 mcp_transport_error
 
 ### 症状

@@ -21,7 +21,6 @@ from agentscope.agent._react_agent import _MemoryMark
 from agentscope.message import Msg, ToolResultBlock, ToolUseBlock
 from agentscope.tool import Toolkit
 from pydantic import BaseModel
-from trace_sdk import chat_traced
 
 from . import mcp_tool_registrar
 from .agent_runtime_builder import AgentRuntimeBuilder
@@ -72,6 +71,7 @@ from .tools import (
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
+from ..tracing.agent_trace_sdk import chat_traced
 from ..constant import (
     AGENT_INTERRUPT_TIMEOUT,
     AGENT_WATCHDOG_TIMEOUT,

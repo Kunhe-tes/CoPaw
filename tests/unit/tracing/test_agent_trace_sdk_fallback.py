@@ -1,0 +1,64 @@
+# -*- coding: utf-8 -*-
+"""Regression tests for the opt-in development AgentTraceSDK fallback."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+_BLOCK_TRACE_SDK_IMPORT = """
+import builtins
+
+_real_import = builtins.__import__
+
+
+def _blocked_import(name, *args, **kwargs):
+    if name == "trace_sdk" or name.startswith("trace_sdk."):
+        raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+    return _real_import(name, *args, **kwargs)
+
+
+builtins.__import__ = _blocked_import
+"""
+
+
+def _import_app_without_trace_sdk(
+    *,
+    allow_fallback: bool,
+) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT / "src")
+    if allow_fallback:
+        env["SWE_ALLOW_MISSING_TRACE_SDK"] = "true"
+    else:
+        env.pop("SWE_ALLOW_MISSING_TRACE_SDK", None)
+
+    return subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _BLOCK_TRACE_SDK_IMPORT + "\nimport swe.app._app",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def test_app_imports_when_missing_trace_sdk_is_explicitly_allowed() -> None:
+    result = _import_app_without_trace_sdk(allow_fallback=True)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_app_keeps_missing_trace_sdk_as_a_startup_error_by_default() -> None:
+    result = _import_app_without_trace_sdk(allow_fallback=False)
+
+    assert result.returncode != 0
+    assert "ModuleNotFoundError" in result.stderr
+    assert "trace_sdk" in result.stderr

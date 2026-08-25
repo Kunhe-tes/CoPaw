@@ -8,9 +8,9 @@ from typing import Any, AsyncIterator
 
 from agentscope.message import Msg
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
-from trace_sdk import global_tracer
 
 from swe.tracing.models import TraceStatus
+from swe.tracing.agent_trace_sdk import global_tracer
 
 from ..command_dispatch import _is_command, run_command_path
 
@@ -45,10 +45,17 @@ async def stream_admission(
         if not preflight.approval_consumed and query and _is_command(query):
             trace_id = await owner._start_query_trace(request, msgs)
             try:
-                async for message, last in run_command_path(request, msgs, owner):
+                async for message, last in run_command_path(
+                    request,
+                    msgs,
+                    owner,
+                ):
                     yield message, last
             except asyncio.CancelledError:
-                await owner._end_trace_if_needed(trace_id, TraceStatus.CANCELLED)
+                await owner._end_trace_if_needed(
+                    trace_id,
+                    TraceStatus.CANCELLED,
+                )
                 raise
             except Exception as exc:
                 await owner._end_trace_if_needed(

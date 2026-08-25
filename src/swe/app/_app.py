@@ -15,7 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from agentscope_runtime.engine.app import AgentApp
-from trace_sdk.global_tracer import shutdown_global_tracer
 
 from ..config import load_config  # pylint: disable=no-name-in-module
 from ..config.utils import get_config_path
@@ -48,6 +47,7 @@ from .migration import (
 )
 from .channels.registry import register_custom_channel_routes
 from ..tracing import init_trace_manager, close_trace_manager
+from ..tracing.agent_trace_sdk import shutdown_global_tracer
 from ..database import get_database_config
 from .service_heartbeat import start_service_heartbeat, stop_service_heartbeat
 from .crons.notification_worker import CronNotificationWorker

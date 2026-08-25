@@ -26,7 +26,6 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
-from trace_sdk import SpanKind, TraceFields, global_tracer
 
 from ..mcp.http_headers import build_mcp_http_headers
 from ..mcp.lazy_client import LazyMCPClient, get_mcp_tool_discovery_cache
@@ -115,6 +114,7 @@ from ...tracing import (
     has_trace_manager,
     get_trace_manager,
 )
+from ...tracing.agent_trace_sdk import SpanKind, TraceFields, global_tracer
 from ...tracing.models import TraceStatus
 from ...config.context import (
     get_current_passthrough_headers,
