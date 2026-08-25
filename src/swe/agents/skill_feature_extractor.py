@@ -493,7 +493,9 @@ class SkillFeatureExtractor:
         if isinstance(swe_meta, dict):
             uses_tools = swe_meta.get("uses_tools", [])
             if isinstance(uses_tools, list):
-                return [str(t) for t in uses_tools if t]
+                tools = [str(t) for t in uses_tools if t]
+                if tools:
+                    return tools
 
         # Fallback: check top-level metadata
         uses_tools = metadata.get("uses_tools", [])
@@ -625,7 +627,7 @@ class SkillFeatureExtractor:
 
         for match in _FILE_EXTENSION_PATTERN.finditer(body_content):
             ext = "." + match.group(1).lower()
-            if not (1 <= len(ext) <= 5):
+            if not 1 <= len(ext) <= 5:
                 continue
 
             token = match.group(0).strip()

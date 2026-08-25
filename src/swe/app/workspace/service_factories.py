@@ -41,6 +41,8 @@ async def create_chat_service(ws: "Workspace", service):
             archive_store=ConversationArchiveStore(
                 ws.workspace_dir / "dialog",
             ),
+            resource_root=ws.workspace_dir / ".scenario_sessions",
+            expert_dependency_root=ws.workspace_dir,
         )
         ws._service_manager.services["chat_manager"] = cm
         logger.info(f"ChatManager created: {chats_path}")

@@ -32,7 +32,10 @@ dependencies = [
     "segno>=1.6.6",
     "modelscope>=1.35.0",
     "huggingface_hub>=0.20.0",
+    "requests>=2.0.0",
     "pillow>=10.0.0",
+    "numpy>=1.0.0",
+    "pandas>=2.0.0",
     # anyio 4.13.0: _deliver_cancellation busy-loop / getpid storm (CoPaw#2632)
     "anyio>=4.0.0,<4.13.0",
     "boto3>=1.24.1",

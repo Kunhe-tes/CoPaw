@@ -24,6 +24,7 @@ from ...config.context import (
     is_valid_identity_value,
     resolve_runtime_tenant_id,
     resolve_scope_id,
+    resolve_storage_tenant_id,
 )
 from ...config.scope_conversion import (
     decode_canonical_scope_id,
@@ -634,6 +635,7 @@ def _require_internal_token(
 )
 async def ensure_source_template(
     payload: InternalEnsureSourceTemplateRequest,
+    request: Request,
     authorization: Optional[str] = Header(None),
     x_internal_token: Optional[str] = Header(None),
 ) -> InternalEnsureSourceTemplateResponse:
@@ -651,6 +653,12 @@ async def ensure_source_template(
             detail="Source template unavailable",
             headers={"Retry-After": str(exc.retry_after_seconds)},
         ) from exc
+    pool = getattr(request.app.state, "tenant_workspace_pool", None)
+    if pool is not None and result.status in {"created", "repaired"}:
+        scope = resolve_storage_tenant_id("default", payload.source_id) or (
+            f"default_{payload.source_id}"
+        )
+        await pool.invalidate_bootstrap(scope, reason="source_template_reload")
     return InternalEnsureSourceTemplateResponse(
         source_id=result.source_id,
         template_name=result.template_name,

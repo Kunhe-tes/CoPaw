@@ -13,10 +13,12 @@ from .models import (
     EffectiveHookPlan,
     HookConfig,
     HookContext,
+    HookEventName,
     HookHandlerConfig,
     HookMatcherGroupConfig,
     HookSessionOverlay,
     copy_handler_with_overrides,
+    validate_handler_event,
 )
 
 
@@ -26,6 +28,7 @@ class _MatchedHandler:
 
     group_id: str
     handler: HookHandlerConfig
+    source: str
 
 
 class HookResolver:
@@ -47,33 +50,110 @@ class HookResolver:
     def resolve_event_plan(self, context: HookContext) -> EffectiveHookPlan:
         """解析当前事件需要执行的 handler，并保持配置来源顺序。"""
 
-        configs = self._enabled_configs()
-        if not configs:
+        config_sources = self._enabled_config_sources()
+        if not config_sources:
             return self._build_plan(context, ())
 
-        overlay_entries = self._active_overlay_entries(configs)
+        overlay_entries = self._active_overlay_entries(
+            config for _, config in config_sources
+        )
         matched_handlers = self._matching_handlers(
             context,
-            configs,
+            config_sources,
             overlay_entries,
         )
         handlers = self._deduplicated_handlers(context, matched_handlers)
         return self._build_plan(context, handlers)
 
+    def requires_stop_output_buffer(self, context: HookContext) -> bool:
+        return bool(
+            self.resolve_stop_transformer_plan(
+                context,
+                evaluate_if=False,
+            ).handlers,
+        )
+
+    def resolve_stop_transformer_plan(
+        self,
+        context: HookContext,
+        *,
+        evaluate_if: bool = True,
+    ) -> EffectiveHookPlan:
+        if context.hook_event_name != HookEventName.STOP:
+            return self._build_plan(context, ())
+        config_sources = self._enabled_config_sources(
+            sort_skill_sources=True,
+        )
+        overlay_entries = self._active_overlay_entries(
+            config for _, config in config_sources
+        )
+        matched_handlers = self._matching_handlers(
+            context,
+            config_sources,
+            overlay_entries,
+            evaluate_if=evaluate_if,
+            output_transform=True,
+        )
+        return self._build_plan(
+            context,
+            self._deduplicated_handlers(
+                context,
+                matched_handlers,
+                include_source=True,
+            ),
+        )
+
+    def resolve_stop_validator_plan(
+        self,
+        context: HookContext,
+        *,
+        evaluate_if: bool = True,
+    ) -> EffectiveHookPlan:
+        if context.hook_event_name != HookEventName.STOP:
+            return self._build_plan(context, ())
+        config_sources = self._enabled_config_sources()
+        overlay_entries = self._active_overlay_entries(
+            config for _, config in config_sources
+        )
+        matched_handlers = self._matching_handlers(
+            context,
+            config_sources,
+            overlay_entries,
+            evaluate_if=evaluate_if,
+            output_transform=False,
+        )
+        return self._build_plan(
+            context,
+            self._deduplicated_handlers(context, matched_handlers),
+        )
+
     def _enabled_configs(self) -> tuple[HookConfig, ...]:
+        return tuple(config for _, config in self._enabled_config_sources())
+
+    def _enabled_config_sources(
+        self,
+        *,
+        sort_skill_sources: bool = False,
+    ) -> tuple[tuple[str, HookConfig], ...]:
+        loaded_skill_sources = self.session_overlay.loaded_skill_sources
+        if sort_skill_sources:
+            loaded_skill_sources = sorted(
+                loaded_skill_sources,
+                key=lambda source: source.skill_name,
+            )
         loaded_skill_configs = tuple(
-            source.hook_config
-            for source in self.session_overlay.loaded_skill_sources
+            (f"skill:{source.skill_name}", source.hook_config)
+            for source in loaded_skill_sources
             if source.hook_config.enabled
         )
         return tuple(
-            config
-            for config in (
-                self.tenant_config,
-                self.agent_config,
+            source
+            for source in (
+                ("tenant", self.tenant_config),
+                ("agent", self.agent_config),
                 *loaded_skill_configs,
             )
-            if config.enabled
+            if source[1].enabled
         )
 
     def _active_overlay_entries(
@@ -93,13 +173,16 @@ class HookResolver:
     def _matching_handlers(
         self,
         context: HookContext,
-        configs: Iterable[HookConfig],
+        config_sources: Iterable[tuple[str, HookConfig]],
         overlay_entries: dict[str, Any],
+        *,
+        evaluate_if: bool = True,
+        output_transform: bool | None = None,
     ) -> list[_MatchedHandler]:
         matched_handlers: list[_MatchedHandler] = []
         event_name = _event_name_value(context.hook_event_name)
 
-        for config in configs:
+        for source, config in config_sources:
             groups = self._groups_for_event(config, context, event_name)
             for group_index, group in enumerate(groups):
                 if not group.matcher.matches(context):
@@ -110,6 +193,9 @@ class HookResolver:
                         group,
                         context,
                         overlay_entries,
+                        source=source,
+                        evaluate_if=evaluate_if,
+                        output_transform=output_transform,
                     ),
                 )
         return matched_handlers
@@ -134,16 +220,29 @@ class HookResolver:
         group: HookMatcherGroupConfig,
         context: HookContext,
         overlay_entries: dict[str, Any],
+        *,
+        source: str,
+        evaluate_if: bool,
+        output_transform: bool | None,
     ) -> list[_MatchedHandler]:
         group_id = group.id or f"group-{group_index}"
         handlers: list[_MatchedHandler] = []
         for raw_handler in group.hooks:
-            handler = self._apply_overlay(raw_handler, overlay_entries)
+            handler = self._apply_overlay(
+                raw_handler,
+                overlay_entries,
+                context.hook_event_name,
+            )
             if handler is None:
                 continue
-            if not self._handler_can_run(handler, context):
+            if (
+                output_transform is not None
+                and handler.output_transform != output_transform
+            ):
                 continue
-            handlers.append(_MatchedHandler(group_id, handler))
+            if evaluate_if and not self._handler_can_run(handler, context):
+                continue
+            handlers.append(_MatchedHandler(group_id, handler, source))
         return handlers
 
     def _handler_can_run(
@@ -160,6 +259,8 @@ class HookResolver:
         self,
         context: HookContext,
         matched_handlers: Iterable[_MatchedHandler],
+        *,
+        include_source: bool = False,
     ) -> tuple[EffectiveHookHandler, ...]:
         event_name = _event_name_value(context.hook_event_name)
         handlers: list[EffectiveHookHandler] = []
@@ -172,6 +273,8 @@ class HookResolver:
                 matched.group_id,
                 matched.handler,
             )
+            if include_source:
+                dedupe_key = f"{matched.source}:{dedupe_key}"
             if dedupe_key in seen:
                 continue
             seen.add(dedupe_key)
@@ -181,6 +284,7 @@ class HookResolver:
                     group_id=matched.group_id,
                     order=len(handlers),
                     dedupe_key=dedupe_key,
+                    source=matched.source,
                 ),
             )
         return tuple(handlers)
@@ -200,6 +304,7 @@ class HookResolver:
         self,
         handler: HookHandlerConfig,
         entries: dict[str, Any],
+        event_name: HookEventName,
     ) -> HookHandlerConfig | None:
         entry = entries.get(handler.id)
         if entry is None:
@@ -207,7 +312,12 @@ class HookResolver:
         if entry.enabled is False:
             return None
         if entry.overrides:
-            return copy_handler_with_overrides(handler, entry.overrides)
+            updated_handler = copy_handler_with_overrides(
+                handler,
+                entry.overrides,
+            )
+            validate_handler_event(updated_handler, event_name)
+            return updated_handler
         return handler
 
     def _once_already_executed(

@@ -182,6 +182,28 @@
   - 租户 `.secret/envs.json` 中同名 key 不会覆盖
   - `PYTHONPATH` 等解释器边界变量仍被过滤
 
+## Shell 脚本结束后报 _wrap_path_function missing specs
+
+### 症状
+
+- `execute_shell_command` 执行的 Python 脚本本身成功完成
+- 工具输出的 stderr 额外出现：
+  - `Error in sitecustomize; set PYTHONVERBOSE for traceback:`
+  - `TypeError: _wrap_path_function() missing 1 required positional argument: 'specs'`
+
+### 典型原因
+
+- Shell 工具为 Python 子进程生成并注入 `sitecustomize.py`；它在解释器启动时安装租户路径守卫
+- 运行中的服务仍使用旧 guard 源码，其中 `_wrap_path_function(module, name, specs)` 的调用遗漏了第三个参数
+- Python 将 `sitecustomize` 导入失败作为 stderr warning 处理并继续执行，因此错误会和脚本输出一起在工具返回时出现
+
+### 第一落点与处理
+
+- [src/swe/security/python_runtime_path_guard.py](../../src/swe/security/python_runtime_path_guard.py)
+- [tests/unit/test_python_runtime_path_guard.py](../../tests/unit/test_python_runtime_path_guard.py)
+- 现行源码必须保证每个 `_wrap_path_function()` 调用传入 `specs`，并运行 `test_runtime_guard_starts_python_without_sitecustomize_error`
+- 该 guard 被生成到子进程临时目录，修复源码后必须重新安装应用并重启 `swe app`；容器部署则需要重建镜像并滚动更新实例
+
 ## MCP 注册时报 App not Subscribe This MCP Server
 
 ### 症状

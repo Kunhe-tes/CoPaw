@@ -22,6 +22,7 @@ import {
   PlanReviewSnapshot,
 } from "./PlanInteractionCards";
 import { ChatPlanReviewRenderProvider } from "../planReviewRenderContext";
+import type { ChatPlanReviewRenderContextValue } from "../planReviewRenderContext";
 import styles from "./PlanInteractionCards.module.less";
 
 const stylesheet = readFileSync(
@@ -117,25 +118,24 @@ function renderPlanReviewMessage(
 
 function renderActiveComposer(
   messages: IAgentScopeRuntimeWebUIMessage<unknown>[],
-  callbacks: Partial<
-    React.ComponentProps<typeof ActivePlanInteractionComposer>
-  > = {},
+  callbacks: ChatPlanReviewRenderContextValue = {},
 ) {
   return render(
-    <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
-      <ChatAnywhereMessagesContext.Provider
-        value={{
-          messages,
-          setMessages: vi.fn(),
-          getMessages: () => messages,
-        }}
-      >
-        <ActivePlanInteractionComposer
-          defaultComposer={<div data-testid="default-composer">composer</div>}
-          {...callbacks}
-        />
-      </ChatAnywhereMessagesContext.Provider>
-    </ChatAnywhereSessionsContext.Provider>,
+    <ChatPlanReviewRenderProvider value={callbacks}>
+      <ChatAnywhereSessionsContext.Provider value={createSessionContextValue()}>
+        <ChatAnywhereMessagesContext.Provider
+          value={{
+            messages,
+            setMessages: vi.fn(),
+            getMessages: () => messages,
+          }}
+        >
+          <ActivePlanInteractionComposer
+            defaultComposer={<div data-testid="default-composer">composer</div>}
+          />
+        </ChatAnywhereMessagesContext.Provider>
+      </ChatAnywhereSessionsContext.Provider>
+    </ChatPlanReviewRenderProvider>,
   );
 }
 
@@ -229,11 +229,51 @@ function createReviewMessage({
   };
 }
 
+function createGoalProposalMessage(): IAgentScopeRuntimeWebUIMessage<unknown> {
+  return {
+    id: "goal-proposal-message",
+    role: "assistant",
+    cards: [{
+      code: "PlanInteraction",
+      data: {
+        card_type: "goal_proposal",
+        objective: "Ship Goal Runtime",
+        completion_criteria: [{
+          requirement: "Runtime works",
+          observable_assertion: "Goal completes",
+          verification_method: "command: pytest tests/unit/app/goals -q",
+          expected_outcome: "exit 0",
+        }],
+        constraints: { must_preserve: ["Chat"], must_not_do: [] },
+        autonomy_boundary: "No deploy",
+      },
+    }],
+  };
+}
+
 describe("Plan interaction cards", () => {
   afterEach(() => {
     cleanup();
     (window as Window & { currentSessionId?: string }).currentSessionId =
       undefined;
+  });
+
+  it("renders Goal Contract Draft in the composer and creates it only after confirmation", async () => {
+    const onConfirmGoalProposal = vi.fn().mockResolvedValue({ goal_id: "goal-1" });
+    const events = captureSubmitEvents();
+    renderActiveComposer([createGoalProposalMessage()], { onConfirmGoalProposal });
+
+    expect(screen.getByLabelText("Goal Contract Draft")).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("整体目标"), {
+      target: { value: "Edited Goal" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "确认并开始执行" }));
+
+    await waitFor(() => expect(onConfirmGoalProposal).toHaveBeenCalledWith(
+      expect.objectContaining({ objective: "Edited Goal" }),
+    ));
+    await waitFor(() => expect(events.handler).toHaveBeenCalled());
+    events.cleanup();
   });
 
   it("hides a dismissed clarification only for the current render", () => {

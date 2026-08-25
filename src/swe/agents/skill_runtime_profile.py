@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import frontmatter
 from yaml import YAMLError
@@ -22,6 +23,7 @@ class SkillRuntimeProfile:
     declared_tools: list[str]
     declared_tool_bootstrap_allowed: bool
     reason: str
+    skill_feature: Any | None = None
 
 
 def build_skill_runtime_profile(
@@ -40,6 +42,10 @@ def build_skill_runtime_profile(
     swe_meta = metadata.get("swe", {}) if isinstance(metadata, dict) else {}
     declared_tools = _extract_uses_tools(swe_meta, metadata)
     has_hook_config = _has_enabled_hook_config(skill_dir)
+    skill_feature = _build_skill_feature_from_content(
+        content,
+        skill_name,
+    )
 
     declared_tool_bootstrap_allowed, reason = _resolve_runtime_constraints(
         has_hook_config=has_hook_config,
@@ -55,6 +61,7 @@ def build_skill_runtime_profile(
         declared_tools=declared_tools,
         declared_tool_bootstrap_allowed=declared_tool_bootstrap_allowed,
         reason=reason,
+        skill_feature=skill_feature,
     )
 
 
@@ -85,7 +92,9 @@ def _extract_uses_tools(
     if isinstance(swe_meta, dict):
         uses_tools = swe_meta.get("uses_tools", [])
         if isinstance(uses_tools, list):
-            return [str(item) for item in uses_tools if item]
+            tools = [str(item) for item in uses_tools if item]
+            if tools:
+                return tools
     if isinstance(metadata, dict):
         uses_tools = metadata.get("uses_tools", [])
         if isinstance(uses_tools, list):
@@ -104,6 +113,27 @@ def _load_frontmatter_safely(
         return post, ""
     except (ValueError, TypeError, YAMLError):
         return {}, "frontmatter_parse_failed"
+
+
+def _build_skill_feature_from_content(content: str, skill_name: str) -> Any:
+    """Extract inference features from the already loaded SKILL.md content."""
+    if not content:
+        return None
+    try:
+        from .skill_feature_extractor import get_skill_feature_extractor
+        from .skill_feature_inferencer import get_skill_feature_inferencer
+
+        extractor = get_skill_feature_extractor()
+        inferencer = get_skill_feature_inferencer()
+        features = extractor.extract_from_content(content, skill_name)
+        existing_feature = inferencer.get_feature(skill_name)
+        return extractor.build_skill_feature(
+            skill_name,
+            features,
+            existing_feature,
+        )
+    except Exception:
+        return None
 
 
 def _has_enabled_hook_config(skill_dir: Path) -> bool:

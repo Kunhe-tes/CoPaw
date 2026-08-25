@@ -173,9 +173,25 @@ export interface ChatPlanReviewCardData {
   feedback?: string;
 }
 
+export interface ChatGoalCompletionCriterion {
+  requirement: string;
+  observable_assertion: string;
+  verification_method: string;
+  expected_outcome: string;
+}
+
+export interface ChatGoalProposalCardData {
+  card_type: "goal_proposal";
+  objective: string;
+  completion_criteria: ChatGoalCompletionCriterion[];
+  constraints: { must_preserve: string[]; must_not_do: string[] };
+  autonomy_boundary: string;
+}
+
 export type ChatPlanInteractionCardData =
   | ChatPlanClarificationCardData
-  | ChatPlanReviewCardData;
+  | ChatPlanReviewCardData
+  | ChatGoalProposalCardData;
 
 function isStringArray(value: unknown): value is string[] {
   return (
@@ -196,6 +212,42 @@ function isPlanClarificationOption(
 
 function isPlanReviewDecision(value: unknown): value is PlanReviewDecision {
   return value === "revise" || value === "execute" || value === "exit_plan";
+}
+
+function normalizeGoalCompletionCriteria(
+  value: unknown,
+): ChatGoalCompletionCriterion[] | null {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const required = [
+    "requirement",
+    "observable_assertion",
+    "verification_method",
+    "expected_outcome",
+  ] as const;
+  const normalized = value.map((item) => {
+    if (!item || typeof item !== "object") return null;
+    const record = item as Record<string, unknown>;
+    if (
+      required.some(
+        (key) => typeof record[key] !== "string" || !record[key].trim(),
+      )
+    ) {
+      return null;
+    }
+    return Object.fromEntries(
+      required.map((key) => [key, record[key] as string]),
+    ) as ChatGoalCompletionCriterion;
+  });
+  return normalized.every(Boolean)
+    ? (normalized as ChatGoalCompletionCriterion[])
+    : null;
+}
+
+function normalizeGoalStringList(value: unknown): string[] | null {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    return null;
+  }
+  return value.map((item) => item.trim()).filter(Boolean);
 }
 
 function normalizePlanClarificationFields(
@@ -307,6 +359,38 @@ function normalizePlanInteractionCard(
         ? card.submitted_decision
         : undefined,
       feedback: typeof card.feedback === "string" ? card.feedback : undefined,
+    };
+  }
+
+  if (card.card_type === "goal_proposal") {
+    const criteria = normalizeGoalCompletionCriteria(card.completion_criteria);
+    const constraints = card.constraints;
+    if (
+      typeof card.objective !== "string" ||
+      !card.objective.trim() ||
+      !criteria ||
+      !constraints ||
+      typeof constraints !== "object" ||
+      !normalizeGoalStringList((constraints as Record<string, unknown>).must_preserve) ||
+      !normalizeGoalStringList((constraints as Record<string, unknown>).must_not_do) ||
+      typeof card.autonomy_boundary !== "string" ||
+      !card.autonomy_boundary.trim()
+    ) {
+      return null;
+    }
+    return {
+      card_type: "goal_proposal",
+      objective: card.objective.trim(),
+      completion_criteria: criteria,
+      constraints: {
+        must_preserve: normalizeGoalStringList(
+          (constraints as Record<string, unknown>).must_preserve,
+        )!,
+        must_not_do: normalizeGoalStringList(
+          (constraints as Record<string, unknown>).must_not_do,
+        )!,
+      },
+      autonomy_boundary: card.autonomy_boundary.trim(),
     };
   }
 

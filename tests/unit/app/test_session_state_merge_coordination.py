@@ -167,8 +167,8 @@ def _make_runner(monkeypatch, tmp_path: Path, session) -> AgentRunner:
     runner.session = session
     setattr(runner, "_chat_manager", None)
     monkeypatch.setattr(
-        "swe.app.runner.runner._build_and_connect_mcp_clients",
-        AsyncMock(return_value=[]),
+        "swe.app.runner.runner._build_lazy_mcp_clients",
+        lambda *_args, **_kwargs: [],
     )
     monkeypatch.setattr(
         "swe.app.runner.runner._cleanup_mcp_clients",

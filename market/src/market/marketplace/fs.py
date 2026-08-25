@@ -219,7 +219,7 @@ def normalize_skill_name(name: str) -> str:
 
 def _validate_path_segment(value: str, name: str = "segment") -> None:
     """校验系统标识符（source_id, item_id, user_id, agent_id）仅包含 ASCII 安全字符."""
-    if not _SAFE_SYSTEM_SEGMENT_RE.match(value):
+    if value in {".", ".."} or not _SAFE_SYSTEM_SEGMENT_RE.match(value):
         raise ValueError(
             f"Invalid {name} {value!r}: only alphanumerics, underscores, hyphens, and dots are allowed",
         )
@@ -272,6 +272,85 @@ def get_skill_dir(
     return (
         get_marketplace_dir(marketplace_root, source_id) / "skills" / item_id
     )
+
+
+def get_expert_dir(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    _validate_path_segment(source_id, "source_id")
+    _validate_path_segment(item_id, "item_id")
+    return (
+        get_marketplace_dir(marketplace_root, source_id) / "experts" / item_id
+    )
+
+
+def get_expert_versions_root(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    return get_expert_dir(marketplace_root, source_id, item_id) / "versions"
+
+
+def get_expert_version_dir(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+    version_id: str,
+) -> Path:
+    _validate_path_segment(version_id, "version_id")
+    return (
+        get_expert_versions_root(marketplace_root, source_id, item_id)
+        / version_id
+    )
+
+
+def get_expert_versions_manifest_path(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    return (
+        get_expert_dir(marketplace_root, source_id, item_id) / "versions.json"
+    )
+
+
+def get_expert_definition_path(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    return (
+        get_expert_dir(marketplace_root, source_id, item_id)
+        / "definition.toml"
+    )
+
+
+def get_expert_scan_result_path(
+    marketplace_root: Path,
+    source_id: str,
+    item_id: str,
+) -> Path:
+    return (
+        get_expert_dir(marketplace_root, source_id, item_id)
+        / "scan_result.json"
+    )
+
+
+def get_user_expert_dir(
+    swe_root: Path,
+    user_id: str,
+    agent_id: str = DEFAULT_AGENT_ID,
+    source_id: str | None = None,
+) -> Path:
+    """返回一个 Agent Profile 的本地专家目录。"""
+    effective_user_id = resolve_effective_user_id(user_id, source_id)
+    _validate_path_segment(effective_user_id, "user_id")
+    _validate_path_segment(agent_id, "agent_id")
+    user_root = migrate_legacy_scope_dir_if_needed(swe_root, effective_user_id)
+    return user_root / "workspaces" / agent_id / "agents"
 
 
 def resolve_effective_user_id(

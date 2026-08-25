@@ -18,9 +18,12 @@ from unittest.mock import AsyncMock
 
 from swe.agents.skill_tool_registry import (
     SkillToolRegistry,
+    build_skill_tool_registry,
+    build_skill_tool_registry_from_profiles,
     get_skill_tool_registry,
     reset_skill_tool_registry,
 )
+from swe.agents.skill_runtime_profile import SkillRuntimeProfile
 from swe.agents.skill_feature_inferencer import (
     SkillFeature,
     SkillFeatureInferencer,
@@ -161,6 +164,117 @@ class TestSkillToolRegistry:
         registry3 = get_skill_tool_registry()
 
         assert registry3 is not registry1
+
+    def test_build_skill_tool_registry_returns_independent_snapshots(
+        self,
+        tmp_path,
+    ):
+        """Building one workspace registry must not overwrite another one."""
+        first_skill = tmp_path / "first" / "skills" / "alpha"
+        first_skill.mkdir(parents=True)
+        (first_skill / "SKILL.md").write_text(
+            "---\nmetadata:\n  swe:\n    uses_tools:\n      - read_file\n---\n",
+            encoding="utf-8",
+        )
+        second_skill = tmp_path / "second" / "skills" / "beta"
+        second_skill.mkdir(parents=True)
+        (second_skill / "SKILL.md").write_text(
+            "---\nmetadata:\n  swe:\n    uses_tools:\n      - write_file\n---\n",
+            encoding="utf-8",
+        )
+
+        first_registry = build_skill_tool_registry(
+            tmp_path / "first",
+            ["alpha"],
+        )
+        second_registry = build_skill_tool_registry(
+            tmp_path / "second",
+            ["beta"],
+        )
+
+        assert first_registry is not second_registry
+        assert first_registry.get_skills_for_tool("read_file") == ["alpha"]
+        assert first_registry.get_skills_for_tool("write_file") == []
+        assert second_registry.get_skills_for_tool("read_file") == []
+        assert second_registry.get_skills_for_tool("write_file") == ["beta"]
+
+    def test_build_skill_tool_registry_from_profiles_avoids_file_reads(
+        self,
+        monkeypatch,
+    ):
+        """Profile-based registry reuse must not reread SKILL.md."""
+
+        def fail_read(_path):
+            raise AssertionError("SKILL.md should not be read again")
+
+        monkeypatch.setattr(
+            "swe.agents.skill_tool_registry.read_text_file_with_encoding_fallback",
+            fail_read,
+        )
+
+        registry = build_skill_tool_registry_from_profiles(
+            {
+                "alpha": SkillRuntimeProfile(
+                    skill_name="alpha",
+                    trace_attributable=True,
+                    has_hook_config=False,
+                    declared_tools=["read_file", "grep_*"],
+                    declared_tool_bootstrap_allowed=True,
+                    reason="declared_tool_bootstrap_allowed",
+                ),
+                "beta": SkillRuntimeProfile(
+                    skill_name="beta",
+                    trace_attributable=True,
+                    has_hook_config=False,
+                    declared_tools=[],
+                    declared_tool_bootstrap_allowed=True,
+                    reason="declared_tool_bootstrap_allowed",
+                ),
+            },
+        )
+
+        assert registry.get_skills_for_tool("read_file") == ["alpha"]
+        assert registry.get_skills_for_tool("grep_search") == ["alpha"]
+        assert registry.get_skills_for_tool("write_file") == []
+
+    def test_build_skill_tool_registry_from_profiles_registers_features(
+        self,
+        monkeypatch,
+    ):
+        """Profile-based registry must preserve dynamic feature inference."""
+
+        def fail_read(_path):
+            raise AssertionError("SKILL.md should not be read again")
+
+        monkeypatch.setattr(
+            "swe.agents.skill_tool_registry.read_text_file_with_encoding_fallback",
+            fail_read,
+        )
+
+        build_skill_tool_registry_from_profiles(
+            {
+                "alpha": SkillRuntimeProfile(
+                    skill_name="alpha",
+                    trace_attributable=True,
+                    has_hook_config=False,
+                    declared_tools=["read_file"],
+                    declared_tool_bootstrap_allowed=True,
+                    reason="declared_tool_bootstrap_allowed",
+                    skill_feature=SkillFeature(
+                        skill_name="alpha",
+                        file_extensions=[".alpha"],
+                        keywords=["alpha-keyword"],
+                        tools_hint=["read_file"],
+                    ),
+                ),
+            },
+        )
+
+        inferencer = get_skill_feature_inferencer()
+        feature = inferencer.get_feature("alpha")
+        assert feature is not None
+        assert feature.file_extensions == [".alpha"]
+        assert feature.keywords == ["alpha-keyword"]
 
 
 # =============================================================================

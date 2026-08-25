@@ -646,6 +646,25 @@ def _extract_context_references(
     return request_data.get("context_references")
 
 
+def _extract_selected_expert_id(
+    request_data: Union[AgentRequest, dict],
+) -> str | None:
+    """Keep an explicit expert selection available for the runner."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "selected_expert_id", None)
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("selected_expert_id")
+    else:
+        value = request_data.get("selected_expert_id")
+        channel_meta = request_data.get("channel_meta")
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("selected_expert_id")
+    if isinstance(value, str):
+        value = value.strip()
+    return value or None
+
+
 def _extract_plan_mode(request_data: Union[AgentRequest, dict]) -> str | None:
     """Keep supported Plan Mode requests in Console channel metadata."""
     if isinstance(request_data, AgentRequest):
@@ -654,6 +673,36 @@ def _extract_plan_mode(request_data: Union[AgentRequest, dict]) -> str | None:
     else:
         mode = request_data.get("mode")
     return mode if mode in {"plan", "normal"} else None
+
+
+def _extract_goal_id(request_data: Union[AgentRequest, dict]) -> str | None:
+    """Carry the server-owned Goal id into the existing Console run path."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "goal_id", None) or channel_meta.get("goal_id")
+    else:
+        value = request_data.get("goal_id")
+        channel_meta = request_data.get("channel_meta")
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("goal_id")
+    if not isinstance(value, str) or not value.strip() or len(value) > 128:
+        return None
+    return value.strip()
+
+
+def _extract_goal_mode_enabled(request_data: Union[AgentRequest, dict]) -> bool:
+    """Read the explicit, one-request Goal Mode selector."""
+    if isinstance(request_data, AgentRequest):
+        channel_meta = getattr(request_data, "channel_meta", None) or {}
+        value = getattr(request_data, "goal_mode_enabled", None)
+        if value is None:
+            value = channel_meta.get("goal_mode_enabled")
+    else:
+        value = request_data.get("goal_mode_enabled")
+        channel_meta = request_data.get("channel_meta")
+        if value is None and isinstance(channel_meta, dict):
+            value = channel_meta.get("goal_mode_enabled")
+    return value is True
 
 
 def _local_path_from_console_attachment_url(url: object) -> Path | None:
@@ -775,7 +824,11 @@ def _extract_wplus_user_scope(
         direct = request_data.get("user_scope")
     if direct is not None:
         return direct
-    return channel_meta.get("user_scope") if isinstance(channel_meta, dict) else None
+    return (
+        channel_meta.get("user_scope")
+        if isinstance(channel_meta, dict)
+        else None
+    )
 
 
 def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
@@ -833,9 +886,20 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     plan_mode = _extract_plan_mode(request_data)
     if plan_mode is not None:
         native_payload["meta"]["mode"] = plan_mode
+    goal_id = _extract_goal_id(request_data)
+    if goal_id is not None:
+        native_payload["meta"]["goal_id"] = goal_id
+    if _extract_goal_mode_enabled(request_data):
+        native_payload["meta"]["goal_mode_enabled"] = True
     context_references = _extract_context_references(request_data)
     if context_references is not None:
         native_payload["meta"]["context_references"] = context_references
+    selected_expert_id = _extract_selected_expert_id(request_data)
+    if selected_expert_id is not None:
+        native_payload["meta"]["selected_expert_id"] = selected_expert_id
+    scenario_preset_id = _extract_scenario_preset_id(request_data)
+    if scenario_preset_id is not None:
+        native_payload["meta"]["scenario_preset_id"] = scenario_preset_id
     memory_user_scope = _extract_wplus_user_scope(request_data)
     if memory_user_scope is not None:
         native_payload["meta"]["wplus_user_scope"] = memory_user_scope
@@ -844,6 +908,31 @@ def _extract_session_and_payload(request_data: Union[AgentRequest, dict]):
     if bbk_id:
         native_payload["meta"]["bbk_id"] = bbk_id
     return native_payload
+
+
+def _extract_scenario_preset_id(
+    request_data: Union[AgentRequest, dict],
+) -> str | None:
+    """Read the optional first-message scenario selection without trusting text."""
+    mapping = (
+        request_data
+        if isinstance(request_data, dict)
+        else (
+            request_data.model_dump()
+            if hasattr(request_data, "model_dump")
+            else dict(getattr(request_data, "__dict__", {}))
+        )
+    )
+    value = mapping.get("scenario_preset_id")
+    if value is None:
+        return None
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value.strip()) > 64
+    ):
+        raise ValueError("Invalid scenario_preset_id")
+    return value.strip()
 
 
 def _derive_chat_name(native_payload: dict) -> str:
@@ -930,37 +1019,107 @@ async def _start_new_chat(
     """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
     msgid = str(uuid.uuid4())
     native_payload["meta"]["msgid"] = msgid
-    chat = await workspace.chat_manager.get_or_create_chat(
-        session_id,
-        native_payload["sender_id"],
-        native_payload["channel_id"],
-        name=_derive_chat_name(native_payload),
-        meta=(
-            {
-                "agent_id": workspace.agent_id,
-            }
-            if getattr(workspace, "agent_id", None)
-            else None
-        ),
+    scenario_preset_id = native_payload["meta"].get("scenario_preset_id")
+    chat_meta = (
+        {"agent_id": workspace.agent_id}
+        if getattr(workspace, "agent_id", None)
+        else {}
     )
+    created = False
+    if scenario_preset_id:
+        from ..scenario_preset.router import (
+            get_service as get_scenario_service,
+        )
+        from ..scenario_preset.runtime import initialize_scenario_snapshot
+
+        async def snapshot_factory(chat):
+            workspace_dir = getattr(workspace, "workspace_dir", None)
+            resource_root = (
+                Path(workspace_dir) / ".scenario_sessions" / chat.id
+                if workspace_dir is not None
+                else None
+            )
+            return await initialize_scenario_snapshot(
+                service=get_scenario_service(),
+                source_id=native_payload["meta"]["source_id"],
+                scenario_id=scenario_preset_id,
+                agent_id=getattr(workspace, "agent_id", None),
+                workspace_dir=workspace_dir,
+                agent_config=getattr(workspace, "config", None),
+                bbk_id=native_payload["meta"].get("bbk_id"),
+                session_resource_root=resource_root,
+            )
+
+        try:
+            chat, created = (
+                await workspace.chat_manager.get_or_create_scenario_chat(
+                    session_id,
+                    native_payload["sender_id"],
+                    native_payload["channel_id"],
+                    _derive_chat_name(native_payload),
+                    chat_meta,
+                    snapshot_factory,
+                )
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Scenario preset is no longer available",
+            ) from exc
+    else:
+        chat = await workspace.chat_manager.get_or_create_chat(
+            session_id,
+            native_payload["sender_id"],
+            native_payload["channel_id"],
+            name=_derive_chat_name(native_payload),
+            meta=chat_meta or None,
+        )
+    if scenario_preset_id:
+        from ..scenario_preset.runtime import (
+            get_scenario_snapshot,
+        )
+
+        snapshot = get_scenario_snapshot(chat.meta)
+        if snapshot is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Scenario selection is only available for a new chat",
+            )
+        if snapshot.get("scenario_id") != scenario_preset_id:
+            raise HTTPException(
+                status_code=409,
+                detail="Scenario selection is locked for this chat",
+            )
+        if snapshot.get("agent_id") not in (None, workspace.agent_id):
+            raise HTTPException(
+                status_code=409,
+                detail="Scenario chat is bound to another Agent",
+            )
+        native_payload["meta"]["scenario_preset_snapshot"] = snapshot
+        native_payload["meta"]["scenario_preset_snapshot_source"] = "chat_meta"
     native_payload["meta"]["chat_id"] = chat.id
     # Inject session_channel from chat record so downstream (e.g. session-end
     # push) can identify the session's original channel (e.g. zhaohu).
     if chat.channel and chat.channel != "console":
         native_payload["meta"]["session_channel"] = chat.channel
-    if before_start is None:
-        queue, is_new_run = await tracker.attach_or_start(
-            chat.id,
-            native_payload,
-            console_channel.stream_one,
-        )
-    else:
-        queue, is_new_run = await tracker.attach_or_start(
-            chat.id,
-            native_payload,
-            console_channel.stream_one,
-            before_start=before_start,
-        )
+    try:
+        if before_start is None:
+            queue, is_new_run = await tracker.attach_or_start(
+                chat.id,
+                native_payload,
+                console_channel.stream_one,
+            )
+        else:
+            queue, is_new_run = await tracker.attach_or_start(
+                chat.id,
+                native_payload,
+                console_channel.stream_one,
+                before_start=before_start,
+            )
+    except BaseException:
+        if scenario_preset_id and created:
+            await workspace.chat_manager.delete_chats([chat.id])
+        raise
     if include_run_status:
         return queue, chat.id, msgid, is_new_run
     return queue, chat.id, msgid
@@ -1015,7 +1174,10 @@ async def post_console_chat(
     workspace = await get_agent_for_request(request)
     console_channel = await workspace.channel_manager.get_channel("console")
     if console_channel is None:
-        raise HTTPException(status_code=503, detail="Channel Console not found")
+        raise HTTPException(
+            status_code=503,
+            detail="Channel Console not found",
+        )
     try:
         native_payload = _extract_session_and_payload(request_data)
     except ValueError as e:
@@ -1068,8 +1230,15 @@ async def post_console_chat(
 # post_console_chat helpers
 # ---------------------------------------------------------------------------
 
+
 class _SuppressionContext:
-    __slots__ = ("suppress_implicit", "service", "proposal_id", "token", "entry_text")
+    __slots__ = (
+        "suppress_implicit",
+        "service",
+        "proposal_id",
+        "token",
+        "entry_text",
+    )
 
     def __init__(
         self,
@@ -1086,6 +1255,7 @@ class _SuppressionContext:
         self.token = token
         self.entry_text = entry_text
 
+
 def _inject_request_metadata(
     request: Request,
     native_payload: dict[str, Any],
@@ -1093,7 +1263,11 @@ def _inject_request_metadata(
     b3_trace_id = _extract_b3_trace_id(request)
     if b3_trace_id:
         native_payload["meta"]["b3_trace_id"] = b3_trace_id
-    source_id = getattr(request.state, "source_id", None) or request.headers.get(
+    source_id = getattr(
+        request.state,
+        "source_id",
+        None,
+    ) or request.headers.get(
         "X-Source-Id",
     )
     if not source_id:
@@ -1102,6 +1276,7 @@ def _inject_request_metadata(
             detail="X-Source-Id header is required",
         )
     native_payload["meta"]["source_id"] = source_id
+
 
 def _resolve_console_identity(
     request: Request,
@@ -1244,8 +1419,12 @@ def _check_wplus_active_session_lock(
     if chat is None or not all((tid, sid, uid, aid)):
         return None
     ownership = OwnershipTuple(
-        tenant_id=tid, source_id=sid, user_id=uid, agent_id=aid,
-        chat_id=chat.id, logical_chat_session_id=chat.session_id,
+        tenant_id=tid,
+        source_id=sid,
+        user_id=uid,
+        agent_id=aid,
+        chat_id=chat.id,
+        logical_chat_session_id=chat.session_id,
     )
     wplus_service = WPlusSopService(workspace=workspace, ownership=ownership)
     active_session = wplus_service.get_active_session()
@@ -1283,8 +1462,12 @@ def _resolve_wplus_suppression(
     if not all((tid, sid, uid, aid)):
         raise HTTPException(status_code=400, detail="Identity required")
     ownership = OwnershipTuple(
-        tenant_id=tid, source_id=sid, user_id=uid, agent_id=aid,
-        chat_id=chat.id, logical_chat_session_id=chat.session_id,
+        tenant_id=tid,
+        source_id=sid,
+        user_id=uid,
+        agent_id=aid,
+        chat_id=chat.id,
+        logical_chat_session_id=chat.session_id,
     )
     wplus_service = WPlusSopService(workspace=workspace, ownership=ownership)
     suppress_implicit = wplus_service.validate_suppression(
@@ -1293,7 +1476,10 @@ def _resolve_wplus_suppression(
         original_text=entry_text,
     )
     if not suppress_implicit:
-        raise HTTPException(status_code=404, detail="W+ SOP proposal not found")
+        raise HTTPException(
+            status_code=404,
+            detail="W+ SOP proposal not found",
+        )
     return (
         True,
         wplus_service,
@@ -1320,7 +1506,9 @@ async def _try_wplus_entry_intercept(
     from ..wplus_sop.service import WPlusSopService
 
     get_chat_by_session = getattr(
-        workspace.chat_manager, "get_chat_by_session", None,
+        workspace.chat_manager,
+        "get_chat_by_session",
+        None,
     )
     tid = identity["tenant_id"]
     sid = identity["source_id"]
@@ -1339,13 +1527,28 @@ async def _try_wplus_entry_intercept(
     entry_text = extract_entry_text(native_payload["content_parts"])
 
     active_session = _check_wplus_active_session_lock(
-        workspace, chat, tid, sid, uid, aid,
+        workspace,
+        chat,
+        tid,
+        sid,
+        uid,
+        aid,
     )
 
-    suppress_implicit, suppression_service, suppression_proposal_id, suppression_token = (
-        _resolve_wplus_suppression(
-            request_mapping, chat, entry_text, tid, sid, uid, aid, workspace,
-        )
+    (
+        suppress_implicit,
+        suppression_service,
+        suppression_proposal_id,
+        suppression_token,
+    ) = _resolve_wplus_suppression(
+        request_mapping,
+        chat,
+        entry_text,
+        tid,
+        sid,
+        uid,
+        aid,
+        workspace,
     )
 
     classification = classify_wplus_entry(
@@ -1356,13 +1559,17 @@ async def _try_wplus_entry_intercept(
         suppress_entry=suppress_implicit,
     )
     if not classification.should_offer:
-        return None, _SuppressionContext(
-            suppress_implicit=suppress_implicit,
-            service=suppression_service,
-            proposal_id=suppression_proposal_id,
-            token=suppression_token,
-            entry_text=entry_text,
-        ) if suppress_implicit else None
+        return None, (
+            _SuppressionContext(
+                suppress_implicit=suppress_implicit,
+                service=suppression_service,
+                proposal_id=suppression_proposal_id,
+                token=suppression_token,
+                entry_text=entry_text,
+            )
+            if suppress_implicit
+            else None
+        )
 
     if active_session is not None:
         raise HTTPException(
@@ -1379,13 +1586,19 @@ async def _try_wplus_entry_intercept(
         )
     if chat is None:
         chat = await workspace.chat_manager.get_or_create_chat(
-            session_id, uid, native_payload["channel_id"],
+            session_id,
+            uid,
+            native_payload["channel_id"],
             name=_derive_chat_name(native_payload),
             meta={"agent_id": aid},
         )
     ownership = OwnershipTuple(
-        tenant_id=tid, source_id=sid, user_id=uid, agent_id=aid,
-        chat_id=chat.id, logical_chat_session_id=chat.session_id,
+        tenant_id=tid,
+        source_id=sid,
+        user_id=uid,
+        agent_id=aid,
+        chat_id=chat.id,
+        logical_chat_session_id=chat.session_id,
     )
     wplus_service = WPlusSopService(workspace=workspace, ownership=ownership)
     try:
@@ -1423,13 +1636,17 @@ async def _try_wplus_entry_intercept(
         }
         yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-    return StreamingResponse(
-        entry_event_generator(),
-        media_type="text/event-stream",
-        headers=_console_chat_stream_headers(
-            session_id=session_id, msgid=None,
+    return (
+        StreamingResponse(
+            entry_event_generator(),
+            media_type="text/event-stream",
+            headers=_console_chat_stream_headers(
+                session_id=session_id,
+                msgid=None,
+            ),
         ),
-    ), None
+        None,
+    )
 
 
 async def _dispatch_console_stream(
@@ -1449,7 +1666,9 @@ async def _dispatch_console_stream(
 
     if is_reconnect:
         queue, run_key = await _attach_reconnect_queue(
-            workspace, tracker, session_id,
+            workspace,
+            tracker,
+            session_id,
             native_payload["channel_id"],
         )
         if queue is None:
@@ -1459,12 +1678,16 @@ async def _dispatch_console_stream(
             )
     else:
         before_start = _build_suppression_before_start(
-            suppression_ctx, native_payload,
+            suppression_ctx,
+            native_payload,
         )
         try:
             queue, run_key, msgid, is_new_run = await _start_new_chat(
-                workspace, tracker, console_channel,
-                session_id, native_payload,
+                workspace,
+                tracker,
+                console_channel,
+                session_id,
+                native_payload,
                 before_start=before_start,
                 include_run_status=True,
             )
@@ -1472,7 +1695,12 @@ async def _dispatch_console_stream(
             _release_suppression_on_failure(suppression_ctx, native_payload)
             raise
         _validate_suppression_new_run(
-            suppression_ctx, tracker, run_key, queue, is_new_run, native_payload,
+            suppression_ctx,
+            tracker,
+            run_key,
+            queue,
+            is_new_run,
+            native_payload,
         )
 
     async def event_generator() -> AsyncGenerator[str, None]:
@@ -1492,7 +1720,8 @@ async def _dispatch_console_stream(
         _stream_with_keepalive(event_generator()),
         media_type="text/event-stream",
         headers=_console_chat_stream_headers(
-            session_id=session_id, msgid=msgid,
+            session_id=session_id,
+            msgid=msgid,
         ),
     )
 

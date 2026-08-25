@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from swe.agents.skill_tool_registry import SkillToolRegistry
 from swe.tracing.config import TracingConfig
 from swe.tracing.manager import (
     TraceContext,
@@ -1277,6 +1278,44 @@ class TestSessionName:
 
         detector_instance.detect_from_user_message.assert_not_called()
         detector_instance.start_skill.assert_not_awaited()
+        await manager.close()
+
+    @pytest.mark.asyncio
+    async def test_setup_skill_detector_uses_supplied_skill_registry(
+        self,
+        enabled_config,
+        mock_db,
+        monkeypatch,
+    ):
+        """追踪技能探测器应使用调用方提供的 registry 快照。"""
+        manager = TraceManager(enabled_config, mock_db)
+        await manager.initialize()
+        trace_id = await manager.start_trace(
+            user_id="user-1",
+            session_id="session-1",
+            channel="console",
+            source_id="source-1",
+        )
+        registry = SkillToolRegistry()
+        captured_kwargs = {}
+        detector_instance = MagicMock()
+
+        def build_detector(**kwargs):
+            captured_kwargs.update(kwargs)
+            return detector_instance
+
+        monkeypatch.setattr(
+            "swe.agents.skill_invocation_detector.SkillInvocationDetector",
+            build_detector,
+        )
+
+        await manager.setup_skill_detector(
+            trace_id=trace_id,
+            enabled_skills=["xlsx"],
+            skill_tool_registry=registry,
+        )
+
+        assert captured_kwargs["registry"] is registry
         await manager.close()
 
     def test_trace_model_with_session_name(self):

@@ -63,10 +63,17 @@ def _summary_trace_cache_key(
     return (trace_id or "__no_trace__"), _runtime_scope_key()
 
 
-def reset_summary_caches() -> None:
+def reset_summary_caches(scope_id: str | None = None) -> None:
     """清理摘要生成相关缓存。"""
-    cached_models = list(_summary_models_by_trace.values())
-    _summary_models_by_trace.clear()
+    if scope_id is None:
+        keys = list(_summary_models_by_trace)
+    else:
+        keys = [
+            key
+            for key in _summary_models_by_trace
+            if key[1][0] == str(scope_id)
+        ]
+    cached_models = [_summary_models_by_trace.pop(key) for key in keys]
     _model_summary_cache.clear()
     for model in cached_models:
         dispose_cached_model(model)
