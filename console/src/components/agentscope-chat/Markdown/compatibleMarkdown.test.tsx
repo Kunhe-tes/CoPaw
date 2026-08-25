@@ -23,4 +23,29 @@ describe("compatible Markdown fallback", () => {
     expect(html).toContain("&lt;script&gt;");
     expect(html).not.toContain("<script>");
   });
+
+  it.each(["<br>", "<br/>", "<br />"])(
+    "allows the safe line break tag %s inside GFM table cells",
+    (lineBreak) => {
+      const html = renderCompatibleMarkdownHtml(
+        `| A | B |\n| --- | --- |\n| first${lineBreak}second | value |`,
+        false,
+      );
+
+      expect(html).toContain("<td>first<br>second</td>");
+      expect(html).not.toContain("&lt;br");
+    },
+  );
+
+  it("keeps unsafe HTML escaped when allowing line breaks", () => {
+    const html = renderCompatibleMarkdownHtml(
+      "safe<br><br onclick=alert(1)><img src=x onerror=alert(1)>",
+      false,
+    );
+
+    expect(html).toContain("safe<br>");
+    expect(html).toContain("&lt;br onclick=alert(1)&gt;");
+    expect(html).toContain("&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).not.toContain("<img");
+  });
 });
