@@ -237,6 +237,22 @@ def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
         ),
         "provider_id": str(params.get("provider_id") or "default"),
         "model_id": str(params.get("model_id") or "default"),
+        "cron_execution_key": str(
+            params.get("cron_execution_key")
+            or params.get("execution_key")
+            or "",
+        ),
+        "scheduled_fire_at": str(
+            params.get("scheduled_fire_at")
+            or params.get("fire_time")
+            or params.get("trigger_time")
+            or "",
+        ),
+        "external_execution_id": str(
+            params.get("external_execution_id")
+            or params.get("execution_id")
+            or "",
+        ),
     }
 
 

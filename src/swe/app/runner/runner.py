@@ -489,6 +489,7 @@ def _build_task_run_record(
     memory_entries: list[Any],
     *,
     memory_start: int,
+    execution_key: str | None = None,
 ) -> dict[str, Any] | None:
     """根据本次新增消息构建任务运行元数据。"""
     if not memory_entries:
@@ -522,7 +523,7 @@ def _build_task_run_record(
     started_at = started_at or now
     ended_at = ended_at or started_at
 
-    return {
+    record = {
         "run_id": f"task-run-{uuid4()}",
         "started_at": started_at,
         "ended_at": ended_at,
@@ -530,6 +531,9 @@ def _build_task_run_record(
         "memory_end": memory_start + len(memory_entries),
         "preview_text": preview_text,
     }
+    if execution_key:
+        record["execution_key"] = execution_key
+    return record
 
 
 def _is_approval(text: str) -> bool:
@@ -2599,44 +2603,51 @@ def _should_stop_follow_up(outcome: _QueryTurnOutcome) -> bool:
     )
 
 
-def _merge_cron_agent_memory(
-    existing_state: dict[str, Any],
-    current_agent_state: dict[str, Any],
-) -> dict[str, Any]:
-    """为 cron 保存路径合并旧消息和本次新增消息。"""
-    existing_memory = existing_state.get("agent", {}).get("memory", {}) or {}
-    if "content" not in existing_memory:
-        return current_agent_state
-
-    current_memory = dict(current_agent_state.get("memory", {}) or {})
-    current_memory["content"] = list(
-        existing_memory.get("content", []) or [],
-    ) + list(current_memory.get("content", []) or [])
-
-    merged_agent_state = dict(current_agent_state)
-    merged_agent_state["memory"] = current_memory
-    return merged_agent_state
-
-
-def _build_cron_merged_state(
+def _build_cron_append_state(
     existing_state: dict[str, Any],
     current_agent_state: dict[str, Any],
     hook_overlay: HookSessionOverlay | None,
-) -> tuple[dict[str, Any], list[Any], list[Any], int]:
-    """构建 cron 任务保存所需的完整 session state。"""
+    execution_key: str | None = None,
+) -> tuple[dict[str, Any], list[Any], list[Any], int, bool]:
+    """构建只追加本次 request memory delta 的 cron session state。"""
     existing_memory = existing_state.get("agent", {}).get("memory", {}) or {}
-    current_memory = current_agent_state.get("memory", {}) or {}
     existing_content = list(existing_memory.get("content", []) or [])
-    current_content = list(current_memory.get("content", []) or [])
     stripped_count = _strip_internal_follow_up_messages_from_state(
         current_agent_state,
     )
+    current_memory = current_agent_state.get("memory", {}) or {}
+    current_content = list(current_memory.get("content", []) or [])
+    execution_key = (
+        str(execution_key).strip() if isinstance(execution_key, str) else ""
+    )
+
+    task_runs = list(existing_state.get(TASK_RUNS_STATE_KEY, []) or [])
+    if execution_key and any(
+        isinstance(run, dict) and run.get("execution_key") == execution_key
+        for run in task_runs
+    ):
+        return (
+            existing_state,
+            existing_content,
+            current_content,
+            stripped_count,
+            False,
+        )
 
     merged_state = dict(existing_state)
-    merged_state["agent"] = _merge_cron_agent_memory(
-        existing_state,
-        current_agent_state,
-    )
+    existing_agent = existing_state.get("agent")
+    if isinstance(existing_agent, dict) and existing_memory:
+        merged_agent = dict(existing_agent)
+        merged_memory = dict(existing_memory)
+        merged_memory["content"] = existing_content + current_content
+        merged_agent["memory"] = merged_memory
+        merged_state["agent"] = merged_agent
+    else:
+        merged_agent = dict(current_agent_state)
+        merged_memory = dict(current_memory)
+        merged_memory["content"] = existing_content + current_content
+        merged_agent["memory"] = merged_memory
+        merged_state["agent"] = merged_agent
     if hook_overlay is not None:
         merged_state["hook_overlay"] = hook_overlay.model_dump(
             mode="json",
@@ -2648,13 +2659,19 @@ def _build_cron_merged_state(
     task_run = _build_task_run_record(
         current_content,
         memory_start=len(existing_content),
+        execution_key=execution_key or None,
     )
     if task_run is not None:
-        task_runs = list(existing_state.get(TASK_RUNS_STATE_KEY, []) or [])
         task_runs.append(task_run)
         merged_state[TASK_RUNS_STATE_KEY] = task_runs
 
-    return merged_state, existing_content, current_content, stripped_count
+    return (
+        merged_state,
+        existing_content,
+        current_content,
+        stripped_count,
+        True,
+    )
 
 
 @dataclass
@@ -3421,6 +3438,11 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "cron_execution_key": getattr(
+                request,
+                "cron_execution_key",
+                None,
+            ),
             "current_user_text": current_user_text,
             "channel_manager": getattr(
                 getattr(self, "_workspace", None),
@@ -5343,6 +5365,8 @@ class AgentRunner(Runner):
         storage_session_id = _coerce_session_storage_id(session_id)
         storage_user_id = _coerce_session_storage_user_id(user_id)
         current_agent_state = agent.state_dict()
+        request_context = getattr(agent, "_request_context", {}) or {}
+        execution_key = request_context.get("cron_execution_key")
         merge_stats: dict[str, Any] = {}
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
@@ -5351,27 +5375,36 @@ class AgentRunner(Runner):
                 existing_content,
                 current_content,
                 stripped_count,
-            ) = _build_cron_merged_state(
+                should_commit,
+            ) = _build_cron_append_state(
                 existing_state,
                 current_agent_state,
                 hook_overlay,
+                execution_key=execution_key,
             )
             merge_stats["existing_content"] = existing_content
             merge_stats["current_content"] = current_content
             merge_stats["stripped_count"] = stripped_count
+            merge_stats["should_commit"] = should_commit
             return merged_state
 
         if session_execution is not None:
-            await session_execution.commit_state(
-                _merge(session_execution.state),
-            )
+            merged_state = _merge(session_execution.state)
+            if merge_stats.get("should_commit", True):
+                await session_execution.commit_state(merged_state)
         else:
-            await self.session.mutate_session_state(
+            existing_state = await self.session.get_session_state_dict(
                 session_id=storage_session_id,
-                mutator=_merge,
                 user_id=storage_user_id,
-                create_if_not_exist=True,
+                allow_not_exist=True,
             )
+            merged_state = _merge(existing_state)
+            if merge_stats.get("should_commit", True):
+                await self.session.save_merged_state(
+                    session_id=storage_session_id,
+                    user_id=storage_user_id,
+                    state=merged_state,
+                )
 
         logger.info(
             "Cron task: saved merged session state "

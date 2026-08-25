@@ -35,6 +35,46 @@ from ...tracing.models import TraceStatus
 
 logger = logging.getLogger(__name__)
 
+
+def _build_cron_execution_key(
+    *,
+    job_id: str,
+    target_session_id: str,
+    dispatch_meta: Dict[str, Any],
+) -> str:
+    """Build a stable key from scheduler-owned execution identity.
+
+    No worker-local wall clock is used.  Manual runs pass no dispatch identity
+    and therefore intentionally return an empty key.
+    """
+    if dispatch_meta.get("cron_is_manual"):
+        return ""
+    explicit = dispatch_meta.get("cron_execution_key") or dispatch_meta.get(
+        "execution_key",
+    )
+    if explicit:
+        return str(explicit)
+
+    intent_id = dispatch_meta.get("intent_id")
+    batch_id = dispatch_meta.get("batch_id")
+    if intent_id and batch_id:
+        return f"{job_id}:{batch_id}:{intent_id}:{target_session_id}"
+
+    fire_at = (
+        dispatch_meta.get("scheduled_fire_at")
+        or dispatch_meta.get("fire_time")
+        or dispatch_meta.get("trigger_time")
+        or dispatch_meta.get("parent_scheduled_fire_at")
+    )
+    if fire_at:
+        return f"{job_id}:{fire_at}:{target_session_id}"
+
+    external_execution_id = dispatch_meta.get("external_execution_id")
+    if external_execution_id:
+        return f"{job_id}:{external_execution_id}:{target_session_id}"
+    return ""
+
+
 CONSOLE_CHANNEL = "console"
 BROADCAST_ORIGINAL_MODEL_SLOT_META_KEY = "broadcast_original_model_slot"
 BROADCAST_MODEL_SLOT_FALLBACK_REASON_META_KEY = (
@@ -1049,7 +1089,12 @@ class CronExecutor:
             job.runtime.timeout_seconds,
         )
         assert job.request is not None
-        req = self._build_agent_request(job, target_user_id, target_session_id)
+        req = self._build_agent_request(
+            job,
+            target_user_id,
+            target_session_id,
+            dispatch_meta=dispatch_meta,
+        )
         _apply_dispatch_passthrough_headers(req, dispatch_meta)
         requested_trace_id, b3_trace_id = _resolve_dispatch_trace_ids(
             dispatch_meta,
@@ -1435,6 +1480,8 @@ class CronExecutor:
         job: CronJobSpec,
         target_user_id: str,
         target_session_id: str,
+        *,
+        dispatch_meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build agent request dict from job spec."""
         req: Dict[str, Any] = job.request.model_dump(mode="json")
@@ -1452,6 +1499,13 @@ class CronExecutor:
         req["skip_history"] = True  # 标记定时任务不加载历史会话
         req["execution_origin"] = "scheduled"
         req["cron_timeout_seconds"] = job.runtime.timeout_seconds
+        execution_key = _build_cron_execution_key(
+            job_id=job.id,
+            target_session_id=req["session_id"],
+            dispatch_meta=dispatch_meta or {},
+        )
+        if execution_key:
+            req["cron_execution_key"] = execution_key
         # 传递 source_id 用于 tracing 数据隔离
         if job.source_id:
             req["source_id"] = job.source_id

@@ -3279,6 +3279,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
     ) -> None:
         job = await self._ensure_persisted_task_binding(job)
         job = self._with_execution_source_identity(job, source_id)
+        dispatch_meta = dict(dispatch_meta or {})
         rt = self._rt.get(job.id)
         if not rt:
             rt = _Runtime(sem=asyncio.Semaphore(job.runtime.max_concurrency))
