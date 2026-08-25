@@ -113,6 +113,36 @@ def test_batch_update_indexes_success_execution_results():
     assert "result_id <> ''" in subtask_sql
 
 
+def test_batch_update_skips_result_index_row_with_invalid_bbk_id():
+    db = FakeDb()
+    db.fetch_all_results[1][0]["bbk_org_id"] = "77"
+
+    success_count, error_count, indexed_count, indexed_users = asyncio.run(
+        QueryService(db=db).batch_update_execution_async_status(),
+    )
+
+    assert success_count == 1
+    assert error_count == 0
+    assert indexed_count == 0
+    assert indexed_users == []
+    assert not _result_index_batch_insert_calls(db)
+
+
+def test_batch_update_skips_plan_result_index_row_without_customer_name():
+    db = FakeDb()
+    db.fetch_all_results[1][0]["cust_nm"] = " "
+
+    success_count, error_count, indexed_count, indexed_users = asyncio.run(
+        QueryService(db=db).batch_update_execution_async_status(),
+    )
+
+    assert success_count == 1
+    assert error_count == 0
+    assert indexed_count == 0
+    assert indexed_users == []
+    assert not _result_index_batch_insert_calls(db)
+
+
 class FakeCustomerNameResponse:
     status_code = 200
 

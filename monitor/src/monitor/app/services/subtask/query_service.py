@@ -22,6 +22,15 @@ BATCH_SIZE = 50
 
 CUSTOMER_NAME_FIELD = "EAC_NM"
 
+RESULT_INDEX_REQUIRED_FIELDS = (
+    "first_bbk_id",
+    "tenant_id",
+    "bbk_org_id",
+    "skill_id",
+    "job_id",
+    "result_type",
+)
+
 
 class QueryService:
     """Service for subtask database operations."""
@@ -1007,6 +1016,55 @@ class QueryService:
         ]
 
     @staticmethod
+    def _is_valid_result_index_row(row: dict) -> bool:
+        """Validate a result-index row before writing or pushing it."""
+        missing_fields = [
+            field
+            for field in RESULT_INDEX_REQUIRED_FIELDS
+            if not isinstance(row.get(field), str) or not row[field].strip()
+        ]
+        if missing_fields:
+            logger.warning(
+                "Skipped result-index row with missing required fields: "
+                "execution_id=%s fields=%s",
+                row.get("execution_id"),
+                ",".join(missing_fields),
+            )
+            return False
+
+        invalid_bbk_fields = [
+            field
+            for field in ("first_bbk_id", "bbk_org_id")
+            if len(row[field].strip()) != 3
+        ]
+        if invalid_bbk_fields:
+            logger.warning(
+                "Skipped result-index row with invalid BBK id length: "
+                "execution_id=%s fields=%s",
+                row.get("execution_id"),
+                ",".join(invalid_bbk_fields),
+            )
+            return False
+
+        if row["result_type"] == "plan":
+            missing_plan_fields = [
+                field
+                for field in ("custuid", "cust_nm")
+                if not isinstance(row.get(field), str)
+                or not row[field].strip()
+            ]
+            if missing_plan_fields:
+                logger.warning(
+                    "Skipped plan result-index row with missing customer data: "
+                    "execution_id=%s fields=%s",
+                    row.get("execution_id"),
+                    ",".join(missing_plan_fields),
+                )
+                return False
+
+        return True
+
+    @staticmethod
     def _build_result_index_users(
         rows: list[dict],
     ) -> list[dict[str, str]]:
@@ -1056,8 +1114,13 @@ class QueryService:
                 ),
             )
 
-        await self._write_result_index_rows(result_rows)
-        return len(result_rows), self._build_result_index_users(result_rows)
+        valid_result_rows = [
+            row for row in result_rows if self._is_valid_result_index_row(row)
+        ]
+        await self._write_result_index_rows(valid_result_rows)
+        return len(valid_result_rows), self._build_result_index_users(
+            valid_result_rows,
+        )
 
     async def batch_update_execution_async_status(
         self,
