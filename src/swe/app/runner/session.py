@@ -8,6 +8,7 @@ are sanitized before being used as filenames.
 """
 
 import asyncio
+import errno
 import json
 import logging
 import os
@@ -126,6 +127,7 @@ def _write_json_text(file_path: str, content: str) -> None:
             file.flush()
             os.fsync(file.fileno())
         os.replace(temp_path, file_path)
+        _sync_parent_directory(file_path)
     except Exception:
         if temp_path is not None:
             try:
@@ -133,6 +135,33 @@ def _write_json_text(file_path: str, content: str) -> None:
             except OSError:
                 pass
         raise
+
+
+def _sync_parent_directory(file_path: str) -> None:
+    """Persist the replacement directory entry when the platform supports it."""
+    directory_path = os.path.dirname(file_path) or "."
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+
+    try:
+        directory_fd = os.open(directory_path, directory_flags)
+    except OSError:
+        return
+
+    try:
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            unsupported_errors = {
+                errno.EINVAL,
+                getattr(errno, "ENOTSUP", errno.EINVAL),
+                getattr(errno, "EOPNOTSUPP", errno.EINVAL),
+            }
+            if exc.errno not in unsupported_errors:
+                raise
+    finally:
+        os.close(directory_fd)
 
 
 def _read_json_state_sync(
@@ -212,6 +241,111 @@ def _write_json_state_sync(
     )
 
 
+class SessionExecution:
+    """A session state snapshot protected by one file lock for its lifetime."""
+
+    def __init__(
+        self,
+        session_save_path: str,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> None:
+        self._session_save_path = session_save_path
+        self._timeout_seconds = timeout_seconds
+        self._scope = None
+        self._state: dict[str, Any] = {}
+        self._revision = 0
+        self._schema_version = 1
+        self._entered = False
+
+    @property
+    def revision(self) -> int:
+        """Return the revision of the latest state in this transaction."""
+        return self._revision
+
+    @property
+    def schema_version(self) -> int:
+        """Return the schema version of the loaded state."""
+        return self._schema_version
+
+    @property
+    def state(self) -> dict[str, Any]:
+        """Return the transaction-owned mutable state snapshot."""
+        self._require_entered()
+        return self._state
+
+    async def __aenter__(self) -> "SessionExecution":
+        self._scope = _session_write_scope(
+            self._session_save_path,
+            timeout_seconds=self._timeout_seconds,
+        )
+        try:
+            await self._scope.__aenter__()
+            _, self._state = await run_runtime_state_work(
+                _read_json_state_sync,
+                self._session_save_path,
+                allow_not_exist=True,
+                allow_empty=True,
+            )
+            self._schema_version = self._get_schema_version(self._state)
+            self._revision = self._get_revision(self._state)
+            self._entered = True
+            return self
+        except BaseException:
+            if self._scope is not None:
+                await self._scope.__aexit__(None, None, None)
+                self._scope = None
+            raise
+
+    async def __aexit__(self, exc_type, exc, traceback) -> None:
+        self._entered = False
+        if self._scope is not None:
+            try:
+                await self._scope.__aexit__(exc_type, exc, traceback)
+            finally:
+                self._scope = None
+
+    async def read_state(self) -> dict[str, Any]:
+        """Return the single state snapshot read while acquiring the lock."""
+        return self.state
+
+    async def commit_state(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Atomically replace the transaction state without reacquiring its lock."""
+        self._require_entered()
+        if not isinstance(state, dict):
+            raise ValueError("state must be a dict")
+
+        next_revision = self._revision + 1
+        committed_state = {
+            **state,
+            "schema_version": 2,
+            "revision": next_revision,
+        }
+        await run_runtime_state_work(
+            _write_json_state_sync,
+            self._session_save_path,
+            committed_state,
+        )
+        self._state = committed_state
+        self._schema_version = 2
+        self._revision = next_revision
+        return self._state
+
+    def _require_entered(self) -> None:
+        if not self._entered:
+            raise RuntimeError("session execution is not active")
+
+    @staticmethod
+    def _get_schema_version(state: dict[str, Any]) -> int:
+        schema_version = state.get("schema_version", 1)
+        return schema_version if isinstance(schema_version, int) else 1
+
+    @staticmethod
+    def _get_revision(state: dict[str, Any]) -> int:
+        revision = state.get("revision", 0)
+        return revision if isinstance(revision, int) and revision >= 0 else 0
+
+
 class SafeJSONSession(SessionBase):
     """SessionBase subclass with filename sanitization and async file I/O.
 
@@ -260,6 +394,22 @@ class SafeJSONSession(SessionBase):
             timeout_seconds=timeout_seconds,
         ):
             yield
+
+    @asynccontextmanager
+    async def execution(
+        self,
+        session_id: str,
+        user_id: str = "",
+        timeout_seconds: float | None = None,
+    ) -> AsyncIterator[SessionExecution]:
+        """Hold one session lock while reading and committing a state snapshot."""
+        session_save_path = self._get_save_path(session_id, user_id=user_id)
+        transaction = SessionExecution(
+            session_save_path,
+            timeout_seconds=timeout_seconds,
+        )
+        async with transaction:
+            yield transaction
 
     async def _read_session_state_file(
         self,

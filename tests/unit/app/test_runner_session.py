@@ -45,6 +45,38 @@ def _mutate_session_state_in_process(
     asyncio.run(_run())
 
 
+def _hold_session_execution_in_process(
+    save_dir: str,
+    session_id: str,
+    entered_event,
+    release_event,
+) -> None:
+    async def _run() -> None:
+        session = SafeJSONSession(save_dir=save_dir)
+        async with session.execution(session_id):
+            entered_event.set()
+            if not release_event.wait(timeout=5):
+                raise TimeoutError("timed out waiting to release execution")
+
+    asyncio.run(_run())
+
+
+def _try_session_execution_in_process(
+    save_dir: str,
+    session_id: str,
+    result_queue,
+) -> None:
+    async def _run() -> None:
+        session = SafeJSONSession(save_dir=save_dir)
+        try:
+            async with session.execution(session_id, timeout_seconds=0.1):
+                result_queue.put("entered")
+        except TimeoutError:
+            result_queue.put("timed_out")
+
+    asyncio.run(_run())
+
+
 class _GuardedReadableFile:
     def __init__(self, file, state: dict[str, bool], operations: list[str]):
         self._file = file
@@ -87,6 +119,68 @@ def test_session_write_locks_are_scoped_to_event_loop_and_normalized_path(
     assert first_loop_locks[0] is first_loop_locks[1]
     assert second_loop_locks[0] is second_loop_locks[1]
     assert first_loop_locks[0] is not second_loop_locks[0]
+
+
+@pytest.mark.asyncio
+async def test_execution_holds_one_file_lock_and_commits_revision(
+    tmp_path: Path,
+) -> None:
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    async with session.execution("session-1") as transaction:
+        assert await transaction.read_state() == {}
+        assert transaction.revision == 0
+        await transaction.commit_state({"agent": {"memory": {"content": []}}})
+
+    saved = await session.get_session_state_dict("session-1")
+    assert saved["schema_version"] == 2
+    assert saved["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_second_execution_times_out_until_first_exits(
+    tmp_path: Path,
+) -> None:
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def hold_lock() -> None:
+        async with session.execution("shared"):
+            entered.set()
+            await release.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    await entered.wait()
+    with pytest.raises(TimeoutError):
+        async with session.execution("shared", timeout_seconds=0.01):
+            pass
+    release.set()
+    await holder
+
+
+@pytest.mark.asyncio
+async def test_execution_upgrades_legacy_state_from_default_revision(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "session-1.json").write_text(
+        '{"agent": {"memory": {"content": ["old"]}}}',
+        encoding="utf-8",
+    )
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    async with session.execution("session-1") as transaction:
+        state = await transaction.read_state()
+        assert transaction.schema_version == 1
+        assert transaction.revision == 0
+        state["agent"]["memory"]["content"].append("new")
+        await transaction.commit_state(state)
+
+    assert await session.get_session_state_dict("session-1") == {
+        "agent": {"memory": {"content": ["old", "new"]}},
+        "schema_version": 2,
+        "revision": 1,
+    }
 
 
 @pytest.mark.asyncio
@@ -539,6 +633,54 @@ def test_cross_process_key_updates_preserve_both_values(
         "first": 1,
         "second": 2,
     }
+
+
+def test_cross_process_execution_waits_for_lock_release(
+    tmp_path: Path,
+) -> None:
+    context = multiprocessing.get_context("spawn")
+    entered_event = context.Event()
+    release_event = context.Event()
+    result_queue = context.Queue()
+
+    holder = context.Process(
+        target=_hold_session_execution_in_process,
+        args=(str(tmp_path), "shared", entered_event, release_event),
+    )
+    contender = context.Process(
+        target=_try_session_execution_in_process,
+        args=(str(tmp_path), "shared", result_queue),
+    )
+
+    holder.start()
+    assert entered_event.wait(timeout=5)
+    contender.start()
+    contender.join(timeout=10)
+
+    if contender.is_alive():
+        contender.terminate()
+        contender.join(timeout=2)
+    assert contender.exitcode == 0
+    assert result_queue.get(timeout=1) == "timed_out"
+
+    release_event.set()
+    holder.join(timeout=10)
+    if holder.is_alive():
+        holder.terminate()
+        holder.join(timeout=2)
+    assert holder.exitcode == 0
+
+    retry = context.Process(
+        target=_try_session_execution_in_process,
+        args=(str(tmp_path), "shared", result_queue),
+    )
+    retry.start()
+    retry.join(timeout=10)
+    if retry.is_alive():
+        retry.terminate()
+        retry.join(timeout=2)
+    assert retry.exitcode == 0
+    assert result_queue.get(timeout=1) == "entered"
 
 
 @pytest.mark.asyncio
