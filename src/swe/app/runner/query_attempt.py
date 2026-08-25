@@ -6,8 +6,11 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
-from typing import Any, AsyncGenerator, Protocol
+import math
+from contextlib import asynccontextmanager
+from typing import Any, AsyncGenerator, Protocol, cast
 
 from agentscope.message import Msg, TextBlock
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -31,6 +34,7 @@ class QueryAttemptOwner(Protocol):
 
     agent_id: str
     tenant_id: str | None
+    session: Any
 
     async def _start_query_trace(
         self,
@@ -88,6 +92,8 @@ class QueryAttemptOwner(Protocol):
 
     async def _cleanup_query_resources(self, **kwargs: Any) -> None: ...
 
+    async def _save_state_during_cleanup(self, **kwargs: Any) -> None: ...
+
     async def _cleanup_blocked_runtime_start(
         self,
         runtime_start: Any,
@@ -109,7 +115,17 @@ class QueryAttemptOwner(Protocol):
         **kwargs: Any,
     ) -> None: ...
 
-    async def get_state_loaded(self, *args: Any) -> bool: ...
+    async def get_state_loaded(
+        self,
+        agent: Any,
+        session_id: str | None,
+        session_state_loaded: bool,
+        skip_history: bool | Any,
+        user_id: str | None,
+        *,
+        session_execution: Any = None,
+        retry_state_snapshot: dict[str, Any] | None = None,
+    ) -> bool: ...
 
     async def _refresh_session_skill_freshness(self, **kwargs: Any) -> Any: ...
 
@@ -131,12 +147,6 @@ class QueryAttemptOwner(Protocol):
 
     async def _complete_successful_query_attempt(
         self,
-        **kwargs: Any,
-    ) -> None: ...
-
-    async def save_job_session_state(
-        self,
-        *args: Any,
         **kwargs: Any,
     ) -> None: ...
 
@@ -227,30 +237,11 @@ async def add_retry_notice_to_memory(agent: Any, retry_msg: Msg) -> None:
         pass
 
 
-async def save_state_before_retry(
-    owner: QueryAttemptOwner,
-    agent: Any,
-    session_state_loaded: bool,
-    session_id: str,
-    skip_history: bool,
-    user_id: str,
-    *,
-    cleanup_timeout: float,
-) -> None:
-    if agent is None or not session_state_loaded:
-        return
-    try:
-        await asyncio.wait_for(
-            owner.save_job_session_state(
-                agent,
-                session_id,
-                skip_history,
-                user_id,
-            ),
-            timeout=cleanup_timeout,
-        )
-    except Exception as exc:
-        logger.warning("Failed to save state before retry: %s", exc)
+def snapshot_state_before_retry(agent: Any) -> dict[str, Any] | None:
+    """Capture retry state in memory without mutating the session file."""
+    if agent is None or not hasattr(agent, "state_dict"):
+        return None
+    return copy.deepcopy(agent.state_dict())
 
 
 async def stream_retry_backoff_notice(
@@ -291,7 +282,6 @@ async def stream_retryable_query_error(
     retry_state: Any,
     runtime: _QueryRuntime | None,
     session_id: str,
-    cleanup_timeout: float,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     error_summary = summarize_retry_error(exc)
     logger.warning(
@@ -306,14 +296,8 @@ async def stream_retryable_query_error(
     )
     yield retry_msg, False
     await add_retry_notice_to_memory(retry_state.agent, retry_msg)
-    await save_state_before_retry(
-        owner,
+    retry_state.agent_state_snapshot = snapshot_state_before_retry(
         retry_state.agent,
-        retry_state.session_state_loaded,
-        session_id,
-        runtime.skip_history if runtime is not None else False,
-        runtime.user_id if runtime is not None else "",
-        cleanup_timeout=cleanup_timeout,
     )
 
 
@@ -325,11 +309,16 @@ async def stream_single_query_attempt(
     retry_state: Any,
     attempt_state: Any,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
+    runtime_args = {
+        "request": attempt_input.request,
+        "msgs": attempt_input.msgs,
+        "query": attempt_input.query,
+        "preflight": attempt_input.preflight,
+    }
+    if attempt_input.session_execution is not None:
+        runtime_args["session_execution"] = attempt_input.session_execution
     attempt_state.runtime_start = await owner._prepare_query_runtime(
-        request=attempt_input.request,
-        msgs=attempt_input.msgs,
-        query=attempt_input.query,
-        preflight=attempt_input.preflight,
+        **runtime_args,
     )
     if attempt_state.runtime_start.block_response is not None:
         await owner._end_trace_if_needed(
@@ -344,6 +333,7 @@ async def stream_single_query_attempt(
     if runtime is None:
         attempt_state.should_return = True
         return
+    runtime.session_execution = attempt_input.session_execution
     with runtime_invocation_claims_context(
         chat_id=runtime.chat.id if runtime.chat is not None else None,
     ):
@@ -360,6 +350,12 @@ async def stream_single_query_attempt(
             attempt_state.session_state_loaded,
             runtime.skip_history,
             runtime.user_id,
+            session_execution=attempt_input.session_execution,
+            retry_state_snapshot=getattr(
+                retry_state,
+                "agent_state_snapshot",
+                None,
+            ),
         )
         retry_state.agent = runtime.agent
         retry_state.session_state_loaded = attempt_state.session_state_loaded
@@ -429,145 +425,248 @@ async def stream_query_after_preflight(
     query: str | None,
     session_id: str,
     preflight: _QueryPreflight,
+    session_execution: Any = None,
 ) -> AsyncGenerator[tuple[Msg, bool], None]:
     """Run retry attempts and final cleanup after preflight succeeds."""
-    logger.debug(
-        "AgentRunner.stream_query: request=%s, agent_id=%s",
-        request,
-        owner.agent_id,
-    )
-    set_current_agent_id(owner.agent_id)
-    file_url_network_token = set_current_file_url_network(
-        owner._request_file_url_network(request),
-    )
-    trace_id = await owner._start_query_trace(request, msgs)
-    claims_context = runtime_invocation_claims_context(
-        session_id=session_id,
-        trace_id=trace_id,
-    )
-    claims_context.__enter__()
-    outcome = owner._new_query_turn_outcome()
-    retry_state = owner._new_retry_state()
-    if preflight.agent_config is None:
-        max_retry_attempts, max_retries, backoff_base, backoff_cap = (
-            owner._load_query_retry_settings()
-        )
-    else:
-        max_retry_attempts, max_retries, backoff_base, backoff_cap = (
-            owner._load_query_retry_settings(preflight.agent_config)
-        )
-    attempt_input = owner._new_query_attempt_input(
-        request=request,
-        msgs=msgs,
-        query=query,
-        preflight=preflight,
-        trace_id=trace_id,
-    )
-    attempt_state = owner._new_query_attempt_state()
+    cleanup_runtime: _QueryRuntime | None = None
+    cleanup_state_loaded = False
+    runtime_start = None
+    outcome = None
     try:
-        for retry_attempt in range(max_retry_attempts):
-            retry_state.prev_agent = retry_state.agent
-            retry_state.prev_session_state_loaded = (
-                retry_state.session_state_loaded
+        async with _query_session_execution(
+            owner,
+            session_id,
+            str(getattr(request, "user_id", "") or ""),
+            request=request,
+            session_execution=session_execution,
+        ) as session_execution:
+            logger.debug(
+                "AgentRunner.stream_query: request=%s, agent_id=%s",
+                request,
+                owner.agent_id,
             )
-            retry_state.agent = None
-            retry_state.session_state_loaded = False
-            attempt_state = owner._new_query_attempt_state()
-            async for msg, last in owner._stream_retry_backoff_notice(
-                retry_attempt=retry_attempt,
-                max_retries=max_retries,
-                backoff_base=backoff_base,
-                backoff_cap=backoff_cap,
+            set_current_agent_id(owner.agent_id)
+            file_url_network_token = set_current_file_url_network(
+                owner._request_file_url_network(request),
+            )
+            trace_id = await owner._start_query_trace(request, msgs)
+            claims_context = runtime_invocation_claims_context(
                 session_id=session_id,
-                retry_state=retry_state,
-            ):
-                yield msg, last
+                trace_id=trace_id,
+            )
+            claims_context.__enter__()
+            outcome = owner._new_query_turn_outcome()
+            retry_state = owner._new_retry_state()
+            if preflight.agent_config is None:
+                max_retry_attempts, max_retries, backoff_base, backoff_cap = (
+                    owner._load_query_retry_settings()
+                )
+            else:
+                max_retry_attempts, max_retries, backoff_base, backoff_cap = (
+                    owner._load_query_retry_settings(preflight.agent_config)
+                )
+            attempt_input = owner._new_query_attempt_input(
+                request=request,
+                msgs=msgs,
+                query=query,
+                preflight=preflight,
+                trace_id=trace_id,
+                session_execution=session_execution,
+            )
+            attempt_state = owner._new_query_attempt_state()
             try:
-                async with global_tracer.start_as_current_span(
-                    "agent.attempt",
-                ) as span:
-                    span.set_attribute("retry.index", retry_attempt)
-                    async for msg, last in owner._stream_single_query_attempt(
-                        attempt_input=attempt_input,
-                        outcome=outcome,
+                for retry_attempt in range(max_retry_attempts):
+                    retry_state.prev_agent = retry_state.agent
+                    retry_state.prev_session_state_loaded = (
+                        retry_state.session_state_loaded
+                    )
+                    retry_state.agent = None
+                    retry_state.session_state_loaded = False
+                    attempt_state = owner._new_query_attempt_state()
+                    async for msg, last in owner._stream_retry_backoff_notice(
+                        retry_attempt=retry_attempt,
+                        max_retries=max_retries,
+                        backoff_base=backoff_base,
+                        backoff_cap=backoff_cap,
+                        session_id=session_id,
                         retry_state=retry_state,
-                        attempt_state=attempt_state,
                     ):
                         yield msg, last
-                    if attempt_state.should_return:
+                    try:
+                        async with global_tracer.start_as_current_span(
+                            "agent.attempt",
+                        ) as span:
+                            span.set_attribute("retry.index", retry_attempt)
+                            async for (
+                                msg,
+                                last,
+                            ) in owner._stream_single_query_attempt(
+                                attempt_input=attempt_input,
+                                outcome=outcome,
+                                retry_state=retry_state,
+                                attempt_state=attempt_state,
+                            ):
+                                yield msg, last
+                            if attempt_state.should_return:
+                                return
+                            if attempt_state.succeeded:
+                                break
+                    except asyncio.CancelledError as exc:
+                        await owner._handle_query_cancelled(
+                            trace_id=trace_id,
+                            session_id=session_id,
+                            agent=(
+                                attempt_state.runtime.agent
+                                if attempt_state.runtime is not None
+                                else None
+                            ),
+                            exc=exc,
+                        )
                         return
-                    if attempt_state.succeeded:
-                        break
-            except asyncio.CancelledError as exc:
-                await owner._handle_query_cancelled(
-                    trace_id=trace_id,
-                    session_id=session_id,
-                    agent=(
-                        attempt_state.runtime.agent
-                        if attempt_state.runtime is not None
+                    except Exception as exc:
+                        if not owner._should_retry(
+                            retry_attempt,
+                            max_retry_attempts,
+                            exc,
+                        ):
+                            await owner._raise_console_model_call_failed_if_needed(
+                                request=request,
+                                exc=exc,
+                                trace_id=trace_id,
+                                session_execution=session_execution,
+                            )
+                            await owner._handle_query_error(
+                                request=request,
+                                exc=exc,
+                                trace_id=trace_id,
+                                locals_snapshot=locals(),
+                            )
+                            raise
+                        async for (
+                            msg,
+                            last,
+                        ) in owner._stream_retryable_query_error(
+                            exc=exc,
+                            retry_attempt=retry_attempt,
+                            max_retry_attempts=max_retry_attempts,
+                            max_retries=max_retries,
+                            retry_state=retry_state,
+                            runtime=attempt_state.runtime,
+                            session_id=session_id,
+                        ):
+                            yield msg, last
+            finally:
+                try:
+                    claims_context.__exit__(None, None, None)
+                except ValueError:
+                    logger.debug(
+                        "Skipped runtime invocation claims context reset from a different async context",
+                        exc_info=True,
+                    )
+                try:
+                    reset_current_file_url_network(file_url_network_token)
+                except ValueError:
+                    logger.debug(
+                        "Skipped file URL network context reset from a different async context",
+                        exc_info=True,
+                    )
+                cleanup_runtime = attempt_state.runtime
+                cleanup_state_loaded = attempt_state.session_state_loaded
+                runtime_start = attempt_state.runtime_start
+                if (
+                    cleanup_runtime is None
+                    and retry_state.prev_agent is not None
+                ):
+                    cleanup_state_loaded = (
+                        retry_state.session_state_loaded
+                        or retry_state.prev_session_state_loaded
+                    )
+                if session_execution is not None:
+                    fallback_agent = (
+                        retry_state.prev_agent
+                        if cleanup_runtime is None
                         else None
-                    ),
-                    exc=exc,
-                )
-                return
-            except Exception as exc:
-                if not owner._should_retry(
-                    retry_attempt,
-                    max_retry_attempts,
-                    exc,
-                ):
-                    await owner._raise_console_model_call_failed_if_needed(
-                        request=request,
-                        exc=exc,
-                        trace_id=trace_id,
                     )
-                    await owner._handle_query_error(
-                        request=request,
-                        exc=exc,
-                        trace_id=trace_id,
-                        locals_snapshot=locals(),
-                    )
-                    raise
-                async for msg, last in owner._stream_retryable_query_error(
-                    exc=exc,
-                    retry_attempt=retry_attempt,
-                    max_retry_attempts=max_retry_attempts,
-                    max_retries=max_retries,
-                    retry_state=retry_state,
-                    runtime=attempt_state.runtime,
-                    session_id=session_id,
-                ):
-                    yield msg, last
+                    try:
+                        await owner._save_state_during_cleanup(
+                            runtime=cleanup_runtime,
+                            session_state_loaded=cleanup_state_loaded,
+                            fallback_agent=fallback_agent,
+                            fallback_session_id=session_id,
+                            fallback_user_id=str(
+                                getattr(request, "user_id", "") or "",
+                            ),
+                            fallback_skip_history=bool(
+                                getattr(request, "skip_history", False),
+                            ),
+                            fallback_session_execution=session_execution,
+                        )
+                        if (
+                            cleanup_runtime is None
+                            and fallback_agent is None
+                            and session_execution.has_uncommitted_state
+                        ):
+                            await session_execution.commit_state(
+                                session_execution.state,
+                            )
+                    finally:
+                        if cleanup_runtime is not None:
+                            cleanup_runtime.session_state_commit_attempted = (
+                                True
+                            )
+                        await session_execution.close()
+                    if cleanup_runtime is not None:
+                        cleanup_runtime.session_state_committed = True
     finally:
-        try:
-            claims_context.__exit__(None, None, None)
-        except ValueError:
-            logger.debug(
-                "Skipped runtime invocation claims context reset from a different async context",
-                exc_info=True,
-            )
-        try:
-            reset_current_file_url_network(file_url_network_token)
-        except ValueError:
-            logger.debug(
-                "Skipped file URL network context reset from a different async context",
-                exc_info=True,
-            )
-        cleanup_runtime = attempt_state.runtime
-        cleanup_state_loaded = attempt_state.session_state_loaded
-        if cleanup_runtime is None and retry_state.prev_agent is not None:
-            cleanup_state_loaded = (
-                retry_state.session_state_loaded
-                or retry_state.prev_session_state_loaded
-            )
         await owner._cleanup_query_resources(
             runtime=cleanup_runtime,
             session_state_loaded=cleanup_state_loaded,
             session_id=session_id,
         )
-        await owner._cleanup_blocked_runtime_start(attempt_state.runtime_start)
+        await owner._cleanup_blocked_runtime_start(runtime_start)
         await owner._store_qa_content_if_needed(
             runtime=cleanup_runtime,
             query=query,
             outcome=outcome,
         )
+
+
+@asynccontextmanager
+async def _query_session_execution(
+    owner: QueryAttemptOwner,
+    session_id: str,
+    user_id: str,
+    *,
+    request: AgentRequest | None = None,
+    session_execution: Any = None,
+) -> AsyncGenerator[Any, None]:
+    if session_execution is not None:
+        yield session_execution
+        return
+    session = getattr(owner, "session", None)
+    if session is None or not hasattr(session, "execution"):
+        yield None
+        return
+    async with session.execution(
+        session_id,
+        user_id=user_id,
+        timeout_seconds=_session_execution_timeout(request),
+    ) as execution:
+        yield execution
+
+
+def _session_execution_timeout(request: AgentRequest | None) -> float:
+    """Return the bounded lock wait for an interactive or scheduled query."""
+    if getattr(request, "execution_origin", None) != "scheduled":
+        return 5.0
+    timeout = getattr(request, "cron_timeout_seconds", None)
+    if not isinstance(timeout, (int, float, str)) or isinstance(timeout, bool):
+        return 5.0
+    timeout_value = cast(int | float | str, timeout)
+    try:
+        timeout_seconds = float(timeout_value)
+    except (TypeError, ValueError):
+        return 5.0
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        return 5.0
+    return min(30.0, timeout_seconds / 3.0)

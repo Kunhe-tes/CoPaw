@@ -88,6 +88,11 @@ async def save_state_during_cleanup(
     session_state_loaded: bool,
     cleanup_timeout: float,
     hook_config_enabled: Any,
+    fallback_agent: Any = None,
+    fallback_session_id: str = "",
+    fallback_user_id: str = "",
+    fallback_skip_history: bool = False,
+    fallback_session_execution: Any = None,
 ) -> None:
     """Persist session state during query cleanup within the configured limit."""
     logger.info(
@@ -95,7 +100,21 @@ async def save_state_during_cleanup(
         runtime is not None,
         session_state_loaded,
     )
-    if runtime is None or not session_state_loaded:
+    if not session_state_loaded:
+        return
+    if runtime is None:
+        if fallback_agent is None:
+            return
+        await asyncio.wait_for(
+            owner.save_job_session_state(
+                fallback_agent,
+                fallback_session_id,
+                fallback_skip_history,
+                fallback_user_id,
+                session_execution=fallback_session_execution,
+            ),
+            timeout=cleanup_timeout,
+        )
         return
     hook_overlay = None
     if hook_config_enabled(
@@ -104,29 +123,20 @@ async def save_state_during_cleanup(
         runtime.hook_overlay,
     ):
         hook_overlay = runtime.hook_overlay
-    try:
-        await asyncio.wait_for(
-            owner.save_job_session_state(
-                runtime.agent,
-                runtime.session_id,
-                runtime.skip_history,
-                runtime.user_id,
-                hook_overlay=hook_overlay,
-            ),
-            timeout=cleanup_timeout,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(
-            "Runner finally: session state save timed out "
-            "(session_id=%s, timeout=%.0fs)",
+    save_kwargs = {"hook_overlay": hook_overlay}
+    session_execution = getattr(runtime, "session_execution", None)
+    if session_execution is not None:
+        save_kwargs["session_execution"] = session_execution
+    await asyncio.wait_for(
+        owner.save_job_session_state(
+            runtime.agent,
             runtime.session_id,
-            cleanup_timeout,
-        )
-    except asyncio.CancelledError:
-        logger.debug(
-            "Runner finally: session state save cancelled (session_id=%s)",
-            runtime.session_id,
-        )
+            runtime.skip_history,
+            runtime.user_id,
+            **save_kwargs,
+        ),
+        timeout=cleanup_timeout,
+    )
 
 
 async def update_chat_during_cleanup(
@@ -246,17 +256,27 @@ async def cleanup_query_resources(
     session_state_loaded: bool,
     session_id: str,
 ) -> None:
-    """Run cleanup concurrently and preserve first-exception propagation."""
+    """Commit session state first, then clean unrelated resources in parallel."""
+    session_save_error = None
+    if not (
+        getattr(runtime, "session_state_committed", False)
+        or getattr(runtime, "session_state_commit_attempted", False)
+    ):
+        try:
+            await owner._save_state_during_cleanup(
+                runtime=runtime,
+                session_state_loaded=session_state_loaded,
+            )
+        except BaseException as exc:
+            session_save_error = exc
     cleanup_results = await asyncio.gather(
-        owner._save_state_during_cleanup(
-            runtime=runtime,
-            session_state_loaded=session_state_loaded,
-        ),
         owner._update_chat_during_cleanup(runtime),
         owner._cleanup_mcp_during_cleanup(runtime),
         owner._end_skill_detector_during_cleanup(runtime),
         return_exceptions=True,
     )
+    if session_save_error is not None:
+        raise session_save_error
     for result in cleanup_results:
         if isinstance(result, BaseException):
             raise result

@@ -11,6 +11,10 @@ from typing import TYPE_CHECKING, Any, Protocol
 from ...agents.skills_manager import resolve_effective_skill_dir
 from ...constant import WORKING_DIR
 from .query_contracts import _QueryRuntime
+from .session import (
+    SESSION_SKILL_SNAPSHOT_STATE_KEY,
+    _normalize_state_for_load,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +34,7 @@ class SessionLifecycleOwner(Protocol):
         session_id: Any,
         user_id: str | None,
         hook_overlay: Any = None,
+        session_execution: Any = None,
     ) -> None: ...
 
     async def _save_regular_session_state(
@@ -38,6 +43,7 @@ class SessionLifecycleOwner(Protocol):
         session_id: Any,
         user_id: str | None,
         hook_overlay: Any = None,
+        session_execution: Any = None,
     ) -> None: ...
 
     def _normalize_session_skill_snapshot(
@@ -86,15 +92,26 @@ async def get_state_loaded(
     *,
     coerce_session_id: Any,
     coerce_user_id: Any,
+    session_execution: Any = None,
+    retry_state_snapshot: dict[str, Any] | None = None,
 ) -> bool:
     """Restore state once, retaining cron and schema-mismatch behavior."""
     storage_session_id = coerce_session_id(session_id)
     storage_user_id = coerce_user_id(user_id)
+    if retry_state_snapshot is not None:
+        agent.load_state_dict(_normalize_state_for_load(retry_state_snapshot))
+        return True
     if skip_history:
         logger.info(
             "Cron task: skipping session state load (session_id=%s)",
             session_id,
         )
+        return True
+    if session_execution is not None:
+        state = await session_execution.read_state()
+        agent_state = state.get("agent") if isinstance(state, dict) else None
+        if isinstance(agent_state, dict):
+            agent.load_state_dict(_normalize_state_for_load(agent_state))
         return True
     try:
         await owner.session.load_session_state(
@@ -118,10 +135,28 @@ async def save_job_session_state(
     skip_history: bool | Any,
     user_id: str | None,
     hook_overlay: Any = None,
+    session_execution: Any = None,
 ) -> None:
     """Persist cron or regular session state through runner-owned writers."""
     if skip_history:
+        if session_execution is None:
+            await owner._save_cron_session_state(
+                agent,
+                session_id,
+                user_id,
+                hook_overlay,
+            )
+            return
         await owner._save_cron_session_state(
+            agent,
+            session_id,
+            user_id,
+            hook_overlay,
+            session_execution=session_execution,
+        )
+        return
+    if session_execution is None:
+        await owner._save_regular_session_state(
             agent,
             session_id,
             user_id,
@@ -133,6 +168,29 @@ async def save_job_session_state(
         session_id,
         user_id,
         hook_overlay,
+        session_execution=session_execution,
+    )
+
+
+async def _runtime_skill_snapshot(
+    owner: SessionLifecycleOwner,
+    runtime: _QueryRuntime,
+) -> dict[str, dict[str, Any]]:
+    session_execution = runtime.session_execution
+    if session_execution is not None:
+        state = await session_execution.read_state()
+        snapshot = (
+            state.get(SESSION_SKILL_SNAPSHOT_STATE_KEY)
+            if isinstance(state, dict)
+            else None
+        )
+        return owner._normalize_session_skill_snapshot(snapshot)
+    return owner._normalize_session_skill_snapshot(
+        await owner.session.get_session_skill_snapshot(
+            session_id=runtime.session_id,
+            user_id=runtime.user_id,
+            allow_not_exist=True,
+        ),
     )
 
 
@@ -145,13 +203,7 @@ async def refresh_session_skill_freshness(
     """Refresh persisted skills and report context that must be injected."""
     if not owner._supports_session_skill_freshness_refresh(runtime=runtime):
         return refresh_result_type()
-    stored_snapshot = owner._normalize_session_skill_snapshot(
-        await owner.session.get_session_skill_snapshot(
-            session_id=runtime.session_id,
-            user_id=runtime.user_id,
-            allow_not_exist=True,
-        ),
-    )
+    stored_snapshot = await _runtime_skill_snapshot(owner, runtime)
     if not stored_snapshot:
         return refresh_result_type(stored_snapshot={}, refreshed_snapshot={})
     workspace_dir = Path(owner.workspace_dir or WORKING_DIR)
@@ -221,13 +273,7 @@ async def restore_confirmed_session_skill_context(
         detector=detector,
     ):
         return
-    stored_snapshot = owner._normalize_session_skill_snapshot(
-        await owner.session.get_session_skill_snapshot(
-            session_id=runtime.session_id,
-            user_id=runtime.user_id,
-            allow_not_exist=True,
-        ),
-    )
+    stored_snapshot = await _runtime_skill_snapshot(owner, runtime)
     skills = (
         runtime.agent.get_runtime_skills()
         if hasattr(runtime.agent, "get_runtime_skills")

@@ -140,6 +140,120 @@ async def test_execution_holds_one_file_lock_and_commits_revision(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", ["timeout", "cancel"])
+async def test_interrupted_commit_waits_for_write_before_releasing_execution_lock(
+    monkeypatch,
+    tmp_path: Path,
+    interruption: str,
+) -> None:
+    """A cancelled worker write must not let a second execution overtake it."""
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    write_started = threading.Event()
+    release_write = threading.Event()
+    holder_finished = asyncio.Event()
+    second_entered = asyncio.Event()
+    original_write = session_module._write_json_text
+
+    def blocking_write(path: str, content: str) -> None:
+        write_started.set()
+        if not release_write.wait(timeout=5):
+            raise TimeoutError(
+                "test did not release the blocked session write",
+            )
+        original_write(path, content)
+
+    monkeypatch.setattr(session_module, "_write_json_text", blocking_write)
+
+    async def hold_interrupted_commit() -> None:
+        async with session.execution("shared") as transaction:
+            if interruption == "timeout":
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(
+                        transaction.commit_state({"agent": {}}),
+                        timeout=0.01,
+                    )
+            else:
+                commit_task = asyncio.create_task(
+                    transaction.commit_state({"agent": {}}),
+                )
+                await asyncio.wait_for(
+                    asyncio.to_thread(write_started.wait),
+                    timeout=1,
+                )
+                commit_task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await commit_task
+            holder_finished.set()
+
+    async def enter_second_execution() -> None:
+        async with session.execution("shared"):
+            second_entered.set()
+
+    holder = asyncio.create_task(hold_interrupted_commit())
+    contender: asyncio.Task[None] | None = None
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(write_started.wait),
+            timeout=1,
+        )
+        contender = asyncio.create_task(enter_second_execution())
+        await asyncio.sleep(0.05)
+        assert not holder_finished.is_set()
+        assert not second_entered.is_set()
+    finally:
+        release_write.set()
+        await asyncio.wait_for(holder, timeout=1)
+        if contender is not None:
+            await asyncio.wait_for(contender, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_cancelled_commit_updates_revision_before_next_commit(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    session = SafeJSONSession(save_dir=str(tmp_path))
+    write_started = threading.Event()
+    release_write = threading.Event()
+    original_write = session_module._write_json_text
+
+    def blocking_first_write(path: str, content: str) -> None:
+        if not write_started.is_set():
+            write_started.set()
+            if not release_write.wait(timeout=5):
+                raise TimeoutError(
+                    "test did not release the blocked session write",
+                )
+        original_write(path, content)
+
+    monkeypatch.setattr(
+        session_module,
+        "_write_json_text",
+        blocking_first_write,
+    )
+
+    async with session.execution("shared") as transaction:
+        first_commit = asyncio.create_task(
+            transaction.commit_state({"agent": {"first": True}}),
+        )
+        await asyncio.wait_for(
+            asyncio.to_thread(write_started.wait),
+            timeout=1,
+        )
+        first_commit.cancel()
+        release_write.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first_commit
+
+        await transaction.commit_state({"agent": {"second": True}})
+        assert transaction.revision == 2
+
+    saved = await session.get_session_state_dict("shared")
+    assert saved["revision"] == 2
+    assert saved["agent"] == {"second": True}
+
+
+@pytest.mark.asyncio
 async def test_second_execution_times_out_until_first_exits(
     tmp_path: Path,
 ) -> None:

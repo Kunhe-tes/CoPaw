@@ -280,6 +280,7 @@ class SessionExecution:
         self._state: dict[str, Any] = {}
         self._revision = 0
         self._schema_version = 1
+        self._state_dirty = False
         self._entered = False
         self._active_executions_token: (
             Token[Mapping[str, "SessionExecution"]] | None
@@ -343,6 +344,11 @@ class SessionExecution:
             self._scope = None
             self._reset_active_executions()
 
+    async def close(self) -> None:
+        """Release this transaction before unrelated query cleanup begins."""
+        if self._scope is not None:
+            await self.__aexit__(None, None, None)
+
     @property
     def is_active(self) -> bool:
         """Return whether this transaction still owns its session lock."""
@@ -357,6 +363,16 @@ class SessionExecution:
         """Return the single state snapshot read while acquiring the lock."""
         return self.state
 
+    @property
+    def has_uncommitted_state(self) -> bool:
+        """Return whether a transaction-side mutation still needs a commit."""
+        return self._state_dirty
+
+    def mark_state_dirty(self) -> None:
+        """Mark a direct transaction-state mutation for final persistence."""
+        self._require_entered()
+        self._state_dirty = True
+
     async def commit_state(self, state: dict[str, Any]) -> dict[str, Any]:
         """Replace transaction state without reacquiring its held lock."""
         self._require_entered()
@@ -369,15 +385,36 @@ class SessionExecution:
             "schema_version": 2,
             "revision": next_revision,
         }
-        await run_runtime_state_work(
-            _write_json_state_sync,
-            self._session_save_path,
-            committed_state,
+        write_task = asyncio.create_task(
+            run_runtime_state_work(
+                _write_json_state_sync,
+                self._session_save_path,
+                committed_state,
+            ),
         )
+        try:
+            await asyncio.shield(write_task)
+        except asyncio.CancelledError:
+            while not write_task.done():
+                try:
+                    await asyncio.shield(write_task)
+                except asyncio.CancelledError:
+                    continue
+            write_task.result()
+            self._set_committed_state(committed_state, next_revision)
+            raise
+        self._set_committed_state(committed_state, next_revision)
+        return self._state
+
+    def _set_committed_state(
+        self,
+        committed_state: dict[str, Any],
+        revision: int,
+    ) -> None:
         self._state = committed_state
         self._schema_version = 2
-        self._revision = next_revision
-        return self._state
+        self._revision = revision
+        self._state_dirty = False
 
     def _require_entered(self) -> None:
         if not self._entered:
