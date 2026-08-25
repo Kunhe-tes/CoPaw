@@ -17,6 +17,7 @@ import { CursorComponent, cursorExtension } from "./core/plugins/cursor";
 import markedFootnote from "marked-footnote";
 import Link from "./core/components/Link";
 import CompatibleMarkdownFallback from "./compatibleMarkdown";
+import { renderSafeMarkdownHtmlToken } from "./compatibleMarkdownHtml";
 
 // 缓存不变的 dompurify 配置
 const EMPTY_DOMPURIFY_CONFIG = {
@@ -99,7 +100,7 @@ export default memo(function (props: MarkdownProps) {
         renderer: {
           html(token: { text?: string; raw?: string }) {
             const text = token.text || token.raw || "";
-            return text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+            return renderSafeMarkdownHtmlToken(text);
           },
         },
       }),
