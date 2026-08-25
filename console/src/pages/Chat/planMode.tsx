@@ -237,7 +237,7 @@ export function PlanModeMenuItem({
     <ComposerQuickMenuItem
       icon={showIcon ? <OrderedListOutlined /> : undefined}
       interactive
-      label={<span className={styles.planModeToggleLabel}>{label}</span>}
+      label={label}
       extra={
         <Switch
           size="small"
