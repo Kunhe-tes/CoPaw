@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
+from trace_sdk import SpanKind, TraceFields, global_tracer
 
 from ..mcp.http_headers import build_mcp_http_headers
 from ..mcp.lazy_client import LazyMCPClient, get_mcp_tool_discovery_cache
@@ -68,6 +70,7 @@ from .task_progress import attach_task_progress
 from .utils import build_env_context
 from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
+from ...__version__ import __version__
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
@@ -5187,27 +5190,44 @@ class AgentRunner(Runner):
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
         user_id = getattr(request, "user_id", "") or ""
+        trace_scope = nullcontext(None)
+        if user_id and session_id and self.agent_id:
+            trace_scope = global_tracer.start_as_current_span(
+                "agent.run",
+                kind=SpanKind.SERVER,
+                trace_fields=TraceFields(
+                    task_id=uuid4().hex,
+                    user_id=user_id,
+                    session_id=session_id,
+                    agent_id=self.agent_id,
+                    agent_version=__version__,
+                ),
+            )
 
-        query_execution = getattr(self, "_query_execution", None)
-        if query_execution is not None:
-            async for frame in query_execution.stream(
-                QueryInvocation(request=request, msgs=tuple(msgs)),
+        async with trace_scope as span:
+            if span is not None:
+                span.set_attribute("agent.user_message", query or "")
+
+            query_execution = getattr(self, "_query_execution", None)
+            if query_execution is not None:
+                async for frame in query_execution.stream(
+                    QueryInvocation(request=request, msgs=tuple(msgs)),
+                ):
+                    trace_id = getattr(request, "trace_id", None)
+                    msg = self._attach_trace_id_to_msg(frame.message, trace_id)
+                    yield msg, frame.last
+                return
+
+            async for msg, last in self._stream_query_entry(
+                msgs,
+                request=request,
+                query=query,
+                session_id=session_id,
+                user_id=user_id,
             ):
                 trace_id = getattr(request, "trace_id", None)
-                msg = self._attach_trace_id_to_msg(frame.message, trace_id)
-                yield msg, frame.last
-            return
-
-        async for msg, last in self._stream_query_entry(
-            msgs,
-            request=request,
-            query=query,
-            session_id=session_id,
-            user_id=user_id,
-        ):
-            trace_id = getattr(request, "trace_id", None)
-            msg = self._attach_trace_id_to_msg(msg, trace_id)
-            yield msg, last
+                msg = self._attach_trace_id_to_msg(msg, trace_id)
+                yield msg, last
 
     async def get_state_loaded(
         self,
