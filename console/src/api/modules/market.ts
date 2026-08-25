@@ -486,6 +486,7 @@ export const marketApi = {
     enabled: boolean;
     name?: string;
     description?: string;
+    skill_id?: string;
     conflicts?: Array<{
       skill_name: string;
       suggested_name: string;
@@ -511,6 +512,7 @@ export const marketApi = {
       enabled: boolean;
       name?: string;
       description?: string;
+      skill_id?: string;
       conflicts?: Array<{
         skill_name: string;
         suggested_name: string;
