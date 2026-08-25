@@ -5,9 +5,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from swe.app.runner import query_attempt
-from swe.app.source_system_config import resolve_query_retry_config
-from swe.config.config import load_agent_config
+from ...source_system_config import resolve_query_retry_config
+from .. import query_attempt
 
 
 def load_retry_settings(
@@ -15,12 +14,21 @@ def load_retry_settings(
     agent_id: str,
     tenant_id: str | None,
     agent_config: Any | None = None,
+    load_agent_config_fn: Any | None = None,
 ) -> tuple[int, int, float, float]:
     """Resolve retry settings with the historic single-attempt fallback."""
     config = agent_config
     try:
         if config is None:
-            config = load_agent_config(agent_id, tenant_id=tenant_id)
+            loader_fn: Any = load_agent_config_fn
+            if loader_fn is None:
+                from ....config.config import (
+                    load_agent_config as _load_agent_config,
+                )
+
+                loader_fn = _load_agent_config
+
+            config = loader_fn(agent_id, tenant_id=tenant_id)
     except Exception:
         pass
     enabled, max_retries, backoff_base, backoff_cap = (

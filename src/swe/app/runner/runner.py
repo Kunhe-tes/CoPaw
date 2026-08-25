@@ -4976,6 +4976,7 @@ class AgentRunner(Runner):
             agent_id=self.agent_id,
             tenant_id=self.tenant_id,
             agent_config=agent_config,
+            load_agent_config_fn=load_agent_config,
         )
 
     async def _add_retry_notice_to_memory(
