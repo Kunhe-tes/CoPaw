@@ -189,7 +189,12 @@ Turn the user's overall objective into a complete Goal Contract Draft. Ask for
 clarification when the objective, deterministic completion criteria, constraints,
 or autonomy boundary are materially unclear. When the Contract Draft is ready,
 call `submit_proposed_plan` with objective, completion_criteria, constraints,
-and autonomy_boundary. Do not execute the Goal before the user confirms it."""
+and autonomy_boundary. Each completion criterion must contain exactly four
+non-empty string fields: requirement, observable_assertion,
+verification_method, and expected_outcome. constraints must contain exactly
+must_preserve and must_not_do, both string arrays. Do not use criterion,
+verification, verification_command, or arrays for a criterion field. Do not
+execute the Goal before the user confirms it."""
 
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
