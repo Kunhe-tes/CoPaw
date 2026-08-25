@@ -1450,6 +1450,7 @@ class CronExecutor:
             req.get("session_id") or target_session_id or f"cron:{job.id}"
         )
         req["skip_history"] = True  # 标记定时任务不加载历史会话
+        req["execution_origin"] = "scheduled"
         # 传递 source_id 用于 tracing 数据隔离
         if job.source_id:
             req["source_id"] = job.source_id

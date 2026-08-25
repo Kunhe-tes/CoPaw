@@ -4200,7 +4200,11 @@ class AgentRunner(Runner):
         mcp_clients: list[Any],
     ) -> tuple[_QueryRuntimeResources, _RuntimeStartResult | None]:
         """Connect request resources and run the session-start hook."""
-        turn_id = f"turn-{uuid4().hex}"
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        turn_id = str(channel_meta.get("turn_id") or "")
+        if not turn_id:
+            turn_id = f"turn-{uuid4().hex}"
+            request.channel_meta = {**channel_meta, "turn_id": turn_id}
         chat = await self._get_or_create_chat(
             session_id=inputs.session_id,
             user_id=inputs.user_id,
@@ -5190,15 +5194,29 @@ class AgentRunner(Runner):
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
         user_id = getattr(request, "user_id", "") or ""
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        turn_id = ""
+        if request is not None:
+            turn_id = f"turn-{uuid4().hex}"
+            request.channel_meta = {**channel_meta, "turn_id": turn_id}
+        is_scheduled = (
+            getattr(request, "execution_origin", None) == "scheduled"
+        )
         trace_scope = nullcontext(None)
-        if user_id and session_id and self.agent_id:
+        if (
+            not is_scheduled
+            and user_id
+            and session_id
+            and turn_id
+            and self.agent_id
+        ):
             trace_scope = global_tracer.start_as_current_span(
                 "agent.run",
                 kind=SpanKind.SERVER,
                 trace_fields=TraceFields(
-                    task_id=uuid4().hex,
+                    task_id=session_id,
                     user_id=user_id,
-                    session_id=session_id,
+                    session_id=turn_id,
                     agent_id=self.agent_id,
                     agent_version=__version__,
                 ),

@@ -30,6 +30,11 @@ def clean_env(monkeypatch):
         "SWE_AUTH_ENABLED",
         "SWE_ENABLED_CHANNELS",
         "SWE_DISABLED_CHANNELS",
+        "AGENT_TRACE_ENABLED",
+        "AGENT_TRACE_SERVICE_NAME",
+        "AGENT_TRACE_EXPORTER",
+        "AGENT_TRACE_ATTRIBUTE_REDACTION_ENABLED",
+        "AGENT_TRACE_ATTRIBUTE_VALUE_REDACTION_ENABLED",
     ]
     for var in test_vars:
         monkeypatch.delenv(var, raising=False)
@@ -67,6 +72,9 @@ class TestEnvDefaultsLoader:
         assert "SWE_FILE_LOG_ENABLED" not in result
         assert os.environ.get("SWE_FILE_LOG_ENABLED") is None
         assert os.environ.get("SWE_AUTH_ENABLED") == "false"
+        assert os.environ.get("AGENT_TRACE_ENABLED") == "false"
+        assert os.environ.get("AGENT_TRACE_SERVICE_NAME") == "swe-agent"
+        assert os.environ.get("AGENT_TRACE_EXPORTER") == "console"
 
     def test_load_prd_defaults(self, monkeypatch):
         """load_env_defaults should load prd.json values."""
@@ -77,6 +85,8 @@ class TestEnvDefaultsLoader:
         assert os.environ.get("SWE_OPENAPI_DOCS") == "false"
         assert "SWE_FILE_LOG_ENABLED" not in result
         assert os.environ.get("SWE_FILE_LOG_ENABLED") is None
+        assert os.environ.get("AGENT_TRACE_ENABLED") == "false"
+        assert os.environ.get("AGENT_TRACE_EXPORTER") == "console"
 
     def test_does_not_override_existing_env(self, monkeypatch):
         """load_env_defaults should not override existing env vars."""
@@ -106,6 +116,14 @@ class TestEnvDefaultsLoader:
         monkeypatch.setenv("SWE_AUTH_ENABLED", "test")
         monkeypatch.setenv("SWE_ENABLED_CHANNELS", "test")
         monkeypatch.setenv("SWE_DISABLED_CHANNELS", "test")
+        monkeypatch.setenv("AGENT_TRACE_ENABLED", "test")
+        monkeypatch.setenv("AGENT_TRACE_SERVICE_NAME", "test")
+        monkeypatch.setenv("AGENT_TRACE_EXPORTER", "test")
+        monkeypatch.setenv("AGENT_TRACE_ATTRIBUTE_REDACTION_ENABLED", "test")
+        monkeypatch.setenv(
+            "AGENT_TRACE_ATTRIBUTE_VALUE_REDACTION_ENABLED",
+            "test",
+        )
 
         result = load_env_defaults("dev")
 

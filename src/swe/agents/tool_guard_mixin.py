@@ -377,6 +377,11 @@ class ToolGuardMixin:
         finally:
             await self.memory.add(tool_res_msg)
 
+    @execute_tool_traced(
+        tool_name_factory=lambda self, tool_call, tool_name, tool_input: tool_name,
+        input_arguments_factory=lambda self, tool_call, tool_name, tool_input: tool_input,
+        output_arguments_factory=lambda result: {},
+    )
     async def _run_tool_call_with_hard_timeout(
         self,
         tool_call: dict[str, Any],
@@ -1897,13 +1902,6 @@ class ToolGuardMixin:
             )
         return bool(consumed)
 
-    @execute_tool_traced(
-        tool_name_factory=lambda self, tool_call, tool_name, tool_input: (tool_name),
-        input_arguments_factory=lambda self, tool_call, tool_name, tool_input: (
-            tool_input
-        ),
-        output_arguments_factory=lambda result: {},
-    )
     async def _run_approved_tool_call(
         self,
         tool_call: dict[str, Any],

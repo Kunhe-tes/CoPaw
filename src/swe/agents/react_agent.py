@@ -1856,15 +1856,6 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                     tool_choice=tool_choice,
                 )
 
-    @chat_traced(
-        request_model_factory=lambda self, *args, **kwargs: (
-            self._resolved_model_slot.get("model")
-        ),
-        provider_name_factory=lambda self, *args, **kwargs: (
-            self._resolved_model_slot.get("provider_id")
-        ),
-        output_arguments_factory=lambda result: {},
-    )
     async def _summarizing(self) -> Msg:
         """Override summarizing with proactive media filtering,
         passive fallback, and tool_use block filtering.
