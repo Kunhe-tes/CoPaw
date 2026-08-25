@@ -57,6 +57,13 @@ const events: HookEventName[] = [
   "Stop",
 ];
 
+const outputTransformContract = `{
+  "decision": "allow",
+  "hookSpecificOutput": {
+    "replacementText": "可选最终文本"
+  }
+}`;
+
 function findHandler(
   config: HookConfigDraft,
   selected: HookTreeSelection,
@@ -215,9 +222,7 @@ function HookManagementPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selected, setSelected] = useState<HookTreeSelection>({ kind: "root" });
-  const [editingEvent, setEditingEvent] = useState<HookEventName | null>(
-    null,
-  );
+  const [editingEvent, setEditingEvent] = useState<HookEventName | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [templateLabel, setTemplateLabel] = useState<string>();
@@ -423,6 +428,14 @@ function HookManagementPage() {
       setTestError("Hook Context 必须保留当前事件及所有必填 Envelope 字段");
       return;
     }
+    if (
+      handler.outputTransform &&
+      (typeof context.assistant_response !== "string" ||
+        !context.assistant_response.trim())
+    ) {
+      setTestError("输出转换测试需要非空的 assistant_response");
+      return;
+    }
     setTestError(null);
     setTesting(true);
     try {
@@ -493,11 +506,7 @@ function HookManagementPage() {
             <h2>{handler.id || "未命名 Handler"}</h2>
             <span>{handler.type} Handler</span>
           </div>
-          <Button
-            onClick={openManualTest}
-          >
-            执行人工测试
-          </Button>
+          <Button onClick={openManualTest}>执行人工测试</Button>
         </div>
         <label>
           Handler ID
@@ -651,6 +660,50 @@ function HookManagementPage() {
             />
           </label>
         )}
+        {selected.event === "Stop" && (
+          <section className={styles.outputTransform}>
+            <label className={styles.switchLine}>
+              转换最终回复
+              <Switch
+                aria-label="转换最终回复"
+                checked={Boolean(handler.outputTransform)}
+                onChange={(outputTransform) =>
+                  onHandlerChange(
+                    outputTransform
+                      ? { outputTransform, once: false }
+                      : { outputTransform },
+                  )
+                }
+              />
+            </label>
+            {handler.outputTransform && (
+              <div className={styles.outputTransformDetails}>
+                <p>
+                  候选回复会暂存，只有最终文本会交付；此处不提供返回字段配置。
+                </p>
+                <p>
+                  有效替换格式为 decision: "allow"，可选
+                  hookSpecificOutput.replacementText。
+                </p>
+                <pre className={styles.transformContract}>
+                  {outputTransformContract}
+                </pre>
+                <p>
+                  处理器执行失败或输出无效时遵循失败策略：allow
+                  保留当前文本继续，block 终止。
+                </p>
+                <p>
+                  Prompt 返回仍仅支持 allow；command/http 的 Stop 返回 block
+                  会终止。
+                </p>
+                <p>
+                  总转换预算默认 30
+                  秒，耗尽时硬终止，且不属于失败策略的可编辑项。
+                </p>
+              </div>
+            )}
+          </section>
+        )}
         <Collapse
           items={[
             {
@@ -680,7 +733,10 @@ function HookManagementPage() {
                   <label>
                     失败策略
                     <Select
-                      value={String(handler.failPolicy ?? "allow")}
+                      value={String(
+                        handler.failPolicy ??
+                          (handler.type === "prompt" ? "block" : "allow"),
+                      )}
                       options={[
                         { value: "allow", label: "允许" },
                         { value: "block", label: "阻断" },
@@ -704,26 +760,25 @@ function HookManagementPage() {
                     <Switch
                       checked={Boolean(handler.once)}
                       disabled={Boolean(handler.outputTransform)}
+                      title={
+                        handler.outputTransform
+                          ? "转换最终回复开启时必须在每次 Stop 时执行"
+                          : undefined
+                      }
+                      aria-describedby={
+                        handler.outputTransform
+                          ? "once-output-transform-reason"
+                          : undefined
+                      }
                       onChange={(once) => onHandlerChange({ once })}
                     />
                   </label>
-                  {selected.event === "Stop" && (
-                    <label className={styles.switchLine}>
-                      输出变换器
-                      <Switch
-                        checked={Boolean(handler.outputTransform)}
-                        onChange={(outputTransform) =>
-                          onHandlerChange({
-                            outputTransform,
-                            once: outputTransform ? false : handler.once,
-                          })
-                        }
-                      />
-                    </label>
-                  )}
-                  {selected.event === "Stop" && handler.outputTransform && (
-                    <p>
-                      启用后，候选文本会在 Stop 完成前暂存；仅最终文本会交付。
+                  {handler.outputTransform && (
+                    <p
+                      id="once-output-transform-reason"
+                      className={styles.onceTransformReason}
+                    >
+                      转换最终回复开启后，必须在每次 Stop 时执行。
                     </p>
                   )}
                   <label className={styles.switchLine}>
@@ -820,8 +875,27 @@ function HookManagementPage() {
       >
         执行人工测试
       </Button>
-      {testResult && (
-        <pre className={styles.summary}>{JSON.stringify(testResult, null, 2)}</pre>
+      {testResult && testResult.output_transform === true ? (
+        <section className={styles.outputTransformSummary}>
+          <p>仅执行当前处理器，不模拟转换链路或总时间预算。</p>
+          {[
+            "status",
+            "replacement_applied",
+            "replacement_length",
+            "failed",
+            "failure_type",
+          ].map((field) => (
+            <p key={field}>
+              {field}: {String(testResult[field] ?? "")}
+            </p>
+          ))}
+        </section>
+      ) : (
+        testResult && (
+          <pre className={styles.summary}>
+            {JSON.stringify(testResult, null, 2)}
+          </pre>
+        )
       )}
     </section>
   );
@@ -859,9 +933,7 @@ function HookManagementPage() {
                 <EventOverview
                   config={draft}
                   dirty={dirty}
-                  onEnabledChange={(enabled) =>
-                    setDraft({ ...draft, enabled })
-                  }
+                  onEnabledChange={(enabled) => setDraft({ ...draft, enabled })}
                   onCreate={() => {
                     setTemplatePickerOpen(false);
                     setCreateOpen(true);
@@ -963,7 +1035,7 @@ function HookManagementPage() {
       <EventEditorDrawer
         key={editingEvent ?? "closed"}
         event={editingEvent}
-        groups={editingEvent ? (draft.events[editingEvent] ?? []) : []}
+        groups={editingEvent ? draft.events[editingEvent] ?? [] : []}
         templateLabel={templateLabel}
         basicDetails={basicDetails}
         details={
@@ -1045,7 +1117,9 @@ function HookManagementPage() {
                 block
                 onClick={() => {
                   const scenario = createScenarioEvent(template.id);
-                  setDraft(replaceEvent(draft, scenario.event, scenario.groups));
+                  setDraft(
+                    replaceEvent(draft, scenario.event, scenario.groups),
+                  );
                   setSelected({
                     kind: "group",
                     event: scenario.event,
@@ -1231,10 +1305,27 @@ function HookManagementPage() {
         >
           我确认将执行真实命令、HTTP 请求或模型调用
         </Checkbox>
-        {testResult && (
-          <pre className={styles.summary}>
-            {JSON.stringify(testResult, null, 2)}
-          </pre>
+        {testResult && testResult.output_transform === true ? (
+          <section className={styles.outputTransformSummary}>
+            <p>仅执行当前处理器，不模拟转换链路或总时间预算。</p>
+            {[
+              "status",
+              "replacement_applied",
+              "replacement_length",
+              "failed",
+              "failure_type",
+            ].map((field) => (
+              <p key={field}>
+                {field}: {String(testResult[field] ?? "")}
+              </p>
+            ))}
+          </section>
+        ) : (
+          testResult && (
+            <pre className={styles.summary}>
+              {JSON.stringify(testResult, null, 2)}
+            </pre>
+          )
         )}
       </Modal>
     </div>
