@@ -193,7 +193,8 @@ describe("HookManagementPage", () => {
     expect(screen.getByLabelText("状态消息")).toBeInTheDocument();
     expect(screen.getByLabelText("仅执行一次")).toBeInTheDocument();
     expect(screen.getByLabelText("附带会话快照")).toBeInTheDocument();
-    expect(screen.getByLabelText("Shell")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Shell")).not.toBeInTheDocument();
+    expect(screen.getByText("Shell：bash")).toBeInTheDocument();
     expect(screen.getByLabelText("环境变量（JSON）")).toBeInTheDocument();
   });
 

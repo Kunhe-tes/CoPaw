@@ -144,6 +144,23 @@ function serializeDraft(config: HookConfigDraft): string {
   return JSON.stringify(config);
 }
 
+function normalizeCommandShells(config: HookConfigDraft): HookConfigDraft {
+  return {
+    ...config,
+    events: Object.fromEntries(
+      Object.entries(config.events).map(([event, groups]) => [
+        event,
+        groups?.map((group) => ({
+          ...group,
+          hooks: group.hooks.map((handler) =>
+            handler.type === "command" ? { ...handler, shell: "bash" } : handler,
+          ),
+        })),
+      ]),
+    ),
+  } as HookConfigDraft;
+}
+
 function parseJsonRecord(value: string): Record<string, string> | null {
   try {
     const parsed: unknown = JSON.parse(value);
@@ -350,7 +367,7 @@ function HookManagementPage() {
     setSaving(true);
     try {
       const snapshot = await hookManagementApi.saveConfiguration(
-        draft,
+        normalizeCommandShells(draft),
         revision,
       );
       setDraft(snapshot.hooks as HookConfigDraft);
@@ -546,17 +563,7 @@ function HookManagementPage() {
                 }
               />
             </label>
-            <label>
-              Shell
-              <Select
-                allowClear
-                value={handler.shell as string | undefined}
-                options={["sh", "bash", "zsh", "cmd", "powershell"].map(
-                  (value) => ({ value, label: value }),
-                )}
-                onChange={(value) => onHandlerChange({ shell: value })}
-              />
-            </label>
+            <div>Shell：bash</div>
             <label>
               环境变量（JSON）
               <Input.TextArea
