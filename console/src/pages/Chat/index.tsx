@@ -28,6 +28,7 @@ import {
   ControlOutlined,
   ExclamationCircleOutlined,
   SettingOutlined,
+  TeamOutlined,
 } from "@ant-design/icons";
 import { SparkCopyLine } from "@agentscope-ai/icons";
 import { useTranslation } from "react-i18next";
@@ -37,6 +38,7 @@ import defaultConfig, { getDefaultConfig } from "./OptionsPanel/defaultConfig";
 import { chatApi } from "../../api/modules/chat";
 import { cronJobApi } from "../../api/modules/cronjob";
 import { feedbackApi } from "../../api/modules/feedback";
+import { expertsApi, type Expert } from "../../api/modules/experts";
 import { contextReferencesApi } from "../../api/modules/contextReferences";
 import type { SkillMentionItem } from "../../components/agentscope-chat/SkillMentions/useSkillMentions";
 import { getApiUrl } from "../../api/config";
@@ -49,6 +51,11 @@ import type {
 import type { FeedbackRecord } from "../../api/types/feedback";
 import ModelSelector from "./ModelSelector";
 import ExpertSelector from "./ExpertSelector";
+import {
+  normalizeSelectableExperts,
+  resolveExpertLabel,
+  type SelectableExpert,
+} from "./expertSelection";
 import { useTheme } from "../../contexts/ThemeContext";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSourceSystemConfigStore } from "../../stores/sourceSystemConfigStore";
@@ -608,6 +615,28 @@ function ActiveGoalModeControl({
   );
 }
 
+function ActiveExpertControl({
+  expert,
+  onDisable,
+}: {
+  expert: SelectableExpert | null;
+  onDisable: () => void;
+}) {
+  const inputState = useChatAnywhereInput((value) => ({
+    disabled: Boolean(value.disabled),
+  }));
+
+  return (
+    <ActivePlanModeButton
+      enabled={Boolean(expert)}
+      disabled={Boolean(inputState.disabled)}
+      label={expert ? resolveExpertLabel(expert) : "专家"}
+      showIcon={false}
+      onDisable={onDisable}
+    />
+  );
+}
+
 const addPlanModeScopeAlias = (
   state: PlanModeLocalState,
   alias: string | null | undefined,
@@ -647,6 +676,8 @@ export default function ChatPage() {
   const [subAgentMonitorResetKey, setSubAgentMonitorResetKey] = useState(0);
   const { selectedAgent } = useAgentStore();
   const [selectedExpertId, setSelectedExpertId] = useState<string | null>(null);
+  const [experts, setExperts] = useState<SelectableExpert[]>([]);
+  const [expertsLoading, setExpertsLoading] = useState(true);
   const [modelRefreshKey, setModelRefreshKey] = useState(0);
   const [feedbackRefreshKey, setFeedbackRefreshKey] = useState(0);
   const [autoPreviewTriggerKey, setAutoPreviewTriggerKey] = useState(0);
@@ -667,6 +698,8 @@ export default function ChatPage() {
   const dragCounterRef = useRef(0);
   const runtimeLoadingBridgeRef = useRef<RuntimeLoadingBridgeApi | null>(null);
   const { message } = useAppMessage();
+  const messageRef = useRef(message);
+  messageRef.current = message;
   const composerInputState = useChatAnywhereInput((value) => ({
     disabled: Boolean(value.disabled),
   }));
@@ -691,6 +724,36 @@ export default function ChatPage() {
   useEffect(() => {
     setSelectedExpertId(null);
   }, [selectedAgent]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadExperts = async () => {
+      setExpertsLoading(true);
+      try {
+        const records = await expertsApi.listExperts();
+        if (!cancelled) {
+          setExperts(normalizeSelectableExperts(records as Expert[]));
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setExperts([]);
+          messageRef.current.error(
+            error instanceof Error ? error.message : "加载专家失败",
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setExpertsLoading(false);
+        }
+      }
+    };
+
+    void loadExperts();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const sourceSystemConfig = useSourceSystemConfigStore(
     (state) => state.config,
   );
@@ -1361,6 +1424,21 @@ export default function ChatPage() {
       />
     ),
     [goalModeEnabled],
+  );
+
+  const selectedExpert = useMemo(
+    () => experts.find((expert) => expert.id === selectedExpertId) || null,
+    [experts, selectedExpertId],
+  );
+
+  const activeExpertControl = useMemo(
+    () => (
+      <ActiveExpertControl
+        expert={selectedExpert}
+        onDisable={() => setSelectedExpertId(null)}
+      />
+    ),
+    [selectedExpert],
   );
 
   useEffect(() => {
@@ -2126,6 +2204,7 @@ export default function ChatPage() {
     const senderPrefixNodes = Children.toArray([
       activePlanModeControl,
       activeGoalModeControl,
+      activeExpertControl,
       senderConfig?.prefix,
     ]).filter(Boolean);
 
@@ -2232,24 +2311,31 @@ export default function ChatPage() {
           }
         />
       </ComposerQuickMenuSubmenu>,
-      <ComposerQuickMenuSubmenu
-        key="expert"
-        label="专家"
-        disabled={composerDisabled || goalModeEnabled}
-        panelWidth="min(240px, calc(100vw - 32px))"
-      >
-        <ExpertSelector
-          planModeEnabled={planModeEnabled}
-          goalModeEnabled={goalModeEnabled}
-          selectedExpertId={selectedExpertId}
-          onChange={setSelectedExpertId}
-          onDisablePlanMode={() => {
-            void persistPlanMode(false);
-          }}
-          disabled={composerDisabled}
-          inline
-        />
-      </ComposerQuickMenuSubmenu>,
+      ...(expertsLoading || experts.length > 0
+        ? [
+            <ComposerQuickMenuSubmenu
+              key="expert"
+              icon={<TeamOutlined />}
+              label="专家"
+              disabled={composerDisabled || goalModeEnabled || expertsLoading}
+              panelWidth="min(240px, calc(100vw - 32px))"
+            >
+              <ExpertSelector
+                experts={experts}
+                loading={expertsLoading}
+                planModeEnabled={planModeEnabled}
+                goalModeEnabled={goalModeEnabled}
+                selectedExpertId={selectedExpertId}
+                onChange={setSelectedExpertId}
+                onDisablePlanMode={() => {
+                  void persistPlanMode(false);
+                }}
+                disabled={composerDisabled}
+                inline
+              />
+            </ComposerQuickMenuSubmenu>,
+          ]
+        : []),
     ];
 
     return {
@@ -2425,6 +2511,7 @@ export default function ChatPage() {
     } as unknown as IAgentScopeRuntimeWebUIOptions;
   }, [
     activeGoalModeControl,
+    activeExpertControl,
     activePlanModeControl,
     brandTheme.avatar,
     brandTheme.brandName,
@@ -2439,6 +2526,8 @@ export default function ChatPage() {
     isComposingRef,
     isContentOnly,
     isDark,
+    experts,
+    expertsLoading,
     multimodalCaps,
     composerDisabled,
     pendingPlanRevision,

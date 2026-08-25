@@ -60,6 +60,14 @@ describe("ExpertSelector inline menu", () => {
 
     render(
       <ExpertSelector
+        experts={[
+          {
+            id: "expert-1",
+            name: "专家一号",
+            description: "处理复杂问题",
+          },
+        ]}
+        loading={false}
         inline
         planModeEnabled={false}
         selectedExpertId={null}
@@ -82,6 +90,14 @@ describe("ExpertSelector inline menu", () => {
 
     render(
       <ExpertSelector
+        experts={[
+          {
+            id: "expert-1",
+            name: "专家一号",
+            description: "处理复杂问题",
+          },
+        ]}
+        loading={false}
         inline
         planModeEnabled={false}
         goalModeEnabled
@@ -98,5 +114,30 @@ describe("ExpertSelector inline menu", () => {
     await waitFor(() => {
       expect(onChange).not.toHaveBeenCalled();
     });
+  });
+
+  it("renders the experts supplied by ChatPage without fetching again", async () => {
+    mocks.listExperts.mockResolvedValue([]);
+
+    render(
+      <ExpertSelector
+        experts={[
+          {
+            id: "expert-1",
+            name: "专家一号",
+            description: "处理复杂问题",
+          },
+        ]}
+        loading={false}
+        inline
+        planModeEnabled={false}
+        selectedExpertId={null}
+        onChange={vi.fn()}
+        onDisablePlanMode={vi.fn()}
+      />,
+    );
+
+    expect(await screen.findByRole("menuitem")).toHaveTextContent("专家一号");
+    expect(mocks.listExperts).not.toHaveBeenCalled();
   });
 });

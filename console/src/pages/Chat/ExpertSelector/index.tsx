@@ -1,11 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useState } from "react";
 import { CheckOutlined, LoadingOutlined } from "@ant-design/icons";
 import { Dropdown, Spin, Tooltip } from "antd";
 import { SparkDownLine } from "@agentscope-ai/icons";
-import { expertsApi, type Expert } from "../../../api/modules/experts";
-import { useAppMessage } from "../../../hooks/useAppMessage";
 import {
-  normalizeSelectableExperts,
   resolveExpertLabel,
   toggleExpertSelection,
   type SelectableExpert,
@@ -13,6 +10,8 @@ import {
 import styles from "./index.module.less";
 
 export interface ExpertSelectorProps {
+  experts: SelectableExpert[];
+  loading?: boolean;
   planModeEnabled: boolean;
   goalModeEnabled?: boolean;
   selectedExpertId: string | null;
@@ -23,6 +22,8 @@ export interface ExpertSelectorProps {
 }
 
 export default function ExpertSelector({
+  experts,
+  loading = false,
   planModeEnabled,
   goalModeEnabled = false,
   selectedExpertId,
@@ -31,32 +32,9 @@ export default function ExpertSelector({
   disabled = false,
   inline = false,
 }: ExpertSelectorProps) {
-  const { message } = useAppMessage();
-  const [experts, setExperts] = useState<SelectableExpert[]>([]);
-  const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
-
-  const selectedExpert = useMemo(
-    () => experts.find((expert) => expert.id === selectedExpertId) || null,
-    [experts, selectedExpertId],
-  );
-
-  const loadExperts = useCallback(async () => {
-    setLoading(true);
-    try {
-      const records = await expertsApi.listExperts();
-      setExperts(normalizeSelectableExperts(records as Expert[]));
-    } catch (error) {
-      setExperts([]);
-      message.error(error instanceof Error ? error.message : "加载专家失败");
-    } finally {
-      setLoading(false);
-    }
-  }, [message]);
-
-  useEffect(() => {
-    void loadExperts();
-  }, [loadExperts]);
+  const selectedExpert =
+    experts.find((expert) => expert.id === selectedExpertId) || null;
 
   const selectionDisabled = disabled || goalModeEnabled;
 
@@ -121,7 +99,6 @@ export default function ExpertSelector({
       open={open}
       onOpenChange={(next) => {
         setOpen(next);
-        if (next) void loadExperts();
       }}
       trigger={["click"]}
       placement="bottomRight"
