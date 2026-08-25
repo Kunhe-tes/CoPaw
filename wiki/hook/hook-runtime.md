@@ -101,6 +101,11 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 
 变换仅作用于可提取文本（字符串或 text block）；工具进度、审批、附件和工具卡片继续实时输出。显式请求的会话快照保持原有行为，可能含原始候选文本。应用日志只记录变换元数据、长度和 SHA-256，不记录候选或替换正文。
 
+如果想直接复用 command handler 的最小实现，可参考
+[stop-output-transform-command-demo](stop-output-transform-command-demo/SKILL.md)。它演示
+从 `assistant_response` 读取候选文本，并仅在文本实际变化时返回合法的
+`hookSpecificOutput.replacementText`。
+
 ## 配置写在哪里
 
 Hook 可以配置在 3 个层级：

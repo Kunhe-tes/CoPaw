@@ -36,12 +36,13 @@
 | `Stop` | [final-output-prompt-guard-demo](final-output-prompt-guard-demo/SKILL.md) | `prompt` | 演示通过提示词审查 Agent 最终输出规范，不符合则 `block`，符合则 `allow` |
 | `Stop` | [stop-history-http-guard-demo](stop-history-http-guard-demo/SKILL.md) | `command` | 演示读取完整会话历史并调用外部接口判定最终输出 |
 | `Stop` | [stop-command-summary-demo](stop-command-summary-demo/SKILL.md) | `command` | 演示结束时发送审计/埋点并显式批准完成 |
+| `Stop` | [stop-output-transform-command-demo](stop-output-transform-command-demo/SKILL.md) | `command` | 演示以 `outputTransform: true` 串行改写最终文本，并用 `replacementText` 完整替换候选回复 |
 
 ## Handler 覆盖
 
 | handler 类型 | 对应样例 | 关键点 |
 | --- | --- | --- |
-| `command` | `user-prompt-submit-command-demo`、`pre-tool-use-command-demo`、`conditional-pre-tool-use-demo`、`snapshot-post-tool-audit-demo`、`mcp-failure-fallback-demo`、`http-auth-failure-guard-demo`、`stop-history-http-guard-demo`、`stop-command-summary-demo` | skill 级必须使用 `argv`，脚本必须放在 `scripts/` 下 |
+| `command` | `user-prompt-submit-command-demo`、`pre-tool-use-command-demo`、`conditional-pre-tool-use-demo`、`snapshot-post-tool-audit-demo`、`mcp-failure-fallback-demo`、`http-auth-failure-guard-demo`、`stop-history-http-guard-demo`、`stop-command-summary-demo`、`stop-output-transform-command-demo` | skill 级必须使用 `argv`，脚本必须放在 `scripts/` 下 |
 | `http` | `hook-http-demo`、`tenant-pre-tool-use-http-policy-demo` | skill 级不能写明文 `headers` 与 `allowedEnvVars`；租户级可用 `headers` / `headerSecretRefs` 接远端策略服务 |
 | `prompt` | `session-start-prompt-demo`、`stop-prompt-demo`、`final-output-prompt-guard-demo` | 可挂到全部 6 个事件；普通事件支持 `allow` / `deny` / `block` / `stop`，`Stop` 仅支持 `allow` / `block` 并决定候选回复是否完成 |
 
@@ -57,6 +58,7 @@
    - 只有确实需要上下文时才打开 `includeConversationSnapshot`
    - `Stop` 是否只返回 `allow` / `block`
    - `Stop` 是否在记录副作用后明确返回 `allow` 或 `block`
+   - `outputTransform: true` 是否只写在 `Stop`、没有同时设置 `once: true`，并且只返回 `allow` 与可选的非空 `replacementText`
 
 ## 额外说明
 
@@ -76,5 +78,9 @@
 - `stop-history-http-guard-demo` 面向完整历史审查：在 `Stop` 阶段读取
   `transcript_path` 指向的完整会话 JSON，再调用外部策略接口返回 `allow` / `block`。
 - `stop-command-summary-demo` 面向完成尝试的外部观测：脚本把审计记录写给外部日志采集，并在 stdout 返回 `allow` 批准候选回复。
+- `stop-output-transform-command-demo` 面向最终文本规范化：它在交付前把候选文本暂存，
+  command handler 通过 `hookSpecificOutput.replacementText` 进行完整替换。若变换失败，
+  `failPolicy: allow` 会保留当前文本继续，`failPolicy: block` 或总时限耗尽会让本轮未完成，
+  不投递候选文本也不自动续跑。
 - prompt 样例目录里的 `scripts/*.py` 不是 hook runtime 自动执行的 handler，而是用于
   生成最小 `HookContext` 样本，方便你手工调试 prompt 规则。
