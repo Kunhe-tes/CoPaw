@@ -156,6 +156,7 @@ export function EventEditorDrawer({
                     <strong>{handler.id}</strong>
                     <span>{handlerSummary(handler)}</span>
                     <Tag>{handler.type}</Tag>
+                    {handler.outputTransform && <Tag color="blue">输出转换</Tag>}
                   </Button>
                   <Space className={styles.pipelineActions} size={0}>
                     <Button
