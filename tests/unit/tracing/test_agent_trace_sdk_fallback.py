@@ -28,6 +28,7 @@ builtins.__import__ = _blocked_import
 def _import_app_without_trace_sdk(
     *,
     allow_fallback: bool,
+    additional_code: str = "",
 ) -> subprocess.CompletedProcess[str]:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(REPO_ROOT / "src")
@@ -40,7 +41,9 @@ def _import_app_without_trace_sdk(
         [
             sys.executable,
             "-c",
-            _BLOCK_TRACE_SDK_IMPORT + "\nimport swe.app._app",
+            _BLOCK_TRACE_SDK_IMPORT
+            + "\nimport swe.app._app"
+            + additional_code,
         ],
         cwd=REPO_ROOT,
         env=env,
@@ -52,6 +55,21 @@ def _import_app_without_trace_sdk(
 
 def test_app_imports_when_missing_trace_sdk_is_explicitly_allowed() -> None:
     result = _import_app_without_trace_sdk(allow_fallback=True)
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_fallback_trace_fields_accept_source_id() -> None:
+    result = _import_app_without_trace_sdk(
+        allow_fallback=True,
+        additional_code=(
+            "\nfrom swe.tracing.agent_trace_sdk import TraceFields"
+            "\nfields = TraceFields("
+            "'task-1', 'user-1', 'session-1', 'agent-1', '1.0', 'source-a'"
+            ")"
+            "\nassert fields.source_id == 'source-a'"
+        ),
+    )
 
     assert result.returncode == 0, result.stderr
 

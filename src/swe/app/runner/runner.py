@@ -5219,6 +5219,7 @@ class AgentRunner(Runner):
                     session_id=turn_id,
                     agent_id=self.agent_id,
                     agent_version=__version__,
+                    source_id=_request_source_id(request),
                 ),
             )
 
