@@ -61,6 +61,13 @@ async function openPreToolGroup() {
   fireEvent.click(await screen.findByRole("button", { name: "所有工具" }));
 }
 
+async function openStopHandler(handlerId: string) {
+  fireEvent.click(await screen.findByRole("button", { name: "编辑配置 Stop" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: `编辑 ${handlerId}` }),
+  );
+}
+
 const hooks = {
   enabled: true,
   events: {
@@ -74,6 +81,28 @@ const hooks = {
             type: "command",
             argv: ["python", "hooks/scripts/guard.py"],
           },
+        ],
+      },
+    ],
+  },
+};
+
+const stopHooks = {
+  enabled: true,
+  events: {
+    Stop: [
+      {
+        id: "stop-output",
+        matcher: { tools: [] },
+        hooks: [
+          {
+            id: "stop-command",
+            type: "command",
+            argv: ["echo", "stop"],
+            once: true,
+          },
+          { id: "stop-http", type: "http", url: "https://example.test" },
+          { id: "stop-prompt", type: "prompt", prompt: "Review output" },
         ],
       },
     ],
@@ -168,6 +197,176 @@ describe("HookManagementPage", () => {
     expect(screen.getByLabelText("环境变量（JSON）")).toBeInTheDocument();
   });
 
+  it.each(["stop-command", "stop-http", "stop-prompt"])(
+    "shows final reply transformation only for Stop %s Handlers",
+    async (handlerId) => {
+      mocks.getConfiguration.mockResolvedValueOnce({
+        hooks: stopHooks,
+        revision: "rev-1",
+      });
+      render(<HookManagementPage />);
+
+      await openStopHandler(handlerId);
+
+      expect(
+        screen.getByRole("switch", { name: "转换最终回复" }),
+      ).toBeInTheDocument();
+      expect(screen.getByText("高级设置")).toBeInTheDocument();
+    },
+  );
+
+  it("does not show final reply transformation for non-Stop Handlers", async () => {
+    render(<HookManagementPage />);
+    await openPreToolHandler();
+
+    expect(
+      screen.queryByRole("switch", { name: "转换最终回复" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("enabling final reply transformation clears and disables once before saving", async () => {
+    mocks.getConfiguration.mockResolvedValueOnce({
+      hooks: stopHooks,
+      revision: "rev-1",
+    });
+    render(<HookManagementPage />);
+    await openStopHandler("stop-command");
+
+    fireEvent.click(screen.getByRole("switch", { name: "转换最终回复" }));
+    fireEvent.click(screen.getByText("高级设置"));
+
+    expect(screen.getByLabelText("仅执行一次")).not.toBeChecked();
+    expect(screen.getByLabelText("仅执行一次")).toBeDisabled();
+    expect(screen.getByLabelText("仅执行一次")).toHaveAttribute(
+      "title",
+      expect.stringContaining("转换最终回复"),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "保存并激活 Stop" }));
+    await waitFor(() =>
+      expect(mocks.saveConfiguration).toHaveBeenCalledWith(
+        expect.objectContaining({
+          events: expect.objectContaining({
+            Stop: [
+              expect.objectContaining({
+                hooks: expect.arrayContaining([
+                  expect.objectContaining({
+                    id: "stop-command",
+                    outputTransform: true,
+                    once: false,
+                  }),
+                ]),
+              }),
+            ],
+          }),
+        }),
+        "rev-1",
+      ),
+    );
+  }, 10_000);
+
+  it("requires a non-empty assistant response for transformed Stop manual tests", async () => {
+    mocks.getConfiguration.mockResolvedValueOnce({
+      hooks: {
+        ...stopHooks,
+        events: {
+          Stop: [
+            {
+              ...stopHooks.events.Stop[0],
+              hooks: [
+                {
+                  ...stopHooks.events.Stop[0].hooks[0],
+                  outputTransform: true,
+                },
+              ],
+            },
+          ],
+        },
+      },
+      revision: "rev-1",
+    });
+    render(<HookManagementPage />);
+    await openStopHandler("stop-command");
+    fireEvent.click(screen.getByRole("button", { name: "执行人工测试" }));
+    fireEvent.change(screen.getByLabelText("Hook Context（JSON）"), {
+      target: {
+        value: JSON.stringify({
+          session_id: "session-1",
+          transcript_path: "/tmp/transcript.jsonl",
+          cwd: "/workspace",
+          tenant_id: "tenant-a",
+          effective_tenant_id: "tenant-a",
+          user_id: "user-a",
+          agent_id: "agent-a",
+          channel: "cli",
+          hook_event_name: "Stop",
+          assistant_response: " ",
+        }),
+      },
+    });
+    fireEvent.click(screen.getByLabelText(/确认将执行真实/i));
+    fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
+
+    expect(
+      await screen.findByText("输出转换测试需要非空的 assistant_response"),
+    ).toBeInTheDocument();
+    expect(mocks.manualTest).not.toHaveBeenCalled();
+  }, 10_000);
+
+  it("shows a redacted transformed manual-test summary", async () => {
+    mocks.getConfiguration.mockResolvedValueOnce({
+      hooks: {
+        ...stopHooks,
+        events: {
+          Stop: [
+            {
+              ...stopHooks.events.Stop[0],
+              hooks: [
+                {
+                  ...stopHooks.events.Stop[0].hooks[0],
+                  outputTransform: true,
+                },
+              ],
+            },
+          ],
+        },
+      },
+      revision: "rev-1",
+    });
+    mocks.manualTest.mockResolvedValueOnce({
+      redacted_summary: {
+        status: "allowed",
+        replacement_applied: true,
+        replacement_length: 14,
+        failed: false,
+        failure_type: "",
+        output_transform: true,
+        candidate_text: "candidate must never be shown",
+        replacement_text: "replacement must never be shown",
+      },
+    });
+    render(<HookManagementPage />);
+    await openStopHandler("stop-command");
+    fireEvent.click(screen.getByRole("button", { name: "执行人工测试" }));
+    fireEvent.click(screen.getByLabelText(/确认将执行真实/i));
+    fireEvent.click(screen.getByRole("button", { name: "执行测试" }));
+
+    expect(await screen.findByText("status: allowed")).toBeInTheDocument();
+    expect(screen.getByText("replacement_applied: true")).toBeInTheDocument();
+    expect(screen.getByText("replacement_length: 14")).toBeInTheDocument();
+    expect(screen.getByText("failed: false")).toBeInTheDocument();
+    expect(screen.getByText(/^failure_type:/)).toBeInTheDocument();
+    expect(
+      screen.getByText("仅执行当前处理器，不模拟转换链路或总时间预算。"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("candidate must never be shown"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("replacement must never be shown"),
+    ).not.toBeInTheDocument();
+  }, 10_000);
+
   it("uploads a newly selected script without waiting for state to settle", async () => {
     render(<HookManagementPage />);
     fireEvent.click(await screen.findByRole("tab", { name: "脚本库" }));
@@ -220,9 +419,9 @@ describe("HookManagementPage", () => {
       (screen.getByLabelText("环境变量（JSON）") as HTMLTextAreaElement).value,
     ).toContain("FIRST");
 
-  fireEvent.click(
+    fireEvent.click(
       screen.getByRole("button", { name: "编辑 second-command" }),
-  );
+    );
     expect(
       (screen.getByLabelText("环境变量（JSON）") as HTMLTextAreaElement).value,
     ).toContain("SECOND");
@@ -333,9 +532,7 @@ describe("HookManagementPage", () => {
         targetTenantIds: ["tenant-b"],
       }),
     );
-    expect(
-      await screen.findByText("已成功分发到 1 个租户"),
-    ).toBeInTheDocument();
+    expect(mocks.message.success).toHaveBeenCalledWith("已成功分发到 1 个租户");
   });
 
   it("removes an event from the drawer after explicit confirmation", async () => {
@@ -378,7 +575,11 @@ describe("HookManagementPage", () => {
               matcher: { tools: [] },
               hooks: [
                 { id: "guard-shell", type: "command", argv: ["echo", "one"] },
-                { id: "second-handler", type: "command", argv: ["echo", "two"] },
+                {
+                  id: "second-handler",
+                  type: "command",
+                  argv: ["echo", "two"],
+                },
               ],
             },
           ],
@@ -390,9 +591,7 @@ describe("HookManagementPage", () => {
     fireEvent.click(
       await screen.findByRole("button", { name: "编辑配置 PreToolUse" }),
     );
-    fireEvent.click(
-      screen.getByRole("button", { name: "guard-shell 下移" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "guard-shell 下移" }));
     fireEvent.click(
       screen.getByRole("button", { name: "保存并激活 PreToolUse" }),
     );
