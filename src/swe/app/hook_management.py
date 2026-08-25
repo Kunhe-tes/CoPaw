@@ -24,6 +24,7 @@ from ..agents.hook_runtime.models import (
     HookContext,
     HookHandlerConfig,
     HookHandlerResult,
+    validate_handler_event,
 )
 from ..security.skill_scanner import SkillScanError, scan_skill_directory
 
@@ -252,7 +253,9 @@ class HookManagementService:
                         f"script already exists: {file.filename}",
                     )
 
-                old_hash = self._sha256_file(target) if target.exists() else None
+                old_hash = (
+                    self._sha256_file(target) if target.exists() else None
+                )
                 scan_outcome = self._scan_upload(file)
                 self._atomic_write(target, file.content)
                 new_hash = hashlib.sha256(file.content).hexdigest()
@@ -261,7 +264,9 @@ class HookManagementService:
                     warned.append(file.filename)
                 self._emit_audit(
                     event=(
-                        "script_replaced" if old_hash is not None else "script_uploaded"
+                        "script_replaced"
+                        if old_hash is not None
+                        else "script_uploaded"
                     ),
                     actor=actor,
                     revision=self.get_configuration().revision,
@@ -321,7 +326,10 @@ class HookManagementService:
             revision=revision,
         )
         try:
-            normalized_handler = self._parse_handler(handler)
+            normalized_handler = self._parse_handler(
+                handler,
+                event_name=context.hook_event_name,
+            )
             normalized_context = context.model_copy(
                 update={
                     "tenant_id": self._tenant_id or context.tenant_id,
@@ -337,6 +345,9 @@ class HookManagementService:
                 normalized_handler,
                 normalized_context,
                 workspace_dir=self._workspace_dir,
+            )
+            handler_result.output_transform = (
+                normalized_handler.output_transform
             )
         except Exception:
             self._emit_audit(
@@ -447,7 +458,9 @@ class HookManagementService:
                     groups_by_id[group["id"]] = (event, group)
 
             missing_ids = [
-                group_id for group_id in selected_ids if group_id not in groups_by_id
+                group_id
+                for group_id in selected_ids
+                if group_id not in groups_by_id
             ]
             if missing_ids:
                 raise HookManagementValidationError(
@@ -807,7 +820,7 @@ class HookManagementService:
         self._reject_command_strings(hooks)
         try:
             config = HookConfig.model_validate(hooks)
-        except ValidationError as exc:
+        except (ValidationError, ValueError) as exc:
             raise HookManagementValidationError(str(exc)) from exc
 
         self._validate_unique_ids(config)
@@ -815,7 +828,12 @@ class HookManagementService:
         self._normalize_script_references(normalized)
         return normalized
 
-    def _parse_handler(self, handler: dict[str, Any]) -> HookHandlerConfig:
+    def _parse_handler(
+        self,
+        handler: dict[str, Any],
+        *,
+        event_name,
+    ) -> HookHandlerConfig:
         if not isinstance(handler, dict):
             raise HookManagementValidationError("handler must be an object")
         self._reject_command_strings(
@@ -823,7 +841,8 @@ class HookManagementService:
         )
         try:
             parsed = _HANDLER_ADAPTER.validate_python(handler)
-        except ValidationError as exc:
+            validate_handler_event(parsed, event_name)
+        except (ValidationError, ValueError) as exc:
             raise HookManagementValidationError(str(exc)) from exc
         normalized = parsed.model_dump(mode="json", by_alias=True)
         self._normalize_script_references(
@@ -878,7 +897,10 @@ class HookManagementService:
                         Path(value).parts[:2] == ("hooks", "scripts")
                         for value in normalized_argv
                     )
-                    if has_controlled_script and str(handler.get("cwd", "")).strip():
+                    if (
+                        has_controlled_script
+                        and str(handler.get("cwd", "")).strip()
+                    ):
                         raise HookManagementValidationError(
                             "script handlers must not set cwd",
                         )
@@ -1101,7 +1123,9 @@ class HookManagementService:
             for groups in hooks.get("events", {}).values():
                 for group in groups:
                     group_ids.add(group["id"])
-                    handler_ids.update(handler["id"] for handler in group["hooks"])
+                    handler_ids.update(
+                        handler["id"] for handler in group["hooks"]
+                    )
             return group_ids, handler_ids
 
         before_groups, before_handlers = collect(before)
@@ -1145,7 +1169,9 @@ class HookManagementService:
                     },
                 )
             logger.info("agent_hook.audit", extra=extra)
-        except Exception:  # pragma: no cover - logging failures are best effort
+        except (
+            Exception
+        ):  # pragma: no cover - logging failures are best effort
             pass
 
     @staticmethod
@@ -1156,4 +1182,11 @@ class HookManagementService:
             "failed": result.failed,
             "failure_type": result.failure_type,
             "status": "failed" if result.failed else "completed",
+            "output_transform": result.output_transform,
+            "replacement_applied": result.replacement_text is not None,
+            "replacement_length": (
+                len(result.replacement_text)
+                if result.replacement_text is not None
+                else 0
+            ),
         }

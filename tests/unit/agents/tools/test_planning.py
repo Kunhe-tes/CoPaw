@@ -13,7 +13,6 @@ from swe.agents.tools.planning import (
     ask_plan_clarification,
     create_submit_proposed_plan_tool,
 )
-from swe.app.plans import JsonProposedPlanStore
 
 
 def _text(response) -> str:
@@ -411,7 +410,7 @@ def test_ask_plan_clarification_tool_schema_guides_choice_kind() -> None:
 
 
 @pytest.mark.asyncio
-async def test_submit_proposed_plan_persists_before_review_card(
+async def test_submit_proposed_plan_emits_goal_contract_draft(
     tmp_path: Path,
 ) -> None:
     tool = create_submit_proposed_plan_tool(
@@ -425,27 +424,43 @@ async def test_submit_proposed_plan_persists_before_review_card(
     )
 
     response = await tool(
-        title="Fix failing test",
-        summary="Narrow the failing scope and patch it.",
-        steps=["Reproduce", "Patch", "Verify"],
-        risks=["Hidden regression"],
-        verification=["Run pytest"],
+        objective="Fix failing test",
+        completion_criteria=[{
+            "requirement": "Tests pass",
+            "observable_assertion": "Focused test command exits successfully",
+            "verification_method": "command: pytest tests/unit -q",
+            "expected_outcome": "exit 0",
+        }],
+        constraints={"must_preserve": ["Existing behavior"], "must_not_do": []},
+        autonomy_boundary="No deployment",
     )
 
     card = response.metadata["plan_interaction_card"]
-    assert card["card_type"] == "plan_review"
-    assert card["plan_id"].startswith("plan-")
-    assert card["title"] == "Fix failing test"
-    assert "open_questions" not in card
-    assert "confidence" not in card
-    assert "Proposed plan" in _text(response)
+    assert card["card_type"] == "goal_proposal"
+    assert card["objective"] == "Fix failing test"
+    assert "Goal Contract Draft" in _text(response)
 
-    stored = await JsonProposedPlanStore(tmp_path).get(
-        "chat-1",
-        card["plan_id"],
+
+@pytest.mark.asyncio
+async def test_submit_proposed_plan_can_emit_goal_ready_contract_draft(
+    tmp_path: Path,
+) -> None:
+    tool = create_submit_proposed_plan_tool(request_context={}, workspace_dir=tmp_path)
+    response = await tool(
+        objective="Ship Goal Runtime",
+        completion_criteria=[{
+            "requirement": "API exists",
+            "observable_assertion": "route is registered",
+            "verification_method": "inspect OpenAPI",
+            "expected_outcome": "route is listed",
+        }],
+        constraints={"must_preserve": [], "must_not_do": ["change auth"]},
+        autonomy_boundary="No deployment",
     )
-    assert stored is not None
-    assert stored.summary == "Narrow the failing scope and patch it."
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["card_type"] == "goal_proposal"
+    assert card["objective"] == "Ship Goal Runtime"
 
 
 @pytest.mark.asyncio
@@ -464,11 +479,13 @@ async def test_submit_proposed_plan_omits_removed_fields_from_signature(
 
     parameters = inspect.signature(tool).parameters
 
-    assert "open_questions" not in parameters
-    assert "confidence" not in parameters
+    assert "title" not in parameters
+    assert "steps" not in parameters
+    assert "risks" not in parameters
+    assert "verification" not in parameters
 
 
-def test_submit_proposed_plan_schema_accepts_json_encoded_text_lists(
+def test_submit_proposed_plan_schema_requires_goal_contract_fields(
     tmp_path: Path,
 ) -> None:
     tool = create_submit_proposed_plan_tool(
@@ -482,8 +499,9 @@ def test_submit_proposed_plan_schema_accepts_json_encoded_text_lists(
         "parameters"
     ]["properties"]
 
-    for field_name in ("steps", "risks", "verification"):
-        assert {"items": {"type": "string"}, "type": "array"} in properties[
-            field_name
-        ]["anyOf"]
-        assert {"type": "string"} in properties[field_name]["anyOf"]
+    assert set(properties) == {
+        "objective",
+        "completion_criteria",
+        "constraints",
+        "autonomy_boundary",
+    }

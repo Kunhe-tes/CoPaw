@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -137,6 +138,40 @@ async def test_command_exit_two_maps_to_block_without_json_parse(
     assert result.failed is False
     assert result.decision == HookDecision.BLOCK
     assert "blocked by script" in result.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fail_policy", "decision"),
+    [
+        (FailPolicy.ALLOW, HookDecision.NONE),
+        (FailPolicy.BLOCK, HookDecision.BLOCK),
+    ],
+)
+async def test_command_transformer_exit_two_obeys_fail_policy(
+    tmp_path: Path,
+    fail_policy: FailPolicy,
+    decision: HookDecision,
+) -> None:
+    script = tmp_path / "block.py"
+    script.write_text("raise SystemExit(2)\n", encoding="utf-8")
+
+    result = await execute_handler(
+        CommandHookHandlerConfig(
+            id="format",
+            argv=["python", str(script)],
+            outputTransform=True,
+            failPolicy=fail_policy,
+        ),
+        _context(HookEventName.STOP).model_copy(
+            update={"assistant_response": "candidate"},
+        ),
+        workspace_dir=tmp_path,
+    )
+
+    assert result.failed is True
+    assert result.failure_type == "blocked_response"
+    assert result.decision == decision
 
 
 @pytest.mark.asyncio
@@ -509,6 +544,86 @@ async def test_http_handler_maps_2xx_json_and_409_block(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [409, 422])
+async def test_http_transformer_status_failure_obeys_fail_policy(
+    monkeypatch,
+    status_code: int,
+) -> None:
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def post(self, *args, **kwargs):
+            return httpx.Response(status_code, text="formatter rejected")
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.executor.httpx.AsyncClient",
+        FakeClient,
+    )
+    result = await execute_handler(
+        HttpHookHandlerConfig(
+            id="format",
+            url="https://hooks.example/format",
+            outputTransform=True,
+            failPolicy=FailPolicy.ALLOW,
+        ),
+        _context(HookEventName.STOP).model_copy(
+            update={"assistant_response": "candidate"},
+        ),
+        workspace_dir=Path("/tmp/tenant-a/workspaces/default"),
+    )
+
+    assert result.failed is True
+    assert result.decision == HookDecision.NONE
+    assert result.failure_type == "blocked_response"
+
+
+@pytest.mark.asyncio
+async def test_transformer_debug_log_excludes_candidate_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    candidate = "do-not-log-this-candidate"
+    script = tmp_path / "format.py"
+    script.write_text(
+        "import json\nprint(json.dumps({'decision':'allow','reason':'ok'}))\n",
+        encoding="utf-8",
+    )
+
+    logged: dict[str, object] = {}
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.executor.logger.debug",
+        lambda _message, *args: logged.update(context=args[-1]),
+    )
+    await execute_handler(
+        CommandHookHandlerConfig(
+            id="format",
+            argv=["python", str(script)],
+            outputTransform=True,
+        ),
+        _context(HookEventName.STOP).model_copy(
+            update={"assistant_response": candidate},
+        ),
+        workspace_dir=tmp_path,
+    )
+
+    logged_context = logged["context"]
+    assert isinstance(logged_context, dict)
+    assert logged_context["assistant_response"] == {
+        "length": len(candidate),
+        "sha256": hashlib.sha256(
+            candidate.encode("utf-8"),
+        ).hexdigest(),
+    }
+
+
+@pytest.mark.asyncio
 async def test_http_handler_resolves_header_secret_from_effective_tenant(
     monkeypatch,
 ) -> None:
@@ -770,6 +885,107 @@ def test_stop_hook_output_rejects_unsupported_fields(
             order=0,
             raw_output=raw_output,
             event_name=HookEventName.STOP,
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw_output", "replacement"),
+    [
+        (
+            {
+                "decision": "allow",
+                "reason": "formatted",
+                "hookSpecificOutput": {"replacementText": "final text"},
+            },
+            "final text",
+        ),
+        ({"decision": "allow", "reason": "passed through"}, None),
+    ],
+)
+def test_stop_transformer_accepts_replacement_or_pass_through(
+    raw_output: dict,
+    replacement: str | None,
+) -> None:
+    result = normalize_hook_output(
+        handler_id="format",
+        order=0,
+        raw_output=raw_output,
+        event_name=HookEventName.STOP,
+        output_transform=True,
+    )
+
+    assert result.decision == HookDecision.ALLOW
+    assert result.replacement_text == replacement
+
+
+@pytest.mark.parametrize(
+    "raw_output",
+    [
+        {"decision": "block", "reason": "no"},
+        {
+            "decision": "allow",
+            "hookSpecificOutput": {"replacementText": "  "},
+        },
+        {
+            "decision": "allow",
+            "hookSpecificOutput": {"replacementText": 1},
+        },
+        {
+            "decision": "allow",
+            "hookSpecificOutput": {"additionalContext": "nope"},
+        },
+    ],
+)
+def test_stop_transformer_rejects_invalid_output(raw_output: dict) -> None:
+    with pytest.raises(ValueError):
+        normalize_hook_output(
+            handler_id="format",
+            order=0,
+            raw_output=raw_output,
+            event_name=HookEventName.STOP,
+            output_transform=True,
+        )
+
+
+def test_stop_transformer_rejects_unknown_top_level_output() -> None:
+    with pytest.raises(ValueError, match="unsupported output fields"):
+        normalize_hook_output(
+            handler_id="format",
+            order=0,
+            raw_output={
+                "decision": "allow",
+                "reason": "formatted",
+                "unexpectedEffect": "nope",
+            },
+            event_name=HookEventName.STOP,
+            output_transform=True,
+        )
+
+
+def test_stop_prompt_transformer_accepts_only_its_extended_contract() -> None:
+    result = normalize_prompt_judgment_output(
+        handler_id="format",
+        order=0,
+        text=(
+            '{"decision":"allow","reason":"formatted",'
+            '"hookSpecificOutput":{"replacementText":"final text"}}'
+        ),
+        event_name=HookEventName.STOP,
+        output_transform=True,
+    )
+
+    assert result.replacement_text == "final text"
+
+    with pytest.raises(ValueError):
+        normalize_prompt_judgment_output(
+            handler_id="format",
+            order=0,
+            text=(
+                '{"decision":"block","reason":"no",'
+                '"hookSpecificOutput":{"replacementText":"final text"}}'
+            ),
+            event_name=HookEventName.STOP,
+            output_transform=True,
         )
 
 
@@ -1155,6 +1371,227 @@ async def test_runtime_stop_executes_handlers_and_returns_gate_result(
     assert result.session_title is None
     assert result.suppress_output is False
     assert result.system_messages == []
+
+
+@pytest.mark.asyncio
+async def test_runtime_stop_finalization_transforms_serially_then_validates(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    seen: list[tuple[str, str | None]] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del workspace_dir
+        seen.append((handler.id, context.assistant_response))
+        replacements = {
+            "tenant-format": "tenant text",
+            "agent-format": "agent text",
+        }
+        return HookHandlerResult(
+            handler_id=handler.id,
+            order=0,
+            decision=(
+                HookDecision.BLOCK
+                if handler.id == "validator"
+                else HookDecision.ALLOW
+            ),
+            reason=(
+                "final validation" if handler.id == "validator" else "format"
+            ),
+            replacement_text=replacements.get(handler.id),
+        )
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="tenant-format",
+                                command="echo",
+                                outputTransform=True,
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+        agent_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="agent-format",
+                                command="echo",
+                                outputTransform=True,
+                            ),
+                            CommandHookHandlerConfig(
+                                id="validator",
+                                command="echo",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    result = await runtime.emit_stop_finalization(
+        _context(HookEventName.STOP).model_copy(
+            update={"assistant_response": "candidate"},
+        ),
+        workspace_dir=Path("/tmp"),
+        max_transform_seconds=30,
+    )
+
+    assert seen == [
+        ("tenant-format", "candidate"),
+        ("agent-format", "tenant text"),
+        ("validator", "agent text"),
+    ]
+    assert result.final_response == "agent text"
+    assert result.validation_result.decision == HookDecision.BLOCK
+    assert result.transformation_failed is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_stop_finalization_stops_on_blocking_transform_failure(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    executed: list[str] = []
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del context, workspace_dir
+        executed.append(handler.id)
+        return HookHandlerResult(
+            handler_id=handler.id,
+            order=0,
+            decision=HookDecision.BLOCK,
+            reason="formatter unavailable",
+            failed=True,
+            failure_type="timeout",
+        )
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="blocking-format",
+                                command="echo",
+                                outputTransform=True,
+                                failPolicy=FailPolicy.BLOCK,
+                            ),
+                            CommandHookHandlerConfig(
+                                id="never-runs",
+                                command="echo",
+                                outputTransform=True,
+                            ),
+                            CommandHookHandlerConfig(
+                                id="never-validates",
+                                command="echo",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    result = await runtime.emit_stop_finalization(
+        _context(HookEventName.STOP).model_copy(
+            update={"assistant_response": "candidate"},
+        ),
+        workspace_dir=Path("/tmp"),
+        max_transform_seconds=30,
+    )
+
+    assert executed == ["blocking-format"]
+    assert result.final_response == "candidate"
+    assert result.transformation_failed is True
+    assert result.transformation_failure_reason == "formatter unavailable"
+
+
+@pytest.mark.asyncio
+async def test_runtime_stop_finalization_stops_when_last_transformer_exceeds_budget(
+    monkeypatch,
+) -> None:
+    from swe.agents.hook_runtime.runtime import HookRuntime
+
+    async def fake_execute_handler(handler, context, *, workspace_dir):
+        del handler, context, workspace_dir
+        return HookHandlerResult(
+            handler_id="format",
+            order=0,
+            decision=HookDecision.ALLOW,
+        )
+
+    monotonic_calls = 0
+
+    def fake_monotonic() -> float:
+        nonlocal monotonic_calls
+        monotonic_calls += 1
+        return 0.0 if monotonic_calls <= 2 else 2.0
+
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.execute_handler",
+        fake_execute_handler,
+    )
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.time.monotonic",
+        fake_monotonic,
+    )
+    runtime = HookRuntime(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            CommandHookHandlerConfig(
+                                id="format",
+                                command="echo",
+                                outputTransform=True,
+                            ),
+                            CommandHookHandlerConfig(
+                                id="validator",
+                                command="echo",
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    result = await runtime.emit_stop_finalization(
+        _context(HookEventName.STOP).model_copy(
+            update={"assistant_response": "candidate"},
+        ),
+        workspace_dir=Path("/tmp"),
+        max_transform_seconds=1,
+    )
+
+    assert result.transformation_failed is True
+    assert result.validation_result.decision == HookDecision.NONE
 
 
 @pytest.mark.asyncio

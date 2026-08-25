@@ -20,6 +20,11 @@ from typing import Any, AsyncIterator, Callable, Sequence, Union
 
 from agentscope.session import SessionBase
 
+from swe.app.runner.session_lock import (
+    AsyncSessionFileLock,
+    SessionLockTimeout,
+    get_session_lock_path,
+)
 from swe.runtime_workers import run_runtime_state_work
 
 logger = logging.getLogger(__name__)
@@ -79,6 +84,30 @@ def _get_session_write_lock(file_path: str) -> asyncio.Lock:
             lock = asyncio.Lock()
             _SESSION_WRITE_LOCKS[lock_key] = lock
         return lock
+
+
+@asynccontextmanager
+async def _session_write_scope(
+    session_save_path: str,
+    *,
+    timeout_seconds: float | None = None,
+) -> AsyncIterator[None]:
+    lock = _get_session_write_lock(session_save_path)
+    if timeout_seconds is None:
+        await lock.acquire()
+    else:
+        await asyncio.wait_for(lock.acquire(), timeout=timeout_seconds)
+    try:
+        try:
+            async with AsyncSessionFileLock(
+                get_session_lock_path(session_save_path),
+                timeout_seconds=timeout_seconds,
+            ):
+                yield
+        except SessionLockTimeout as exc:
+            raise TimeoutError(str(exc)) from exc
+    finally:
+        lock.release()
 
 
 def _write_json_text(file_path: str, content: str) -> None:
@@ -226,15 +255,11 @@ class SafeJSONSession(SessionBase):
     ) -> AsyncIterator[None]:
         """按会话文件串行化读改写，避免清理和运行结束互相覆盖。"""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        lock = _get_session_write_lock(session_save_path)
-        if timeout_seconds is None:
-            await lock.acquire()
-        else:
-            await asyncio.wait_for(lock.acquire(), timeout=timeout_seconds)
-        try:
+        async with _session_write_scope(
+            session_save_path,
+            timeout_seconds=timeout_seconds,
+        ):
             yield
-        finally:
-            lock.release()
 
     async def _read_session_state_file(
         self,
@@ -267,7 +292,7 @@ class SafeJSONSession(SessionBase):
     ) -> None:
         """Save state modules to a JSON file using async I/O."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        async with _get_session_write_lock(session_save_path):
+        async with _session_write_scope(session_save_path):
             existing_state = await self._read_existing_state_for_save(
                 session_save_path,
             )
@@ -451,7 +476,7 @@ class SafeJSONSession(SessionBase):
         if state is None:
             state = {}
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        async with _get_session_write_lock(session_save_path):
+        async with _session_write_scope(session_save_path):
             await run_runtime_state_work(
                 _write_json_state_sync,
                 session_save_path,
@@ -473,12 +498,10 @@ class SafeJSONSession(SessionBase):
     ) -> dict[str, Any]:
         """Atomically read, merge and write session state under one lock."""
         session_save_path = self._get_save_path(session_id, user_id=user_id)
-        lock = _get_session_write_lock(session_save_path)
-        if timeout_seconds is None:
-            await lock.acquire()
-        else:
-            await asyncio.wait_for(lock.acquire(), timeout=timeout_seconds)
-        try:
+        async with _session_write_scope(
+            session_save_path,
+            timeout_seconds=timeout_seconds,
+        ):
             exists, states = await run_runtime_state_work(
                 _read_json_state_sync,
                 session_save_path,
@@ -501,8 +524,6 @@ class SafeJSONSession(SessionBase):
                 session_save_path,
                 updated_state,
             )
-        finally:
-            lock.release()
 
         logger.info(
             "Mutated session state in %s successfully.",

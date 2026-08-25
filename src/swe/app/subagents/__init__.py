@@ -44,6 +44,12 @@ from .launch_snapshot import (
     read_and_remove_private_mcp_snapshot,
     resolve_skill_owned_model_slot,
 )
+from .session_dependencies import (
+    ExpertDependencyViewError,
+    initialize_community_expert_dependency_view,
+    release_community_expert_dependency_view_for_chat,
+    release_community_expert_dependency_views,
+)
 from .nicknames import assign_subagent_nickname
 from .registry import (
     AgentRegistry,
@@ -82,6 +88,7 @@ __all__ = [
     "DelegationSpec",
     "DefinitionMatchMetadata",
     "DefinitionValidationError",
+    "ExpertDependencyViewError",
     "InMemoryDefinitionProvider",
     "InMemorySubAgentRunStore",
     "LocalJsonSubAgentRunStore",
@@ -110,7 +117,10 @@ __all__ = [
     "compose_effective_policy",
     "validate_tool_call",
     "load_skill_owned_definitions",
+    "initialize_community_expert_dependency_view",
     "read_and_remove_private_mcp_snapshot",
+    "release_community_expert_dependency_views",
+    "release_community_expert_dependency_view_for_chat",
     "resolve_skill_owned_model_slot",
     "build_definition_catalog",
 ]

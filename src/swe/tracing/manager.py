@@ -555,6 +555,7 @@ class TraceManager:
         enabled_skills: list[str],
         skill_runtime_profiles: Optional[dict[str, Any]] = None,
         workspace_dir: Optional[Path] = None,
+        skill_tool_registry: Optional[Any] = None,
     ) -> None:
         """Set up skill invocation detector for a trace.
 
@@ -585,7 +586,7 @@ class TraceManager:
 
             # Create detector with dependencies
             detector = SkillInvocationDetector(
-                registry=get_skill_tool_registry(),
+                registry=skill_tool_registry or get_skill_tool_registry(),
                 context_manager=get_skill_context_manager(),
                 trace_manager=self,
                 trace_id=trace_id,

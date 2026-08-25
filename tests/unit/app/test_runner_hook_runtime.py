@@ -20,6 +20,7 @@ from swe.agents.hook_runtime.models import (
     HookSessionOverlay,
     AdditionalContext,
     MergedHookResult,
+    StopHookExecutionResult,
 )
 from swe.agents.tool_guard_mixin import PreToolUseTerminalStop
 from swe.app.runner.runner import (
@@ -37,8 +38,15 @@ from swe.app.runner.runner import (
     _TurnPlan,
     _QueryTurnOutcome,
     _emit_runner_hook,
+    _extract_assistant_response,
+    _replace_assistant_response,
+)
+from swe.app.runner.turn_lifecycle import (
+    _is_bufferable_assistant_text,
+    _stream_standard_completion_lifecycle,
 )
 from swe.app.runner.session import SafeJSONSession
+from swe.agents.skill_tool_registry import SkillToolRegistry
 from swe.config.config import SuggestionMode
 from swe.tracing.manager import (
     TraceContext,
@@ -436,9 +444,11 @@ async def test_attach_session_skill_detector_reuses_trace_detector_and_tracing(
     tmp_path,
 ) -> None:
     runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    skill_tool_registry = SkillToolRegistry()
     fake_agent = SimpleNamespace(
         _request_context={},
         get_effective_skills=lambda: ["xlsx"],
+        get_skill_tool_registry=lambda: skill_tool_registry,
     )
     runtime = _QueryRuntime(
         agent=fake_agent,
@@ -477,6 +487,7 @@ async def test_attach_session_skill_detector_reuses_trace_detector_and_tracing(
     ):
         runner._attach_session_skill_detector(runtime=runtime, request=request)
         detector = runtime.session_skill_detector
+        assert detector._registry is skill_tool_registry
         assert (
             detector
             is fake_agent._request_context["_skill_invocation_detector"]
@@ -723,7 +734,10 @@ async def test_query_handler_user_prompt_hook_blocks_before_command_dispatch(
         ),
     )
     command_path = AsyncMock()
-    monkeypatch.setattr("swe.app.runner.runner.run_command_path", command_path)
+    monkeypatch.setattr(
+        "swe.app.runner.query_execution.admission.run_command_path",
+        command_path,
+    )
 
     request = SimpleNamespace(
         session_id="session-1",
@@ -769,7 +783,7 @@ async def test_query_handler_no_config_does_not_emit_hook(
         yield Msg(name="Friday", role="assistant", content="command"), True
 
     monkeypatch.setattr(
-        "swe.app.runner.runner.run_command_path",
+        "swe.app.runner.query_execution.admission.run_command_path",
         fake_run_command_path,
     )
 
@@ -816,7 +830,7 @@ async def test_query_handler_traces_conversation_commands(
         yield Msg(name="Friday", role="assistant", content="command"), True
 
     monkeypatch.setattr(
-        "swe.app.runner.runner.run_command_path",
+        "swe.app.runner.query_execution.admission.run_command_path",
         fake_run_command_path,
     )
     request = SimpleNamespace(
@@ -1345,6 +1359,46 @@ async def test_build_lazy_mcp_clients_defers_client_creation_until_discovery(
 
 
 @pytest.mark.asyncio
+async def test_build_lazy_mcp_clients_never_forwards_user_headers_to_marketplace(
+    monkeypatch,
+) -> None:
+    import swe.app.runner.runner as runner_module
+    from swe.config.config import MCPClientConfig, MCPConfig
+
+    tool = SimpleNamespace(name="search", description="", inputSchema={})
+    created_client = SimpleNamespace(
+        connect=AsyncMock(),
+        list_tools=AsyncMock(return_value=[tool]),
+        close=AsyncMock(),
+    )
+    create_client = AsyncMock(return_value=created_client)
+    monkeypatch.setattr(
+        runner_module,
+        "_create_mcp_client_with_headers",
+        create_client,
+    )
+
+    clients = runner_module._build_lazy_mcp_clients(
+        MCPConfig(
+            clients={
+                "market": MCPClientConfig(
+                    name="market",
+                    command="node",
+                    source="marketplace:mcp-1",
+                ),
+            },
+        ),
+        tenant_id="tenant-a",
+        user_id="user-a",
+        passthrough_headers={"Authorization": "Bearer user-token"},
+    )
+
+    await clients[0].list_tools()
+
+    assert create_client.await_args.args[1] is None
+
+
+@pytest.mark.asyncio
 async def test_prepare_query_runtime_logs_agent_build_duration(
     monkeypatch,
     tmp_path,
@@ -1699,6 +1753,270 @@ async def test_query_handler_stop_allow_completes(
         HookEventName.SESSION_START,
         HookEventName.STOP,
     ]
+
+
+@pytest.mark.asyncio
+async def test_query_handler_stop_transformer_buffers_and_releases_final_text(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    runner.session = SafeJSONSession(save_dir=str(tmp_path))
+    setattr(runner, "_chat_manager", None)
+    _patch_normal_agent_path(monkeypatch)
+    transformer_config = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.STOP: [
+                HookMatcherGroupConfig(
+                    hooks=[
+                        CommandHookHandlerConfig(
+                            id="format",
+                            command="echo",
+                            outputTransform=True,
+                        ),
+                    ],
+                ),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner.load_agent_config",
+        lambda *args, **kwargs: _agent_config(transformer_config),
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._load_tenant_hook_config",
+        lambda *args, **kwargs: HookConfig(),
+    )
+
+    async def fake_emit_runner_hook(event_name, **kwargs):
+        del event_name, kwargs
+        return MergedHookResult()
+
+    async def fake_stop_finalization(**kwargs):
+        assert kwargs["assistant_response"] == "agent reply"
+        return StopHookExecutionResult(
+            final_response="final reply",
+            validation_result=MergedHookResult(decision=HookDecision.ALLOW),
+        )
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_hook",
+        fake_emit_runner_hook,
+    )
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_stop_finalization",
+        fake_stop_finalization,
+    )
+
+    outputs = [
+        item
+        async for item in runner.query_handler(
+            [Msg(name="user", role="user", content="hello")],
+            request=SimpleNamespace(
+                session_id="session-1",
+                user_id="user-1",
+                channel="console",
+                channel_meta={},
+            ),
+        )
+    ]
+
+    assert [item[0].get_text_content() for item in outputs] == ["final reply"]
+
+
+def test_agent_profile_owns_stop_transform_budget() -> None:
+    configured = SimpleNamespace(
+        running=SimpleNamespace(
+            hook_runtime=SimpleNamespace(max_stop_transform_seconds=12.5),
+        ),
+    )
+
+    assert AgentRunner._resolve_max_stop_transform_seconds(configured) == 12.5
+    assert (
+        AgentRunner._resolve_max_stop_transform_seconds(
+            SimpleNamespace(running=SimpleNamespace()),
+        )
+        == 30.0
+    )
+
+
+def test_stop_transformer_handles_text_block_assistant_response() -> None:
+    agent = _FakeAgent()
+    candidate = "candidate block text"
+    msg = Msg(
+        name="Friday",
+        role="assistant",
+        content=[{"type": "text", "text": candidate}],
+    )
+    agent.memory.content.append((msg, []))
+
+    assert _is_bufferable_assistant_text(msg) is True
+    assert _extract_assistant_response(agent) == candidate
+    assert _replace_assistant_response(agent, "final block text") is True
+    assert msg.content == [{"type": "text", "text": "final block text"}]
+
+
+def test_stop_transformer_extract_ignores_live_assistant_events() -> None:
+    agent = _FakeAgent()
+    candidate = Msg(name="Friday", role="assistant", content="final candidate")
+    live_progress = Msg(
+        name="Friday",
+        role="assistant",
+        content="tool progress",
+        metadata={"event_type": "tool_progress"},
+    )
+    agent.memory.content.extend([(candidate, []), (live_progress, [])])
+
+    assert _extract_assistant_response(agent) == "final candidate"
+
+
+@pytest.mark.parametrize("event_type", ["tool_progress", "approval_request"])
+def test_stop_transformer_keeps_live_assistant_events_unbuffered(
+    event_type: str,
+) -> None:
+    msg = Msg(
+        name="Friday",
+        role="assistant",
+        content="live update",
+        metadata={"event_type": event_type},
+    )
+
+    assert _is_bufferable_assistant_text(msg) is False
+
+
+def test_stop_transformer_keeps_mixed_media_message_unbuffered() -> None:
+    msg = Msg(
+        name="Friday",
+        role="assistant",
+        content=[
+            {"type": "text", "text": "caption"},
+            {"type": "image", "url": "https://example.com/image.png"},
+        ],
+    )
+
+    assert _is_bufferable_assistant_text(msg) is False
+
+
+@pytest.mark.asyncio
+async def test_strict_stop_release_emits_only_the_final_buffered_message() -> (
+    None
+):
+    first = Msg(name="Friday", role="assistant", content="raw first")
+    second = Msg(name="Friday", role="assistant", content="raw final")
+    outcome = _QueryTurnOutcome(
+        assistant_response="transformed final",
+        stop_output_buffer_required=True,
+        buffered_assistant_messages=[first, second],
+    )
+
+    class Owner:
+        def _requires_stop_output_buffer(self, **kwargs):
+            del kwargs
+            return True
+
+        async def _stream_agent_turns(self, **kwargs):
+            if kwargs.get("never_stream"):
+                yield None
+
+        async def _emit_stop_hook_if_needed(self, **kwargs):
+            del kwargs
+            return MergedHookResult(decision=HookDecision.ALLOW)
+
+    outputs = [
+        item
+        async for item in _stream_standard_completion_lifecycle(
+            Owner(),
+            request=SimpleNamespace(),
+            runtime=SimpleNamespace(),
+            plan=SimpleNamespace(),
+            outcome=outcome,
+        )
+    ]
+
+    assert [message.get_text_content() for message, _last in outputs] == [
+        "transformed final",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_transformer_failure_does_not_return_handler_response_text(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    candidate = "private candidate"
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    agent = _FakeAgent()
+    agent.memory.content.append(
+        (Msg(name="Friday", role="assistant", content=candidate), []),
+    )
+    transformer_config = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.STOP: [
+                HookMatcherGroupConfig(
+                    hooks=[
+                        CommandHookHandlerConfig(
+                            id="format",
+                            command="echo",
+                            outputTransform=True,
+                        ),
+                    ],
+                ),
+            ],
+        },
+    )
+
+    async def fake_finalization(**kwargs):
+        del kwargs
+        return StopHookExecutionResult(
+            final_response=candidate,
+            transformation_failed=True,
+            transformation_failure_reason=candidate,
+        )
+
+    monkeypatch.setattr(
+        "swe.app.runner.runner._emit_runner_stop_finalization",
+        fake_finalization,
+    )
+    result = await runner._emit_stop_hook_if_needed(
+        request=SimpleNamespace(),
+        runtime=SimpleNamespace(
+            tenant_hooks=HookConfig(),
+            agent_config=_agent_config(transformer_config),
+            hook_overlay=HookSessionOverlay(),
+            agent=agent,
+        ),
+        plan=SimpleNamespace(original_user_message="hello"),
+        outcome=_QueryTurnOutcome(
+            assistant_response=candidate,
+            stop_output_buffer_required=True,
+            assistant_memory_start=0,
+        ),
+    )
+
+    assert result is not None
+    assert (
+        result.blocking_failure_reason == "Stop output transformation failed"
+    )
+    assert candidate not in result.blocking_failure_reason
+
+
+def test_replacement_skips_trailing_live_assistant_event() -> None:
+    agent = _FakeAgent()
+    candidate = Msg(name="Friday", role="assistant", content="candidate")
+    live_progress = Msg(
+        name="Friday",
+        role="assistant",
+        content="tool progress",
+        metadata={"event_type": "tool_progress"},
+    )
+    agent.memory.content.extend([(candidate, []), (live_progress, [])])
+
+    assert _replace_assistant_response(agent, "final") is True
+    assert candidate.content == "final"
+    assert live_progress.content == "tool progress"
+    assert _extract_assistant_response(agent) == "final"
 
 
 @pytest.mark.asyncio

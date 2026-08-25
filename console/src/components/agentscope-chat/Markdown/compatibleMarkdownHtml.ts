@@ -13,6 +13,10 @@ function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
+export function renderSafeMarkdownHtmlToken(value: string): string {
+  return /^<br\s*\/?>$/i.test(value) ? "<br>" : escapeHtml(value);
+}
+
 export function renderCompatibleMarkdownHtml(
   content: string,
   allowHtml: boolean,
@@ -21,7 +25,7 @@ export function renderCompatibleMarkdownHtml(
 
   if (!allowHtml) {
     renderer.html = (token: { text?: string; raw?: string }) =>
-      escapeHtml(token.text || token.raw || "");
+      renderSafeMarkdownHtmlToken(token.text || token.raw || "");
   }
 
   const html = marked.parse(content, {

@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import shutil
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -49,7 +51,7 @@ class JsonChatRepository(BaseChatRepository):
     Similar to JsonJobRepository pattern from crons.
 
     Notes:
-    - Single-machine, no cross-process lock.
+    - Session creation uses a cross-process advisory file lock.
     - Atomic write: write tmp then replace.
     """
 
@@ -140,6 +142,13 @@ class JsonChatRepository(BaseChatRepository):
         )
 
     def _save_sync(self, chats_file: ChatsFile) -> _FileSignature | None:
+        with self._write_lock_sync():
+            return self._save_sync_unlocked(chats_file)
+
+    def _save_sync_unlocked(
+        self,
+        chats_file: ChatsFile,
+    ) -> _FileSignature | None:
         # Create parent directory if needed
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -155,6 +164,18 @@ class JsonChatRepository(BaseChatRepository):
         # Atomic replace (shutil.move handles cross-disk on Windows)
         shutil.move(str(tmp_path), str(self._path))
         return self._file_signature()
+
+    @contextmanager
+    def _write_lock_sync(self):
+        """Serialize every JSON mutation across worker processes."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = self._path.with_suffix(f"{self._path.suffix}.lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
     def _prepare_snapshot_sync(
         self,
@@ -181,9 +202,15 @@ class JsonChatRepository(BaseChatRepository):
     def _save_and_prepare_snapshot_sync(
         self,
         chats_file: ChatsFile,
+        *,
+        already_locked: bool = False,
     ) -> _SnapshotState | None:
         chats_file_to_save = chats_file.model_copy(deep=True)
-        signature = self._save_sync(chats_file_to_save)
+        signature = (
+            self._save_sync_unlocked(chats_file_to_save)
+            if already_locked
+            else self._save_sync(chats_file_to_save)
+        )
         if signature is None:
             return None
         return self._prepare_snapshot_sync(signature, chats_file_to_save)
@@ -238,6 +265,89 @@ class JsonChatRepository(BaseChatRepository):
             chats_file,
         )
         self._set_snapshot(snapshot_state)
+
+    def _create_chat_if_absent_by_session_sync(
+        self,
+        spec: ChatSpec,
+    ) -> tuple[_SnapshotState | None, ChatSpec, bool]:
+        with self._write_lock_sync():
+            _, chats_file = self._load_sync()
+            for existing in chats_file.chats:
+                if (
+                    existing.session_id == spec.session_id
+                    and existing.user_id == spec.user_id
+                    and existing.channel == spec.channel
+                ):
+                    return None, existing.model_copy(deep=True), False
+            chats_file.chats.append(spec.model_copy(deep=True))
+            snapshot_state = self._save_and_prepare_snapshot_sync(
+                chats_file,
+                already_locked=True,
+            )
+            return snapshot_state, spec.model_copy(deep=True), True
+
+    def _upsert_chat_sync(self, spec: ChatSpec) -> _SnapshotState | None:
+        with self._write_lock_sync():
+            _, chats_file = self._load_sync()
+            for index, existing in enumerate(chats_file.chats):
+                if existing.id == spec.id:
+                    chats_file.chats[index] = spec.model_copy(deep=True)
+                    break
+            else:
+                chats_file.chats.append(spec.model_copy(deep=True))
+            return self._save_and_prepare_snapshot_sync(
+                chats_file,
+                already_locked=True,
+            )
+
+    def _delete_chats_sync(
+        self,
+        chat_ids: list[str],
+    ) -> tuple[_SnapshotState | None, bool]:
+        if not chat_ids:
+            return None, False
+        with self._write_lock_sync():
+            _, chats_file = self._load_sync()
+            before = len(chats_file.chats)
+            chats_file.chats = [
+                chat for chat in chats_file.chats if chat.id not in chat_ids
+            ]
+            if len(chats_file.chats) == before:
+                return None, False
+            return (
+                self._save_and_prepare_snapshot_sync(
+                    chats_file,
+                    already_locked=True,
+                ),
+                True,
+            )
+
+    async def create_chat_if_absent_by_session(
+        self,
+        spec: ChatSpec,
+    ) -> tuple[ChatSpec, bool]:
+        """Atomically create one Chat for a logical session across workers."""
+        snapshot_state, chat, created = await run_runtime_state_work(
+            self._create_chat_if_absent_by_session_sync,
+            spec,
+        )
+        self._set_snapshot(snapshot_state)
+        return chat, created
+
+    async def upsert_chat(self, spec: ChatSpec) -> None:
+        snapshot_state = await run_runtime_state_work(
+            self._upsert_chat_sync,
+            spec,
+        )
+        self._set_snapshot(snapshot_state)
+
+    async def delete_chats(self, chat_ids: list[str]) -> bool:
+        snapshot_state, deleted = await run_runtime_state_work(
+            self._delete_chats_sync,
+            chat_ids,
+        )
+        self._set_snapshot(snapshot_state)
+        return deleted
 
     async def get_chat(self, chat_id: str) -> ChatSpec | None:
         """Get chat spec by chat_id (UUID), reusing a valid snapshot index."""

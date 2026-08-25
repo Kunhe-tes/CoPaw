@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -24,8 +25,18 @@ def _should_generate_session_title(chat, fallback_name: str) -> bool:
 
 
 @pytest.mark.asyncio
-async def test_console_stream_waits_for_session_title_task():
-    """主回答结束后，SSE 应等待标题任务写入并推送刷新事件。"""
+async def test_console_stream_defers_waiting_for_session_title_task():
+    """标题任务未完成时，SSE 应先输出模型事件，流尾再补发标题事件。"""
+
+    class FakeMessageEvent:
+        object = "message"
+        status = None
+        type = "message"
+        output = []
+        metadata = None
+
+        def model_dump_json(self):
+            return json.dumps({"object": "message", "type": "message"})
 
     async def process(request):
         async def update_title():
@@ -40,7 +51,7 @@ async def test_console_stream_waits_for_session_title_task():
             "_session_title_task",
             asyncio.create_task(update_title()),
         )
-        yield SimpleNamespace(object="message", status=None, type="message")
+        yield FakeMessageEvent()
 
     channel = ConsoleChannel(
         process=process,
@@ -56,6 +67,7 @@ async def test_console_stream_waits_for_session_title_task():
 
     events = [event async for event in channel.stream_one(request)]
 
+    assert '"object": "message"' in events[0]
     assert any(
         '"object": "session_title_updated"' in event
         and '"session_title": "费用分析"' in event

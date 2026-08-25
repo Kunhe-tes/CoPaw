@@ -236,6 +236,7 @@ vi.mock("react-i18next", () => ({
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => <span data-testid="attachment-icon" />,
   SparkCopyLine: () => <span data-testid="copy-icon" />,
+  SparkDownLine: () => <span data-testid="expert-selector-arrow" />,
 }));
 
 vi.mock("react-router-dom", () => ({
@@ -482,6 +483,11 @@ vi.mock("@/components/ConversationQuickNav", () => ({
   default: () => null,
 }));
 
+vi.mock("./ExpertSelector", () => ({
+  __esModule: true,
+  default: () => null,
+}));
+
 vi.mock("@/components/agentscope-chat/DragUploadOverlay", () => ({
   __esModule: true,
   default: () => null,
@@ -704,6 +710,30 @@ describe("ChatPage plan mode wiring", () => {
     expect(screen.getByText("模式")).toBeInTheDocument();
     expect(screen.getByText("计划")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
+  });
+
+  it("places Expert immediately after Mode in Composer quick actions", () => {
+    render(<ChatPage />);
+
+    const quickMenuItems = React.Children.toArray(
+      mocks.capturedOptions?.sender?.quickMenuItems,
+    ) as Array<
+      React.ReactElement<{ children?: React.ReactNode; label: string }>
+    >;
+    const modeItems = React.Children.toArray(
+      quickMenuItems[0].props.children,
+    ) as Array<React.ReactElement<{ icon?: React.ReactNode; label: string }>>;
+    const goalModeItem = modeItems.find((item) => item.props.label === "目标");
+    const expertSelector = quickMenuItems[1].props
+      .children as React.ReactElement<{ inline?: boolean }>;
+
+    expect(quickMenuItems.map((item) => item.props.label)).toEqual([
+      "模式",
+      "专家",
+    ]);
+    expect(expertSelector.props.inline).toBe(true);
+    expect(goalModeItem).toBeDefined();
+    expect(goalModeItem?.props.icon).toBeUndefined();
   });
 
   it("creates a backend chat before persisting Plan Mode for a pending local session", async () => {

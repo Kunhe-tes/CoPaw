@@ -121,6 +121,60 @@ describe("SkillTokenEditor", () => {
     expect(token).toHaveAttribute("contenteditable", "false");
     expect(token).toHaveAttribute("data-reference-type", "workspace_file");
   });
+
+  it("renders a scenario capability marker as an atomic prefix and reports its removal", () => {
+    const onFixedTokenRemove = vi.fn();
+    render(
+      <SkillTokenEditor
+        aria-label="消息"
+        fixedToken={{ text: "@信息提取", onRemove: onFixedTokenRemove }}
+        value="请总结附件"
+        skillMentions={{
+          items,
+          selected: [],
+          onChange: vi.fn(),
+          onOpen: vi.fn(),
+        }}
+        onValueChange={vi.fn()}
+      />,
+    );
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    const marker = screen.getByText("@信息提取");
+    expect(marker).toHaveAttribute("contenteditable", "false");
+    expect(marker).toHaveAttribute("data-scenario-token", "true");
+
+    marker.remove();
+    fireEvent.input(editor);
+
+    expect(onFixedTokenRemove).toHaveBeenCalledOnce();
+  });
+  it("removes the scenario capability marker with Backspace", () => {
+    const onFixedTokenRemove = vi.fn();
+    render(
+      <SkillTokenEditor
+        aria-label="消息"
+        fixedToken={{ text: "@信息提取", onRemove: onFixedTokenRemove }}
+        value="草稿"
+        skillMentions={{
+          items,
+          selected: [],
+          onChange: vi.fn(),
+          onOpen: vi.fn(),
+        }}
+        onValueChange={vi.fn()}
+      />,
+    );
+    const editor = screen.getByRole("textbox", { name: "消息" });
+    const range = document.createRange();
+    range.setStart(editor.childNodes[1], 0);
+    range.collapse(true);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+
+    fireEvent.keyDown(editor, { key: "Backspace" });
+
+    expect(onFixedTokenRemove).toHaveBeenCalledOnce();
+  });
   it("renders one distinguishable atomic token for every reference type", () => {
     render(
       <SkillTokenEditor

@@ -57,7 +57,7 @@ export default createGlobalStyle`
   &--expanded {
     position: absolute;
     top: 6px;
-    right: 11px;
+    right: 2px;
     z-index: 1;
     width: 28px;
     height: 28px;
@@ -195,7 +195,7 @@ export default createGlobalStyle`
 
 /* New topic button */
 .chat-sidebar-new-topic {
-  padding: 40px 20px 8px;
+  padding: 35px 20px 12px;
   display: flex;
   align-items: center;
   justify-content: center;

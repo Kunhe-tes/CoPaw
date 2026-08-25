@@ -425,21 +425,37 @@ class ConsoleChannel(BaseChannel):
                 status: Any,
             ) -> bool:
                 """外层 response 启动帧应等标题事件先发给前端。"""
+                latest_meta = getattr(request, "channel_meta", None)
+                if not isinstance(latest_meta, dict):
+                    latest_meta = send_meta
+                has_title = bool(latest_meta.get("session_title"))
                 status_value = getattr(status, "value", status)
                 return (
                     not title_emitted
+                    and has_title
                     and obj == "response"
                     and str(status_value).lower() == "in_progress"
                 )
 
             async def build_session_title_event() -> str | None:
-                """生成标题刷新事件；标题任务存在时先等待其完成。"""
+                """生成标题刷新事件；可选等待后台标题任务完成。"""
+                return await build_session_title_event_with_wait(
+                    wait_for_task=False,
+                )
+
+            async def build_session_title_event_with_wait(
+                *,
+                wait_for_task: bool,
+            ) -> str | None:
+                """生成标题刷新事件；流中不等待未完成的后台标题任务。"""
                 nonlocal send_meta, title_emitted, title_task_waited
                 if title_emitted:
                     return None
 
                 title_task = getattr(request, "_session_title_task", None)
                 if title_task is not None and not title_task_waited:
+                    if not wait_for_task and not title_task.done():
+                        return None
                     title_task_waited = True
                     try:
                         await asyncio.shield(title_task)
@@ -579,6 +595,11 @@ class ConsoleChannel(BaseChannel):
 
             for buffered in flush_buffered_initial_events():
                 yield buffered
+            title_event = await build_session_title_event_with_wait(
+                wait_for_task=True,
+            )
+            if title_event:
+                yield title_event
 
             logger.info(
                 "console stream done: event_count=%s has_response=%s",
