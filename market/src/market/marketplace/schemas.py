@@ -6,6 +6,8 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
+from .models import ExpertVersion, ExpertVersionsManifest
+
 
 class PublishSkillRequest(BaseModel):
     """上架技能请求体."""
@@ -73,6 +75,82 @@ class MarketSkillDetail(MarketSkillResponse):
     """技能详情（含调用客户明细）."""
 
     user_stats: list[SkillUserStat] = Field(default_factory=list)
+
+
+class PublishExpertRequest(BaseModel):
+    """上架社区专家请求体."""
+
+    definition_id: str
+    agent_id: str = "default"
+    category_id: int | None = None
+    bbk_ids: list[str] = Field(default_factory=list)
+    overwrite: bool = False
+
+
+class ExpertInstallRequest(BaseModel):
+    """接收专家到一个 Agent Profile。"""
+
+    agent_id: str = "default"
+
+
+class ExpertDistributionRequest(BaseModel):
+    """管理员分发专家。"""
+
+    target_type: Literal["all", "bbk_id", "user_id"]
+    target_values: list[str] = Field(default_factory=list)
+
+
+class ExpertOperationResult(BaseModel):
+    user_id: str
+    success: bool
+    definition_id: str | None = None
+    reason: str | None = None
+
+
+class ExpertDistributionResponse(BaseModel):
+    item_id: str
+    distributed_count: int
+    conflict_count: int = 0
+    results: list[ExpertOperationResult] = Field(default_factory=list)
+
+
+class ExpertRecallRequest(BaseModel):
+    target_user_ids: list[str] | None = None
+
+
+class ExpertRecallResponse(BaseModel):
+    item_id: str
+    recalled_count: int
+    failed_count: int = 0
+    results: list[ExpertOperationResult] = Field(default_factory=list)
+
+
+class MarketExpertResponse(BaseModel):
+    """社区专家列表/详情响应."""
+
+    item_id: str
+    name: str
+    description: str = ""
+    version: str = "1.0.0"
+    creator_id: str
+    creator_name: str = ""
+    category_id: Optional[int] = None
+    bbk_ids: list[str] = Field(default_factory=list)
+    status: str = "active"
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    version_unchanged: bool = False
+
+
+class MarketExpertDetail(MarketExpertResponse):
+    """社区专家详情."""
+
+    versions: list[ExpertVersion] = Field(default_factory=list)
+    definition: dict[str, Any] = Field(default_factory=dict)
+
+
+class ExpertVersionListResponse(ExpertVersionsManifest):
+    """社区专家版本列表响应."""
 
 
 class MySkillItem(BaseModel):

@@ -84,6 +84,7 @@
     "mySkills": "我的技能",
     "myMcp": "我的 MCP",
     "myExperts": "我的专家",
+    "expertCommunity": "专家社区",
     "systemCheck": "系统自检"
   },
   "systemCheck": {
@@ -1281,7 +1282,7 @@
     "createNewChat": "创建新聊天",
     "disclaimer": "懂你所需，伴你左右",
     "greeting": "你好，我今天能帮你做什么？",
-    "description": "您好，有什么可以帮您？",
+    "description": "你好，有什么可以帮你？",
     "prompt1": "让我们开启一段新的旅程吧！",
     "prompt2": "能告诉我你有哪些技能吗？",
     "inputPlaceholder": "请输入你的问题...",

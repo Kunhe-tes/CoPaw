@@ -1,7 +1,8 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import { flushSync } from "react-dom";
 import { useNavigate, useLocation } from "react-router-dom";
-import { Image, Modal } from "antd";
+import { Image, Modal, Tooltip } from "antd";
+import { PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import { useContextSelector } from "use-context-selector";
 import useChatAnywhereEventEmitter from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Context/useChatAnywhereEventEmitter";
 import Style from "./style";
@@ -89,7 +90,6 @@ function ToggleIcon({ collapsed }: { collapsed: boolean }) {
 
 export interface ChatSidebarProps {
   tasks: CronJobSpecOutput[];
-  showGuide?: boolean;
   selectedTaskId?: string;
   onCreateSession?: () => void;
   onTaskClick?: (task: CronJobSpecOutput) => void;
@@ -103,7 +103,6 @@ export interface ChatSidebarProps {
 export default function ChatSidebar(props: ChatSidebarProps) {
   const {
     tasks,
-    showGuide = false,
     selectedTaskId,
     onCreateSession,
     onTaskClick,
@@ -148,6 +147,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
   const { selectedAgent, setSelectedAgent } = useAgentStore();
   const bbk = useIframeStore((state) => state.bbk);
   const source = useIframeStore((state) => state.source);
+  const isOriginY = useIframeStore((state) => state.isOriginY);
   const isOperationGuideContext =
     bbk === OPERATION_GUIDE_BBK && source === OPERATION_GUIDE_SOURCE;
   const isHeaderHidden = source === SPECIAL_SOURCE;
@@ -396,22 +396,16 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             loadMoreSessionsFailed={loadMoreHistoryFailed}
             onLoadMoreSessions={() => void loadMoreSessions()}
           />
-          <button
-            className="chat-sidebar-collapse-toggle"
-            onClick={handleToggleCollapse}
-            type="button"
-            aria-label="展开侧栏"
-          >
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-              <path
-                d="M4 2L7 5L4 8"
-                stroke="rgba(0,0,0,0.35)"
-                strokeWidth="1.5"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
-          </button>
+          <Tooltip title="展开导航" placement="right">
+            <button
+              className="chat-sidebar-collapse-toggle"
+              onClick={handleToggleCollapse}
+              type="button"
+              aria-label="展开导航"
+            >
+              <PanelLeftOpen aria-hidden="true" size={18} strokeWidth={1.8} />
+            </button>
+          </Tooltip>
         </div>
       </>
     );
@@ -432,6 +426,20 @@ export default function ChatSidebar(props: ChatSidebarProps) {
                 <img src={sendIcon} alt="+" width="16" height="16" />
                 新建会话
               </button>
+              <Tooltip title="收起导航" placement="right">
+                <button
+                  className="chat-sidebar-collapse-toggle chat-sidebar-collapse-toggle--expanded"
+                  onClick={handleToggleCollapse}
+                  type="button"
+                  aria-label="收起导航"
+                >
+                  <PanelLeftClose
+                    aria-hidden="true"
+                    size={18}
+                    strokeWidth={1.8}
+                  />
+                </button>
+              </Tooltip>
             </div>
             <div
               className={`chat-sidebar-content-record-list${
@@ -504,7 +512,7 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
           </div>
 
-          {showGuide && (
+          {isOriginY && (
             <div className="chat-sidebar-footer">
               {/* 暂时隐藏，后续需要时再开放
               <div className="chat-sidebar-footer-item">
@@ -524,25 +532,9 @@ export default function ChatSidebar(props: ChatSidebarProps) {
             </div>
           )}
         </div>
-        <button
-          className="chat-sidebar-collapse-toggle"
-          onClick={handleToggleCollapse}
-          type="button"
-          aria-label="收起侧栏"
-        >
-          <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-            <path
-              d="M6 2L3 5L6 8"
-              stroke="rgba(0,0,0,0.35)"
-              strokeWidth="1.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
       </div>
       {/* Guide Image Preview */}
-      {showGuide && isOperationGuideContext && (
+      {isOriginY && isOperationGuideContext && (
         <div style={{ display: "none" }}>
           <Image.PreviewGroup
             preview={{

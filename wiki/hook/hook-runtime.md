@@ -23,7 +23,7 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 - `PreToolUse` 是最常用的事件：可以拒绝工具、要求审批、改写工具输入。
 - `PostToolUse` 和 `PostToolUseFailure` 不能撤销已经发生的工具调用，但现在所有经 Tool Guard 执行的工具路径（包括预批准和受保护的内置工具）都会进入对应的后置 hook；它们适合审计、诊断，或用终止决策结束当前回合。
 - `continue: false` 或 `decision: "stop"` 是回合级终止，而不只是“阻断当前工具”：在工具事件中命中后会阻止后续推理，并取消仍在等待的并行工具调用。
-- `Stop` 是统一完成门禁：每个 handler 可先执行审计、埋点或通知；合并后的 `allow` / `block` 决定候选回复是否完成。显式 `block` 可触发有上限的自动续跑，`failPolicy: block` 的执行失败则直接以未完成结束。
+- `Stop` 是统一完成门禁：普通 handler 并发执行，合并后的 `allow` / `block` 决定候选回复是否完成。显式 `outputTransform: true` 会先串行改写候选文本，再进入普通校验；显式 `block` 可触发有上限的自动续跑，`failPolicy: block` 的执行失败则直接以未完成结束。
 - Skill 自带 hook 只有在该 Skill 在当前会话里被激活后才会生效。
 - 多个 handler 会并发执行，不要依赖“前一个 handler 的输出给后一个 handler 使用”。
 
@@ -64,7 +64,7 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 | `PreToolUse` | 工具真正执行前 | 可能直接放行、拒绝、改写输入，或弹出审批卡片 | 工具审批、参数检查、命令改写 |
 | `PostToolUse` | 工具成功返回后 | 成功结果已经保留；普通 `block` 不会撤销它，终止决策会结束当前回合 | 审计记录、补充工具结果说明、在结果出现后停止继续推理 |
 | `PostToolUseFailure` | 工具调用抛出失败后 | 原始失败已被记录；普通 `block` 不会吞掉它，终止决策会结束当前回合 | 记录错误、提示排查方向、在失败后停止继续推理 |
-| `Stop` | 候选回复已经流出后、正式结束前 | 用户通常已经看到了候选回复；若返回 `block`，系统会继续同一任务 | 完成门禁、测试门禁、发布前检查 |
+| `Stop` | 候选回复生成后、正式结束前 | 普通 Stop 时用户通常已看到候选回复；存在潜在输出变换器时，文本会先被保留 | 完成门禁、测试门禁、发布前检查、最终文本格式化 |
 
 实际请求路径里还有一个顺序细节：如果当前请求带有文本用户输入，`UserPromptSubmit` 会在 preflight 阶段先执行；之后系统装配 Agent 主流程时才执行 `SessionStart`。所以上表按生命周期概念排序，不表示所有请求里严格按表格顺序触发。
 
@@ -72,7 +72,34 @@ Hook Runtime 用于在 Agent 的关键运行节点挂接自定义策略。你可
 
 ### 关于 `Stop`
 
-`Stop` 是“现在能不能结束”的唯一事件。它在候选回复生成后运行一次：handler 可以记录该尝试，随后返回 `allow` 批准完成或返回 `block` 要求 Agent 在同一请求中继续。每次续跑后的新候选回复都会再次触发 Stop，因此审计系统应将其记录为独立完成尝试。
+`Stop` 是“现在能不能结束”的唯一事件。普通 Stop 在候选回复生成后运行一次：handler 可以记录该尝试，随后返回 `allow` 批准完成或返回 `block` 要求 Agent 在同一请求中继续。每次续跑后的新候选回复都会再次触发 Stop，因此审计系统应将其记录为独立完成尝试。
+
+### Stop 输出变换器
+
+在 `Stop` handler 上声明 `"outputTransform": true` 可把它变为最终文本变换器。只要事件、matcher、来源和 overlay 存在潜在匹配，候选 assistant 文本会在 `if` 求值前被保留；变换器按“租户 → Agent Profile → 已激活 Skill（按 `skill_name` 排序）”串行运行，后一个看到前一个的替换结果。之后所有普通 Stop handler 并发校验最终文本。
+
+```json
+{
+  "events": {
+    "Stop": [{
+      "hooks": [
+        {"id":"format","type":"http","url":"https://policy.example/rewrite","outputTransform":true,"timeout":5,"failPolicy":"block"},
+        {"id":"audit","type":"command","argv":["python","hooks/scripts/audit_final.py"]}
+      ]
+    }]
+  }
+}
+```
+
+变换器只能返回 `allow`，并可选择完整替换文本：
+
+```json
+{"decision":"allow","reason":"formatted","hookSpecificOutput":{"replacementText":"final text"}}
+```
+
+省略 `replacementText` 表示保持当前文本。`outputTransform` 仅能用于 `Stop`，不能与 `once: true` 同用；`replacementText` 只能由变换器使用。总时限由 Agent Profile 的 `running.hook_runtime.max_stop_transform_seconds` 控制，默认 30 秒。`failPolicy: allow` 失败时保留当前文本继续；`failPolicy: block` 或预算耗尽时本轮以未完成结束，不投递文本也不自动续跑。
+
+变换仅作用于可提取文本（字符串或 text block）；工具进度、审批、附件和工具卡片继续实时输出。显式请求的会话快照保持原有行为，可能含原始候选文本。应用日志只记录变换元数据、长度和 SHA-256，不记录候选或替换正文。
 
 ## 配置写在哪里
 
@@ -236,6 +263,7 @@ Skill 级 `hooks/hooks.json` 示例：
 | `includeConversationSnapshot` | 否 | `true` 时，仅该 handler 会额外收到 `conversation_snapshot` 和 `conversation_snapshot_meta`。默认 `false`。 |
 | `conversationSnapshotLimit` | 否 | 快照最多携带多少条最近消息。默认 `50`，最大 `200`；仅在 `includeConversationSnapshot: true` 时生效。 |
 | `failPolicy` | 否 | handler 自身执行失败时的处理策略，支持 `allow` 或 `block`。`command` / `http` 默认 `allow`，`prompt` 默认 `block`。 |
+| `outputTransform` | 否 | 仅 `Stop` 可用，默认 `false`。为 `true` 时 handler 串行改写最终文本，且不能设置 `once: true`。 |
 
 ### `once: true` 的实际含义
 

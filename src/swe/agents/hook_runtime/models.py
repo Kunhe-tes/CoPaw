@@ -139,6 +139,8 @@ class HookHandlerResult(BaseModel):
     reason: str = ""
     failed: bool = False
     failure_type: str = ""
+    replacement_text: str | None = None
+    output_transform: bool = False
 
 
 class HookPermissionDecision(BaseModel):
@@ -175,6 +177,15 @@ class MergedHookResult(BaseModel):
         }
 
 
+class StopHookExecutionResult(BaseModel):
+    final_response: str
+    validation_result: MergedHookResult = Field(
+        default_factory=MergedHookResult,
+    )
+    transformation_failed: bool = False
+    transformation_failure_reason: str = ""
+
+
 class BaseHookHandlerConfig(BaseModel):
     model_config = ConfigDict(
         extra="ignore",
@@ -188,6 +199,7 @@ class BaseHookHandlerConfig(BaseModel):
     timeout: float = Field(default=10.0, gt=0)
     status_message: str = Field(default="", alias="statusMessage")
     once: bool = False
+    output_transform: bool = Field(default=False, alias="outputTransform")
     include_conversation_snapshot: bool = Field(
         default=False,
         alias="includeConversationSnapshot",
@@ -322,18 +334,29 @@ class HookConfig(BaseModel):
     @model_validator(mode="after")
     def validate_prompt_handler_events(self) -> "HookConfig":
         for event_name, groups in self.events.items():
-            if event_name in PROMPT_HANDLER_BLOCKABLE_EVENTS:
-                continue
             for group in groups:
-                if any(
-                    isinstance(handler, PromptHookHandlerConfig)
-                    for handler in group.hooks
-                ):
-                    raise ValueError(
-                        "prompt hook handlers must be configured on "
-                        "blockable events only",
-                    )
+                for handler in group.hooks:
+                    validate_handler_event(handler, event_name)
         return self
+
+
+def validate_handler_event(
+    handler: HookHandlerConfig,
+    event_name: HookEventName,
+) -> None:
+    if (
+        isinstance(handler, PromptHookHandlerConfig)
+        and event_name not in PROMPT_HANDLER_BLOCKABLE_EVENTS
+    ):
+        raise ValueError(
+            "prompt hook handlers must be configured on blockable events only",
+        )
+    if handler.output_transform and event_name != HookEventName.STOP:
+        raise ValueError(
+            "outputTransform handlers must be configured on Stop only",
+        )
+    if handler.output_transform and handler.once:
+        raise ValueError("outputTransform handlers cannot use once")
 
 
 class HookOverlayEntry(BaseModel):
@@ -455,6 +478,7 @@ class EffectiveHookHandler(BaseModel):
     group_id: str
     order: int
     dedupe_key: str
+    source: str = "tenant"
 
     def success(self, raw_output: dict[str, Any] | None) -> HookHandlerResult:
         from .output import normalize_hook_output

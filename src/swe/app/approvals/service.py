@@ -303,6 +303,24 @@ class ApprovalService:
         if not pending.future.done():
             pending.future.set_result(decision)
 
+        goal_id = str(pending.extra.get("goal_id") or "").strip()
+        if goal_id:
+            try:
+                from ..goals.registry import get_goal_service
+
+                goal_service = get_goal_service()
+                if goal_service is not None:
+                    await goal_service.wake(
+                        goal_id,
+                        f"Tool approval {decision.value}",
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to wake Goal after approval resolution: %s",
+                    goal_id,
+                    exc_info=True,
+                )
+
         await self._persist_request(pending)
         await self.record_event(pending, "resolved", status=pending.status)
         return pending
@@ -492,6 +510,44 @@ class ApprovalService:
             )
         return cancelled
 
+    async def supersede_goal_review_approvals(
+        self,
+        goal_id: str,
+        request_ids: tuple[str, ...],
+    ) -> int:
+        """Invalidate pending Judge approvals belonging to an edited Goal."""
+        requested = set(request_ids)
+        if not goal_id or not requested:
+            return 0
+        now = time.time()
+        superseded: list[PendingApproval] = []
+        async with self._lock:
+            for request_id in requested:
+                pending = self._pending.get(request_id)
+                if (
+                    pending is None
+                    or not self._matches_scope(pending)
+                    or pending.extra.get("goal_id") != goal_id
+                ):
+                    continue
+                self._pending.pop(request_id)
+                pending.status = "superseded"
+                pending.resolved_at = now
+                if not pending.future.done():
+                    pending.future.set_result(ApprovalDecision.TIMEOUT)
+                self._completed[request_id] = pending
+                superseded.append(pending)
+            self._gc_completed_locked()
+        for pending in superseded:
+            await self._persist_request(pending)
+            await self.record_event(
+                pending,
+                "superseded",
+                status=pending.status,
+                details={"goal_id": goal_id},
+            )
+        return len(superseded)
+
     async def consume_approval(
         self,
         session_id: str,
@@ -577,7 +633,9 @@ class ApprovalService:
                 or self._completed.get(pending.request_id)
                 or pending
             )
-            extra = dict(record.extra) if isinstance(record.extra, dict) else {}
+            extra = (
+                dict(record.extra) if isinstance(record.extra, dict) else {}
+            )
             extra[_EXTERNAL_SUBMISSION_EXTRA_KEY] = submission
             record.extra = extra
             pending = record

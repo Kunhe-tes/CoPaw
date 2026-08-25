@@ -51,7 +51,9 @@ describe("SystemConfigPage", () => {
 
   function getSwitchByTitle(title: string) {
     const switchTitle = screen.getByText(title);
-    const switchRow = switchTitle.closest("div[class*='switchRow']");
+    const switchRow = switchTitle.closest<HTMLElement>(
+      "div[class*='switchRow']",
+    );
     if (!switchRow) {
       throw new Error(`Switch row not found: ${title}`);
     }

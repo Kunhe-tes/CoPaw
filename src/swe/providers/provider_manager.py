@@ -6,6 +6,7 @@ providers, adding/removing custom providers, and fetching provider details."""
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ try:
     import msvcrt
 except ImportError:  # pragma: no cover (Unix)
     msvcrt = None
+
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -33,6 +35,9 @@ from swe.providers.provider import (
     ProviderInfo,
 )
 from swe.providers.models import ModelSlotConfig
+from swe.providers.provider_catalog_service import ProviderCatalogService
+from swe.providers.provider_runtime_cache import ProviderRuntimeCache
+from swe.providers.tenant_provider_repository import TenantProviderRepository
 from swe.constant import SECRET_DIR
 from swe.runtime_cache import reset_scope_bound_model_caches
 from swe.runtime_workers import run_runtime_state_work
@@ -44,12 +49,7 @@ logger = logging.getLogger(__name__)
 
 _PROVIDER_MANAGER_SLOW_LOG_MS = 500
 _PROVIDER_INFO_SLOW_LOG_MS = 100
-
-if fcntl is None and msvcrt is None:  # pragma: no cover
-    raise ImportError(
-        "No file locking module available (need fcntl or msvcrt)",
-    )
-
+_PROVIDER_FRESHNESS_TTL_SECONDS = 300.0
 
 # -------------------------------------------------------
 # Built-in provider definitions and their default models.
@@ -65,8 +65,12 @@ class ProviderManager:
     including built-in and custom ones."""
 
     _instance = None
-    _instances: dict[str, "ProviderManager"] = {}
-    _instances_lock = threading.Lock()
+    _runtime_cache = ProviderRuntimeCache(_PROVIDER_FRESHNESS_TTL_SECONDS)
+    _instances = _runtime_cache.instances
+    _instances_lock = _runtime_cache.instances_lock
+    _init_executor = _runtime_cache.init_executor
+    _inflight = _runtime_cache.instance_inflight
+    _instance_tasks = _inflight
 
     @classmethod
     def reset_instance_cache(cls) -> None:
@@ -75,9 +79,8 @@ class ProviderManager:
         source-scoped cutover 期间必须确保旧的 tenant-only 单例不会在同一
         进程生命周期里继续复用，因此这里提供显式清理入口供启动/测试调用。
         """
-        with cls._instances_lock:
-            cls._instances.clear()
-            cls._instance = None
+        cls._runtime_cache.reset_instances()
+        cls._instance = None
         reset_scope_bound_model_caches()
 
     def __init__(self, tenant_id: str = "default") -> None:
@@ -89,11 +92,17 @@ class ProviderManager:
         # Initialize provider manager, load providers from registry and store
         # any necessary state (e.g., cached models).
         self.tenant_id = tenant_id
+        self._repository = TenantProviderRepository(SECRET_DIR)
         self.builtin_providers: Dict[str, Provider] = {}
         self._builtin_provider_defaults: Dict[str, Provider] = {}
         self.custom_providers: Dict[str, Provider] = {}
         self.active_model: ModelSlotConfig | None = None
+        self._catalog = ProviderCatalogService(self)
         self._file_freshness_tokens: dict[str, tuple[int, int]] = {}
+        self._next_freshness_check_at = (
+            time.monotonic() + _PROVIDER_FRESHNESS_TTL_SECONDS
+        )
+        self._freshness_lock = threading.RLock()
         self.root_path = self._get_tenant_root_path(tenant_id)
         self.builtin_path = self.root_path / "builtin"
         self.custom_path = self.root_path / "custom"
@@ -222,13 +231,7 @@ class ProviderManager:
         Returns:
             Path to the tenant's provider configuration directory.
         """
-        from ..config.utils import migrate_legacy_scope_dir_if_needed
-
-        tenant_root_dir = migrate_legacy_scope_dir_if_needed(
-            SECRET_DIR,
-            tenant_id,
-        )
-        return tenant_root_dir / "providers"
+        return TenantProviderRepository(SECRET_DIR).root_path(tenant_id)
 
     @staticmethod
     def _do_initialize_provider_storage(
@@ -249,6 +252,21 @@ class ProviderManager:
             tenant_id: The effective tenant ID.
             tenant_providers_dir: Target directory for provider storage.
         """
+        repository = TenantProviderRepository(SECRET_DIR)
+        if os.environ.get("SWE_ENABLE_LEGACY_PROVIDER_STORAGE") != "1":
+            repository._seed_scope(
+                tenant_id,
+                tenant_providers_dir,
+            )
+            for path in (
+                tenant_providers_dir,
+                tenant_providers_dir / "builtin",
+                tenant_providers_dir / "custom",
+            ):
+                path.mkdir(parents=True, exist_ok=True)
+                repository._restrict_directory_permissions(path)
+            return
+
         from ..config.context import get_current_source_id
 
         started_at = time.perf_counter()
@@ -489,8 +507,15 @@ class ProviderManager:
             to call multiple times - subsequent calls are no-ops if storage exists.
         """
         effective_tenant_id = (
-            ProviderManager._resolve_effective_provider_tenant_id(tenant_id)
+            ProviderManager._resolve_effective_provider_tenant_id(
+                tenant_id,
+            )
         )
+        if os.environ.get("SWE_ENABLE_LEGACY_PROVIDER_STORAGE") != "1":
+            TenantProviderRepository(SECRET_DIR).prepare_scope(
+                effective_tenant_id,
+            )
+            return
         tenant_providers_dir = ProviderManager._get_tenant_root_path(
             effective_tenant_id,
         )
@@ -676,15 +701,14 @@ class ProviderManager:
             ProviderManager instance for the specified tenant.
         """
         effective_tenant_id = (
-            ProviderManager._resolve_effective_provider_tenant_id(tenant_id)
+            ProviderManager._resolve_effective_provider_tenant_id(
+                tenant_id,
+            )
         )
 
-        # Fast path: check if instance exists without lock
-        if effective_tenant_id in ProviderManager._instances:
-            return ProviderManager._instances[effective_tenant_id]
-
-        # Slow path: create instance with lock
-        lock_started_at = time.perf_counter()
+        cached = ProviderManager._instances.get(effective_tenant_id)
+        if cached is not None:
+            return cached
         logger.info(
             "provider_manager_instance_cache_miss route_tenant_id=%s "
             "provider_tenant_id=%s cached_instances=%d thread_id=%s",
@@ -693,49 +717,60 @@ class ProviderManager:
             len(ProviderManager._instances),
             threading.get_ident(),
         )
-        with ProviderManager._instances_lock:
-            lock_wait_ms = int((time.perf_counter() - lock_started_at) * 1000)
-            logger.info(
-                "provider_manager_instance_lock_acquired route_tenant_id=%s "
-                "provider_tenant_id=%s wait_ms=%d cached_instances=%d "
-                "thread_id=%s",
-                tenant_id,
-                effective_tenant_id,
-                lock_wait_ms,
-                len(ProviderManager._instances),
-                threading.get_ident(),
+        future = ProviderManager._runtime_cache.get_or_start_instance(
+            effective_tenant_id,
+            ProviderManager._build_instance_sync,
+        )
+        create_started_at = time.perf_counter()
+        existing = future.result()
+        logger.info(
+            "provider_manager_instance_create_done route_tenant_id=%s "
+            "provider_tenant_id=%s duration_ms=%d cached_instances=%d",
+            tenant_id,
+            effective_tenant_id,
+            int((time.perf_counter() - create_started_at) * 1000),
+            len(ProviderManager._instances),
+        )
+        return existing
+
+    @classmethod
+    async def get_or_create_instance(
+        cls,
+        tenant_id: str | None = None,
+    ) -> "ProviderManager":
+        """Get a manager asynchronously with scope-keyed single-flight startup."""
+        effective = cls._resolve_effective_provider_tenant_id(tenant_id)
+        cached = cls._instances.get(effective)
+        if cached is not None:
+            return cached
+        future = cls._runtime_cache.get_or_start_instance(
+            effective,
+            cls._build_instance_sync,
+        )
+
+        try:
+            return await asyncio.shield(asyncio.wrap_future(future))
+        finally:
+            cls._runtime_cache.discard_completed_instance_startup(
+                effective,
+                future,
             )
-            # Double-check after acquiring lock
-            if effective_tenant_id not in ProviderManager._instances:
-                create_started_at = time.perf_counter()
-                logger.info(
-                    "provider_manager_instance_create_start "
-                    "route_tenant_id=%s provider_tenant_id=%s",
-                    tenant_id,
-                    effective_tenant_id,
-                )
-                ProviderManager._instances[effective_tenant_id] = (
-                    ProviderManager(
-                        effective_tenant_id,
-                    )
-                )
-                logger.info(
-                    "provider_manager_instance_create_done "
-                    "route_tenant_id=%s provider_tenant_id=%s "
-                    "duration_ms=%d cached_instances=%d",
-                    tenant_id,
-                    effective_tenant_id,
-                    int((time.perf_counter() - create_started_at) * 1000),
-                    len(ProviderManager._instances),
-                )
-            else:
-                logger.info(
-                    "provider_manager_instance_reused_after_lock "
-                    "route_tenant_id=%s provider_tenant_id=%s",
-                    tenant_id,
-                    effective_tenant_id,
-                )
-            return ProviderManager._instances[effective_tenant_id]
+
+    @classmethod
+    def _get_or_start_instance_future(
+        cls,
+        effective: str,
+    ):
+        """Compatibility facade for the cache-owned startup registry."""
+        return cls._runtime_cache.get_or_start_instance(
+            effective,
+            cls._build_instance_sync,
+        )
+
+    @staticmethod
+    def _build_instance_sync(effective: str) -> "ProviderManager":
+        ProviderManager.ensure_tenant_provider_storage(effective)
+        return ProviderManager(effective)
 
     @staticmethod
     def get_active_chat_model() -> ChatModelBase:
@@ -767,12 +802,10 @@ class ProviderManager:
 
     def _prepare_disk_storage(self):
         """Prepare directory structure"""
-        for path in [self.root_path, self.builtin_path, self.custom_path]:
-            path.mkdir(parents=True, exist_ok=True)
-            try:
-                os.chmod(path, 0o700)  # Restrict permissions for security
-            except Exception:
-                pass
+        paths = self._repository.prepare_scope(self.tenant_id)
+        self.root_path = paths.root
+        self.builtin_path = paths.builtin
+        self.custom_path = paths.custom
 
     def _init_builtins(self):
         # Deep copy builtin providers to ensure per-tenant isolation
@@ -783,19 +816,15 @@ class ProviderManager:
 
     def _record_mtimes(self):
         """Snapshot modification times of all provider config files."""
-        mtimes: dict[str, tuple[int, int]] = {}
-        for provider_id in self.builtin_providers:
-            path = self.builtin_path / f"{provider_id}.json"
-            if path.exists():
-                mtimes[str(path)] = self._file_token(path)
-        for path in self.custom_path.glob("*.json"):
-            mtimes[str(path)] = self._file_token(path)
-        active_path = self.root_path / "active_model.json"
-        if active_path.exists():
-            mtimes[str(active_path)] = self._file_token(active_path)
-        self._file_freshness_tokens = mtimes
+        self._file_freshness_tokens = self._repository.freshness_snapshot(
+            self.tenant_id,
+            list(self.builtin_providers),
+        )
 
     def _file_token(self, path: Path) -> tuple[int, int]:
+        repository = getattr(self, "_repository", None)
+        if repository is not None:
+            return repository.file_token(path)
         stat = path.stat()
         return stat.st_mtime_ns, stat.st_size
 
@@ -805,6 +834,31 @@ class ProviderManager:
             self._file_freshness_tokens[str(path)] = self._file_token(path)
         else:
             self._file_freshness_tokens.pop(str(path), None)
+
+    def _mark_freshness_due(self) -> None:
+        self._next_freshness_check_at = 0.0
+        self._get_runtime_cache().mark_freshness_due(self.tenant_id)
+
+    def _get_runtime_cache(self) -> ProviderRuntimeCache:
+        return ProviderManager._runtime_cache
+
+    def _catalog_seams(
+        self,
+    ) -> tuple[TenantProviderRepository | None, ProviderRuntimeCache]:
+        """Supply catalog dependencies without exposing storage internals."""
+        runtime_cache = self._get_runtime_cache()
+        runtime_cache.set_model_cache_reset(
+            reset_scope_bound_model_caches,
+        )
+        return getattr(self, "_repository", None), runtime_cache
+
+    def _catalog_service(self) -> ProviderCatalogService:
+        """Return the catalog service, including for legacy test fixtures."""
+        catalog = getattr(self, "_catalog", None)
+        if catalog is None:
+            catalog = ProviderCatalogService(self)
+            self._catalog = catalog
+        return catalog
 
     def _refresh_if_stale(self):
         """Reload providers whose files changed on disk since last snapshot."""
@@ -890,7 +944,7 @@ class ProviderManager:
                 (time.perf_counter() - apply_active_started_at) * 1000,
             )
         reset_cache_started_at = time.perf_counter()
-        reset_scope_bound_model_caches()
+        reset_scope_bound_model_caches(self.tenant_id)
         reset_cache_ms = int(
             (time.perf_counter() - reset_cache_started_at) * 1000,
         )
@@ -932,7 +986,7 @@ class ProviderManager:
         new: list[Path] = []
         current: set[str] = set()
 
-        for path in self.custom_path.glob("*.json"):
+        for path in self._repository.custom_provider_paths(self.tenant_id):
             path_str = str(path)
             current.add(path_str)
             try:
@@ -966,15 +1020,10 @@ class ProviderManager:
 
     def _file_has_changed(self, path: Path) -> bool:
         """Check if a file has changed since last snapshot."""
-        try:
-            if path.exists():
-                return self._file_freshness_tokens.get(
-                    str(path),
-                ) != self._file_token(path)
-            return str(path) in self._file_freshness_tokens
-        except OSError:
-            pass
-        return False
+        return self._repository.file_has_changed(
+            path,
+            self._file_freshness_tokens,
+        )
 
     def _apply_builtin_refresh(self, provider_ids: list[str]) -> None:
         """Apply changes for modified builtin providers."""
@@ -1021,69 +1070,33 @@ class ProviderManager:
         """Apply changes for active model."""
         self.active_model = self.load_active_model()
 
-    async def list_provider_info(self) -> List[ProviderInfo]:
-        started_at = time.perf_counter()
-        refresh_started_at = time.perf_counter()
-        self._refresh_if_stale()
-        refresh_ms = int((time.perf_counter() - refresh_started_at) * 1000)
-        providers: list[tuple[str, Provider]] = [
-            ("builtin", provider)
-            for provider in self.builtin_providers.values()
-        ]
-        providers += [
-            ("custom", provider) for provider in self.custom_providers.values()
-        ]
-        gather_started_at = time.perf_counter()
-        provider_results = await asyncio.gather(
-            *[
-                self._get_provider_info_with_timing(provider, provider_kind)
-                for provider_kind, provider in providers
-            ],
-        )
-        gather_ms = int((time.perf_counter() - gather_started_at) * 1000)
-        provider_infos = [info for info, _ in provider_results]
-        timings = [
-            (provider.id, provider_kind, duration_ms)
-            for (provider_kind, provider), (_, duration_ms) in zip(
-                providers,
-                provider_results,
+    async def refresh_if_due(self) -> None:
+        """Refresh provider files only after the freshness TTL elapses."""
+        cache = self._get_runtime_cache()
+        if time.monotonic() < getattr(
+            self,
+            "_next_freshness_check_at",
+            0.0,
+        ) and not cache.freshness_check_is_due(self.tenant_id):
+            return
+        cache.ensure_freshness_due(self.tenant_id)
+
+        async def refresh() -> None:
+            future = cache.submit(
+                self._refresh_and_mark_fresh,
             )
-        ]
-        max_provider_id = ""
-        max_provider_kind = ""
-        max_provider_ms = 0
-        if timings:
-            max_provider_id, max_provider_kind, max_provider_ms = max(
-                timings,
-                key=lambda item: item[2],
-            )
-        total_ms = int((time.perf_counter() - started_at) * 1000)
-        model_count = sum(len(provider.models) for provider in provider_infos)
-        extra_model_count = sum(
-            len(provider.extra_models) for provider in provider_infos
-        )
-        logger.info(
-            "provider_list_provider_info_done tenant_id=%s total_ms=%d "
-            "refresh_ms=%d gather_ms=%d provider_count=%d builtin_count=%d "
-            "custom_count=%d model_count=%d extra_model_count=%d "
-            "max_provider_id=%s max_provider_kind=%s max_provider_ms=%d "
-            "freshness_token_count=%d root_path=%s",
+            await asyncio.shield(asyncio.wrap_future(future))
+
+        await cache.refresh_if_due(self.tenant_id, refresh)
+        self._next_freshness_check_at = cache.next_freshness_check_at(
             self.tenant_id,
-            total_ms,
-            refresh_ms,
-            gather_ms,
-            len(provider_infos),
-            len(self.builtin_providers),
-            len(self.custom_providers),
-            model_count,
-            extra_model_count,
-            max_provider_id,
-            max_provider_kind,
-            max_provider_ms,
-            len(self._file_freshness_tokens),
-            self.root_path,
         )
-        return list(provider_infos)
+
+    def _refresh_and_mark_fresh(self) -> None:
+        self._refresh_if_stale()
+
+    async def list_provider_info(self) -> List[ProviderInfo]:
+        return await self._catalog_service().list_provider_info()
 
     async def _get_provider_info_with_timing(
         self,
@@ -1132,240 +1145,95 @@ class ProviderManager:
         return None
 
     async def get_provider_info(self, provider_id: str) -> ProviderInfo | None:
-        provider = self.get_provider(provider_id)
-        return await provider.get_info() if provider else None
+        return await self._catalog_service().get_provider_info(provider_id)
 
     def get_active_model(self) -> ModelSlotConfig | None:
-        # Return the currently active provider/model configuration.
-        self._refresh_if_stale()
+        """Return the cached active model.
+
+        Async request boundaries refresh this snapshot through
+        :meth:`refresh_if_due`.  Synchronous CLI callers retain their
+        historical refresh behavior when no event loop is running.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            if time.monotonic() >= getattr(
+                self,
+                "_next_freshness_check_at",
+                0.0,
+            ):
+                self._refresh_if_stale()
+                self._next_freshness_check_at = (
+                    time.monotonic() + _PROVIDER_FRESHNESS_TTL_SECONDS
+                )
         return self.active_model
 
     def update_provider(self, provider_id: str, config: Dict) -> bool:
-        # Update the configuration of a provider (e.g., base URL, API key).
-        # This will be called when the user edits a provider's settings in the
-        # UI. It should update the in-memory provider instance and persist the
-        # changes to providers.json.
-        provider = self.get_provider(provider_id)
-        if not provider:
-            return False
-        provider.update_config(config)
-        self._save_provider(
-            provider,
-            is_builtin=provider_id in self.builtin_providers,
-        )
-        reset_scope_bound_model_caches()
-        return True
+        return self._catalog_service().update_provider(provider_id, config)
 
     async def fetch_provider_models(
         self,
         provider_id: str,
     ) -> List[ModelInfo]:
-        """Fetch the list of available models from a provider and update."""
-        provider = self.get_provider(provider_id)
-        if not provider:
-            return []
-        try:
-            models = await provider.fetch_models()
-            provider.extra_models = models
-            await self._save_provider_async(
-                provider,
-                is_builtin=provider_id in self.builtin_providers,
-            )
-            return models
-        except Exception as e:
-            logger.warning(
-                "Failed to fetch models for provider '%s': %s",
-                provider_id,
-                e,
-            )
-            return []
+        return await self._catalog_service().fetch_provider_models(provider_id)
 
     def _resolve_custom_provider_id(self, provider_id: str) -> str:
-        """Resolve provider ID conflicts for a custom provider."""
-        base_id = provider_id
-        if base_id in self.builtin_providers:
-            base_id = f"{base_id}-custom"
-
-        resolved_id = base_id
-        while (
-            resolved_id in self.builtin_providers
-            or resolved_id in self.custom_providers
-        ):
-            resolved_id = f"{resolved_id}-new"
-
-        return resolved_id
+        return self._catalog_service().resolve_custom_provider_id(provider_id)
 
     async def add_custom_provider(self, provider_data: ProviderInfo):
-        # Add a new custom provider with the given data. This will update the
-        # providers.json file and make the new provider available in the UI.
-        provider_payload = provider_data.model_dump()
-        provider_payload["id"] = self._resolve_custom_provider_id(
-            provider_data.id,
-        )
-        provider_payload["is_custom"] = True
-        provider = self._provider_from_data(
-            provider_payload,
-        )  # Validate provider data
-        # For custom providers, we assume they don't support connection check
-        # without model config, to avoid false negatives in the UI.
-        provider.support_connection_check = False
-        self.custom_providers[provider.id] = provider
-        await self._save_provider_async(provider, is_builtin=False)
-        reset_scope_bound_model_caches()
-        return await provider.get_info()
+        return await self._catalog_service().add_custom_provider(provider_data)
 
     def remove_custom_provider(self, provider_id: str) -> bool:
-        # Remove a custom provider by its ID. This will update the
-        # providers.json file and remove the provider from the UI.
-        if provider_id in self.custom_providers:
-            del self.custom_providers[provider_id]
-            provider_path = self.custom_path / f"{provider_id}.json"
-            if provider_path.exists():
-                os.remove(provider_path)
-            self._file_freshness_tokens.pop(str(provider_path), None)
-            reset_scope_bound_model_caches()
-            return True
-        return False
+        return self._catalog_service().remove_custom_provider(provider_id)
 
     async def activate_model(self, provider_id: str, model_id: str):
-        # Set the active provider and model for the agent. This will update
-        # providers.json and determine which provider/model is used when the
-        # agent creates chat model instances.
-        provider = self.get_provider(provider_id)
-        if not provider:
-            raise ValueError(f"Provider '{provider_id}' not found.")
-        if not provider.has_model(model_id):
-            raise ValueError(
-                f"Model '{model_id}' not found in provider '{provider_id}'.",
-            )
-        self.active_model = ModelSlotConfig(
-            provider_id=provider_id,
-            model=model_id,
+        return await self._catalog_service().activate_model(
+            provider_id,
+            model_id,
         )
-        await self._save_active_model_async(self.active_model)
-        reset_scope_bound_model_caches()
-
-        self.maybe_probe_multimodal(provider_id, model_id)
 
     def maybe_probe_multimodal(self, provider_id: str, model_id: str) -> None:
-        """Schedule multimodal probing for a model if capability is unknown."""
-        provider = self.get_provider(provider_id)
-        # Auto-probe multimodal if not yet probed
-        for model in provider.models + provider.extra_models:
-            if model.id == model_id and model.supports_multimodal is None:
-                asyncio.create_task(
-                    self._auto_probe_multimodal(provider_id, model_id),
-                )
-                break
+        self._catalog_service().maybe_probe_multimodal(provider_id, model_id)
 
     async def _auto_probe_multimodal(
         self,
         provider_id: str,
         model_id: str,
     ) -> None:
-        """Background probe that doesn't block model activation."""
-        try:
-            result = await self.probe_model_multimodal(provider_id, model_id)
-            logger.info(
-                "Auto-probe for %s/%s: image=%s, video=%s",
-                provider_id,
-                model_id,
-                result.get("supports_image"),
-                result.get("supports_video"),
-            )
-        except Exception as e:
-            logger.warning("Auto-probe multimodal failed: %s", e)
+        await self._catalog_service()._auto_probe_multimodal(
+            provider_id,
+            model_id,
+        )
 
     async def add_model_to_provider(
         self,
         provider_id: str,
         model_info: ModelInfo,
     ) -> ProviderInfo:
-        provider = self.get_provider(provider_id)
-        if not provider:
-            raise ValueError(f"Provider '{provider_id}' not found.")
-        await provider.add_model(model_info)
-        await self._save_provider_async(
-            provider,
-            is_builtin=provider_id in self.builtin_providers,
+        return await self._catalog_service().add_model_to_provider(
+            provider_id,
+            model_info,
         )
-        reset_scope_bound_model_caches()
-        return await provider.get_info()
 
     async def delete_model_from_provider(
         self,
         provider_id: str,
         model_id: str,
     ) -> ProviderInfo:
-        provider = self.get_provider(provider_id)
-        if not provider:
-            raise ValueError(f"Provider '{provider_id}' not found.")
-        await provider.delete_model(model_id=model_id)
-        await self._save_provider_async(
-            provider,
-            is_builtin=provider_id in self.builtin_providers,
+        return await self._catalog_service().delete_model_from_provider(
+            provider_id,
+            model_id,
         )
-        reset_scope_bound_model_caches()
-        return await provider.get_info()
 
     async def probe_model_multimodal(
         self,
         provider_id: str,
         model_id: str,
     ) -> dict:
-        """Probe a model's multimodal capabilities and persist the result."""
-        provider = self.get_provider(provider_id)
-        if not provider:
-            return {"error": f"Provider '{provider_id}' not found"}
-
-        result = await provider.probe_model_multimodal(model_id)
-
-        # Update the model's capability flags
-        for model in provider.models + provider.extra_models:
-            if model.id == model_id:
-                model.supports_image = result.supports_image
-                model.supports_video = result.supports_video
-                model.supports_multimodal = result.supports_multimodal
-                model.probe_source = "probed"
-                break
-
-        # Compare probe result against expected baseline
-        from .capability_baseline import (
-            ExpectedCapabilityRegistry,
-            compare_probe_result,
+        return await self._catalog_service().probe_model_multimodal(
+            provider_id,
+            model_id,
         )
-
-        registry = ExpectedCapabilityRegistry()
-        expected = registry.get_expected(provider_id, model_id)
-        if expected:
-            discrepancies = compare_probe_result(
-                expected,
-                result.supports_image,
-                result.supports_video,
-            )
-            for d in discrepancies:
-                logger.warning(
-                    "Probe discrepancy: %s/%s %s expected=%s actual=%s (%s)",
-                    d.provider_id,
-                    d.model_id,
-                    d.field,
-                    d.expected,
-                    d.actual,
-                    d.discrepancy_type,
-                )
-
-        # Persist to disk
-        await self._save_provider_async(
-            provider,
-            is_builtin=provider_id in self.builtin_providers,
-        )
-        return {
-            "supports_image": result.supports_image,
-            "supports_video": result.supports_video,
-            "supports_multimodal": result.supports_multimodal,
-            "image_message": result.image_message,
-            "video_message": result.video_message,
-        }
 
     def _save_provider(
         self,
@@ -1377,6 +1245,19 @@ class ProviderManager:
         provider_dir = self.builtin_path if is_builtin else self.custom_path
         provider_path = provider_dir / f"{provider.id}.json"
         if skip_if_exists and provider_path.exists():
+            return
+        repository = getattr(self, "_repository", None)
+        if (
+            repository is not None
+            and repository.root_path(self.tenant_id) == self.root_path
+        ):
+            provider_path = repository.write_provider(
+                self.tenant_id,
+                provider.model_dump(),
+                is_builtin=is_builtin,
+                skip_if_exists=skip_if_exists,
+            )
+            self._update_mtime(provider_path)
             return
         with open(provider_path, "w", encoding="utf-8") as f:
             json.dump(provider.model_dump(), f, ensure_ascii=False, indent=2)
@@ -1398,33 +1279,10 @@ class ProviderManager:
             is_builtin=is_builtin,
             skip_if_exists=skip_if_exists,
         )
+        self._mark_freshness_due()
 
     def overwrite_provider_payload(self, payload: Dict) -> Provider:
-        """Replace a tenant provider with the supplied payload.
-
-        The payload should come from an existing Provider instance's
-        ``model_dump()`` so secrets and model metadata are preserved. The write
-        path updates both in-memory state and on-disk storage in the same shape
-        that ProviderManager already uses for normal persistence.
-        """
-        provider = self._provider_from_data(payload)
-        is_builtin = not provider.is_custom
-
-        if is_builtin:
-            self.custom_providers.pop(provider.id, None)
-            custom_path = self.custom_path / f"{provider.id}.json"
-            if custom_path.exists():
-                custom_path.unlink()
-            self.builtin_providers[provider.id] = provider
-        else:
-            self.builtin_providers.pop(provider.id, None)
-            builtin_path = self.builtin_path / f"{provider.id}.json"
-            if builtin_path.exists():
-                builtin_path.unlink()
-            self.custom_providers[provider.id] = provider
-
-        self._save_provider(provider, is_builtin=is_builtin)
-        return provider
+        return self._catalog_service().overwrite_provider_payload(payload)
 
     def load_provider(
         self,
@@ -1437,6 +1295,17 @@ class ProviderManager:
         if not provider_path.exists():
             return None
         try:
+            repository = getattr(self, "_repository", None)
+            if (
+                repository is not None
+                and repository.root_path(self.tenant_id) == self.root_path
+            ):
+                data = repository.read_provider(
+                    self.tenant_id,
+                    provider_id,
+                    is_builtin=is_builtin,
+                )
+                return self._provider_from_data(data) if data else None
             with open(provider_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return self._provider_from_data(data)
@@ -1468,6 +1337,17 @@ class ProviderManager:
 
     def save_active_model(self, active_model: ModelSlotConfig):
         """Save the active provider/model configuration to disk."""
+        repository = getattr(self, "_repository", None)
+        if (
+            repository is not None
+            and repository.root_path(self.tenant_id) == self.root_path
+        ):
+            active_path = repository.write_active_model(
+                self.tenant_id,
+                active_model,
+            )
+            self._update_mtime(active_path)
+            return
         self._save_active_model_to_root(self.root_path, active_model)
         self._update_mtime(self.root_path / "active_model.json")
 
@@ -1476,6 +1356,7 @@ class ProviderManager:
         active_model: ModelSlotConfig,
     ) -> None:
         await run_runtime_state_work(self.save_active_model, active_model)
+        self._mark_freshness_due()
 
     @staticmethod
     def _save_active_model_to_root(
@@ -1515,6 +1396,12 @@ class ProviderManager:
 
     def load_active_model(self) -> ModelSlotConfig | None:
         """Load the active provider/model configuration from disk."""
+        repository = getattr(self, "_repository", None)
+        if (
+            repository is not None
+            and repository.root_path(self.tenant_id) == self.root_path
+        ):
+            return repository.read_active_model(self.tenant_id)
         return self._read_active_model_from_root(self.root_path)
 
     def _init_from_storage(self):
@@ -1530,7 +1417,9 @@ class ProviderManager:
                 builtin.extra_models = provider.extra_models
                 builtin.generate_kwargs.update(provider.generate_kwargs)
         # Load custom providers
-        for provider_file in self.custom_path.glob("*.json"):
+        for provider_file in self._repository.custom_provider_paths(
+            self.tenant_id,
+        ):
             provider = self.load_provider(provider_file.stem, is_builtin=False)
             if provider:
                 self.custom_providers[provider.id] = provider

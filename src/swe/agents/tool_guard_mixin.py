@@ -51,6 +51,19 @@ def _current_task_label() -> str:
     return f"task-{id(task)}"
 
 
+def _goal_tool_may_write_environment(
+    tool_name: str,
+    tool_input: dict[str, Any],
+) -> bool:
+    """Conservatively track real Goal-turn writes for contract rechecks."""
+    if tool_name in _GOAL_ENVIRONMENT_WRITE_TOOLS:
+        return True
+    if tool_name != "execute_shell_command":
+        return False
+    command = f" {str(tool_input.get('command') or '').lower()} "
+    return any(token in command for token in _GOAL_MUTATING_SHELL_TOKENS)
+
+
 def _trace_field(trace_ctx: Any, field: str, default: Any = "") -> Any:
     """安全读取 trace 上下文字段，避免诊断日志反向打断 tracing。"""
     if trace_ctx is None:
@@ -126,6 +139,17 @@ _PLAN_MODE_DENIED_READONLY_OPTIONS = frozenset(("--pre",))
 _APPROVAL_KIND_TOOL_GUARD = "tool_guard"
 _APPROVAL_KIND_HOOK_PRE_TOOL_USE = "hook_pre_tool_use"
 _PENDING_TOOL_SKILL_ATTRIBUTIONS_KEY = "_pending_tool_skill_attributions"
+_SELECTED_EXPERT_EXECUTION_KEY = "selected_expert_execution"
+_SELECTED_EXPERT_RUN_ID_KEY = "selected_expert_run_id"
+_SELECTED_EXPERT_WAIT_TIMEOUT_MS = 3000
+_GOAL_ENVIRONMENT_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
+_GOAL_MUTATING_SHELL_TOKENS = frozenset(
+    {
+        "rm ", "mv ", "cp ", "mkdir", "touch", "tee ", ">", ">>",
+        "sed -i", "git commit", "git reset", "git checkout", "git clean",
+        "pip install", "npm install", "pnpm install",
+    },
+)
 
 
 def _subagent_mcp_server_key(
@@ -1704,7 +1728,17 @@ class ToolGuardMixin:
                 trace_tool_output=trace_tool_output,
             )
 
-            self._complete_forced_tool_replay(tool_name, tool_input)
+            self._complete_forced_tool_replay(
+                tool_call,
+                tool_name,
+                tool_input,
+            )
+            request_context = getattr(self, "_request_context", {}) or {}
+            if (
+                request_context.get("goal_id")
+                and _goal_tool_may_write_environment(tool_name, tool_input)
+            ):
+                request_context["_goal_turn_environment_changed"] = True
             return result
 
         except PreToolUseTerminalStop:
@@ -1877,6 +1911,7 @@ class ToolGuardMixin:
 
     def _complete_forced_tool_replay(
         self,
+        tool_call: dict[str, Any],
         tool_name: str,
         tool_input: dict[str, Any],
     ) -> None:
@@ -1886,6 +1921,7 @@ class ToolGuardMixin:
         self._tool_guard_forced_replay_active = False
         self._tool_guard_replay_done = {
             "tool_name": tool_name,
+            "tool_call_id": str(tool_call.get("id") or ""),
             "tool_input": tool_input,
             "remaining_queue": getattr(self, "_tool_guard_replay_queue", []),
         }
@@ -1983,6 +2019,9 @@ class ToolGuardMixin:
         extra["agent_id"] = self._request_context.get("agent_id")
         extra["tenant_id"] = self._request_context.get("tenant_id")
         extra["source_id"] = self._request_context.get("source_id")
+        goal_id = str(self._request_context.get("goal_id") or "").strip()
+        if goal_id:
+            extra["goal_id"] = goal_id
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
 
@@ -2111,6 +2150,16 @@ class ToolGuardMixin:
         if self._consume_plan_interaction_turn_boundary():
             return Msg(self.name, [], "assistant")
 
+        selected_expert_error = str(
+            self._request_context.pop(
+                "selected_expert_execution_error",
+                "",
+            )
+            or "",
+        ).strip()
+        if selected_expert_error:
+            return await self._emit_assistant_msg(selected_expert_error)
+
         with self._agent_phase_context(
             "approval_replay",
             reason="approval_replay_done",
@@ -2179,12 +2228,133 @@ class ToolGuardMixin:
             return None
 
         self._tool_guard_replay_done = None
+        selected_expert_follow_up = self._selected_expert_follow_up(
+            replay_info,
+        )
+        if selected_expert_follow_up is not None:
+            return await self._emit_forced_tool_use(selected_expert_follow_up)
+        selected_expert_error = str(
+            self._request_context.pop(
+                "selected_expert_execution_error",
+                "",
+            )
+            or "",
+        ).strip()
+        if selected_expert_error:
+            return await self._emit_assistant_msg(selected_expert_error)
         remaining_queue = self._filter_pending_replay_queue(
             replay_info.get("remaining_queue") or [],
         )
         if not remaining_queue:
             return None
         return await self._emit_next_replay_tool_call(remaining_queue)
+
+    def _selected_expert_follow_up(
+        self,
+        replay_info: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Keep a selected-expert turn on its one worker until terminal.
+
+        The forced initial ``start_subagent`` call still crosses the normal
+        Tool Guard.  Once accepted, this helper emits ordinary guarded
+        ``wait_subagent`` calls until that exact run reports a terminal
+        result, then lets the Main Agent summarize the recorded result.
+        """
+        context = self._request_context
+        if not context.get(_SELECTED_EXPERT_EXECUTION_KEY):
+            return None
+        tool_name = str(replay_info.get("tool_name") or "")
+        run_id = str(context.get(_SELECTED_EXPERT_RUN_ID_KEY) or "").strip()
+        response = self._selected_expert_tool_response(replay_info)
+        if tool_name == "start_subagent":
+            run_id = str(response.get("run_id") or "").strip()
+            if not response.get("accepted") or not run_id:
+                context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+                context["selected_expert_execution_error"] = (
+                    "The selected expert could not be started. "
+                    "It was not replaced by the Main Agent."
+                )
+                return None
+            context[_SELECTED_EXPERT_RUN_ID_KEY] = run_id
+            return self._selected_expert_wait_tool_call()
+        if tool_name == "get_subagent":
+            if self._selected_expert_record_is_terminal(response):
+                context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+                return None
+            return self._selected_expert_wait_tool_call()
+        if tool_name != "wait_subagent":
+            return None
+        if not run_id or self._selected_expert_is_terminal(response, run_id):
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            return None
+        if not self._selected_expert_is_active(response, run_id):
+            return self._selected_expert_get_tool_call(run_id)
+        return self._selected_expert_wait_tool_call()
+
+    def _selected_expert_tool_response(
+        self,
+        replay_info: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Read the current forced-call result without trusting model text."""
+        response = self._extract_current_tool_response(
+            str(replay_info.get("tool_call_id") or ""),
+            include_structured_failure=True,
+        )
+        if isinstance(response, str):
+            try:
+                response = _json.loads(response)
+            except (TypeError, ValueError):
+                return {}
+        return response if isinstance(response, dict) else {}
+
+    @staticmethod
+    def _selected_expert_is_terminal(
+        response: dict[str, Any],
+        run_id: str,
+    ) -> bool:
+        """Return whether the selected run is present in a terminal wait."""
+        for item in response.get("terminal_runs", []):
+            if isinstance(item, dict) and item.get("run_id") == run_id:
+                return True
+        return False
+
+    @staticmethod
+    def _selected_expert_is_active(
+        response: dict[str, Any],
+        run_id: str,
+    ) -> bool:
+        return any(
+            isinstance(item, dict) and item.get("run_id") == run_id
+            for item in response.get("active_runs", [])
+        )
+
+    @staticmethod
+    def _selected_expert_record_is_terminal(
+        response: dict[str, Any],
+    ) -> bool:
+        return str(response.get("status") or "") in {
+            "completed",
+            "partial",
+            "failed",
+            "cancelled",
+            "expired",
+        }
+
+    @staticmethod
+    def _selected_expert_wait_tool_call() -> dict[str, Any]:
+        return {
+            "id": f"selected-expert-wait-{_uuid.uuid4().hex[:12]}",
+            "name": "wait_subagent",
+            "input": {"timeout_ms": _SELECTED_EXPERT_WAIT_TIMEOUT_MS},
+        }
+
+    @staticmethod
+    def _selected_expert_get_tool_call(run_id: str) -> dict[str, Any]:
+        return {
+            "id": f"selected-expert-get-{_uuid.uuid4().hex[:12]}",
+            "name": "get_subagent",
+            "input": {"run_id": run_id},
+        }
 
     def _filter_pending_replay_queue(
         self,

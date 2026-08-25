@@ -1,5 +1,5 @@
 import React from "react";
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, waitFor, within } from "@testing-library/react";
 import { Modal } from "antd";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import ChatSidebar from ".";
@@ -40,6 +40,7 @@ const mocks = vi.hoisted(() => ({
   iframeState: {
     bbk: null as string | null,
     source: null as string | null,
+    isOriginY: false,
   },
 }));
 
@@ -49,6 +50,7 @@ vi.mock("react-router-dom", () => ({
 }));
 
 vi.mock("antd", () => ({
+  Tooltip: ({ children }: { children: React.ReactNode }) => children,
   Image: Object.assign(
     ({ src }: { src?: string }) =>
       src ? (
@@ -130,7 +132,11 @@ vi.mock("@/stores/agentStore", () => ({
 
 vi.mock("@/stores/iframeStore", () => ({
   useIframeStore: (
-    selector: (state: { bbk: string | null; source: string | null }) => unknown,
+    selector: (state: {
+      bbk: string | null;
+      source: string | null;
+      isOriginY: boolean;
+    }) => unknown,
   ) => selector(mocks.iframeState),
 }));
 
@@ -169,6 +175,7 @@ describe("ChatSidebar infinite history scrolling", () => {
     mocks.context.getSessions = mocks.getSessions;
     mocks.iframeState.bbk = null;
     mocks.iframeState.source = null;
+    mocks.iframeState.isOriginY = false;
     mocks.hasMoreSessions.mockReturnValue(true);
     mocks.getSessionTotal.mockReturnValue(120);
     mocks.getSessions.mockImplementation(() => mocks.context.sessions);
@@ -208,6 +215,22 @@ describe("ChatSidebar infinite history scrolling", () => {
     const { getAllByText } = render(<ChatSidebar tasks={[]} />);
 
     expect(getAllByText("历史记录(120)").length).toBeGreaterThan(0);
+  });
+
+  it("restores the sidebar from the collapsed toolbar", () => {
+    const { container } = render(<ChatSidebar tasks={[]} />);
+    const view = within(container);
+    const collapseButton = view.getByRole("button", { name: "收起导航" });
+
+    expect(collapseButton).toHaveClass(
+      "chat-sidebar-collapse-toggle--expanded",
+    );
+    expect(collapseButton.closest(".chat-sidebar-new-topic")).not.toBeNull();
+
+    fireEvent.click(collapseButton);
+
+    expect(view.getByRole("button", { name: "展开导航" })).toBeInTheDocument();
+    expect(container.querySelector(".chat-sidebar")).toBeNull();
   });
 
   it("subtracts visible task count from the history total", () => {
@@ -309,8 +332,9 @@ describe("ChatSidebar infinite history scrolling", () => {
   it("previews the guide image when bbk is 121 and source is RMASSIST", () => {
     mocks.iframeState.bbk = "121";
     mocks.iframeState.source = "RMASSIST";
+    mocks.iframeState.isOriginY = true;
 
-    const { container } = render(<ChatSidebar tasks={[]} showGuide />);
+    const { container } = render(<ChatSidebar tasks={[]} />);
     const guide = container.querySelector(
       '[data-testid="guide-image"]',
     ) as HTMLImageElement;
@@ -333,8 +357,9 @@ describe("ChatSidebar infinite history scrolling", () => {
   it("opens the placeholder link when the operation guide context does not match", () => {
     mocks.iframeState.bbk = "121";
     mocks.iframeState.source = "OTHER";
+    mocks.iframeState.isOriginY = true;
 
-    const { container } = render(<ChatSidebar tasks={[]} showGuide />);
+    const { container } = render(<ChatSidebar tasks={[]} />);
 
     expect(container.querySelector(".chat-sidebar-footer")).toHaveTextContent(
       "操作指南",
@@ -364,8 +389,9 @@ describe("ChatSidebar infinite history scrolling", () => {
   it("accounts for the hidden header when source is ruice", () => {
     mocks.iframeState.bbk = "100";
     mocks.iframeState.source = "ruice";
+    mocks.iframeState.isOriginY = true;
 
-    const { container } = render(<ChatSidebar tasks={[]} showGuide />);
+    const { container } = render(<ChatSidebar tasks={[]} />);
     const recordList = container.querySelector(
       ".chat-sidebar-content-record-list",
     );

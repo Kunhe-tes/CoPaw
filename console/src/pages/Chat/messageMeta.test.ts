@@ -158,4 +158,28 @@ describe("messageMeta", () => {
       required: true,
     });
   });
+
+  it("extracts complete Goal Contract Drafts only", () => {
+    const card = extractPlanInteractionCard({
+      metadata: {
+        plan_interaction_card: {
+          card_type: "goal_proposal",
+          objective: "Ship Goal Runtime",
+          completion_criteria: [{
+            requirement: "Runtime works",
+            observable_assertion: "A Goal reaches COMPLETE",
+            verification_method: "command: pytest tests/unit/app/goals -q",
+            expected_outcome: "exit 0",
+          }],
+          constraints: { must_preserve: ["Existing Chat"], must_not_do: [] },
+          autonomy_boundary: "Do not deploy",
+        },
+      },
+    });
+
+    expect(card).toMatchObject({
+      card_type: "goal_proposal",
+      objective: "Ship Goal Runtime",
+    });
+  });
 });

@@ -15,6 +15,7 @@ import type { FormInstance } from "antd";
 import { useCallback, useRef, useState } from "react";
 import { getChannelLabel, type ChannelKey } from "./constants";
 import { getUserId } from "../../../../utils/identity";
+import { useIframeStore } from "../../../../stores/iframeStore";
 import { TenantSelector } from "../../../../components/TenantSelector";
 import styles from "../index.module.less";
 import { useTheme } from "../../../../contexts/ThemeContext";
@@ -155,6 +156,10 @@ export function ChannelDrawer({
   const [weixinQrcodeLoading, setWeixinQrcodeLoading] = useState(false);
   const weixinPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const weixinConfirmedRef = useRef(false);
+
+  // 仅管理员（或 default）可见分发入口，与应用市场保持一致
+  const manager = useIframeStore((state) => state.manager);
+  const canManage = manager || getUserId() === "default";
 
   // 通道配置分发状态
   const [distributeOpen, setDistributeOpen] = useState(false);
@@ -1084,7 +1089,7 @@ export function ChannelDrawer({
 
   const drawerFooter = (
     <div className={styles.formActions}>
-      {activeKey === "zhaohu" && (
+      {activeKey === "zhaohu" && canManage && (
         <Button onClick={handleOpenDistribute}>
           {t("channels.distributeToTenants")}
         </Button>

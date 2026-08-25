@@ -636,11 +636,14 @@ def _initialize_continuous_governance(
         logger.warning("Failed to initialize continuous governance: %s", e)
 
 
-def _initialize_database_backed_modules(db_connection: Any | None) -> None:
+async def _initialize_database_backed_modules(
+    db_connection: Any | None,
+) -> None:
     """初始化只在数据库可用时启用的附属模块。"""
     if db_connection is None:
         return
     try:
+        from .goals.registry import initialize_goal_service
         from .greeting.router import init_greeting_module
         from .featured_case.router import init_featured_case_module
         from .feedback.router import init_feedback_module
@@ -648,15 +651,18 @@ def _initialize_database_backed_modules(db_connection: Any | None) -> None:
         from .html_preview_clicks.router import (
             init_html_preview_click_module,
         )
+        from .scenario_preset.router import init_scenario_preset_module
 
+        await initialize_goal_service(db_connection)
         init_greeting_module(db_connection)
         init_featured_case_module(db_connection)
         init_feedback_module(db_connection)
         init_skill_result_module(db_connection)
         init_html_preview_click_module(db_connection)
+        await init_scenario_preset_module(db_connection)
         logger.info(
-            "Greeting, FeaturedCase, Feedback, SkillResult and HTML "
-            "preview click modules initialized",
+            "Greeting, FeaturedCase, Feedback, SkillResult, HTML preview click "
+            "and ScenarioPreset modules initialized",
         )
 
         from .workspace.tenant_init_source_store import (
@@ -900,7 +906,7 @@ async def lifespan(
         multi_agent_manager,
     )
 
-    _initialize_database_backed_modules(db_connection)
+    await _initialize_database_backed_modules(db_connection)
 
     startup_elapsed = time.time() - startup_start_time
     logger.info(

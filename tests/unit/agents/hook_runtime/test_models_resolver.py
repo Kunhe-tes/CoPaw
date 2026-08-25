@@ -236,6 +236,87 @@ def test_stop_is_blockable_and_before_stop_is_rejected() -> None:
     assert config.events[HookEventName.STOP][0].hooks[0].type == ("prompt")
 
 
+def test_output_transform_is_valid_only_for_non_once_stop_handlers() -> None:
+    config = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.STOP: [
+                HookMatcherGroupConfig(
+                    hooks=[_handler("format", outputTransform=True)],
+                ),
+            ],
+        },
+    )
+
+    assert config.events[HookEventName.STOP][0].hooks[0].output_transform
+
+    with pytest.raises(ValidationError, match="outputTransform"):
+        HookConfig(
+            enabled=True,
+            events={
+                HookEventName.PRE_TOOL_USE: [
+                    HookMatcherGroupConfig(
+                        hooks=[_handler("bad-event", outputTransform=True)],
+                    ),
+                ],
+            },
+        )
+
+    with pytest.raises(ValidationError, match="once"):
+        HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        hooks=[
+                            _handler(
+                                "bad-once",
+                                outputTransform=True,
+                                once=True,
+                            ),
+                        ],
+                    ),
+                ],
+            },
+        )
+
+
+def test_stop_transformers_with_matching_ids_are_not_deduplicated_across_sources() -> (
+    None
+):
+    transformer = _handler("format", outputTransform=True)
+    runtime = HookResolver(
+        tenant_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        id="formatters",
+                        hooks=[transformer],
+                    ),
+                ],
+            },
+        ),
+        agent_config=HookConfig(
+            enabled=True,
+            events={
+                HookEventName.STOP: [
+                    HookMatcherGroupConfig(
+                        id="formatters",
+                        hooks=[transformer],
+                    ),
+                ],
+            },
+        ),
+    )
+
+    plan = runtime.resolve_stop_transformer_plan(
+        _context(HookEventName.STOP, assistant_response="candidate"),
+    )
+
+    assert [item.source for item in plan.handlers] == ["tenant", "agent"]
+
+
 @pytest.mark.parametrize(
     "event_name",
     [HookEventName.POST_TOOL_USE, HookEventName.POST_TOOL_USE_FAILURE],
@@ -336,6 +417,103 @@ def test_resolver_loads_stop_prompt_handlers_from_all_levels() -> None:
     assert plan.context.assistant_response == "候选回复"
 
 
+def test_stop_transformers_use_source_order_and_defer_if_evaluation() -> None:
+    tenant = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.STOP: [
+                HookMatcherGroupConfig(
+                    id="tenant-stop",
+                    hooks=[_handler("tenant-format", outputTransform=True)],
+                ),
+            ],
+        },
+    )
+    agent = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.STOP: [
+                HookMatcherGroupConfig(
+                    id="agent-stop",
+                    hooks=[
+                        _handler(
+                            "agent-format",
+                            outputTransform=True,
+                            if_condition="assistant_response == 'candidate'",
+                        ),
+                    ],
+                ),
+            ],
+        },
+    )
+
+    def _skill_source(name: str) -> LoadedSkillHookSource:
+        return LoadedSkillHookSource(
+            source_id=f"skill:{name}",
+            skill_name=name,
+            skill_root=f"/workspace/skills/{name}",
+            source_path=f"/workspace/skills/{name}/hooks/hooks.json",
+            hook_config=HookConfig(
+                enabled=True,
+                events={
+                    HookEventName.STOP: [
+                        HookMatcherGroupConfig(
+                            id=f"skill:{name}:stop",
+                            hooks=[
+                                _handler(
+                                    f"skill:{name}:format",
+                                    outputTransform=True,
+                                ),
+                            ],
+                        ),
+                    ],
+                },
+            ),
+        )
+
+    resolver = HookResolver(
+        tenant_config=tenant,
+        agent_config=agent,
+        session_overlay=HookSessionOverlay(
+            loaded_skill_sources=[
+                _skill_source("zebra"),
+                _skill_source("alpha"),
+            ],
+        ),
+    )
+    pending_context = _context(HookEventName.STOP)
+
+    assert resolver.requires_stop_output_buffer(pending_context) is True
+    assert [
+        item.source
+        for item in resolver.resolve_stop_transformer_plan(
+            pending_context,
+            evaluate_if=False,
+        ).handlers
+    ] == ["tenant", "agent", "skill:alpha", "skill:zebra"]
+    assert [
+        item.handler.id
+        for item in resolver.resolve_stop_transformer_plan(
+            pending_context,
+        ).handlers
+    ] == ["tenant-format", "skill:alpha:format", "skill:zebra:format"]
+
+    eligible_context = pending_context.model_copy(
+        update={"assistant_response": "candidate"},
+    )
+    assert [
+        item.handler.id
+        for item in resolver.resolve_stop_transformer_plan(
+            eligible_context,
+        ).handlers
+    ] == [
+        "tenant-format",
+        "agent-format",
+        "skill:alpha:format",
+        "skill:zebra:format",
+    ]
+
+
 def test_resolver_does_not_dedupe_prompt_handlers_with_different_rules() -> (
     None
 ):
@@ -416,6 +594,33 @@ def test_resolver_applies_overlay_disable_expiration_and_once_scope() -> None:
         "enabled",
         "expired",
     ]
+
+
+def test_resolver_revalidates_event_constraints_after_overlay_override() -> (
+    None
+):
+    config = HookConfig(
+        enabled=True,
+        events={
+            HookEventName.PRE_TOOL_USE: [
+                HookMatcherGroupConfig(hooks=[_handler("policy")]),
+            ],
+        },
+    )
+    overlay = HookSessionOverlay(
+        entries=[
+            HookOverlayEntry(
+                hook_id="policy",
+                overrides={"outputTransform": True},
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="outputTransform"):
+        HookResolver(
+            tenant_config=config,
+            session_overlay=overlay,
+        ).resolve_event_plan(_context(HookEventName.PRE_TOOL_USE))
 
 
 def test_legacy_session_state_loads_with_empty_skill_sources() -> None:

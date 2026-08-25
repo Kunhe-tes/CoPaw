@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import os
 from pathlib import Path
 from types import SimpleNamespace
@@ -230,6 +231,236 @@ async def test_start_new_chat_propagates_created_chat_id_to_compaction_sse():
     assert tracker.payload["meta"]["chat_id"] == chat_id
     assert tracker.payload["meta"]["existing"] == "preserved"
     assert any(f'"chat_id": "{chat_id}"' in event for event in events)
+
+
+@pytest.mark.asyncio
+async def test_start_new_chat_persists_first_submit_scenario_snapshot(
+    monkeypatch,
+):
+    """The server-created snapshot, not the client ID, reaches the runner."""
+
+    class _ChatManager:
+        created = None
+
+        async def get_or_create_scenario_chat(self, *_args):
+            factory = _args[-1]
+            chat = SimpleNamespace(
+                id="00000000-0000-0000-0000-000000000001",
+                channel="console",
+                meta={},
+            )
+            self.created = chat
+            chat.meta["scenario_preset_snapshot"] = await factory(chat)
+            return chat, True
+
+    class _TaskTracker:
+        payload = None
+
+        async def attach_or_start(self, _run_key, payload, _stream_fn):
+            self.payload = payload
+            return object(), True
+
+    snapshot = {
+        "scenario_id": "scenario-a",
+        "capability_name": "信息提取",
+        "resources": [],
+    }
+    from src.swe.app.scenario_preset import runtime as scenario_runtime
+
+    scenario_router = importlib.import_module(
+        "src.swe.app.scenario_preset.router",
+    )
+
+    async def _initialize(**_kwargs):
+        return snapshot
+
+    monkeypatch.setattr(
+        scenario_runtime,
+        "initialize_scenario_snapshot",
+        _initialize,
+    )
+
+    def _get_service():
+        return object()
+
+    monkeypatch.setattr(scenario_router, "get_service", _get_service)
+    tracker = _TaskTracker()
+    chat_manager = _ChatManager()
+    workspace = SimpleNamespace(agent_id="agent-1", chat_manager=chat_manager)
+    native_payload = {
+        "sender_id": "user-1",
+        "channel_id": "console",
+        "content_parts": [
+            TextContent(type=ContentType.TEXT, text="@信息提取"),
+        ],
+        "meta": {
+            "session_id": "session-1",
+            "source_id": "source-a",
+            "scenario_preset_id": "scenario-a",
+        },
+    }
+
+    await console_router._start_new_chat(
+        workspace,
+        tracker,
+        SimpleNamespace(stream_one=None),
+        "session-1",
+        native_payload,
+    )
+
+    assert chat_manager.created.meta["scenario_preset_snapshot"] == snapshot
+    assert tracker.payload["meta"]["scenario_preset_snapshot"] == snapshot
+
+
+@pytest.mark.asyncio
+async def test_start_new_chat_cleans_created_scenario_when_tracker_fails(
+    monkeypatch,
+):
+    class _ChatManager:
+        deleted: list[str] = []
+
+        async def get_or_create_scenario_chat(self, *_args):
+            factory = _args[-1]
+            chat = SimpleNamespace(
+                id="00000000-0000-0000-0000-000000000001",
+                channel="console",
+                meta={"scenario_preset_snapshot": await factory(None)},
+            )
+            return chat, True
+
+        async def delete_chats(self, chat_ids):
+            self.deleted.extend(chat_ids)
+            return True
+
+    async def _initialize(**_kwargs):
+        return {"scenario_id": "scenario-a", "resources": []}
+
+    scenario_runtime = importlib.import_module(
+        "src.swe.app.scenario_preset.runtime",
+    )
+    scenario_router = importlib.import_module(
+        "src.swe.app.scenario_preset.router",
+    )
+    monkeypatch.setattr(
+        scenario_runtime,
+        "initialize_scenario_snapshot",
+        _initialize,
+    )
+
+    def _get_service():
+        return object()
+
+    monkeypatch.setattr(scenario_router, "get_service", _get_service)
+
+    class _TaskTracker:
+        async def attach_or_start(self, *_args):
+            raise RuntimeError("tracker unavailable")
+
+    chat_manager = _ChatManager()
+    native_payload = {
+        "sender_id": "user-1",
+        "channel_id": "console",
+        "content_parts": [TextContent(type=ContentType.TEXT, text="@能力")],
+        "meta": {
+            "session_id": "session-1",
+            "source_id": "source-a",
+            "scenario_preset_id": "scenario-a",
+        },
+    }
+
+    with pytest.raises(RuntimeError, match="tracker unavailable"):
+        await console_router._start_new_chat(
+            SimpleNamespace(agent_id="agent-1", chat_manager=chat_manager),
+            _TaskTracker(),
+            SimpleNamespace(stream_one=None),
+            "session-1",
+            native_payload,
+        )
+
+    assert chat_manager.deleted == ["00000000-0000-0000-0000-000000000001"]
+
+
+@pytest.mark.asyncio
+async def test_start_new_chat_rejects_scenario_on_existing_plain_chat():
+    """A preset cannot be injected into a chat that was started without it."""
+
+    class _ChatManager:
+        async def get_or_create_scenario_chat(self, *_args):
+            return (
+                SimpleNamespace(
+                    id="chat-existing",
+                    channel="console",
+                    meta={},
+                ),
+                False,
+            )
+
+    native_payload = {
+        "sender_id": "user-1",
+        "channel_id": "console",
+        "content_parts": [
+            TextContent(type=ContentType.TEXT, text="@信息提取"),
+        ],
+        "meta": {
+            "session_id": "session-1",
+            "source_id": "source-a",
+            "scenario_preset_id": "scenario-a",
+        },
+    }
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException, match="only available for a new chat"):
+        await console_router._start_new_chat(
+            SimpleNamespace(agent_id="agent-1", chat_manager=_ChatManager()),
+            SimpleNamespace(attach_or_start=None),
+            SimpleNamespace(stream_one=None),
+            "session-1",
+            native_payload,
+        )
+
+
+@pytest.mark.asyncio
+async def test_start_new_chat_rejects_switching_scenario_on_locked_chat():
+    class _ChatManager:
+        async def get_or_create_scenario_chat(self, *_args):
+            return (
+                SimpleNamespace(
+                    id="chat-existing",
+                    channel="console",
+                    meta={
+                        "scenario_preset_snapshot": {
+                            "scenario_id": "scenario-a",
+                            "agent_id": "agent-1",
+                        },
+                    },
+                ),
+                False,
+            )
+
+    native_payload = {
+        "sender_id": "user-1",
+        "channel_id": "console",
+        "content_parts": [
+            TextContent(type=ContentType.TEXT, text="@另一个能力"),
+        ],
+        "meta": {
+            "session_id": "session-1",
+            "source_id": "source-a",
+            "scenario_preset_id": "scenario-b",
+        },
+    }
+
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException, match="locked for this chat"):
+        await console_router._start_new_chat(
+            SimpleNamespace(agent_id="agent-1", chat_manager=_ChatManager()),
+            SimpleNamespace(attach_or_start=None),
+            SimpleNamespace(stream_one=None),
+            "session-1",
+            native_payload,
+        )
 
 
 def _build_upload_client(monkeypatch, media_dir):

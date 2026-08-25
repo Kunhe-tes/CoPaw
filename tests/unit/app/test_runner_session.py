@@ -2,17 +2,47 @@
 import asyncio
 import builtins
 import json
+import multiprocessing
 import threading
+import time
 from pathlib import Path
 
 import pytest
 
 from swe.app.runner import session as session_module
 from swe.app.runner.session import SafeJSONSession
+from swe.app.runner.session_lock import SessionLockTimeout
 
 
 def _write_json_text(path: str, content: str) -> None:
     Path(path).write_text(content, encoding="utf-8")
+
+
+def _mutate_session_state_in_process(
+    save_dir: str,
+    session_id: str,
+    key: str,
+    value: object,
+    started_event,
+    wait_for_event,
+    delay_seconds: float,
+) -> None:
+    async def _run() -> None:
+        session = SafeJSONSession(save_dir=save_dir)
+
+        def _mutate(states: dict[str, object]) -> dict[str, object]:
+            states[key] = value
+            if started_event is not None:
+                started_event.set()
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            return states
+
+        if wait_for_event is not None and not wait_for_event.wait(timeout=5):
+            raise TimeoutError("timed out waiting for session mutation")
+        await session.mutate_session_state(session_id, _mutate)
+
+    asyncio.run(_run())
 
 
 class _GuardedReadableFile:
@@ -57,6 +87,32 @@ def test_session_write_locks_are_scoped_to_event_loop_and_normalized_path(
     assert first_loop_locks[0] is first_loop_locks[1]
     assert second_loop_locks[0] is second_loop_locks[1]
     assert first_loop_locks[0] is not second_loop_locks[0]
+
+
+@pytest.mark.asyncio
+async def test_session_file_lock_timeout_maps_to_builtin_timeout_error(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class BusyFileLock:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            raise SessionLockTimeout("busy")
+
+        async def __aexit__(self, exc_type, exc, traceback) -> None:
+            pass
+
+    monkeypatch.setattr(session_module, "AsyncSessionFileLock", BusyFileLock)
+    session = SafeJSONSession(save_dir=str(tmp_path))
+
+    with pytest.raises(TimeoutError, match="busy"):
+        async with session.session_write_lock(
+            "shared",
+            timeout_seconds=0.01,
+        ):
+            pass
 
 
 @pytest.mark.asyncio
@@ -430,6 +486,59 @@ async def test_concurrent_key_updates_preserve_both_values(
 
     await asyncio.gather(first_task, second_task)
     assert json.loads(session_path.read_text()) == {"first": 1, "second": 2}
+
+
+def test_cross_process_key_updates_preserve_both_values(
+    tmp_path: Path,
+) -> None:
+    session_path = tmp_path / "shared.json"
+    session_path.write_text("{}", encoding="utf-8")
+    context = multiprocessing.get_context("spawn")
+    first_started = context.Event()
+
+    first_process = context.Process(
+        target=_mutate_session_state_in_process,
+        args=(
+            str(tmp_path),
+            "shared",
+            "first",
+            1,
+            first_started,
+            None,
+            0.4,
+        ),
+    )
+    second_process = context.Process(
+        target=_mutate_session_state_in_process,
+        args=(
+            str(tmp_path),
+            "shared",
+            "second",
+            2,
+            None,
+            first_started,
+            0,
+        ),
+    )
+
+    first_process.start()
+    second_process.start()
+    first_process.join(timeout=10)
+    second_process.join(timeout=10)
+
+    if first_process.is_alive():
+        first_process.terminate()
+        first_process.join(timeout=2)
+    if second_process.is_alive():
+        second_process.terminate()
+        second_process.join(timeout=2)
+
+    assert first_process.exitcode == 0
+    assert second_process.exitcode == 0
+    assert json.loads(session_path.read_text()) == {
+        "first": 1,
+        "second": 2,
+    }
 
 
 @pytest.mark.asyncio

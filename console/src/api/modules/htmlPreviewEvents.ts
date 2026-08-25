@@ -7,7 +7,7 @@ import { request } from "../request";
 import type {
   HtmlPreviewCustomerClickResponse,
   HtmlPreviewClickEventListResponse,
-  HtmlPreviewClickEventPayload,
+  HtmlTrackerPayloadType,
   HtmlPreviewClickSubmitResponse,
   HtmlPreviewClickSummaryResponse,
   HtmlPreviewCustomerClickSummaryResponse,
@@ -19,8 +19,8 @@ import type {
 } from "../types/htmlPreviewEvents";
 
 function withClickRuntimeContext(
-  payload: HtmlPreviewClickEventPayload,
-): HtmlPreviewClickEventPayload {
+  payload: HtmlTrackerPayloadType,
+): HtmlTrackerPayloadType {
   const iframeContext = getIframeContext();
   return {
     ...payload,
@@ -44,7 +44,7 @@ function withListSnapshotRuntimeContext(
 
 export const htmlPreviewEventsApi = {
   recordClick: async (
-    payload: HtmlPreviewClickEventPayload,
+    payload: HtmlTrackerPayloadType,
   ): Promise<HtmlPreviewClickSubmitResponse> => {
     try {
       const response = await fetch(getApiUrl("/html-preview/events"), {

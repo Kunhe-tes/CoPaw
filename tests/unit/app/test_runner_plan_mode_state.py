@@ -271,3 +271,41 @@ async def test_accepted_plan_without_server_source_is_ignored() -> None:
     request_context = agent_cls.call_args.kwargs["request_context"]
     assert request_context["mode"] == "normal"
     assert "accepted_plan" not in request_context
+
+
+async def test_goal_request_forces_plan_and_expert_selection_off() -> None:
+    runner, _repo = await _runner_with_repo()
+    chat = SimpleNamespace(id="chat-1", meta={"plan_mode_enabled": True})
+    request = _request(
+        {
+            "goal_id": "goal-1",
+            "goal_mode_enabled": True,
+            "plan_mode_enabled": True,
+            "mode": "plan",
+            "selected_expert_id": "expert-1",
+        },
+    )
+    runner.session = SimpleNamespace(_get_save_path=lambda *_args: "session")
+
+    with patch("src.swe.app.runner.runner.SWEAgent") as agent_cls:
+        runner._create_agent_for_query(
+            agent_config=SimpleNamespace(),
+            env_context="",
+            mcp_clients=[],
+            request=request,
+            session_id="session-1",
+            user_id="user-1",
+            channel="console",
+            chat=chat,
+            turn_id="turn-1",
+            hook_overlay=SimpleNamespace(model_dump=lambda **_kwargs: {}),
+            auth_token=None,
+            approved_tool_call=None,
+        )
+
+    request_context = agent_cls.call_args.kwargs["request_context"]
+    assert request_context["goal_id"] == "goal-1"
+    assert request_context["goal_mode_enabled"] is True
+    assert request_context["plan_mode_enabled"] is False
+    assert request_context["mode"] == "normal"
+    assert "selected_expert_id" not in request_context

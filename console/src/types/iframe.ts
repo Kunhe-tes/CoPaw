@@ -143,6 +143,8 @@ export interface IframeContext {
   source: string | null;
   /** 是否隐藏菜单 */
   hideMenu: boolean;
+  /** 当前页面是否通过 origin=Y 入口访问 */
+  isOriginY: boolean;
   /** 是否为超级管理员 */
   isSuperManager: boolean;
   /** 是否为普通管理员 */

@@ -50,6 +50,9 @@ interface IframeStore extends IframeContext {
    */
   clearContext: () => void;
 
+  /** 记录当前页面是否通过 origin=Y 入口访问 */
+  setOriginY: (isOriginY: boolean) => void;
+
   /**
    * 设置自定义 headers
    * @param authHeaders - 自定义 header 数组
@@ -79,6 +82,7 @@ const initialState: IframeContext = {
   space: null,
   source: null,
   hideMenu: false,
+  isOriginY: false,
   isSuperManager: false,
   manager: false,
   skipPreviewTracking: false,
@@ -114,6 +118,8 @@ export const useIframeStore = create<IframeStore>()(
 
       clearContext: () => set(initialState),
 
+      setOriginY: (isOriginY) => set({ isOriginY }),
+
       setAuthHeaders: (authHeaders) => set({ authHeaders }),
 
       // ==================== URL 导航参数 (Kun He, 2026-04-15) ====================
@@ -145,6 +151,7 @@ export const useIframeStore = create<IframeStore>()(
         positionId: state.positionId,
         userChange: state.userChange,
         hideChat: state.hideChat,
+        // isOriginY 仅描述本次页面入口，不持久化到后续访问。
         // 导航参数不需要持久化，只在首次加载时使用
       }),
       storage: {

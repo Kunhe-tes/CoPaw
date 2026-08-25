@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -20,6 +21,8 @@ from .models import (
     HookSessionOverlay,
     HookEventName,
     MergedHookResult,
+    StopHookExecutionResult,
+    copy_handler_with_overrides,
 )
 from .resolver import HookResolver, once_key
 from swe.tracing.sanitizer import sanitize_string
@@ -45,6 +48,13 @@ class HookRuntime:
         self.agent_config = agent_config or HookConfig()
         self.session_overlay = session_overlay or HookSessionOverlay()
 
+    def requires_stop_output_buffer(self, context: HookContext) -> bool:
+        return HookResolver(
+            tenant_config=self.tenant_config,
+            agent_config=self.agent_config,
+            session_overlay=self.session_overlay,
+        ).requires_stop_output_buffer(context)
+
     async def emit(
         self,
         context: HookContext,
@@ -55,11 +65,16 @@ class HookRuntime:
         ) = None,
     ) -> MergedHookResult:
         started_at = time.perf_counter()
-        plan = HookResolver(
+        resolver = HookResolver(
             tenant_config=self.tenant_config,
             agent_config=self.agent_config,
             session_overlay=self.session_overlay,
-        ).resolve_event_plan(context)
+        )
+        plan = (
+            resolver.resolve_stop_validator_plan(context)
+            if context.hook_event_name == HookEventName.STOP
+            else resolver.resolve_event_plan(context)
+        )
         if not plan.handlers:
             return merge_hook_results(plan, [])
         conversation_snapshot = await self._capture_conversation_snapshot(
@@ -102,6 +117,155 @@ class HookRuntime:
         except Exception as exc:
             logger.warning("Failed to emit hook telemetry: %s", exc)
         return merged
+
+    async def emit_stop_finalization(
+        self,
+        context: HookContext,
+        *,
+        workspace_dir: Path,
+        max_transform_seconds: float,
+        conversation_snapshot_provider: (
+            Callable[[], Awaitable[dict[str, Any] | None]] | None
+        ) = None,
+    ) -> StopHookExecutionResult:
+        if context.hook_event_name != HookEventName.STOP:
+            raise ValueError("Stop finalization requires a Stop context")
+        if not context.assistant_response:
+            return StopHookExecutionResult(final_response="")
+
+        resolver = HookResolver(
+            tenant_config=self.tenant_config,
+            agent_config=self.agent_config,
+            session_overlay=self.session_overlay,
+        )
+        transformer_plan = resolver.resolve_stop_transformer_plan(
+            context,
+            evaluate_if=False,
+        )
+        snapshot_plan = EffectiveHookPlan(
+            event_name=context.hook_event_name,
+            context=context,
+            handlers=(
+                *transformer_plan.handlers,
+                *resolver.resolve_stop_validator_plan(
+                    context,
+                    evaluate_if=False,
+                ).handlers,
+            ),
+        )
+        conversation_snapshot = await self._capture_conversation_snapshot(
+            snapshot_plan,
+            conversation_snapshot_provider,
+        )
+        current_text = context.assistant_response
+        deadline = time.monotonic() + max_transform_seconds
+
+        for item in transformer_plan.handlers:
+            handler_context = context.model_copy(
+                update={"assistant_response": current_text},
+            )
+            if not resolver._matches_if(
+                item.handler.if_condition,
+                handler_context,
+            ):
+                continue
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                return StopHookExecutionResult(
+                    final_response=current_text,
+                    transformation_failed=True,
+                    transformation_failure_reason=(
+                        "Stop output transformation time budget exhausted"
+                    ),
+                )
+            effective_handler = copy_handler_with_overrides(
+                item.handler,
+                {"timeout": min(item.handler.timeout, remaining_seconds)},
+            )
+            handler_context = self._context_for_handler(
+                handler_context,
+                effective_handler,
+                conversation_snapshot,
+            )
+            started_at = time.perf_counter()
+            result = await execute_handler(
+                effective_handler,
+                handler_context,
+                workspace_dir=workspace_dir,
+            )
+            result.order = item.order
+            previous_text = current_text
+            if result.replacement_text is not None:
+                current_text = result.replacement_text
+            _log_stop_transform_telemetry(
+                item=item,
+                result=result,
+                input_text=previous_text,
+                output_text=current_text,
+                duration_ms=_duration_ms(started_at),
+            )
+            if time.monotonic() > deadline:
+                return StopHookExecutionResult(
+                    final_response=current_text,
+                    transformation_failed=True,
+                    transformation_failure_reason=(
+                        "Stop output transformation time budget exhausted"
+                    ),
+                )
+            if result.decision == HookDecision.BLOCK:
+                return StopHookExecutionResult(
+                    final_response=current_text,
+                    transformation_failed=True,
+                    transformation_failure_reason=(
+                        result.reason or "Stop output transformation failed"
+                    ),
+                )
+
+        final_context = context.model_copy(
+            update={"assistant_response": current_text},
+        )
+        validator_plan = resolver.resolve_stop_validator_plan(final_context)
+        if not validator_plan.handlers:
+            return StopHookExecutionResult(final_response=current_text)
+
+        async def _run_validator(item):
+            handler_started_at = time.perf_counter()
+            handler_context = self._context_for_handler(
+                final_context,
+                item.handler,
+                conversation_snapshot,
+            )
+            result = await execute_handler(
+                item.handler,
+                handler_context,
+                workspace_dir=workspace_dir,
+            )
+            result.order = item.order
+            return result, _duration_ms(handler_started_at)
+
+        executed = await asyncio.gather(
+            *(_run_validator(item) for item in validator_plan.handlers),
+        )
+        results = [item[0] for item in executed]
+        handler_durations = {
+            result.order: duration_ms for result, duration_ms in executed
+        }
+        self._mark_once_executed(final_context, validator_plan.handlers)
+        validation_result = merge_hook_results(validator_plan, results)
+        try:
+            _log_hook_telemetry(
+                validator_plan,
+                results,
+                handler_durations,
+                validation_result,
+                duration_ms=0,
+            )
+        except Exception as exc:
+            logger.warning("Failed to emit hook telemetry: %s", exc)
+        return StopHookExecutionResult(
+            final_response=current_text,
+            validation_result=validation_result,
+        )
 
     async def _capture_conversation_snapshot(
         self,
@@ -161,6 +325,41 @@ class HookRuntime:
 
 def _duration_ms(started_at: float) -> int:
     return max(0, int((time.perf_counter() - started_at) * 1000))
+
+
+def _stop_transform_hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _log_stop_transform_telemetry(
+    *,
+    item,
+    result: HookHandlerResult,
+    input_text: str,
+    output_text: str,
+    duration_ms: int,
+) -> None:
+    payload = {
+        "schema": "hook_stop_transform.v1",
+        "handler_id": item.handler.id,
+        "source": item.source,
+        "replacement_applied": result.replacement_text is not None,
+        "input_length": len(input_text),
+        "output_length": len(output_text),
+        "input_sha256": _stop_transform_hash(input_text),
+        "output_sha256": _stop_transform_hash(output_text),
+        "duration_ms": duration_ms,
+        "failed": result.failed,
+        "failure_type": result.failure_type,
+    }
+    try:
+        logger.info(
+            "%s%s",
+            _TELEMETRY_PREFIX,
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+        )
+    except Exception as exc:
+        logger.warning("Failed to emit Stop transform telemetry: %s", exc)
 
 
 def _preview(value: Any) -> str:

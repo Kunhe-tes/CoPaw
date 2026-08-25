@@ -16,7 +16,7 @@ import {
 } from "./useSkillMentions";
 
 interface TokenPart {
-  kind: "text" | "token";
+  kind: "fixed_token" | "text" | "token";
   referenceType?: SkillMentionItem["type"];
   value: string;
   selectionIndex?: number;
@@ -46,6 +46,10 @@ export interface SkillTokenEditorProps
     "children" | "contentEditable" | "onChange" | "onInput" | "value"
   > {
   disabled?: boolean;
+  fixedToken?: {
+    text: string;
+    onRemove: () => void;
+  };
   mentionMenuContainer?: HTMLElement | null;
   mentionMenuPlacement?: "top" | "bottom";
   readOnly?: boolean;
@@ -58,8 +62,12 @@ export interface SkillTokenEditorProps
 function getTokenParts(
   value: string,
   selected: SkillMentionItem[],
+  fixedToken?: SkillTokenEditorProps["fixedToken"],
 ): TokenPart[] {
   const parts: TokenPart[] = [];
+  if (fixedToken) {
+    parts.push({ kind: "fixed_token", value: fixedToken.text });
+  }
   let cursor = 0;
   const usedSelectionIndexes = new Set<number>();
   while (true) {
@@ -120,7 +128,9 @@ function previousTokenAtCaret(editor: HTMLDivElement): HTMLElement | null {
   ) {
     node = range.startContainer.previousSibling;
   }
-  return node instanceof HTMLElement && node.dataset.skillToken === "true"
+  if (!(node instanceof HTMLElement)) return null;
+  return node.dataset.skillToken === "true" ||
+    node.dataset.scenarioToken === "true"
     ? node
     : null;
 }
@@ -170,6 +180,23 @@ function replaceEditorContents(editor: HTMLDivElement, parts: TokenPart[]) {
   for (const part of parts) {
     if (part.kind === "text") {
       fragment.append(document.createTextNode(part.value));
+      continue;
+    }
+
+    if (part.kind === "fixed_token") {
+      const token = document.createElement("span");
+      token.setAttribute("aria-label", `已选能力 ${part.value}`);
+      token.setAttribute("contenteditable", "false");
+      token.dataset.scenarioToken = "true";
+      token.style.background = "#EEF4FF";
+      token.style.borderRadius = "6px";
+      token.style.color = "#2957DC";
+      token.style.display = "inline-block";
+      token.style.fontWeight = "500";
+      token.style.marginRight = "4px";
+      token.style.padding = "0 4px";
+      token.append(document.createTextNode(part.value));
+      fragment.append(token);
       continue;
     }
 
@@ -234,6 +261,7 @@ export const SkillTokenEditor = forwardRef<
   {
     className,
     disabled = false,
+    fixedToken,
     onKeyDown,
     onCompositionEnd,
     onCompositionStart,
@@ -255,8 +283,8 @@ export const SkillTokenEditor = forwardRef<
   const isComposingRef = useRef(false);
   const [compositionVersion, setCompositionVersion] = useState(0);
   const tokenParts = useMemo(
-    () => getTokenParts(value, skillMentions.selected),
-    [skillMentions.selected, value],
+    () => getTokenParts(value, skillMentions.selected, fixedToken),
+    [fixedToken, skillMentions.selected, value],
   );
   const mentions = useSkillMentions({
     ...skillMentions,
@@ -397,7 +425,17 @@ export const SkillTokenEditor = forwardRef<
         }}
         onInput={(event) => {
           const editor = event.currentTarget;
-          const nextValue = editor.textContent || "";
+          const scenarioTokenVisible =
+            !fixedToken ||
+            Boolean(editor.querySelector("[data-scenario-token=true]"));
+          if (!scenarioTokenVisible) {
+            fixedToken?.onRemove();
+          }
+          const editorText = editor.textContent || "";
+          const nextValue =
+            scenarioTokenVisible && fixedToken
+              ? editorText.slice(fixedToken.text.length)
+              : editorText;
           const nextSelected = selectedReferencesVisibleInEditor(
             editor,
             skillMentions.selected,
@@ -421,6 +459,10 @@ export const SkillTokenEditor = forwardRef<
               : null;
             if (token) {
               event.preventDefault();
+              if (token.dataset.scenarioToken === "true") {
+                fixedToken?.onRemove();
+                return;
+              }
               removeToken(token);
               return;
             }

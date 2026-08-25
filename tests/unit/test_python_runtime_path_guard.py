@@ -16,6 +16,35 @@ from swe.security.python_runtime_path_guard import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_runtime_guard_starts_python_without_sitecustomize_error(
+    tmp_path: Path,
+) -> None:
+    """The generated sitecustomize module must load cleanly at Python startup."""
+    tenant_root = tmp_path / "tenant"
+    tenant_root.mkdir()
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=tenant_root,
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [sys.executable, "-c", "print('guard-ready')"],
+            cwd=tenant_root,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "guard-ready"
+    assert "Error in sitecustomize" not in result.stderr
+
+
 def test_runtime_guard_allows_imports_from_existing_pythonpath_roots(
     tmp_path: Path,
 ) -> None:

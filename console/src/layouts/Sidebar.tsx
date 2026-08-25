@@ -235,6 +235,16 @@ export default function Sidebar({
       path: "/featured-cases-management",
       label: t("nav.featuredCasesManagement", "精选案例管理"),
     },
+    ...(canManageCurrentSourceConfig
+      ? [
+          {
+            key: "scenario-presets-management",
+            icon: <Settings size={18} />,
+            path: "/scenario-presets-management",
+            label: "场景预设管理",
+          },
+        ]
+      : []),
     {
       key: "environments",
       icon: <SparkInternetLine size={18} />,
@@ -247,12 +257,16 @@ export default function Sidebar({
       path: "/security",
       label: t("nav.security"),
     },
-    {
-      key: "skill-config",
-      icon: <SlidersHorizontal size={18} />,
-      path: "/skill-config",
-      label: t("nav.skillConfig", "Skill 配置"),
-    },
+    ...(isRMassistSource
+      ? [
+          {
+            key: "skill-config",
+            icon: <SlidersHorizontal size={18} />,
+            path: "/skill-config",
+            label: t("nav.skillConfig", "Skill 配置"),
+          },
+        ]
+      : []),
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -391,6 +405,11 @@ export default function Sidebar({
       label: collapsed ? null : t("nav.market"),
       icon: <Store size={16} />,
     },
+    {
+      key: "expert-community",
+      label: collapsed ? null : "专家社区",
+      icon: <SearchCheck size={16} />,
+    },
     // 4. 运行中心
     {
       key: "run-center",
@@ -442,6 +461,15 @@ export default function Sidebar({
             : t("nav.featuredCasesManagement", "精选案例管理"),
           icon: <SparkFileTxtLine size={16} />,
         },
+        ...(canManageCurrentSourceConfig
+          ? [
+              {
+                key: "scenario-presets-management",
+                label: collapsed ? null : "场景预设管理",
+                icon: <Settings size={16} />,
+              },
+            ]
+          : []),
         {
           key: "environments",
           label: collapsed ? null : t("nav.environments"),
@@ -452,11 +480,15 @@ export default function Sidebar({
           label: collapsed ? null : t("nav.security"),
           icon: <SparkBrowseLine size={16} />,
         },
-        {
-          key: "skill-config",
-          label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
-          icon: <SlidersHorizontal size={16} />,
-        },
+        ...(isRMassistSource
+          ? [
+              {
+                key: "skill-config",
+                label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
+                icon: <SlidersHorizontal size={16} />,
+              },
+            ]
+          : []),
         ...(canManageCurrentSourceConfig
           ? [
               {

@@ -43,6 +43,31 @@ def test_create_writes_disabled_uuid_toml_with_agent_owned_source(
     assert tomllib.loads(package.toml)["name"] == "reviewer"
 
 
+def test_received_expert_round_trips_community_reference(
+    tmp_path: Path,
+) -> None:
+    repository = AgentOwnedDefinitionRepository(
+        tmp_path / "agents",
+        owner_scope="tenant/default",
+    )
+
+    package = repository.create(
+        _payload(
+            enabled=True,
+            community={
+                "item_id": "community-1",
+                "version": "1.2.3",
+                "content_fingerprint": "sha256:abc",
+            },
+        ),
+    )
+
+    assert package.definition.agent_owned.community.item_id == "community-1"
+    assert package.definition.agent_owned.community.version == "1.2.3"
+    parsed = tomllib.loads(package.toml)
+    assert parsed["community"]["content_fingerprint"] == "sha256:abc"
+
+
 def test_update_preserves_unknown_toml_fields_and_requires_revision(
     tmp_path: Path,
 ) -> None:

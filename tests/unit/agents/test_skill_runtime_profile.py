@@ -72,6 +72,59 @@ class TestSkillRuntimeProfile:
         assert profile.has_hook_config is False
         assert profile.declared_tool_bootstrap_allowed is True
 
+    def test_build_skill_runtime_profile_extracts_inference_feature(
+        self,
+        tmp_path: Path,
+    ):
+        """runtime profile 应复用本次 SKILL.md 内容生成推断特征。"""
+        skill_dir = _write_skill(
+            tmp_path,
+            skill_name="fill-metadata",
+            description="补全Excel文件中缺失的字段中文名。",
+            metadata_block="""
+metadata:
+  swe:
+    uses_tools:
+      - read_file
+""",
+        )
+        with (skill_dir / "SKILL.md").open("a", encoding="utf-8") as handle:
+            handle.write(
+                "\n## Trigger Keywords\n\n"
+                "- fill metadata\n"
+                "\nUse `.xlsx` input files.\n",
+            )
+
+        profile = build_skill_runtime_profile(skill_dir, "fill-metadata")
+
+        assert profile.skill_feature is not None
+        assert profile.skill_feature.skill_name == "fill-metadata"
+        assert ".xlsx" in profile.skill_feature.file_extensions
+        assert "fill metadata" in profile.skill_feature.keywords
+        assert profile.skill_feature.tools_hint == ["read_file"]
+
+    def test_empty_swe_uses_tools_falls_back_to_metadata_uses_tools(
+        self,
+        tmp_path: Path,
+    ):
+        """空 swe 声明应保持旧 registry 的顶层 fallback 语义。"""
+        skill_dir = _write_skill(
+            tmp_path,
+            skill_name="fallback-tools",
+            description="Fallback declared tools.",
+            metadata_block="""
+metadata:
+  swe:
+    uses_tools: []
+  uses_tools:
+    - read_file
+""",
+        )
+
+        profile = build_skill_runtime_profile(skill_dir, "fallback-tools")
+
+        assert profile.declared_tools == ["read_file"]
+
     def test_skill_with_enabled_hook_disables_declared_tool_bootstrap(
         self,
         tmp_path: Path,

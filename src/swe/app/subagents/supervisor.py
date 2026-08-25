@@ -40,6 +40,10 @@ from .launch_snapshot import (
     capture_model_launch_snapshot,
     remove_launch_skill_snapshot,
 )
+from .session_dependencies import (
+    capture_community_expert_session_dependencies,
+    resolve_community_expert_dependency_view,
+)
 from .nicknames import assign_subagent_nickname
 from .permissions import build_definition_policy, compose_effective_policy
 from .registry import AgentRegistry
@@ -199,16 +203,37 @@ class BackgroundSubAgentSupervisor:
         nickname = assign_subagent_nickname(definition.nickname)
         run_id = f"subagent-{uuid4().hex[:12]}"
         try:
-            skill_snapshot_dirs, private_mcp_snapshot_path, diagnostics = (
-                capture_launch_dependencies(
+            session_dependency_view = resolve_community_expert_dependency_view(
+                workspace_dir=workspace_dir,
+                chat_id=str((request_context or {}).get("chat_id") or ""),
+                definition=definition,
+                view_root=(request_context or {}).get(
+                    "_expert_dependency_view_root",
+                ),
+            )
+            if session_dependency_view is not None:
+                (
+                    skill_snapshot_dirs,
+                    private_mcp_snapshot_path,
+                    diagnostics,
+                ) = capture_community_expert_session_dependencies(
                     run_store_dir=scope.run_store_dir,
                     run_id=run_id,
-                    workspace_dir=workspace_dir,
-                    parent_agent_config=parent_agent_config,
+                    dependency_view_root=session_dependency_view,
                     definition=definition,
-                    effective_skill_names=effective_skill_names or [],
+                    parent_agent_config=parent_agent_config,
                 )
-            )
+            else:
+                skill_snapshot_dirs, private_mcp_snapshot_path, diagnostics = (
+                    capture_launch_dependencies(
+                        run_store_dir=scope.run_store_dir,
+                        run_id=run_id,
+                        workspace_dir=workspace_dir,
+                        parent_agent_config=parent_agent_config,
+                        definition=definition,
+                        effective_skill_names=effective_skill_names or [],
+                    )
+                )
         except OSError as exc:
             record = await store.create(
                 spec,
@@ -395,6 +420,23 @@ class BackgroundSubAgentSupervisor:
             active_runs=active_runs,
             terminal_runs=terminal_runs,
             timed_out=bool(active_runs and not terminal_runs),
+        )
+
+    async def wait_for_run(
+        self,
+        scope: BackgroundSubAgentScope,
+        run_id: str,
+    ) -> BackgroundSubAgentRunRecord | None:
+        """Wait for one managed worker to reach a terminal persisted record."""
+        active = self._active_for_scope(scope)
+        handle = active.get(run_id)
+        if handle is None:
+            return await PerRunSubAgentRunStore(scope.run_store_dir).get(run_id)
+        await asyncio.to_thread(handle.process.wait)
+        terminal_runs = await self._reap_scope(scope)
+        return next(
+            (item for item in terminal_runs if item.run_id == run_id),
+            await PerRunSubAgentRunStore(scope.run_store_dir).get(run_id),
         )
 
     async def get(

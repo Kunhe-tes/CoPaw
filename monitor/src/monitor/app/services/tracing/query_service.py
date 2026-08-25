@@ -1651,6 +1651,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             page_size=page_size,
             offset=offset,
             bbk_ids=bbk_ids,
+            start_date=start_date,
+            end_date=end_date,
         )
         logger.info(
             "[get_users] 构建主查询耗时: %.3fms",
@@ -1782,6 +1784,8 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         page_size: int,
         offset: int,
         bbk_ids: Optional[str] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
     ) -> tuple[str, list[Any]]:
         """Build the user list query and its ordered parameters."""
         _, bbk_subquery_params = build_bbk_in_filter(bbk_ids)
@@ -1789,6 +1793,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         if bbk_subquery_params:
             placeholders = ", ".join(["%s"] * len(bbk_subquery_params))
             bbk_in_clause = f" AND tr.bbk_id IN ({placeholders})"
+        exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
 
         if source_id == "all":
             # source_id == "all": total_skills 子查询不加 source_id 过滤
@@ -1820,7 +1825,9 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     SELECT tr.user_id, COUNT(*) as skill_count
                     FROM swe_tracing_spans s
                     INNER JOIN swe_tracing_traces tr ON s.trace_id = tr.trace_id
-                    WHERE s.skill_name IS NOT NULL{bbk_in_clause}
+                    WHERE s.skill_name IS NOT NULL
+                      AND tr.source_id NOT IN ({exclude_placeholders})
+                      AND s.source_id NOT IN ({exclude_placeholders}){bbk_in_clause}{" AND tr.start_time >= %s" if start_date else ""}{" AND tr.start_time < %s" if end_date else ""}
                     GROUP BY tr.user_id
                 ) sk ON sk.user_id = t.user_id
                 WHERE {where_sql}
@@ -1828,9 +1835,17 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 ORDER BY {order_by}
                 LIMIT %s OFFSET %s
             """
+            skill_date_params = []
+            if start_date:
+                skill_date_params.append(start_date)
+            if end_date:
+                skill_date_params.append(end_date)
             final_params = (
                 cron_params
+                + list(EXCLUDED_SOURCE_IDS)
+                + list(EXCLUDED_SOURCE_IDS)
                 + bbk_subquery_params
+                + skill_date_params
                 + params
                 + [page_size, offset]
             )
@@ -1866,7 +1881,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     INNER JOIN swe_tracing_traces tr ON s.trace_id = tr.trace_id
                     WHERE s.skill_name IS NOT NULL
                       AND tr.source_id = %s
-                      AND s.source_id = %s{bbk_in_clause}
+                      AND s.source_id = %s{bbk_in_clause}{" AND tr.start_time >= %s" if start_date else ""}{" AND tr.start_time < %s" if end_date else ""}
                     GROUP BY tr.user_id
                 ) sk ON sk.user_id = t.user_id
                 WHERE {where_sql}
@@ -1874,10 +1889,16 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 ORDER BY {order_by}
                 LIMIT %s OFFSET %s
             """
+            skill_date_params = []
+            if start_date:
+                skill_date_params.append(start_date)
+            if end_date:
+                skill_date_params.append(end_date)
             final_params = (
                 cron_params
                 + [source_id, source_id]
                 + bbk_subquery_params
+                + skill_date_params
                 + params
                 + [page_size, offset]
             )

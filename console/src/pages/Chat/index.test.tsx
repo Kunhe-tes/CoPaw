@@ -36,6 +36,7 @@ const mocks = vi.hoisted(() => {
     capturedOptions: null as Record<string, any> | null,
     planModeEnabledHistory: [] as boolean[],
     showContentOnly: false,
+    isOriginY: false,
     createChat: vi.fn(async () => ({
       id: "chat-real-created",
       meta: { plan_mode_enabled: true },
@@ -235,6 +236,7 @@ vi.mock("react-i18next", () => ({
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => <span data-testid="attachment-icon" />,
   SparkCopyLine: () => <span data-testid="copy-icon" />,
+  SparkDownLine: () => <span data-testid="expert-selector-arrow" />,
 }));
 
 vi.mock("react-router-dom", () => ({
@@ -285,8 +287,12 @@ vi.mock("../../stores/sourceSystemConfigStore", () => ({
 }));
 
 vi.mock("../../stores/iframeStore", () => {
-  const useIframeStore = (selector?: (value: { userId: string }) => unknown) =>
-    selector ? selector({ userId: "test-user" }) : { userId: "test-user" };
+  const useIframeStore = (
+    selector?: (value: { userId: string; isOriginY: boolean }) => unknown,
+  ) =>
+    selector
+      ? selector({ userId: "test-user", isOriginY: mocks.isOriginY })
+      : { userId: "test-user", isOriginY: mocks.isOriginY };
 
   useIframeStore.getState = () => ({
     sessionId: mocks.navigationSessionId,
@@ -392,7 +398,6 @@ vi.mock("./sessionApi", () => {
 vi.mock("./components/ChatSidebar", () => {
   function ChatSidebar(props: {
     tasks: Array<{ id: string; name?: string }>;
-    showGuide?: boolean;
     selectedTaskId?: string;
     onTaskClick?: (task: { id: string; name?: string }) => void;
   }) {
@@ -400,7 +405,6 @@ vi.mock("./components/ChatSidebar", () => {
       <div
         data-testid="chat-sidebar"
         data-selected-task-id={props.selectedTaskId || ""}
-        data-show-guide={String(Boolean(props.showGuide))}
       >
         {props.tasks.map((task) => (
           <button
@@ -475,6 +479,11 @@ vi.mock("./ModelSelector", () => ({
 }));
 
 vi.mock("@/components/ConversationQuickNav", () => ({
+  __esModule: true,
+  default: () => null,
+}));
+
+vi.mock("./ExpertSelector", () => ({
   __esModule: true,
   default: () => null,
 }));
@@ -592,6 +601,7 @@ describe("ChatPage plan mode wiring", () => {
     mocks.capturedOptions = null;
     mocks.planModeEnabledHistory = [];
     mocks.showContentOnly = false;
+    mocks.isOriginY = false;
     mocks.inputDisabled = true;
     mocks.pathname = "/chat/chat-1";
     mocks.search = "";
@@ -652,24 +662,6 @@ describe("ChatPage plan mode wiring", () => {
     );
   });
 
-  it("enables the operation guide only when origin is Y", () => {
-    const defaultRender = render(<ChatPage />);
-
-    expect(screen.getByTestId("chat-sidebar")).toHaveAttribute(
-      "data-show-guide",
-      "false",
-    );
-
-    defaultRender.unmount();
-    mocks.search = "?origin=Y";
-    render(<ChatPage />);
-
-    expect(screen.getByTestId("chat-sidebar")).toHaveAttribute(
-      "data-show-guide",
-      "true",
-    );
-  });
-
   it("keeps the subagent monitor mounted in content-only mode", () => {
     mocks.showContentOnly = true;
 
@@ -718,6 +710,30 @@ describe("ChatPage plan mode wiring", () => {
     expect(screen.getByText("模式")).toBeInTheDocument();
     expect(screen.getByText("计划")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
+  });
+
+  it("places Expert immediately after Mode in Composer quick actions", () => {
+    render(<ChatPage />);
+
+    const quickMenuItems = React.Children.toArray(
+      mocks.capturedOptions?.sender?.quickMenuItems,
+    ) as Array<
+      React.ReactElement<{ children?: React.ReactNode; label: string }>
+    >;
+    const modeItems = React.Children.toArray(
+      quickMenuItems[0].props.children,
+    ) as Array<React.ReactElement<{ icon?: React.ReactNode; label: string }>>;
+    const goalModeItem = modeItems.find((item) => item.props.label === "目标");
+    const expertSelector = quickMenuItems[1].props
+      .children as React.ReactElement<{ inline?: boolean }>;
+
+    expect(quickMenuItems.map((item) => item.props.label)).toEqual([
+      "模式",
+      "专家",
+    ]);
+    expect(expertSelector.props.inline).toBe(true);
+    expect(goalModeItem).toBeDefined();
+    expect(goalModeItem?.props.icon).toBeUndefined();
   });
 
   it("creates a backend chat before persisting Plan Mode for a pending local session", async () => {

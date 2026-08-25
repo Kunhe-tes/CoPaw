@@ -111,5 +111,40 @@ export interface SubAgentRunCancelResponse {
   run: SubAgentRunSnapshotItem;
 }
 
+export type GoalState =
+  | "ACTIVE" | "WAITING" | "PAUSED" | "BLOCKED" | "LIMITED"
+  | "INTERRUPTED" | "COMPLETE" | "CANCELLED";
+
+export interface GoalCriterionSnapshot {
+  criterion_id: string;
+  verified: boolean;
+  consecutive_failures: number;
+  evidence_refs: string[];
+  criterion: {
+    requirement: string;
+    observable_assertion: string;
+    verification_method: string;
+    expected_outcome: string;
+  };
+}
+
+export interface GoalSnapshot {
+  goal_id: string;
+  state: GoalState;
+  revision: number;
+  turn_budget: number;
+  budget_cycle: number;
+  turns_used: number;
+  next_focus?: string | null;
+  state_reason?: string | null;
+  contract: {
+    objective: string;
+    completion_criteria: GoalCriterionSnapshot["criterion"][];
+    constraints: { must_preserve: string[]; must_not_do: string[] };
+    autonomy_boundary: string;
+  };
+  criteria: GoalCriterionSnapshot[];
+}
+
 // Legacy Session type alias for backward compatibility
 export type Session = ChatSpec;

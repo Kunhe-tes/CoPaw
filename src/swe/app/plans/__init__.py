@@ -13,6 +13,7 @@ from .models import (
     PlanStatus,
     ProposedPlan,
     ProposedPlanCreate,
+    GoalProposal,
 )
 from .service import PlanDecisionConflict, PlanDecisionResult, PlanService
 from .store import JsonProposedPlanStore, ProposedPlanStore
@@ -33,5 +34,6 @@ __all__ = [
     "PlanStatus",
     "ProposedPlan",
     "ProposedPlanCreate",
+    "GoalProposal",
     "ProposedPlanStore",
 ]

@@ -336,6 +336,16 @@ class SkillOwnedDefinitionMetadata(BaseModel):
     model: SkillOwnedModelReference | None = None
 
 
+class CommunityExpertReference(BaseModel):
+    """Identity of the community package that produced a received expert."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: str
+    version: str
+    content_fingerprint: str
+
+
 class AgentOwnedDefinitionMetadata(BaseModel):
     """Metadata retained for a definition configured by one Agent Profile."""
 
@@ -346,6 +356,7 @@ class AgentOwnedDefinitionMetadata(BaseModel):
     declared_mcps: list[str] | None = None
     tools: SkillOwnedToolConfig = Field(default_factory=SkillOwnedToolConfig)
     model: SkillOwnedModelReference | None = None
+    community: CommunityExpertReference | None = None
 
 
 class LifecycleConfig(BaseModel):
