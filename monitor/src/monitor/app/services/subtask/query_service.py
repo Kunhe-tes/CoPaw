@@ -29,6 +29,8 @@ RESULT_INDEX_REQUIRED_FIELDS = (
     "skill_id",
     "job_id",
     "result_type",
+    "template_id",
+    "result_id",
 )
 
 
