@@ -336,7 +336,7 @@ git add src/swe/app/runner/utils.py src/swe/app/runner/api.py console/src/pages/
 git commit -m "fix(chat): preserve persisted history message ids"
 ```
 
-### Task 6: Verify release readiness on NAS and perform the cutover — pending production validation
+### Task 6: Verify release readiness on NAS and perform the cutover — artifacts completed; production validation pending
 
 **Files:**
 
@@ -344,25 +344,25 @@ git commit -m "fix(chat): preserve persisted history message ids"
 - Create: `deploy/session-nas-lock-verification-job.yaml`
 - Modify: `analysis/playbook/location-paths.md`
 
-- [ ] **Step 1: Write the two-worker NAS verification script.**
+- [x] **Step 1: Write the two-worker NAS verification script.**
 
 The script accepts one shared session directory. Worker A takes `LOCK_EX` on `.verification.json.lock`, records entry,
 and waits; worker B attempts `LOCK_EX | LOCK_NB` and must receive `EACCES` or `EWOULDBLOCK`. After A exits, B must
 acquire the same lock. A second mode performs 1,000 serialized JSON commits and verifies `revision == 1000` and
 successful JSON parsing after every commit.
 
-- [ ] **Step 2: Package it as a two-Pod Kubernetes Job.**
+- [x] **Step 2: Package it as a two-Pod Kubernetes Job.**
 
 Mount the production-equivalent session PVC into both Pods at the same path. The Job fails if lock contention,
 post-owner-exit acquisition, JSON parsing, or revision continuity fails. Do not emit production application logs or
 change application runtime configuration.
 
-- [ ] **Step 3: Record the operational precondition.**
+- [x] **Step 3: Record the operational precondition.**
 
 Add the verification command and the required pause/drain/full-replacement rollout sequence to
 `analysis/playbook/location-paths.md`. State explicitly that old and new Runner versions must not overlap.
 
-- [ ] **Step 4: Run all focused automated tests.**
+- [x] **Step 4: Run all focused automated tests.**
 
 Run: `PYTHONPATH=src venv/bin/python -m pytest tests/unit/app/test_runner_session.py tests/unit/app/test_query_session_execution.py tests/unit/app/test_cron_session_append.py tests/unit/app/test_chat_history_message_identity.py tests/unit/app/test_cron_task_session_cleanup.py tests/unit/agents/test_request_memory_lease.py tests/unit/agents/test_memory_compaction_archive.py -q`
 
@@ -375,7 +375,7 @@ scale old Pods to zero, deploy the new version to all Pods, run one ordinary and
 task session, then resume cron dispatch. If the Job fails, do not deploy this design; retain the prior version and
 evaluate a distributed lock backend.
 
-- [ ] **Step 6: Commit release verification artifacts.**
+- [x] **Step 6: Commit release verification artifacts.**
 
 ```bash
 git add scripts/verify_session_nas_lock.py deploy/session-nas-lock-verification-job.yaml analysis/playbook/location-paths.md

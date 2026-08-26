@@ -6,12 +6,18 @@
 
 ```bash
 python3 scripts/verify_session_nas_lock.py /mnt/sessions
+kubectl get pvc swe-sessions-nas -o jsonpath='{.status.phase}{" "}{.status.accessModes[*]}{"\n"}'
+test "$(kubectl get pvc swe-sessions-nas -o jsonpath='{.status.phase}')" = "Bound"
+kubectl get pvc swe-sessions-nas -o jsonpath='{.status.accessModes[*]}' | grep -qw ReadWriteMany
+kubectl delete job swe-session-nas-lock-verification --ignore-not-found
 kubectl apply -f deploy/session-nas-lock-verification-job.yaml
 kubectl wait --for=condition=complete job/swe-session-nas-lock-verification --timeout=10m
 ```
 
-检查必须同时证明：第二个进程在持锁期间拿不到 `.verification.json.lock`、持锁进程退出后可以接管、
-原子 JSON 替换始终可解析且 revision 连续递增。失败时禁止以无锁写入或 Redis 锁替代；先保留旧版本。
+检查必须同时证明：第二个 Pod 在持锁期间拿不到 `.verification.json.lock`、持锁进程被 SIGKILL 后可以接管、
+第二个 Pod 并发读取原子 JSON 替换时始终可解析且 revision 连续递增。失败时禁止以无锁写入或 Redis 锁替代；
+先保留旧版本。Job 镜像必须是包含 `scripts/verify_session_nas_lock.py` 的本次 release 镜像；示例默认使用
+`agentscope/swe:latest`，生产环境应改为已验证的不可变 release tag。
 
 通过后暂停 cron dispatch，排空现有 session 请求，将旧 Runner Pod 缩容到零，再部署新版本，确认所有新 Pod
 使用同一绝对 session 路径后恢复 cron。禁止新旧 Runner writer 混跑，否则旧逻辑仍可能覆盖新事务快照。
