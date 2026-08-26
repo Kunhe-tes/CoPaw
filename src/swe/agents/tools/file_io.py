@@ -19,6 +19,7 @@ from agentscope.tool import ToolResponse
 from swe.runtime_workers import run_runtime_state_work
 
 from ..tool_failure import ToolExecutionError
+from .office_text import detect_document_kind, extract_document_text
 from .utils import (
     truncate_text_output,
     read_file_safe,
@@ -190,6 +191,19 @@ def _get_effective_file_read_max_bytes() -> int:
     return get_current_recent_max_bytes() or DEFAULT_MAX_BYTES
 
 
+def _read_document_text_sync(file_path: str) -> str:
+    """Read a file as text, extracting plain text for Office documents.
+
+    Binary Office formats (docx/xlsx/pptx, legacy doc via antiword) are
+    detected by magic bytes and converted to plain text; everything else
+    falls back to the existing text reader.
+    """
+    kind = detect_document_kind(file_path)
+    if kind is None:
+        return read_file_safe(file_path)
+    return extract_document_text(file_path, kind)
+
+
 def _read_file_selection_sync(
     file_path: str,
     *,
@@ -197,7 +211,7 @@ def _read_file_selection_sync(
     end_line: Optional[int],
     max_bytes: int,
 ) -> str:
-    content = read_file_safe(file_path)
+    content = _read_document_text_sync(file_path)
     all_lines = content.split("\n")
     total = len(all_lines)
 
@@ -456,8 +470,16 @@ async def read_file(  # pylint: disable=too-many-return-statements
     """Read a file. Relative paths resolve from the current agent workspace
     when available, otherwise the current tenant workspace root.
 
-    Use start_line/end_line to read a specific line range (output includes
-    line numbers). Omit both to read the full file.
+    Plain text files are read directly. Binary Office documents are detected
+    by their file signature and their text content is extracted on the fly:
+    .docx/.docm (Word), .xlsx/.xlsm (Excel) and .pptx/.pptm (PowerPoint)
+    are parsed in-memory, and legacy binary .doc files are decoded via
+    antiword when it is installed. Legacy .xls/.ppt and PDF are recognized
+    but not supported and return a clear error.
+
+    Use start_line/end_line to read a specific line range. Omit both to read
+    the full file. Output is truncated at the configured byte budget with a
+    continuation hint when the file is larger.
 
     Args:
         file_path (`str`):
