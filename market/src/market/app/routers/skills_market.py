@@ -586,6 +586,7 @@ def _process_skill_upload_single(
     str,
     bool,
     Optional[str],
+    Optional[str],
 ]:
     """处理单个技能的上架逻辑.
 
@@ -635,7 +636,15 @@ def _process_skill_upload_single(
             "existing_creator_name": existing.creator_name,
             "existing_version": existing.version,
         }
-        return None, conflict_info, name, resolved_cn_name, False, None
+        return (
+            None,
+            conflict_info,
+            name,
+            resolved_cn_name,
+            False,
+            None,
+            final_skill_id,
+        )
 
     version_unchanged = False
     cn_name_changed = False
@@ -691,7 +700,15 @@ def _process_skill_upload_single(
 
     save_index(svc.marketplace_root, source_id, items)
 
-    return name, None, name, resolved_cn_name, version_unchanged, item.item_id
+    return (
+        name,
+        None,
+        name,
+        resolved_cn_name,
+        version_unchanged,
+        item.item_id,
+        final_skill_id,
+    )
 
 
 async def _process_published_skill_record(
@@ -857,6 +874,7 @@ async def publish_skill_upload(
                 resolved_cn_name,
                 version_unchanged,
                 item_id,
+                final_skill_id,
             ) = await asyncio.to_thread(
                 _process_skill_upload_single,
                 skill_dir,
@@ -922,6 +940,7 @@ async def publish_skill_upload(
         description=parsed_description,
         cn_name=parsed_cn_name,
         version_unchanged=has_unchanged,
+        skill_id=final_skill_id,
     )
     if conflicts:
         result.conflicts = conflicts

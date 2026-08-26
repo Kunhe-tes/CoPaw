@@ -4,7 +4,7 @@ export type HtmlPreviewEventType =
   | "module_exposure";
 export type HtmlPreviewTemplateType = "main" | "sub";
 
-export interface HtmlPreviewClickEventPayload {
+export interface HtmlTrackerPayloadType {
   source_id?: string | null;
   user_id?: string | null;
   user_name?: string | null;
