@@ -537,6 +537,7 @@ class MarketplaceService:
         self.marketplace_root = marketplace_root
         self.swe_root = swe_root
         self.skill_registry = SkillRegistry(db)
+        self.skill_scan_history_recorder: Any | None = None
 
     async def _trigger_agent_reload(
         self,
@@ -578,6 +579,7 @@ class MarketplaceService:
         skill_name: str,
         agent_id: str = "default",
         source_id: str | None = None,
+        bbk_id: str = "",
     ) -> None:
         """扫描技能目录，发现安全问题抛出异常."""
         skills_dir = get_user_skills_dir(
@@ -588,7 +590,13 @@ class MarketplaceService:
         )
         skill_dir = skills_dir / skill_name
         if skill_dir.exists():
-            scan_skill_directory(skill_dir, skill_name=skill_name)
+            scan_skill_directory(
+                skill_dir,
+                skill_name=skill_name,
+                source_id=source_id or "",
+                user_id=user_id,
+                bbk_id=bbk_id,
+            )
 
     def register_skill_in_manifest(
         self,
@@ -710,6 +718,7 @@ class MarketplaceService:
         skill_name: str,
         agent_id: str = "default",
         source_id: str | None = None,
+        bbk_id: str = "",
     ) -> dict[str, Any]:
         """启用技能（含安全扫描 + 回调重载）.
 
@@ -754,8 +763,10 @@ class MarketplaceService:
                     skill_name,
                     agent_id,
                     source_id,
+                    bbk_id,
                 )
             except SkillScanError as e:
+                await self.flush_skill_scan_history()
                 return {
                     "success": False,
                     "reason": "security_scan_failed",
@@ -936,6 +947,7 @@ class MarketplaceService:
         skill_names: list[str],
         agent_id: str = "default",
         source_id: str | None = None,
+        bbk_id: str = "",
     ) -> dict[str, Any]:
         """批量启用技能."""
         results: dict[str, Any] = {}
@@ -945,8 +957,15 @@ class MarketplaceService:
                 skill_name,
                 agent_id,
                 source_id,
+                bbk_id,
             )
         return results
+
+    async def flush_skill_scan_history(self) -> None:
+        """Wait for accepted scan history writes, if a writer is installed."""
+        recorder = getattr(self, "skill_scan_history_recorder", None)
+        if recorder is not None:
+            await recorder.flush()
 
     async def batch_disable_skills(
         self,

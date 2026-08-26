@@ -46,6 +46,9 @@ def _record(record_id: str = "record-1") -> BlockedSkillRecord:
         ],
         content_hash="a" * 64,
         action="blocked",
+        source_id="source-a",
+        user_id="user-a",
+        bbk_id="bbk-a",
     )
 
 
@@ -60,16 +63,12 @@ def mock_db():
 
 
 @pytest.mark.asyncio
-async def test_store_initializes_database_table_and_order_index(mock_db):
+async def test_store_initialization_does_not_manage_database_schema(mock_db):
     store = SkillScanHistoryStore(mock_db)
 
     await store.initialize()
 
-    sql = mock_db.execute.await_args.args[0]
-    assert "CREATE TABLE IF NOT EXISTS swe_skill_scan_history" in sql
-    assert "PRIMARY KEY (id)" in sql
-    assert "INDEX idx_swe_skill_scan_history_order" in sql
-    assert "INDEX idx_swe_skill_scan_history_skill_action_order" in sql
+    mock_db.execute.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -86,6 +85,9 @@ async def test_store_round_trips_insert_and_bounded_page(mock_db):
             "findings_json": json.dumps(record.findings),
             "content_hash": record.content_hash,
             "action": record.action,
+            "source_id": record.source_id,
+            "user_id": record.user_id,
+            "bbk_id": record.bbk_id,
         },
     ]
 
@@ -95,10 +97,18 @@ async def test_store_round_trips_insert_and_bounded_page(mock_db):
     insert_query, insert_params = mock_db.execute.await_args_list[-1].args
     assert "INSERT INTO swe_skill_scan_history" in insert_query
     assert insert_params[0] == record.id
+    assert insert_params[-3:] == (
+        record.source_id,
+        record.user_id,
+        record.bbk_id,
+    )
     assert page.total == 21
     assert page.page == 2
     assert page.page_size == 10
     assert page.items[0].id == record.id
+    assert page.items[0].source_id == "source-a"
+    assert page.items[0].user_id == "user-a"
+    assert page.items[0].bbk_id == "bbk-a"
     assert page.items[0].blocked_at == "2026-08-03T08:00:00+00:00"
     query, params = mock_db.fetch_all.await_args.args
     assert "ORDER BY blocked_at DESC, id DESC" in query
@@ -117,6 +127,9 @@ async def test_store_queries_latest_warning_for_one_skill(mock_db):
         "findings_json": json.dumps(record.findings),
         "content_hash": record.content_hash,
         "action": "warned",
+        "source_id": record.source_id,
+        "user_id": record.user_id,
+        "bbk_id": record.bbk_id,
     }
     store = SkillScanHistoryStore(mock_db)
 
@@ -127,6 +140,9 @@ async def test_store_queries_latest_warning_for_one_skill(mock_db):
 
     assert warning is not None
     assert warning.id == "latest-warning"
+    assert warning.source_id == "source-a"
+    assert warning.user_id == "user-a"
+    assert warning.bbk_id == "bbk-a"
     query, params = mock_db.fetch_one.await_args.args
     assert "WHERE skill_name = %s AND action = 'warned'" in query
     assert "blocked_at >= %s" in query

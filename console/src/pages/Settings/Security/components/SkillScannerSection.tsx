@@ -71,6 +71,13 @@ function FindingsModal({
                 : record.file_path,
           },
           {
+            title: t("security.skillScanner.scanAlerts.analyzer"),
+            dataIndex: "analyzer",
+            key: "analyzer",
+            width: 120,
+            render: (value: string | undefined) => value || "-",
+          },
+          {
             title: "Description",
             dataIndex: "description",
             key: "description",
@@ -218,6 +225,27 @@ export function SkillScannerSection() {
       dataIndex: "skill_name",
       key: "skill_name",
       width: 180,
+    },
+    {
+      title: t("security.skillScanner.scanAlerts.source"),
+      dataIndex: "source_id",
+      key: "source_id",
+      width: 120,
+      render: (value: string | undefined) => value || "-",
+    },
+    {
+      title: t("security.skillScanner.scanAlerts.user"),
+      dataIndex: "user_id",
+      key: "user_id",
+      width: 120,
+      render: (value: string | undefined) => value || "-",
+    },
+    {
+      title: t("security.skillScanner.scanAlerts.branch"),
+      dataIndex: "bbk_id",
+      key: "bbk_id",
+      width: 120,
+      render: (value: string | undefined) => value || "-",
     },
     {
       title: t("security.skillScanner.scanAlerts.action"),

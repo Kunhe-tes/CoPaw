@@ -35,6 +35,9 @@ class _Store:
                     max_severity="HIGH",
                     findings=[],
                     action="blocked",
+                    source_id="source-a",
+                    user_id="user-a",
+                    bbk_id="bbk-a",
                 ),
             ],
             total=5000,
@@ -57,6 +60,9 @@ class _Store:
             max_severity="HIGH",
             findings=[],
             action="warned",
+            source_id="source-a",
+            user_id="user-a",
+            bbk_id="bbk-a",
         )
 
     async def clear(self) -> None:
@@ -88,6 +94,9 @@ def test_history_route_returns_requested_database_page():
                 "findings": [],
                 "content_hash": "",
                 "action": "blocked",
+                "source_id": "source-a",
+                "user_id": "user-a",
+                "bbk_id": "bbk-a",
             },
         ],
         "total": 5000,
