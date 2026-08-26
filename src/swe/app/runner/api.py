@@ -236,6 +236,9 @@ def _model_call_failed_messages_from_state(state: dict) -> list[ChatMessage]:
 
 async def _messages_from_memory_state(
     memory_state: dict,
+    *,
+    session_id: str = "",
+    position_offset: int = 0,
 ) -> list[ChatMessage]:
     if not memory_state:
         return []
@@ -244,7 +247,11 @@ async def _messages_from_memory_state(
     normalized_state = _normalize_state_for_load(memory_state)
     memory.load_state_dict(normalized_state, strict=False)
     memories = await memory.get_memory(prepend_summary=False)
-    return agentscope_msg_to_message(memories)
+    return agentscope_msg_to_message(
+        memories,
+        session_id=session_id,
+        position_offset=position_offset,
+    )
 
 
 def _slice_memory_state(
@@ -340,12 +347,18 @@ async def _messages_from_memory_range(
     memory_state: dict,
     start: int,
     end: int,
+    *,
+    session_id: str = "",
 ) -> list[ChatMessage] | None:
     """读取一段 memory slice 对应的消息。"""
     sliced_state = _slice_memory_state(memory_state, start, end)
     if sliced_state is None:
         return None
-    return await _messages_from_memory_state(sliced_state)
+    return await _messages_from_memory_state(
+        sliced_state,
+        session_id=session_id,
+        position_offset=start,
+    )
 
 
 def _find_final_text_message_index(
@@ -390,38 +403,57 @@ def _annotate_run_messages(
 async def _annotate_task_run_messages(
     memory_state: dict,
     raw_task_runs: list[dict],
+    *,
+    session_id: str = "",
 ) -> list[ChatMessage]:
     content = memory_state.get("content")
     if not isinstance(content, list):
-        return await _messages_from_memory_state(memory_state)
+        return await _messages_from_memory_state(
+            memory_state,
+            session_id=session_id,
+        )
 
     task_runs = _normalize_task_runs(raw_task_runs, len(content))
     if task_runs is None:
-        return await _messages_from_memory_state(memory_state)
+        return await _messages_from_memory_state(
+            memory_state,
+            session_id=session_id,
+        )
 
     messages: list[ChatMessage] = []
     cursor = 0
     for start, end, run_index, run_id in task_runs:
         if start < cursor:
-            return await _messages_from_memory_state(memory_state)
+            return await _messages_from_memory_state(
+                memory_state,
+                session_id=session_id,
+            )
 
         if cursor < start:
             gap_messages = await _messages_from_memory_range(
                 memory_state,
                 cursor,
                 start,
+                session_id=session_id,
             )
             if gap_messages is None:
-                return await _messages_from_memory_state(memory_state)
+                return await _messages_from_memory_state(
+                    memory_state,
+                    session_id=session_id,
+                )
             messages.extend(gap_messages)
 
         run_messages = await _messages_from_memory_range(
             memory_state,
             start,
             end,
+            session_id=session_id,
         )
         if run_messages is None:
-            return await _messages_from_memory_state(memory_state)
+            return await _messages_from_memory_state(
+                memory_state,
+                session_id=session_id,
+            )
         messages.extend(
             _annotate_run_messages(
                 run_messages,
@@ -437,6 +469,7 @@ async def _annotate_task_run_messages(
             memory_state,
             cursor,
             len(content),
+            session_id=session_id,
         )
         if tail_messages is not None:
             messages.extend(tail_messages)
@@ -597,9 +630,13 @@ async def _build_chat_history(
             messages = await _annotate_task_run_messages(
                 memory_state,
                 state[TASK_RUNS_STATE_KEY],
+                session_id=chat_spec.session_id,
             )
         else:
-            messages = await _messages_from_memory_state(memory_state)
+            messages = await _messages_from_memory_state(
+                memory_state,
+                session_id=chat_spec.session_id,
+            )
     messages.extend(task_messages)
     messages.extend(model_call_failed_messages)
     messages.sort(key=_message_sort_key)
@@ -653,7 +690,10 @@ async def _archive_page(
     if store is None:
         return ChatArchivePage()
     page = await store.read_page(chat_id, before=before, limit=limit)
-    messages = agentscope_msg_to_message(page.messages)
+    messages = agentscope_msg_to_message(
+        page.messages,
+        session_id=chat_id,
+    )
     return ChatArchivePage(
         messages=_redact_hidden_context_messages(messages),
         boundaries=[_boundary_model(boundary) for boundary in page.boundaries],

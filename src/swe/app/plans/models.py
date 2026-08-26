@@ -16,6 +16,8 @@ from pydantic import (
     model_validator,
 )
 
+from ..goals.models import CompletionCriterion, GoalConstraints
+
 PlanStatus = Literal["proposed", "revision_requested", "accepted", "exited"]
 PlanReviewDecisionType = Literal["revise", "execute", "exit_plan"]
 PlanClarificationKind = Literal[
@@ -141,8 +143,8 @@ class GoalProposal(_StrictPlanModel):
 
     card_type: Literal["goal_proposal"] = "goal_proposal"
     objective: str
-    completion_criteria: list[dict[str, str]] = Field(min_length=1)
-    constraints: dict[str, list[str]]
+    completion_criteria: list[CompletionCriterion] = Field(min_length=1)
+    constraints: GoalConstraints
     autonomy_boundary: str
 
     @field_validator("objective", "autonomy_boundary")
@@ -151,16 +153,6 @@ class GoalProposal(_StrictPlanModel):
         if not value.strip():
             raise ValueError("must not be empty")
         return value.strip()
-
-    @model_validator(mode="after")
-    def _validate_goal_criteria(self) -> "GoalProposal":
-        required = {"requirement", "observable_assertion", "verification_method", "expected_outcome"}
-        for criterion in self.completion_criteria:
-            if set(criterion) != required or any(not str(criterion[key]).strip() for key in required):
-                raise ValueError("each completion criterion must define all verification fields")
-        if set(self.constraints) != {"must_preserve", "must_not_do"}:
-            raise ValueError("constraints must define must_preserve and must_not_do")
-        return self
 
 
 class PlanReviewDecision(_StrictPlanModel):

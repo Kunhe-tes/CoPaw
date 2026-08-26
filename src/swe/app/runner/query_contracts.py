@@ -43,6 +43,7 @@ class _QueryRuntimeInputs:
     auth_token: str | None
     passthrough_headers: dict[str, str]
     selected_skill_directives: list[Any] = field(default_factory=list)
+    session_execution: Any | None = None
 
 
 @dataclass
@@ -71,6 +72,9 @@ class _QueryRuntime:
     skip_history: bool
     pending_confirmed_skill_snapshots: dict[str, dict[str, Any]]
     selected_context_directives: list[str] = field(default_factory=list)
+    session_execution: Any | None = None
+    session_state_committed: bool = False
+    session_state_commit_attempted: bool = False
 
 
 @dataclass
@@ -104,6 +108,7 @@ class QueryPreflightOwner(Protocol):
         *,
         session_id: str,
         user_id: str,
+        session_execution: Any = None,
     ) -> HookSessionOverlay:
         """Load the hook overlay persisted for this session."""
 
@@ -123,6 +128,7 @@ class QueryPreflightOwner(Protocol):
         agent_config: Any,
         overlay: HookSessionOverlay,
         prompt: str,
+        session_execution: Any = None,
     ) -> Any:
         """Emit the USER_PROMPT_SUBMIT hook through the runner."""
 
@@ -144,6 +150,7 @@ class QueryRuntimeOwner(Protocol):
         request: AgentRequest,
         msgs: list[Any],
         preflight: _QueryPreflight,
+        session_execution: Any = None,
     ) -> _QueryRuntimeInputs:
         """Build request-derived inputs before resource connection."""
 

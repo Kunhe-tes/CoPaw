@@ -60,7 +60,7 @@ const splitList = (value?: string) =>
 
 export const payloadFromValues = (values: ExpertFormValues): ExpertPayload => {
   const model =
-    typeof values.model === "string" && values.model
+    typeof values.model === "string"
       ? (() => {
           const separator = values.model.indexOf("::");
           return separator > 0

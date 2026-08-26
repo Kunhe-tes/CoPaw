@@ -139,13 +139,18 @@ async def complete_runtime_activation(
     load_selected_hooks: Any,
 ) -> tuple[_QueryRuntimeResources, _RuntimeStartResult | None]:
     """Run SESSION_START and return either resources or its blocked lease."""
+    session_start_args = {
+        "request": request,
+        "tenant_hooks": inputs.tenant_hooks,
+        "agent_config": inputs.agent_config,
+        "hook_overlay": inputs.hook_overlay,
+        "skip_history": inputs.skip_history,
+        "env_context": inputs.env_context,
+    }
+    if inputs.session_execution is not None:
+        session_start_args["session_execution"] = inputs.session_execution
     env_context, block_response = await emit_session_start(
-        request=request,
-        tenant_hooks=inputs.tenant_hooks,
-        agent_config=inputs.agent_config,
-        hook_overlay=inputs.hook_overlay,
-        skip_history=inputs.skip_history,
-        env_context=inputs.env_context,
+        **session_start_args,
     )
     resources = _QueryRuntimeResources(
         chat=chat,
@@ -199,6 +204,7 @@ async def build_query_runtime_inputs(
     request: AgentRequest,
     msgs: list[Any],
     preflight: _QueryPreflight,
+    session_execution: Any = None,
     build_environment_context: Any,
     request_source_id: Any,
     request_user_name: Any,
@@ -283,6 +289,7 @@ async def build_query_runtime_inputs(
         selected_skill_directives=[],
         auth_token=getattr(request, "auth_token", None),
         passthrough_headers=passthrough_headers,
+        session_execution=session_execution,
     )
 
 
@@ -340,6 +347,7 @@ async def finalize_query_runtime(
         skip_history=inputs.skip_history,
         pending_confirmed_skill_snapshots={},
         selected_context_directives=inputs.selected_context_directives,
+        session_execution=inputs.session_execution,
     )
     owner._attach_session_skill_detector(runtime=runtime, request=request)
     return runtime
@@ -352,15 +360,19 @@ async def prepare_query_runtime(
     msgs: list[Any],
     query: str | None,
     preflight: _QueryPreflight,
+    session_execution: Any = None,
 ) -> _RuntimeStartResult:
     """Assemble provider, request resources, hooks, agent, and MCP clients."""
     manager = await ProviderManager.get_or_create_instance(owner.tenant_id)
     await manager.refresh_if_due()
-    inputs = await owner._build_query_runtime_inputs(
-        request=request,
-        msgs=msgs,
-        preflight=preflight,
-    )
+    runtime_input_args = {
+        "request": request,
+        "msgs": msgs,
+        "preflight": preflight,
+    }
+    if session_execution is not None:
+        runtime_input_args["session_execution"] = session_execution
+    inputs = await owner._build_query_runtime_inputs(**runtime_input_args)
     mcp_clients: list[Any] = []
     try:
         resources, block_result = await owner._start_query_runtime_resources(

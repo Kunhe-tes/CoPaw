@@ -230,15 +230,19 @@ async def _run_conversation_command(
     request,
     context: _CommandRequestContext,
     runner: AgentRunner,
+    session_execution=None,
 ) -> AsyncIterator[tuple]:
     """Run a conversation command and persist its in-memory state."""
     memory = runner.memory_manager.get_in_memory_memory(
         chat_id=context.chat_id or None,
     )
-    session_state = await runner.session.get_session_state_dict(
-        session_id=context.session_id,
-        user_id=context.user_id,
-    )
+    if session_execution is None:
+        session_state = await runner.session.get_session_state_dict(
+            session_id=context.session_id,
+            user_id=context.user_id,
+        )
+    else:
+        session_state = await session_execution.read_state()
     memory_state = session_state.get("agent", {}).get("memory", {})
     memory.load_state_dict(memory_state, strict=False)
 
@@ -269,6 +273,12 @@ async def _run_conversation_command(
         )
     yield response_msg, True
     if context.session_id and context.user_id:
+        if session_execution is not None:
+            state = session_execution.state
+            agent_state = state.setdefault("agent", {})
+            agent_state["memory"] = memory.state_dict()
+            await session_execution.commit_state(state)
+            return
         await runner.session.update_session_state(
             session_id=context.session_id,
             key="agent.memory",
@@ -288,6 +298,8 @@ async def run_command_path(
     request,
     msgs,
     runner: AgentRunner,
+    *,
+    session_execution=None,
 ) -> AsyncIterator[tuple]:
     """Run command path and yield (msg, last) for each response.
 
@@ -322,5 +334,6 @@ async def run_command_path(
         request,
         context,
         runner,
+        session_execution=session_execution,
     ):
         yield item

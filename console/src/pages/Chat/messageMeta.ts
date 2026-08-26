@@ -234,9 +234,12 @@ function normalizeGoalCompletionCriteria(
     ) {
       return null;
     }
-    return Object.fromEntries(
-      required.map((key) => [key, record[key] as string]),
-    ) as ChatGoalCompletionCriterion;
+    return {
+      requirement: record.requirement as string,
+      observable_assertion: record.observable_assertion as string,
+      verification_method: record.verification_method as string,
+      expected_outcome: record.expected_outcome as string,
+    };
   });
   return normalized.every(Boolean)
     ? (normalized as ChatGoalCompletionCriterion[])

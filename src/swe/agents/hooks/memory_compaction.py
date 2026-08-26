@@ -197,6 +197,7 @@ class MemoryCompactionHook:
                 chat_id=chat_id,
                 watermark=watermark,
                 messages=messages,
+                memory=agent.memory,
                 chat_model=agent.model,
                 formatter=agent.formatter,
             ),
@@ -230,7 +231,7 @@ class MemoryCompactionHook:
 
     async def _install_checkpoint_stage(
         self,
-        _agent: ReActAgent,
+        agent: ReActAgent,
         running_config: Any,
         messages: list[Msg],
         chat_id: str,
@@ -241,6 +242,7 @@ class MemoryCompactionHook:
         installed = await self.memory_manager.install_ready_precompaction(
             chat_id=chat_id,
             messages=messages,
+            memory=agent.memory,
         )
         if installed:
             return await self._is_legacy_fallback_avoided(
@@ -256,7 +258,11 @@ class MemoryCompactionHook:
         )
         if install_degraded is None:
             return False
-        await install_degraded(chat_id=chat_id, messages=messages)
+        await install_degraded(
+            chat_id=chat_id,
+            messages=messages,
+            memory=agent.memory,
+        )
         return await self._is_legacy_fallback_avoided(
             running_config,
             remeasure_projected_tokens,

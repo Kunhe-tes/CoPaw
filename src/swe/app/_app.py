@@ -47,6 +47,7 @@ from .migration import (
 )
 from .channels.registry import register_custom_channel_routes
 from ..tracing import init_trace_manager, close_trace_manager
+from ..tracing.agent_trace_sdk import shutdown_global_tracer
 from ..database import get_database_config
 from .service_heartbeat import start_service_heartbeat, stop_service_heartbeat
 from .crons.notification_worker import CronNotificationWorker
@@ -487,7 +488,6 @@ async def _initialize_approval_audit_store(
         app.state.approval_audit_store = approval_audit_store
         get_approval_service().set_store(approval_audit_store)
         if approval_audit_store.is_available:
-            await approval_audit_store.initialize()
             logger.info("Approval audit storage initialized")
         else:
             logger.warning(
@@ -519,7 +519,6 @@ async def _initialize_skill_scan_history(
         return
 
     try:
-        await store.initialize()
         recorder = SkillScanHistoryRecorder(store)
         await recorder.start()
         app.state.skill_scan_history_recorder = recorder
@@ -547,7 +546,6 @@ async def _initialize_cron_broadcast_children_store(
         )
         app.state.cron_broadcast_children_store = cron_broadcast_children_store
         if cron_broadcast_children_store.is_available:
-            await cron_broadcast_children_store.initialize()
             logger.info("Cron broadcast children snapshot storage initialized")
         else:
             logger.warning(
@@ -571,7 +569,6 @@ async def _initialize_cron_broadcast_task_store(
         cron_broadcast_task_store = CronBroadcastTaskStore(db_connection)
         app.state.cron_broadcast_task_store = cron_broadcast_task_store
         if cron_broadcast_task_store.is_available:
-            await cron_broadcast_task_store.initialize()
             logger.info("Cron broadcast task storage initialized")
         else:
             logger.warning(
@@ -601,7 +598,6 @@ async def _initialize_skill_readiness(
             multi_agent_manager=multi_agent_manager,
         )
         if skill_readiness_store.is_available:
-            await skill_readiness_store.initialize()
             logger.info("SkillReadiness storage initialized")
         else:
             logger.warning(
@@ -772,6 +768,11 @@ async def _shutdown_lifespan_resources(
         logger.info("Tracing manager closed")
     except Exception as e:
         logger.warning("Error closing tracing manager: %s", e)
+
+    try:
+        shutdown_global_tracer()
+    except Exception as e:
+        logger.warning("Error closing AgentTraceSDK global tracer: %s", e)
 
     try:
         await stop_service_heartbeat()

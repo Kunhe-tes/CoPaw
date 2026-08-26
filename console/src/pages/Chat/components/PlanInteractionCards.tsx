@@ -193,12 +193,19 @@ function findLatestPlanClarificationCard(
   return null;
 }
 
-type ActivePlanInteraction = {
-  type: "clarification" | "goal_proposal";
-  data: ChatPlanClarificationCardData | ChatGoalProposalCardData;
-  instanceKey: string;
-  sourceKey: string | null;
-};
+type ActivePlanInteraction =
+  | {
+      type: "clarification";
+      data: ChatPlanClarificationCardData;
+      instanceKey: string;
+      sourceKey: string | null;
+    }
+  | {
+      type: "goal_proposal";
+      data: ChatGoalProposalCardData;
+      instanceKey: string;
+      sourceKey: string | null;
+    };
 
 function findLatestActivePlanInteractionCard(
   messages: IAgentScopeRuntimeWebUIMessage[],

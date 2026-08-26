@@ -82,6 +82,7 @@ async def test_run_heartbeat_once_uses_longer_default_timeout(
 
     assert observed["timeout"] == 7200
     assert observed["workload"] == LLM_WORKLOAD_CRON
+    assert observed["request"]["execution_origin"] == "scheduled"
     assert get_current_llm_workload() == LLM_WORKLOAD_CHAT
 
 

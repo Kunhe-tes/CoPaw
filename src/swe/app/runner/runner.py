@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -68,6 +69,7 @@ from .task_progress import attach_task_progress
 from .utils import build_env_context
 from ..identity_resolver import resolve_user_identity
 from ..channels.schema import DEFAULT_CHANNEL
+from ...__version__ import __version__
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
@@ -112,6 +114,7 @@ from ...tracing import (
     has_trace_manager,
     get_trace_manager,
 )
+from ...tracing.agent_trace_sdk import SpanKind, TraceFields, global_tracer
 from ...tracing.models import TraceStatus
 from ...config.context import (
     get_current_passthrough_headers,
@@ -486,6 +489,7 @@ def _build_task_run_record(
     memory_entries: list[Any],
     *,
     memory_start: int,
+    execution_key: str | None = None,
 ) -> dict[str, Any] | None:
     """根据本次新增消息构建任务运行元数据。"""
     if not memory_entries:
@@ -519,7 +523,7 @@ def _build_task_run_record(
     started_at = started_at or now
     ended_at = ended_at or started_at
 
-    return {
+    record = {
         "run_id": f"task-run-{uuid4()}",
         "started_at": started_at,
         "ended_at": ended_at,
@@ -527,6 +531,9 @@ def _build_task_run_record(
         "memory_end": memory_start + len(memory_entries),
         "preview_text": preview_text,
     }
+    if execution_key:
+        record["execution_key"] = execution_key
+    return record
 
 
 def _is_approval(text: str) -> bool:
@@ -676,15 +683,19 @@ async def _load_session_hook_overlay(
     *,
     session_id: str,
     user_id: str,
+    session_execution: Any = None,
 ) -> HookSessionOverlay:
     if session is None or not session_id:
         return HookSessionOverlay()
     try:
-        state = await session.get_session_state_dict(
-            session_id=session_id,
-            user_id=user_id,
-            allow_not_exist=True,
-        )
+        if session_execution is not None:
+            state = await session_execution.read_state()
+        else:
+            state = await session.get_session_state_dict(
+                session_id=session_id,
+                user_id=user_id,
+                allow_not_exist=True,
+            )
     except Exception:
         logger.debug("Failed to load hook overlay from session", exc_info=True)
         return HookSessionOverlay()
@@ -852,6 +863,7 @@ async def _emit_runner_hook(
     source: str | None = None,
     model: str | None = None,
     agent: Any | None = None,
+    session_execution: Any = None,
 ) -> MergedHookResult:
     agent_hooks = getattr(agent_config, "hooks", None)
     if not isinstance(agent_hooks, HookConfig):
@@ -879,6 +891,7 @@ async def _emit_runner_hook(
         return await _capture_persisted_runner_conversation_snapshot(
             request=request,
             runner=runner,
+            session_execution=session_execution,
         )
 
     return await runtime.emit(
@@ -967,13 +980,9 @@ async def _capture_persisted_runner_conversation_snapshot(
     *,
     request: Any,
     runner: "AgentRunner",
+    session_execution: Any = None,
 ) -> dict[str, Any] | None:
     if getattr(request, "skip_history", False):
-        return None
-
-    session = getattr(runner, "session", None)
-    get_session_state_dict = getattr(session, "get_session_state_dict", None)
-    if not callable(get_session_state_dict):
         return None
 
     session_id = getattr(request, "session_id", None)
@@ -981,13 +990,24 @@ async def _capture_persisted_runner_conversation_snapshot(
         return None
 
     try:
-        state = await get_session_state_dict(
-            session_id=_coerce_session_storage_id(session_id),
-            user_id=_coerce_session_storage_user_id(
-                getattr(request, "user_id", None),
-            ),
-            allow_not_exist=True,
-        )
+        if session_execution is not None:
+            state = await session_execution.read_state()
+        else:
+            session = getattr(runner, "session", None)
+            get_session_state_dict = getattr(
+                session,
+                "get_session_state_dict",
+                None,
+            )
+            if not callable(get_session_state_dict):
+                return None
+            state = await get_session_state_dict(
+                session_id=_coerce_session_storage_id(session_id),
+                user_id=_coerce_session_storage_user_id(
+                    getattr(request, "user_id", None),
+                ),
+                allow_not_exist=True,
+            )
     except Exception:
         logger.debug(
             "Failed to load persisted memory for hook snapshot",
@@ -2583,44 +2603,51 @@ def _should_stop_follow_up(outcome: _QueryTurnOutcome) -> bool:
     )
 
 
-def _merge_cron_agent_memory(
-    existing_state: dict[str, Any],
-    current_agent_state: dict[str, Any],
-) -> dict[str, Any]:
-    """为 cron 保存路径合并旧消息和本次新增消息。"""
-    existing_memory = existing_state.get("agent", {}).get("memory", {}) or {}
-    if "content" not in existing_memory:
-        return current_agent_state
-
-    current_memory = dict(current_agent_state.get("memory", {}) or {})
-    current_memory["content"] = list(
-        existing_memory.get("content", []) or [],
-    ) + list(current_memory.get("content", []) or [])
-
-    merged_agent_state = dict(current_agent_state)
-    merged_agent_state["memory"] = current_memory
-    return merged_agent_state
-
-
-def _build_cron_merged_state(
+def _build_cron_append_state(
     existing_state: dict[str, Any],
     current_agent_state: dict[str, Any],
     hook_overlay: HookSessionOverlay | None,
-) -> tuple[dict[str, Any], list[Any], list[Any], int]:
-    """构建 cron 任务保存所需的完整 session state。"""
+    execution_key: str | None = None,
+) -> tuple[dict[str, Any], list[Any], list[Any], int, bool]:
+    """构建只追加本次 request memory delta 的 cron session state。"""
     existing_memory = existing_state.get("agent", {}).get("memory", {}) or {}
-    current_memory = current_agent_state.get("memory", {}) or {}
     existing_content = list(existing_memory.get("content", []) or [])
-    current_content = list(current_memory.get("content", []) or [])
     stripped_count = _strip_internal_follow_up_messages_from_state(
         current_agent_state,
     )
+    current_memory = current_agent_state.get("memory", {}) or {}
+    current_content = list(current_memory.get("content", []) or [])
+    execution_key = (
+        str(execution_key).strip() if isinstance(execution_key, str) else ""
+    )
+
+    task_runs = list(existing_state.get(TASK_RUNS_STATE_KEY, []) or [])
+    if execution_key and any(
+        isinstance(run, dict) and run.get("execution_key") == execution_key
+        for run in task_runs
+    ):
+        return (
+            existing_state,
+            existing_content,
+            current_content,
+            stripped_count,
+            False,
+        )
 
     merged_state = dict(existing_state)
-    merged_state["agent"] = _merge_cron_agent_memory(
-        existing_state,
-        current_agent_state,
-    )
+    existing_agent = existing_state.get("agent")
+    if isinstance(existing_agent, dict) and existing_memory:
+        merged_agent = dict(existing_agent)
+        merged_memory = dict(existing_memory)
+        merged_memory["content"] = existing_content + current_content
+        merged_agent["memory"] = merged_memory
+        merged_state["agent"] = merged_agent
+    else:
+        merged_agent = dict(current_agent_state)
+        merged_memory = dict(current_memory)
+        merged_memory["content"] = existing_content + current_content
+        merged_agent["memory"] = merged_memory
+        merged_state["agent"] = merged_agent
     if hook_overlay is not None:
         merged_state["hook_overlay"] = hook_overlay.model_dump(
             mode="json",
@@ -2632,13 +2659,19 @@ def _build_cron_merged_state(
     task_run = _build_task_run_record(
         current_content,
         memory_start=len(existing_content),
+        execution_key=execution_key or None,
     )
     if task_run is not None:
-        task_runs = list(existing_state.get(TASK_RUNS_STATE_KEY, []) or [])
         task_runs.append(task_run)
         merged_state[TASK_RUNS_STATE_KEY] = task_runs
 
-    return merged_state, existing_content, current_content, stripped_count
+    return (
+        merged_state,
+        existing_content,
+        current_content,
+        stripped_count,
+        True,
+    )
 
 
 @dataclass
@@ -2650,6 +2683,7 @@ class _RetryState:
     session_state_loaded: bool = False
     prev_session_state_loaded: bool = False
     task_completed: bool = False
+    agent_state_snapshot: dict[str, Any] | None = None
 
 
 @dataclass
@@ -2673,6 +2707,7 @@ class _QueryAttemptInput:
     query: str | None
     preflight: _QueryPreflight
     trace_id: str | None
+    session_execution: Any | None = None
 
 
 class AgentRunner(Runner):
@@ -2907,6 +2942,7 @@ class AgentRunner(Runner):
         user_id: str,
         query: str | None,
         request: AgentRequest,
+        session_execution: Any = None,
     ) -> _QueryPreflight:
         """处理审批与用户 prompt hook，返回主流程需要的前置状态。"""
         return await query_preflight.prepare_query_preflight(
@@ -2915,6 +2951,7 @@ class AgentRunner(Runner):
             user_id=user_id,
             query=query,
             request=request,
+            session_execution=session_execution,
         )
 
     def _load_query_preflight_config(self) -> tuple[Any, HookConfig]:
@@ -2929,12 +2966,14 @@ class AgentRunner(Runner):
         *,
         session_id: str,
         user_id: str,
+        session_execution: Any = None,
     ) -> HookSessionOverlay:
         """Load the request's persisted hook overlay."""
         return await _load_session_hook_overlay(
             getattr(self, "session", None),
             session_id=session_id,
             user_id=user_id,
+            session_execution=session_execution,
         )
 
     @staticmethod
@@ -2954,16 +2993,22 @@ class AgentRunner(Runner):
         agent_config: Any,
         overlay: HookSessionOverlay,
         prompt: str,
+        session_execution: Any = None,
     ) -> MergedHookResult:
         """Emit the user-prompt hook through the runner's shared helper."""
+        hook_args = {
+            "request": request,
+            "runner": self,
+            "tenant_hooks": tenant_hooks,
+            "agent_config": agent_config,
+            "overlay": overlay,
+            "prompt": prompt,
+        }
+        if session_execution is not None:
+            hook_args["session_execution"] = session_execution
         return await _emit_runner_hook(
             HookEventName.USER_PROMPT_SUBMIT,
-            request=request,
-            runner=self,
-            tenant_hooks=tenant_hooks,
-            agent_config=agent_config,
-            overlay=overlay,
-            prompt=prompt,
+            **hook_args,
         )
 
     @staticmethod
@@ -3318,20 +3363,26 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay,
         skip_history: bool,
         env_context: str,
+        session_execution: Any = None,
     ) -> tuple[str, Msg | None]:
         """执行 SESSION_START hook，并返回可能追加的上下文或阻断消息。"""
         if not _hook_config_enabled(tenant_hooks, agent_config, hook_overlay):
             return env_context, None
 
+        hook_args = {
+            "request": request,
+            "runner": self,
+            "tenant_hooks": tenant_hooks,
+            "agent_config": agent_config,
+            "overlay": hook_overlay,
+            "source": "resume" if not skip_history else "startup",
+            "model": _resolve_active_model_label(self.tenant_id),
+        }
+        if session_execution is not None:
+            hook_args["session_execution"] = session_execution
         session_start_result = await _emit_runner_hook(
             HookEventName.SESSION_START,
-            request=request,
-            runner=self,
-            tenant_hooks=tenant_hooks,
-            agent_config=agent_config,
-            overlay=hook_overlay,
-            source="resume" if not skip_history else "startup",
-            model=_resolve_active_model_label(self.tenant_id),
+            **hook_args,
         )
         if session_start_result.decision in {
             HookDecision.BLOCK,
@@ -3387,6 +3438,11 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "cron_execution_key": getattr(
+                request,
+                "cron_execution_key",
+                None,
+            ),
             "current_user_text": current_user_text,
             "channel_manager": getattr(
                 getattr(self, "_workspace", None),
@@ -4143,6 +4199,7 @@ class AgentRunner(Runner):
         msgs: list[Any],
         query: str | None,
         preflight: _QueryPreflight,
+        session_execution: Any = None,
     ) -> _RuntimeStartResult:
         """装配 agent、chat、MCP 客户端以及会话级 hook 运行状态。"""
         return await query_runtime.prepare_query_runtime(
@@ -4151,6 +4208,7 @@ class AgentRunner(Runner):
             msgs=msgs,
             query=query,
             preflight=preflight,
+            session_execution=session_execution,
         )
 
     @staticmethod
@@ -4166,6 +4224,7 @@ class AgentRunner(Runner):
         request: AgentRequest,
         msgs: list[Any],
         preflight: _QueryPreflight,
+        session_execution: Any = None,
     ) -> _QueryRuntimeInputs:
         """Resolve request values needed before connecting runtime resources."""
         return await query_runtime.build_query_runtime_inputs(
@@ -4186,6 +4245,7 @@ class AgentRunner(Runner):
             load_tenant_hooks=_load_tenant_hook_config,
             load_agent_configuration=load_agent_config,
             current_passthrough_headers=get_current_passthrough_headers,
+            session_execution=session_execution,
         )
 
     async def _start_query_runtime_resources(
@@ -4197,7 +4257,11 @@ class AgentRunner(Runner):
         mcp_clients: list[Any],
     ) -> tuple[_QueryRuntimeResources, _RuntimeStartResult | None]:
         """Connect request resources and run the session-start hook."""
-        turn_id = f"turn-{uuid4().hex}"
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        turn_id = str(channel_meta.get("turn_id") or "")
+        if not turn_id:
+            turn_id = f"turn-{uuid4().hex}"
+            request.channel_meta = {**channel_meta, "turn_id": turn_id}
         chat = await self._get_or_create_chat(
             session_id=inputs.session_id,
             user_id=inputs.user_id,
@@ -4680,12 +4744,14 @@ class AgentRunner(Runner):
         *,
         request: AgentRequest,
         detail: ModelCallFailureDetail,
+        session_execution: Any = None,
     ) -> None:
         """保存模型调用失败详情，持久化异常不应覆盖原始失败信息。"""
         try:
             await self._persist_model_call_failed_detail(
                 request=request,
                 detail=detail,
+                session_execution=session_execution,
             )
         except Exception:
             logger.warning(
@@ -4699,6 +4765,7 @@ class AgentRunner(Runner):
         request: AgentRequest,
         exc: Exception,
         trace_id: str | None,
+        session_execution: Any = None,
     ) -> None:
         """在 Console 模型调用失败时抛出用户可见的结构化异常。"""
         if getattr(request, "channel", DEFAULT_CHANNEL) != DEFAULT_CHANNEL:
@@ -4723,6 +4790,7 @@ class AgentRunner(Runner):
         await self._persist_model_call_failed_detail_safely(
             request=request,
             detail=detail,
+            session_execution=session_execution,
         )
         raise ModelCallFailedException(detail) from exc
 
@@ -4731,6 +4799,7 @@ class AgentRunner(Runner):
         *,
         request: AgentRequest,
         detail: ModelCallFailureDetail,
+        session_execution: Any = None,
     ) -> None:
         """Persist user-visible model-call failure detail outside memory."""
         if self.session is None or not hasattr(
@@ -4773,6 +4842,11 @@ class AgentRunner(Runner):
             next_state[MODEL_CALL_FAILED_MESSAGES_STATE_KEY] = records
             return next_state
 
+        if session_execution is not None:
+            _append_record(session_execution.state)
+            session_execution.mark_state_dirty()
+            return
+
         await self.session.mutate_session_state(
             session_id=session_id,
             mutator=_append_record,
@@ -4785,6 +4859,11 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime | None,
         session_state_loaded: bool,
+        fallback_agent: SWEAgent | None = None,
+        fallback_session_id: str = "",
+        fallback_user_id: str = "",
+        fallback_skip_history: bool = False,
+        fallback_session_execution: Any = None,
     ) -> None:
         await query_cleanup.save_state_during_cleanup(
             self,
@@ -4792,6 +4871,11 @@ class AgentRunner(Runner):
             session_state_loaded=session_state_loaded,
             cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
             hook_config_enabled=_hook_config_enabled,
+            fallback_agent=fallback_agent,
+            fallback_session_id=fallback_session_id,
+            fallback_user_id=fallback_user_id,
+            fallback_skip_history=fallback_skip_history,
+            fallback_session_execution=fallback_session_execution,
         )
 
     async def _update_chat_during_cleanup(
@@ -4957,16 +5041,9 @@ class AgentRunner(Runner):
         session_id: str,
         skip_history: bool,
         user_id: str,
-    ) -> None:
-        await query_attempt.save_state_before_retry(
-            self,
-            agent,
-            session_state_loaded,
-            session_id,
-            skip_history,
-            user_id,
-            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
-        )
+    ) -> dict[str, Any] | None:
+        del session_state_loaded, session_id, skip_history, user_id
+        return query_attempt.snapshot_state_before_retry(agent)
 
     def _load_query_retry_settings(
         self,
@@ -5031,7 +5108,6 @@ class AgentRunner(Runner):
             retry_state=retry_state,
             runtime=runtime,
             session_id=session_id,
-            cleanup_timeout=QUERY_CLEANUP_TIMEOUT,
         ):
             yield item
 
@@ -5059,11 +5135,16 @@ class AgentRunner(Runner):
             TraceStatus.COMPLETED,
         )
         if skill_snapshot_to_persist is not None:
-            await self.session.save_session_skill_snapshot(
-                session_id=runtime.session_id,
-                user_id=runtime.user_id,
-                snapshot=skill_snapshot_to_persist,
-            )
+            if runtime.session_execution is not None:
+                runtime.session_execution.state[
+                    SESSION_SKILL_SNAPSHOT_STATE_KEY
+                ] = skill_snapshot_to_persist
+            else:
+                await self.session.save_session_skill_snapshot(
+                    session_id=runtime.session_id,
+                    user_id=runtime.user_id,
+                    snapshot=skill_snapshot_to_persist,
+                )
 
     async def _finish_blocked_query_attempt(
         self,
@@ -5089,11 +5170,16 @@ class AgentRunner(Runner):
                 TraceStatus.COMPLETED,
             )
         if skill_snapshot_to_persist is not None:
-            await self.session.save_session_skill_snapshot(
-                session_id=runtime.session_id,
-                user_id=runtime.user_id,
-                snapshot=skill_snapshot_to_persist,
-            )
+            if runtime.session_execution is not None:
+                runtime.session_execution.state[
+                    SESSION_SKILL_SNAPSHOT_STATE_KEY
+                ] = skill_snapshot_to_persist
+            else:
+                await self.session.save_session_skill_snapshot(
+                    session_id=runtime.session_id,
+                    user_id=runtime.user_id,
+                    snapshot=skill_snapshot_to_persist,
+                )
 
     async def _stream_single_query_attempt(
         self,
@@ -5141,6 +5227,7 @@ class AgentRunner(Runner):
         query: str | None,
         session_id: str,
         preflight: _QueryPreflight,
+        session_execution: Any = None,
     ):
         """Coordinate retry and attempt execution after preflight."""
         async for item in query_attempt.stream_query_after_preflight(
@@ -5150,6 +5237,7 @@ class AgentRunner(Runner):
             query=query,
             session_id=session_id,
             preflight=preflight,
+            session_execution=session_execution,
         ):
             yield item
 
@@ -5187,27 +5275,59 @@ class AgentRunner(Runner):
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
         user_id = getattr(request, "user_id", "") or ""
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        turn_id = ""
+        if request is not None:
+            turn_id = f"turn-{uuid4().hex}"
+            request.channel_meta = {**channel_meta, "turn_id": turn_id}
+        is_scheduled = (
+            getattr(request, "execution_origin", None) == "scheduled"
+        )
+        trace_scope = nullcontext(None)
+        if (
+            not is_scheduled
+            and user_id
+            and session_id
+            and turn_id
+            and self.agent_id
+        ):
+            trace_scope = global_tracer.start_as_current_span(
+                "agent.run",
+                kind=SpanKind.SERVER,
+                trace_fields=TraceFields(
+                    task_id=session_id,
+                    user_id=user_id,
+                    session_id=turn_id,
+                    agent_id=self.agent_id,
+                    agent_version=__version__,
+                    source_id=_request_source_id(request),
+                ),
+            )
 
-        query_execution = getattr(self, "_query_execution", None)
-        if query_execution is not None:
-            async for frame in query_execution.stream(
-                QueryInvocation(request=request, msgs=tuple(msgs)),
+        async with trace_scope as span:
+            if span is not None:
+                span.set_attribute("agent.user_message", query or "")
+
+            query_execution = getattr(self, "_query_execution", None)
+            if query_execution is not None:
+                async for frame in query_execution.stream(
+                    QueryInvocation(request=request, msgs=tuple(msgs)),
+                ):
+                    trace_id = getattr(request, "trace_id", None)
+                    msg = self._attach_trace_id_to_msg(frame.message, trace_id)
+                    yield msg, frame.last
+                return
+
+            async for msg, last in self._stream_query_entry(
+                msgs,
+                request=request,
+                query=query,
+                session_id=session_id,
+                user_id=user_id,
             ):
                 trace_id = getattr(request, "trace_id", None)
-                msg = self._attach_trace_id_to_msg(frame.message, trace_id)
-                yield msg, frame.last
-            return
-
-        async for msg, last in self._stream_query_entry(
-            msgs,
-            request=request,
-            query=query,
-            session_id=session_id,
-            user_id=user_id,
-        ):
-            trace_id = getattr(request, "trace_id", None)
-            msg = self._attach_trace_id_to_msg(msg, trace_id)
-            yield msg, last
+                msg = self._attach_trace_id_to_msg(msg, trace_id)
+                yield msg, last
 
     async def get_state_loaded(
         self,
@@ -5216,6 +5336,9 @@ class AgentRunner(Runner):
         session_state_loaded: bool,
         skip_history: bool | Any,
         user_id: str | None,
+        *,
+        session_execution: Any = None,
+        retry_state_snapshot: dict[str, Any] | None = None,
     ) -> bool:
         return await session_lifecycle.get_state_loaded(
             self,
@@ -5226,6 +5349,8 @@ class AgentRunner(Runner):
             user_id,
             coerce_session_id=_coerce_session_storage_id,
             coerce_user_id=_coerce_session_storage_user_id,
+            session_execution=session_execution,
+            retry_state_snapshot=retry_state_snapshot,
         )
 
     async def _save_cron_session_state(
@@ -5234,11 +5359,14 @@ class AgentRunner(Runner):
         session_id: str | None | Any,
         user_id: str | None,
         hook_overlay: HookSessionOverlay | None = None,
+        session_execution: Any = None,
     ) -> None:
         """保存 cron 任务状态，保留旧历史并追加本轮新增消息。"""
         storage_session_id = _coerce_session_storage_id(session_id)
         storage_user_id = _coerce_session_storage_user_id(user_id)
         current_agent_state = agent.state_dict()
+        request_context = getattr(agent, "_request_context", {}) or {}
+        execution_key = request_context.get("cron_execution_key")
         merge_stats: dict[str, Any] = {}
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
@@ -5247,22 +5375,36 @@ class AgentRunner(Runner):
                 existing_content,
                 current_content,
                 stripped_count,
-            ) = _build_cron_merged_state(
+                should_commit,
+            ) = _build_cron_append_state(
                 existing_state,
                 current_agent_state,
                 hook_overlay,
+                execution_key=execution_key,
             )
             merge_stats["existing_content"] = existing_content
             merge_stats["current_content"] = current_content
             merge_stats["stripped_count"] = stripped_count
+            merge_stats["should_commit"] = should_commit
             return merged_state
 
-        await self.session.mutate_session_state(
-            session_id=storage_session_id,
-            mutator=_merge,
-            user_id=storage_user_id,
-            create_if_not_exist=True,
-        )
+        if session_execution is not None:
+            merged_state = _merge(session_execution.state)
+            if merge_stats.get("should_commit", True):
+                await session_execution.commit_state(merged_state)
+        else:
+            existing_state = await self.session.get_session_state_dict(
+                session_id=storage_session_id,
+                user_id=storage_user_id,
+                allow_not_exist=True,
+            )
+            merged_state = _merge(existing_state)
+            if merge_stats.get("should_commit", True):
+                await self.session.save_merged_state(
+                    session_id=storage_session_id,
+                    user_id=storage_user_id,
+                    state=merged_state,
+                )
 
         logger.info(
             "Cron task: saved merged session state "
@@ -5280,8 +5422,11 @@ class AgentRunner(Runner):
         session_id: str | None | Any,
         user_id: str | None,
         hook_overlay: HookSessionOverlay | None = None,
+        session_execution: Any = None,
     ) -> None:
         """兼容不支持 state_dict 的 agent 落盘路径。"""
+        if session_execution is not None:
+            raise TypeError("session transaction requires agent.state_dict")
         storage_session_id = _coerce_session_storage_id(session_id)
         storage_user_id = _coerce_session_storage_user_id(user_id)
         await self.session.save_session_state(
@@ -5315,6 +5460,7 @@ class AgentRunner(Runner):
         session_id: str | None | Any,
         user_id: str | None,
         hook_overlay: HookSessionOverlay | None = None,
+        session_execution: Any = None,
     ) -> None:
         """保存普通请求状态，并在落盘前剔除内部续跑提示。"""
         storage_session_id = _coerce_session_storage_id(session_id)
@@ -5325,6 +5471,7 @@ class AgentRunner(Runner):
                 session_id,
                 user_id,
                 hook_overlay,
+                session_execution,
             )
             return
 
@@ -5365,12 +5512,17 @@ class AgentRunner(Runner):
             )
             return state_modules
 
-        await self.session.mutate_session_state(
-            session_id=storage_session_id,
-            mutator=_merge,
-            user_id=storage_user_id,
-            create_if_not_exist=True,
-        )
+        if session_execution is not None:
+            await session_execution.commit_state(
+                _merge(session_execution.state),
+            )
+        else:
+            await self.session.mutate_session_state(
+                session_id=storage_session_id,
+                mutator=_merge,
+                user_id=storage_user_id,
+                create_if_not_exist=True,
+            )
         logger.info(
             "Saved session state with stripped_internal_follow_ups=%s "
             "deduped_external_approvals=%s "
@@ -5387,8 +5539,20 @@ class AgentRunner(Runner):
         skip_history: bool | Any,
         user_id: str | None,
         hook_overlay: HookSessionOverlay | None = None,
+        *,
+        session_execution: Any = None,
     ):
         """按请求类型保存 session state。"""
+        if session_execution is None:
+            await session_lifecycle.save_job_session_state(
+                self,
+                agent,
+                session_id,
+                skip_history,
+                user_id,
+                hook_overlay,
+            )
+            return
         await session_lifecycle.save_job_session_state(
             self,
             agent,
@@ -5396,6 +5560,7 @@ class AgentRunner(Runner):
             skip_history,
             user_id,
             hook_overlay,
+            session_execution=session_execution,
         )
 
     async def _cleanup_denied_session_memory(
@@ -5403,6 +5568,7 @@ class AgentRunner(Runner):
         session_id: str,
         user_id: str,
         denial_response: "Msg | None" = None,
+        session_execution: Any = None,
     ) -> None:
         """Clean up session memory after a tool-guard denial.
 
@@ -5424,7 +5590,7 @@ class AgentRunner(Runner):
             storage_session_id,
             storage_user_id,
         )
-        if not Path(path).exists():
+        if session_execution is None and not Path(path).exists():
             return
 
         try:
@@ -5456,12 +5622,17 @@ class AgentRunner(Runner):
 
                 return states if modified else None
 
-            await self.session.mutate_session_state(
-                session_id=storage_session_id,
-                mutator=_cleanup_state,
-                user_id=storage_user_id,
-                create_if_not_exist=False,
-            )
+            if session_execution is not None:
+                updated = _cleanup_state(session_execution.state)
+                if updated is not None:
+                    await session_execution.commit_state(updated)
+            else:
+                await self.session.mutate_session_state(
+                    session_id=storage_session_id,
+                    mutator=_cleanup_state,
+                    user_id=storage_user_id,
+                    create_if_not_exist=False,
+                )
 
             if not modified:
                 return

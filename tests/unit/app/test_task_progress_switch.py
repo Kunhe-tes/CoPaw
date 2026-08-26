@@ -288,6 +288,36 @@ class TestReactAgentTaskProgressPrompt:
         assert "After the user answers one question series" in prompt
         assert "all decision-tree branches" in prompt
 
+    def test_build_sys_prompt_adds_goal_proposal_contract_shape(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_system_prompt_from_working_dir",
+            lambda **_: "base prompt",
+        )
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+        agent._request_context = {"goal_mode_enabled": True}
+
+        with bind_source_system_config(_build_effective_config(False)):
+            prompt = SWEAgent._build_sys_prompt(agent)
+
+        for field in (
+            "requirement",
+            "observable_assertion",
+            "verification_method",
+            "expected_outcome",
+            "must_preserve",
+            "must_not_do",
+        ):
+            assert field in prompt
+
     def test_build_sys_prompt_omits_plan_mode_instruction_in_normal_mode(
         self,
         monkeypatch,

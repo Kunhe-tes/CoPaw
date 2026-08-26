@@ -71,6 +71,7 @@ from .tools import (
 )
 from .utils import process_file_and_media_blocks_in_message
 from ..utils.fs_text import sanitize_text_for_json
+from ..tracing.agent_trace_sdk import chat_traced
 from ..constant import (
     AGENT_INTERRUPT_TIMEOUT,
     AGENT_WATCHDOG_TIMEOUT,
@@ -188,7 +189,12 @@ Turn the user's overall objective into a complete Goal Contract Draft. Ask for
 clarification when the objective, deterministic completion criteria, constraints,
 or autonomy boundary are materially unclear. When the Contract Draft is ready,
 call `submit_proposed_plan` with objective, completion_criteria, constraints,
-and autonomy_boundary. Do not execute the Goal before the user confirms it."""
+and autonomy_boundary. Each completion criterion must contain exactly four
+non-empty string fields: requirement, observable_assertion,
+verification_method, and expected_outcome. constraints must contain exactly
+must_preserve and must_not_do, both string arrays. Do not use criterion,
+verification, verification_command, or arrays for a criterion field. Do not
+execute the Goal before the user confirms it."""
 
 # Valid namesake strategies for tool registration
 NamesakeStrategy = Literal["override", "skip", "raise", "rename"]
@@ -1439,9 +1445,18 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         # Register memory_search tool if enabled and available
         if self._enable_memory_manager and self.memory_manager is not None:
             # update memory manager
-            self.memory = self.memory_manager.get_in_memory_memory(
-                chat_id=self._request_context.get("chat_id") or None,
+            chat_id = self._request_context.get("chat_id") or None
+            create_request_memory = getattr(
+                self.memory_manager,
+                "create_request_memory",
+                None,
             )
+            if chat_id and callable(create_request_memory):
+                self.memory = create_request_memory(chat_id)
+            else:
+                self.memory = self.memory_manager.get_in_memory_memory(
+                    chat_id=chat_id,
+                )
 
             # Register memory_search as a tool function
             self.toolkit.register_tool_function(
@@ -1768,6 +1783,15 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         """
         return self._strip_media_blocks_from_memory()
 
+    @chat_traced(
+        request_model_factory=lambda self, *args, **kwargs: (
+            self._resolved_model_slot.get("model")
+        ),
+        provider_name_factory=lambda self, *args, **kwargs: (
+            self._resolved_model_slot.get("provider_id")
+        ),
+        output_arguments_factory=lambda result: {},
+    )
     async def _run_reasoning_with_internal_context(
         self,
         tool_choice: Literal["auto", "none", "required"] | None = None,

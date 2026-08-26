@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import hashlib
 import json
 import logging
 import platform
@@ -32,6 +33,36 @@ from .tool_status import apply_running_tool_status, apply_terminal_tool_status
 logger = logging.getLogger(__name__)
 _MISSING_SOURCE_ID_PLACEHOLDER = "(not provided)"
 _RUNTIME_MESSAGE_ROLES = {"assistant", "system", "user", "tool"}
+
+
+def legacy_message_id(
+    session_id: str,
+    position: int,
+    timestamp: str | None,
+    role: str | None,
+    content: object,
+) -> str:
+    """Return a stable identity for persisted messages without a raw ID."""
+    normalized_content = (
+        content
+        if isinstance(content, str)
+        else json.dumps(
+            content,
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+    )
+    material = "\x1f".join(
+        (
+            str(session_id or ""),
+            str(position),
+            str(timestamp or ""),
+            str(role or ""),
+            normalized_content,
+        ),
+    )
+    return f"legacy:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
 
 
 def _normalize_runtime_message_role(
@@ -331,6 +362,9 @@ def _build_media_message_from_block(
 # pylint: disable=too-many-branches,too-many-statements, too-many-nested-blocks
 def agentscope_msg_to_message(
     messages: Union[Msg, List[Msg]],
+    *,
+    session_id: str = "",
+    position_offset: int = 0,
 ) -> List[ChatMessage]:
     """
     Convert AgentScope Msg(s) into one or more runtime Message objects.
@@ -356,11 +390,25 @@ def agentscope_msg_to_message(
     ) -> ChatMessage:
         payload = message.model_dump()
         payload["timestamp"] = timestamp
+        metadata = payload.get("metadata")
+        if isinstance(metadata, dict):
+            stable_id = metadata.get("original_id")
+            if isinstance(stable_id, str) and stable_id:
+                payload["id"] = stable_id
         return ChatMessage.model_validate(payload)
 
-    for msg in msgs:
+    for position, msg in enumerate(msgs, start=position_offset):
+        raw_id = getattr(msg, "id", None)
+        raw_id = str(raw_id).strip() if raw_id else ""
+        stable_id = raw_id or legacy_message_id(
+            session_id,
+            position,
+            msg.timestamp,
+            msg.role,
+            msg.content,
+        )
         metadata = {
-            "original_id": msg.id,
+            "original_id": stable_id,
             "original_name": msg.name,
             "metadata": msg.metadata,
         }
