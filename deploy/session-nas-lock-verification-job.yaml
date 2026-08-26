@@ -23,6 +23,11 @@ spec:
         - name: verifier
           image: agentscope/swe:latest
           command: ["python3", "/app/scripts/verify_session_nas_lock.py", "/mnt/sessions", "--mode", "indexed"]
+          env:
+            - name: JOB_COMPLETION_INDEX
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
           volumeMounts:
             - name: sessions
               mountPath: /mnt/sessions
