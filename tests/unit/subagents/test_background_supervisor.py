@@ -17,14 +17,18 @@ from swe.app.subagents import (
     BackgroundSubAgentSupervisor,
     DefinitionMatchMetadata,
     DelegationSpec,
+    InMemoryDefinitionProvider,
     PerRunSubAgentRunStore,
     PermissionPolicy,
     SkillOwnedDefinitionMetadata,
     SubAgentStartRequest,
     builtin_definition_provider,
+    initialize_community_expert_dependency_view,
 )
 from swe.config.config import AgentProfileConfig, MCPClientConfig, MCPConfig
 from swe.app.tenant_context import bind_tenant_context
+from swe.app.subagents.models import AgentOwnedDefinitionMetadata
+from swe.app.subagents.builtins import _builtin
 
 
 @pytest.fixture(autouse=True)
@@ -134,6 +138,91 @@ async def test_start_blocks_when_concurrency_limit_reached(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_start_uses_the_initialized_community_expert_session_view(
+    tmp_path: Path,
+) -> None:
+    """Later runs in a Chat keep using the first selected dependency view."""
+    definition = (
+        AgentRegistry([builtin_definition_provider()])
+        .resolve(
+            "plan-researcher",
+        )
+        .model_copy(
+            update={
+                "name": "received-reviewer",
+                "agent_owned": AgentOwnedDefinitionMetadata(
+                    definition_id="00000000-0000-0000-0000-000000000030",
+                    declared_skills=["quality"],
+                    declared_mcps=["github"],
+                    community={
+                        "item_id": "expert-1",
+                        "version": "1.0.0",
+                        "content_fingerprint": "fingerprint",
+                    },
+                ),
+            },
+        )
+    )
+    source_root = (
+        tmp_path
+        / "agents"
+        / "00000000-0000-0000-0000-000000000030.dependencies"
+    )
+    (source_root / "skills" / "quality").mkdir(parents=True)
+    (source_root / "skills" / "quality" / "SKILL.md").write_text(
+        "# session original",
+        encoding="utf-8",
+    )
+    (source_root / "mcp").mkdir()
+    (source_root / "mcp" / "config.json").write_text(
+        '{"github":{"name":"github","command":"session-github"}}',
+        encoding="utf-8",
+    )
+    chat_id = "00000000-0000-0000-0000-000000000031"
+    view_root = initialize_community_expert_dependency_view(
+        workspace_dir=tmp_path,
+        chat_id=chat_id,
+        definition=definition,
+    )
+    assert view_root is not None
+    (source_root / "skills" / "quality" / "SKILL.md").write_text(
+        "# later profile update",
+        encoding="utf-8",
+    )
+
+    popen_factory = _FakePopenFactory()
+    supervisor = BackgroundSubAgentSupervisor(popen_factory=popen_factory)
+    scope = _scope(tmp_path)
+    started = await supervisor.start(
+        scope=scope,
+        spec=_spec().model_copy(update={"name": definition.name}),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+        definition=definition,
+        request_context={
+            "chat_id": chat_id,
+            "_expert_dependency_view_root": str(view_root),
+        },
+    )
+
+    assert started.status == "running"
+    launch = json.loads(
+        (scope.run_store_dir / f"{started.run_id}.launch.json").read_text(
+            encoding="utf-8",
+        ),
+    )
+    skill_dir = Path(launch["launch_snapshot"]["skill_snapshot_dirs"][0])
+    assert (skill_dir / "SKILL.md").read_text(encoding="utf-8") == (
+        "# session original"
+    )
+    mcp_path = Path(launch["launch_snapshot"]["private_mcp_snapshot_path"])
+    assert (
+        json.loads(mcp_path.read_text(encoding="utf-8"))["github"]["command"]
+        == "session-github"
+    )
+
+
+@pytest.mark.asyncio
 async def test_wait_lazy_reaps_worker_without_result(tmp_path):
     popen_factory = _FakePopenFactory()
     supervisor = BackgroundSubAgentSupervisor(
@@ -161,6 +250,33 @@ async def test_wait_lazy_reaps_worker_without_result(tmp_path):
     assert record.worker is not None
     assert record.worker.exit_code == 1
     assert record.errors[-1].code == "worker_exited_without_result"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_run_waits_for_one_worker_without_a_poll_timeout(tmp_path):
+    popen_factory = _FakePopenFactory()
+    definition = _builtin(
+        name="plan-researcher",
+        description="test definition",
+        instruction="test instruction",
+    )
+    supervisor = BackgroundSubAgentSupervisor(
+        popen_factory=popen_factory,
+        registry=AgentRegistry([InMemoryDefinitionProvider([definition])]),
+    )
+    scope = _scope(tmp_path)
+    started = await supervisor.start(
+        scope=scope,
+        spec=_spec(),
+        parent_agent_config=_agent_config(tmp_path),
+        workspace_dir=tmp_path,
+    )
+
+    record = await supervisor.wait_for_run(scope, started.run_id)
+
+    assert record is not None
+    assert record.run_id == started.run_id
+    assert record.status == "failed"
 
 
 @pytest.mark.asyncio

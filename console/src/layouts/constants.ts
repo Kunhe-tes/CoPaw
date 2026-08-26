@@ -78,6 +78,7 @@ export const KEY_TO_PATH: Record<string, string> = {
   "my-skills": "/my-skills",
   "my-mcp": "/my-mcp",
   experts: "/experts",
+  "expert-community": "/expert-community",
 };
 
 export const KEY_TO_LABEL: Record<string, string> = {
@@ -119,6 +120,7 @@ export const KEY_TO_LABEL: Record<string, string> = {
   market: "nav.market",
   "my-skills": "nav.mySkills",
   "my-mcp": "nav.myMcp",
+  "expert-community": "nav.expertCommunity",
 };
 
 // ── URL helpers ───────────────────────────────────────────────────────────

@@ -36,14 +36,18 @@ const mocks = vi.hoisted(() => {
     capturedOptions: null as Record<string, any> | null,
     planModeEnabledHistory: [] as boolean[],
     showContentOnly: false,
+    isOriginY: false,
     createChat: vi.fn(async () => ({
       id: "chat-real-created",
       meta: { plan_mode_enabled: true },
     })),
+    expertSelectorProps: null as Record<string, unknown> | null,
     listCronJobs: vi.fn(async () => []),
+    listExperts: vi.fn(async () => []),
     currentSessionId: "chat-1",
     inputDisabled: true,
     pathname: "/chat/chat-1",
+    search: "",
     getChatIdForSession: vi.fn((sessionId: string) => sessionId),
     getLogicalSessionId: vi.fn((sessionId: string) => sessionId),
     getRealIdForSession: vi.fn((sessionId: string) => sessionId),
@@ -234,10 +238,11 @@ vi.mock("react-i18next", () => ({
 vi.mock("@agentscope-ai/icons", () => ({
   SparkAttachmentLine: () => <span data-testid="attachment-icon" />,
   SparkCopyLine: () => <span data-testid="copy-icon" />,
+  SparkDownLine: () => <span data-testid="expert-selector-arrow" />,
 }));
 
 vi.mock("react-router-dom", () => ({
-  useLocation: () => ({ pathname: mocks.pathname }),
+  useLocation: () => ({ pathname: mocks.pathname, search: mocks.search }),
   useNavigate: () => mocks.navigate,
 }));
 
@@ -284,8 +289,12 @@ vi.mock("../../stores/sourceSystemConfigStore", () => ({
 }));
 
 vi.mock("../../stores/iframeStore", () => {
-  const useIframeStore = (selector?: (value: { userId: string }) => unknown) =>
-    selector ? selector({ userId: "test-user" }) : { userId: "test-user" };
+  const useIframeStore = (
+    selector?: (value: { userId: string; isOriginY: boolean }) => unknown,
+  ) =>
+    selector
+      ? selector({ userId: "test-user", isOriginY: mocks.isOriginY })
+      : { userId: "test-user", isOriginY: mocks.isOriginY };
 
   useIframeStore.getState = () => ({
     sessionId: mocks.navigationSessionId,
@@ -330,6 +339,12 @@ vi.mock("../../api/modules/cronjob", () => ({
 vi.mock("../../api/modules/feedback", () => ({
   feedbackApi: {
     getSessionFeedbacks: vi.fn(async () => ({ items: [] })),
+  },
+}));
+
+vi.mock("../../api/modules/experts", () => ({
+  expertsApi: {
+    listExperts: mocks.listExperts,
   },
 }));
 
@@ -476,6 +491,21 @@ vi.mock("@/components/ConversationQuickNav", () => ({
   default: () => null,
 }));
 
+vi.mock("./ExpertSelector", () => ({
+  __esModule: true,
+  default: (props: Record<string, unknown>) => {
+    mocks.expertSelectorProps = props;
+    return (
+      <button
+        type="button"
+        onClick={() => (props.onChange as (id: string) => void)("expert-1")}
+      >
+        选择专家
+      </button>
+    );
+  },
+}));
+
 vi.mock("@/components/agentscope-chat/DragUploadOverlay", () => ({
   __esModule: true,
   default: () => null,
@@ -589,8 +619,10 @@ describe("ChatPage plan mode wiring", () => {
     mocks.capturedOptions = null;
     mocks.planModeEnabledHistory = [];
     mocks.showContentOnly = false;
+    mocks.isOriginY = false;
     mocks.inputDisabled = true;
     mocks.pathname = "/chat/chat-1";
+    mocks.search = "";
     mocks.currentSessionId = "chat-1";
     mocks.getChatIdForSession.mockImplementation(
       (sessionId: string) => sessionId,
@@ -617,6 +649,9 @@ describe("ChatPage plan mode wiring", () => {
     mocks.createChat.mockClear();
     mocks.listCronJobs.mockReset();
     mocks.listCronJobs.mockResolvedValue([]);
+    mocks.listExperts.mockReset();
+    mocks.listExperts.mockResolvedValue([]);
+    mocks.expertSelectorProps = null;
     mocks.setLoading.mockReset();
     mocks.getLoading.mockReset();
     mocks.getLoading.mockReturnValue(false);
@@ -696,6 +731,83 @@ describe("ChatPage plan mode wiring", () => {
     expect(screen.getByText("模式")).toBeInTheDocument();
     expect(screen.getByText("计划")).toBeInTheDocument();
     expect(screen.getByRole("switch", { name: "计划模式" })).toBeDisabled();
+  });
+
+  it("places Expert immediately after Mode in Composer quick actions", () => {
+    render(<ChatPage />);
+
+    const quickMenuItems = React.Children.toArray(
+      mocks.capturedOptions?.sender?.quickMenuItems,
+    ) as Array<
+      React.ReactElement<{ children?: React.ReactNode; label: string }>
+    >;
+    const modeItems = React.Children.toArray(
+      quickMenuItems[0].props.children,
+    ) as Array<React.ReactElement<{ icon?: React.ReactNode; label: string }>>;
+    const goalModeItem = modeItems.find((item) => item.props.label === "目标");
+    const expertSelector = quickMenuItems[1].props
+      .children as React.ReactElement<{ inline?: boolean }>;
+
+    expect(quickMenuItems.map((item) => item.props.label)).toEqual([
+      "模式",
+      "专家",
+    ]);
+    expect(expertSelector.props.inline).toBe(true);
+    expect(goalModeItem).toBeDefined();
+    expect(goalModeItem?.props.icon).toBeUndefined();
+  });
+
+  it("hides Expert from Composer quick actions when no selectable experts are configured", async () => {
+    render(<ChatPage />);
+
+    await waitFor(() => {
+      expect(mocks.listExperts).toHaveBeenCalledTimes(1);
+      const quickMenuItems = React.Children.toArray(
+        mocks.capturedOptions?.sender?.quickMenuItems,
+      ) as Array<React.ReactElement<{ label: string }>>;
+
+      expect(quickMenuItems.map((item) => item.props.label)).toEqual(["模式"]);
+    });
+  });
+
+  it("shows the selected expert name above the composer", async () => {
+    mocks.inputDisabled = false;
+    mocks.listExperts.mockResolvedValue([
+      {
+        definition_id: "expert-1",
+        enabled: true,
+        valid: true,
+        definition: {
+          name: "专家一号",
+          description: "处理复杂问题",
+        },
+      },
+    ]);
+
+    render(<ChatPage />);
+
+    await waitFor(() => {
+      expect(mocks.expertSelectorProps).toEqual(
+        expect.objectContaining({
+          experts: [
+            expect.objectContaining({ id: "expert-1", name: "专家一号" }),
+          ],
+        }),
+      );
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "选择专家" }));
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "专家一号" })).toBeEnabled();
+      const quickMenuItems = React.Children.toArray(
+        mocks.capturedOptions?.sender?.quickMenuItems,
+      ) as Array<React.ReactElement<{ icon?: React.ReactNode; label: string }>>;
+      const expertItem = quickMenuItems.find(
+        (item) => item.props.label === "专家",
+      );
+      expect(expertItem?.props.icon).toBeDefined();
+    });
   });
 
   it("creates a backend chat before persisting Plan Mode for a pending local session", async () => {

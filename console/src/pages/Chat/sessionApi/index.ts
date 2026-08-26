@@ -573,6 +573,7 @@ const buildResponseCard = (
     ...msg,
     content: normalizeOutputMessageContent(msg.content),
   }));
+  const stableId = stableResponseId(normalizedMessages);
 
   const cardTraceId = normalizedMessages.reduce<string | null>((found, msg) => {
     if (found) return found;
@@ -600,7 +601,7 @@ const buildResponseCard = (
     {
       code: CARD_RESPONSE,
       data: {
-        id: `response_${generateId()}`,
+        id: `response_${stableId}`,
         output: normalizedMessages,
         object: "response",
         status: "completed",
@@ -641,12 +642,19 @@ const buildResponseCard = (
   });
 
   return {
-    id: generateId(),
+    id: `history-response-${stableId}`,
     role: ROLE_ASSISTANT,
     cards,
     msgStatus: "finished",
   };
 };
+
+function stableResponseId(messages: OutputMessage[]): string {
+  const persistedIds = messages
+    .map((message) => message.id)
+    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  return persistedIds.length > 0 ? persistedIds.join("_") : generateId();
+}
 
 /**
  * Convert flat backend messages into the card-based format expected by

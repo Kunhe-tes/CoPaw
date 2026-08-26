@@ -67,6 +67,7 @@ describe("Plan Mode frontend helpers", () => {
     );
 
     expect(screen.getByText("计划")).toBeInTheDocument();
+    expect(screen.getByText("计划")).toHaveClass(quickMenuStyles.label);
     expect(screen.queryByLabelText("ordered-list")).not.toBeInTheDocument();
     expect(
       screen.getByText("计划").closest(`.${quickMenuStyles.item}`),
@@ -119,6 +120,25 @@ describe("Plan Mode frontend helpers", () => {
     await waitFor(() => {
       expect(onDisable).toHaveBeenCalledTimes(1);
     });
+  });
+
+  it("renders a closable active Goal Mode button without the ordered-list icon", async () => {
+    const onDisable = vi.fn();
+    render(
+      <ActivePlanModeButton
+        enabled
+        label="目标模式"
+        showIcon={false}
+        onDisable={onDisable}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "目标模式" });
+    expect(button).toBeInTheDocument();
+    expect(screen.queryByLabelText("ordered-list")).not.toBeInTheDocument();
+
+    fireEvent.click(button);
+    await waitFor(() => expect(onDisable).toHaveBeenCalledTimes(1));
   });
 
   it("keeps the active Plan Mode button mounted while exiting, then unmounts it", () => {

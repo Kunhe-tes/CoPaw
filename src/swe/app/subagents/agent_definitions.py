@@ -22,6 +22,7 @@ import fcntl
 from .models import (
     AgentOwnedDefinitionMetadata,
     BudgetConfig,
+    CommunityExpertReference,
     KNOWN_BUILTIN_TOOLS,
     SkillOwnedModelReference,
     SkillOwnedToolConfig,
@@ -124,6 +125,25 @@ class AgentOwnedDefinitionRepository:
         with self._mutation_lock():
             current = self._require_current(definition_id, expected_revision)
             normalized = _merge_update_payload(current.raw_payload, payload)
+            if current.definition is not None:
+                community = getattr(
+                    current.definition.agent_owned,
+                    "community",
+                    None,
+                )
+                if community is not None:
+                    old_skills = list(
+                        current.definition.agent_owned.declared_skills,
+                    )
+                    old_mcps = list(
+                        current.definition.agent_owned.declared_mcps or [],
+                    )
+                    new_skills = list(normalized.get("skills") or [])
+                    new_mcps = list(normalized.get("mcps") or [])
+                    if old_skills != new_skills or old_mcps != new_mcps:
+                        raise AgentOwnedDefinitionConflict(
+                            "received community expert dependencies are read-only; publish a new community source to change them",
+                        )
             if current.definition is not None:
                 normalized["enabled"] = current.definition.enabled
             package = self._package_from_payload(definition_id, normalized)
@@ -295,10 +315,13 @@ class AgentOwnedDefinitionRepository:
             definition_id=definition_id,
             declared_skills=_string_list(payload.get("skills"), "skills"),
             declared_mcps=(
-                _string_list(payload.get("mcps"), "mcps") if "mcps" in payload else None
+                _string_list(payload.get("mcps"), "mcps")
+                if "mcps" in payload
+                else None
             ),
             tools=_parse_tools(payload.get("tools")),
             model=_parse_model(payload.get("model")),
+            community=_parse_community(payload.get("community")),
         )
         return SubAgentDefinition(
             name=name,
@@ -388,6 +411,10 @@ def _normalize_payload(
             payload.get("model"),
             definition.agent_owned.model.model_dump(),
         )
+    if definition.agent_owned.community is None:
+        normalized.pop("community", None)
+    else:
+        normalized["community"] = definition.agent_owned.community.model_dump()
     return normalized
 
 
@@ -433,6 +460,21 @@ def _parse_model(value: Any) -> SkillOwnedModelReference | None:
     )
 
 
+def _parse_community(value: Any) -> CommunityExpertReference | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("community must be a table")
+    return CommunityExpertReference(
+        item_id=_string(value.get("item_id"), "community.item_id"),
+        version=_string(value.get("version"), "community.version"),
+        content_fingerprint=_string(
+            value.get("content_fingerprint"),
+            "community.content_fingerprint",
+        ),
+    )
+
+
 def _parse_budget(value: Any) -> BudgetConfig:
     if value is None:
         return BudgetConfig()
@@ -462,7 +504,9 @@ def _string(value: Any, field: str) -> str:
 def _string_list(value: Any, field: str) -> list[str]:
     if value is None:
         return []
-    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) for item in value
+    ):
         raise ValueError(f"{field} must be an array of strings")
     cleaned = [item.strip() for item in value]
     if not all(cleaned) or len(cleaned) != len(set(cleaned)):
@@ -494,10 +538,14 @@ def _revision(toml: str | bytes) -> str:
 
 def _render_toml(payload: dict[str, Any]) -> str:
     scalar_items = [
-        (key, value) for key, value in payload.items() if not isinstance(value, dict)
+        (key, value)
+        for key, value in payload.items()
+        if not isinstance(value, dict)
     ]
     table_items = [
-        (key, value) for key, value in payload.items() if isinstance(value, dict)
+        (key, value)
+        for key, value in payload.items()
+        if isinstance(value, dict)
     ]
     lines = [_render_assignment(key, value) for key, value in scalar_items]
     for key, value in table_items:
@@ -515,7 +563,9 @@ def _render_assignment(key: str, value: Any) -> str:
 
 def _render_key(key: str) -> str:
     return (
-        key if _BARE_KEY_PATTERN.fullmatch(key) else json.dumps(key, ensure_ascii=False)
+        key
+        if _BARE_KEY_PATTERN.fullmatch(key)
+        else json.dumps(key, ensure_ascii=False)
     )
 
 

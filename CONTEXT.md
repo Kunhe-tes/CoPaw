@@ -133,8 +133,148 @@ The optional `[model]` provider-and-identifier pair in a **Skill-owned Definitio
 _Avoid_: model-id-only reference, provider configuration, API key, arbitrary model endpoint, failed run for unavailable model
 
 **Skill-owned Model Selection**:
-The use of a resolved **Skill-owned Model Reference** by a Skill-owned SubAgent Worker. Any cloud or local model is eligible when the current tenant configuration resolves its provider-and-identifier pair; built-in and ordinary Stored SubAgent Definitions always inherit the parent model.
-_Avoid_: cloud-only model selection, model switching for built-in definitions, model switching for ordinary stored definitions, model routing in a run-scoped definition
+The use of a resolved **Skill-owned Model Reference** by a Skill-owned SubAgent Worker. Any cloud or local model is eligible when the current tenant configuration resolves its provider-and-identifier pair; built-in and Run-scoped SubAgent Definitions inherit the parent model.
+_Avoid_: cloud-only model selection, model switching for built-in definitions, model routing in a run-scoped definition
+
+**Agent-owned Model Reference**:
+The optional provider-and-identifier pair in an Agent-owned Definition Package. It names a model already configured for the tenant and cannot carry provider connection or credential settings.
+_Avoid_: model-id-only reference, provider configuration, API key, arbitrary model endpoint
+
+**Agent-owned Model Selection**:
+The use of a resolved **Agent-owned Model Reference** by an Agent-owned SubAgent Worker. When the referenced provider or model is unavailable, the worker silently inherits the parent Agent model.
+_Avoid_: forced model availability, credential transfer, model switching for built-in definitions, model routing in a run-scoped definition
+
+**Expert Model Picker**:
+The My Experts form control that lists the current tenant's usable chat models as provider-and-model choices plus an inherit-current-chat-model option. An existing unavailable configured reference remains visible and preserved instead of being discarded.
+_Avoid_: provider setup form, hidden unavailable model reset, global model picker
+
+**Community Expert Package**:
+A reusable expert shared through the Expert Community. It carries the expert's portable behavior and capability declarations, while the installing Agent Profile owns its local enablement and dependency resolution.
+_Avoid_: tenant-global expert configuration, live shared expert, copied Agent Profile
+
+**Portable Model Reference**:
+The provider-and-model identifier carried by a Community Expert Package without provider connection settings or credentials. An installing Agent Profile resolves it against its own tenant configuration and falls back to its Main Agent model when unavailable.
+_Avoid_: exported API key, shared provider configuration, credential-bearing expert package
+
+**Expert Community Scope**:
+The source-scoped community boundary for Community Expert Packages. It is a dedicated top-level Console destination immediately after Application Marketplace, rather than an Application Marketplace resource page; users browse and receive experts within their source and assigned institution visibility, while source administrators own publication, update, withdrawal, and distribution actions.
+_Avoid_: global expert marketplace, institution-bypassing expert catalog, Application Marketplace expert tab, Creation Center submenu, tenant-global expert catalog, author-managed market publication
+
+**Expert Community Administrator**:
+The existing Marketplace manager authorized to publish, maintain versions, unpublish, withdraw, and distribute Community Expert Packages under the established Skills and MCPs manager convention. Ordinary users may browse, install, and locally manage received experts but cannot mutate community items.
+_Avoid_: expert-specific role, author-only publisher, ordinary-user market editor
+
+**Community Expert Source**:
+The Agent-owned expert definition maintained in its author's Agent Profile and used as the input for explicit community synchronization. The market copy is not edited directly; later source edits produce a new market version.
+_Avoid_: market-owned expert definition, live shared definition, automatic bidirectional sync
+
+**Community Expert Installation**:
+The creation of a new Agent-owned Definition Package from a Community Expert Package. User-initiated installation targets the currently selected Agent Profile, while administrator distribution targets each recipient's Default Agent Profile; the receiving package has its own management identity. Installation identity is scoped by user, Agent Profile, and community item ID, so a user may independently install the same package in different Agent Profiles. A package already installed in one target Agent Profile cannot be reinstalled or self-updated by its user.
+_Avoid_: shared Definition ID, user-global installation, repeat-install overwrite, recipient self-update, publisher workspace copy, tenant-wide expert activation
+
+**Received Community Expert**:
+An Agent-owned Stored SubAgent Definition created by installing or receiving a Community Expert Package. It records its community item, received version, and local content identity; it follows the receiving Agent Profile's lifecycle and can be edited or removed locally without changing the community source.
+_Avoid_: live marketplace binding, immutable market definition, source expert alias
+
+**Community Expert Administrator Distribution**:
+The only community-driven update path for a Received Community Expert. A source administrator distributes a newer Community Expert Package to recipients' Default Agent Profiles; recipients do not pull updates from the community themselves, and distribution silently replaces any local received-expert modifications.
+_Avoid_: recipient-driven marketplace update, automatic update, local-edit conflict, live version tracking
+
+**Received Community Expert Enablement**:
+The enablement rule for a Received Community Expert: a first user installation or administrator distribution enables it, while an administrator update preserves the receiving Agent Profile's existing enabled or disabled choice.
+_Avoid_: always-disabled community install, update-forces-enable, publish-state inheritance
+
+**Community Expert Variant**:
+A locally edited Received Community Expert whose frozen bundled Skill and MCP content remains read-only. It remains local and cannot be synchronized to the Expert Community, including by an Expert Community Administrator. To change dependencies or share a variant, its owner separately creates a new local Community Expert Source and binds the owner's own resources; no received-expert copy action is provided. It never overwrites or synchronizes back to the original community item.
+_Avoid_: bundled-dependency editor, received-expert copy action, received-expert publication, ordinary-user publication, reverse synchronization, forkless community update, publisher-definition mutation
+
+**Community Expert Name**:
+The source-scoped unique display name of a Community Expert Package. A same-name publication requires explicit administrator confirmation, then continues the existing community item as a new version while preserving its version history.
+_Avoid_: duplicate source expert listing, silent cross-author replacement, unversioned overwrite
+
+**Community Expert Category**:
+The optional source-managed category assigned to a Community Expert Package for Expert Community browsing and filtering. It does not become part of the receiving local expert or affect execution.
+_Avoid_: runtime expert category, Agent Profile category, locally persisted community taxonomy
+
+**Community Expert Version Snapshot**:
+The immutable expert definition, frozen private Skill and MCP dependency copies, and Skill publication-scan result captured for one Community Expert version. The first version is `1.0.0`; changed republishing advances its patch version, while identical content creates no version.
+_Avoid_: mutable expert version, independently versioned bundled dependency, duplicate no-op version
+
+**Community Expert Version Restoration**:
+The administrator action that makes a historical Community Expert Version Snapshot the current community version. Later distribution uses that restored snapshot.
+_Avoid_: recipient-local rollback, untracked historical copy, partial dependency rollback
+
+**Complete Community Expert Publication**:
+The publishability condition that every Skill and MCP declared by a Community Expert Source is present and readable in its publishing Agent Profile so the version can freeze a complete private dependency copy. A missing or unreadable declared dependency blocks that publication without changing an older community version.
+_Avoid_: partial expert version, declaration-only dependency publishing, best-effort dependency omission
+
+**Expert Dependency Integrity Failure**:
+The pre-launch failure when a Selected Expert's frozen private Skill or MCP package is missing, unreadable, or structurally invalid. The expert does not start and the user is directed to restore the received package through administrator distribution or re-receiving.
+_Avoid_: partial run from corrupted package, silent missing private dependency, fallback to general Agent dependencies
+
+**Expert MCP Connectivity Degradation**:
+The non-fatal condition in which a structurally valid frozen Expert MCP configuration cannot connect to its external service. The Selected Expert still runs without that MCP and the current conversation reports the reduced capability.
+_Avoid_: corrupted-package failure, whole-expert failure for transient MCP outage, hidden MCP omission
+
+**Community Expert Installation Name Conflict**:
+The attempted first installation of a Community Expert whose runtime SubAgent Name already belongs to an unrelated local expert in the target Agent Profile. It is rejected without changing either expert; only a later administrator update of the same community item may replace its received copy.
+_Avoid_: first-install overwrite, automatic runtime-name suffix, unrelated local expert replacement
+
+**Community Expert Distribution Conflict**:
+The per-user failure in a batch Community Expert distribution when that user's Default Agent Profile has an unrelated enabled expert with the package's runtime SubAgent Name. The conflicting user is skipped without changing either expert, while distribution proceeds for every other target user.
+_Avoid_: batch-wide abort, unrelated-expert overwrite, automatic name suffix
+
+**Community Expert Withdrawal**:
+The explicit administrator operation that removes a Community Expert's received copies, identified by community item ID, from selected users or from every user when no target is specified, regardless of whether each copy arrived by distribution or user installation. In-progress runs finish, but completed withdrawal immediately prevents later selection or invocation in every Chat and releases its session dependency view. It is distinct from unpublishing, which only stops new browsing, installation, and distribution while existing copies remain usable.
+_Avoid_: in-flight run termination, unpublish-means-delete, name-based recall, distribution-only withdrawal, automatic removal on withdrawal from market
+
+**Session-scoped Expert Dependency View**:
+The temporary Skill and MCP availability granted to one Chat session from a Community Expert Package's frozen private dependency copy. It contains only the expert's declared dependencies, never writes those dependencies to the receiving Agent Profile, and never makes other Agent Profile Skill or MCP resources visible to that expert or to another Chat session.
+_Avoid_: persistent dependency installation, Agent Profile resource passthrough, tenant-wide expert dependency, cross-session capability grant
+
+**Temporary Expert Dependency Binding**:
+The session-lifetime association between a Community Expert and its frozen private Skill and MCP dependency copy. Declared dependency names always resolve to that private copy rather than an Agent Profile resource of the same name; MCP configuration is copied with the package under the same full-configuration semantics as Marketplace MCP distribution, and each resource remains subject to runtime availability, Tool Guard, and approval checks.
+_Avoid_: same-name Agent resource fallback, live market lookup, permanent Skill or MCP enablement, Agent-wide dependency registration
+
+**Frozen Expert MCP Configuration**:
+The complete MCP configuration copied into a Community Expert Package version and then into its received expert's private dependency directory. It follows the existing Marketplace MCP publication and distribution contract, including `headers` and `env`, and is usable only through the expert's session-scoped dependency view.
+_Avoid_: redacted expert dependency copy, general Agent MCP registration, per-session market re-resolution
+
+**Expert Private Dependency Directory**:
+The Definition-ID-bound companion directory `agents/<definition-id>.dependencies/`, containing frozen `skills/` and `mcp/` copies for one Community Expert. It coexists with, and does not replace, the expert's `agents/<definition-id>.toml` Definition Package.
+_Avoid_: shared workspace dependency directory, Agent-wide Skill/MCP directory, Definition Package migration
+
+**Expert Dependency Session Initialization**:
+The one-time initialization of a Chat's Session-scoped Expert Dependency View when the user first selects or invokes a Community Expert. The resulting frozen dependency view remains available through later turns of that Chat and is released when the Chat ends.
+_Avoid_: per-turn dependency loading, Agent Profile installation, cross-chat dependency reuse
+
+**Explicit Expert Selection**:
+The per-message user action in the Chat composer's Expert control, displayed alongside the Model control, that selects one enabled Agent-owned or Received Community Expert. The selection clears after submission; without it, no expert directory or Background SubAgent tool is exposed to the Main Agent.
+_Avoid_: mode control, intent-keyword delegation, implicit expert discovery, Main-Agent-selected expert, session-persistent expert selection
+
+**Composer Expert Catalog**:
+The searchable list of valid enabled local and Received Community Experts in the currently selected Agent Profile, shown by the Chat composer's Expert control. Community listings are not directly callable; an expert must first be received by that Agent Profile.
+_Avoid_: global expert chooser, direct community invocation, disabled expert catalog, cross-Agent expert list
+
+**Selected Expert Execution**:
+The direct start of the single Expert named by an Explicit Expert Selection for that submitted message. The Main Agent may hand off the objective and summarize the result but cannot skip, substitute, or select another expert.
+_Avoid_: optional selected-expert use, multiple expert fan-out, Main Agent routing decision
+
+**Selected Expert Model Resolution**:
+The model precedence for a Selected Expert Execution: a usable configured expert model is used first; otherwise the Chat's currently selected model is used as the expert fallback. The Chat model remains available for Main Agent summarization.
+_Avoid_: disabled Chat model control, forced unavailable expert model, implicit model switch
+
+**Expert and Plan Mode Exclusivity**:
+The composer interaction rule that Explicit Expert Selection and Plan Mode cannot coexist. Selecting an Expert clears Plan Mode; enabling Plan Mode clears the Expert selection, while both controls remain available for an explicit user switch.
+_Avoid_: disabled mode switch, hidden expert clearing, expert-assisted Plan Mode, conflicting execution modes
+
+**Synchronous Expert Conversation**:
+The Chat interaction in which a Selected Expert Execution displays progress and cancellation while the current message awaits the SubAgent Run, then automatically presents the Main Agent's summary in that same conversation turn. Failures, timeouts, and cancellation are likewise reported in the current turn while the underlying SubAgent Run remains observable.
+_Avoid_: result-polling follow-up, detached-only expert run, hidden failure state
+
+**Expert Dependency Publication Scan**:
+The one-time mandatory safety scan of each Skill copied into a new Community Expert Package version. Receiving or using that unchanged frozen version does not re-run the scan.
+_Avoid_: target-side policy scan, per-session safety scan, unscanned expert dependency publication
 
 **Skill-owned Delegation Prompt**:
 The layered SubAgent prompt constructed from its Definition `instruction`, fixed runtime safety rules, the delegated `objective`, and optional `background`. The Definition instruction and safety rules are trusted system instructions; `background` is delimited as untrusted task material in that system message, while `objective` is structured user input. Neither task field can replace the Definition's role instruction.
@@ -408,6 +548,94 @@ _Avoid_: audit database table, hook execution log, full script archive, hook pay
 A lifecycle-hook configuration owned by exactly one **Agent Profile**. It applies only while that Agent Profile runs, rather than across a tenant or through a reusable Skill.
 _Avoid_: agent-level hook, tenant hook, skill hook
 
+**Stop Response Replacement**:
+The complete replacement text supplied by a Stop Hook for one candidate Assistant Response. A replacement-capable Stop Hook makes that candidate subject to Strict Completion Finalization, so only the approved or replacement text is retained and delivered; it is not a patch, token-stream transformation, or an instruction for the Agent to produce a later answer.
+_Avoid_: output patch, stream rewrite, follow-up response, completion block
+
+**Strict Completion Finalization**:
+The delivery rule that a candidate Assistant Response subject to a replacement-capable Stop Hook is withheld until every matched Stop Hook completes. The user, session record, and downstream channel receive only the approved or replaced final text, never the original candidate.
+_Avoid_: optimistic replacement, provisional final response, client-side correction
+
+**Final Response Memory Replacement**:
+The atomic substitution of the current turn's final Assistant Response in Agent memory with its approved Stop Response Replacement before completion is persisted or derived. The replacement is the sole response available to later reasoning, session restoration, tracing indexes, and response-derived features.
+_Avoid_: presentation-only replacement, split conversation history, dual final response
+
+**Original Candidate Audit Boundary**:
+The retention rule for a candidate Assistant Response changed by a Stop Output Transformation Pipeline. Swe-controlled persistence retains only minimal transformation metadata in application logs and never the original candidate plaintext, while a configured external Handler or model provider remains responsible for any content it has already received.
+_Avoid_: raw response audit log, audit database record, recoverable original response, external-handler data erasure
+
+**Stop Transformation Log Record**:
+A best-effort application log for one output-transformation attempt that identifies participating Handler IDs and sources, replacement occurrence, input and final lengths and SHA-256 summaries, duration, and failure or time-budget status without retaining either text. A logging failure never changes completion delivery.
+_Avoid_: transformation audit store, raw response log, delivery-blocking logger
+
+**Stop Transformation Manual Test**:
+The existing single-Handler Hook manual test when applied to a Stop Output Transformer with an editable sample Assistant Response. It reports that Handler's real result without running a full pipeline, altering a live session, or delivering a response; automated tests establish pipeline behavior.
+_Avoid_: live response preview, full-pipeline console simulator, persisted manual transformation
+
+**Blocked Transformation Continuation**:
+The automatic Stop follow-up rule that retains only the final text produced by the Stop Output Transformation Pipeline in Agent memory when the Stop Validation Phase blocks completion. The next Agent turn receives that transformed text and the blocking reason, never the original candidate.
+_Avoid_: original-candidate retry context, raw response restoration, split blocked attempt
+
+**Stop Transformation Failure Policy**:
+The fail-closed or diagnostic-only outcome when a Stop Output Transformer times out, errors, or returns an invalid replacement. An allowing failure preserves the current text and continues the pipeline; a blocking failure ends the request incomplete without executing later handlers or starting an automatic follow-up.
+_Avoid_: unsafe fallback delivery, automatic failure retry, best-effort blocking transformation
+
+**Stop Transformation Time Budget**:
+The Agent Profile-owned bounded wall-clock allowance for one Stop Output Transformation Pipeline, defaulting to thirty seconds. Each Transformer receives no more than its own timeout and the remaining pipeline budget; tenant and Skill configuration cannot raise it, and exhaustion ends the request incomplete without delivery or an automatic follow-up.
+_Avoid_: Skill-raised transformation budget, tenant-raised transformation budget, unbounded serial transformation, per-handler-only timeout, retry-after-budget-exhaustion
+
+**Stop Output Transformation Pipeline**:
+The ordered phase of a Stop completion attempt that applies each matched output-transforming Handler's complete replacement to the current candidate Assistant Response. Each later transformation receives the prior transformation's result, rather than the original candidate.
+_Avoid_: concurrent replacement conflict, output patch chain, Agent follow-up
+
+**Stop Output Transformer**:
+A Stop Hook Handler explicitly admitted to the Stop Output Transformation Pipeline. A command, HTTP, or prompt Handler may be a Stop Output Transformer; a Handler's technical type alone does not grant it output-replacement authority.
+_Avoid_: implicitly transforming Stop Handler, prompt-only rewriter, general Stop Handler
+
+**Stop Output Transformation Declaration**:
+The explicit Handler configuration that admits one Stop Hook Handler to the Stop Output Transformation Pipeline and makes its completion attempt subject to Strict Completion Finalization. An undeclared Handler has no output-replacement authority even if it returns replacement-shaped data.
+_Avoid_: inferred transformation, response-output heuristic, global Stop rewrite switch
+
+**Potential Stop Output Transformer**:
+A declared Stop Output Transformer whose event and matcher scope can apply to the current completion attempt before its text-dependent condition is evaluated. Its presence requires Text-only Strict Completion Delivery even when every later transformation condition passes through the candidate unchanged.
+_Avoid_: post-stream transformation decision, condition-only buffering, leaked conditional candidate
+
+**Output Transformation Source Order**:
+The fixed precedence order for matched Stop Output Transformers: tenant-level Handlers, then Agent Profile Handlers, then Handlers from explicitly activated Skills. Multiple Skill sources run by lexical `skill_name`; a source's matcher groups and Handlers retain their declaration order. A Skill that is not activated for the current session has no output-transformation authority.
+_Avoid_: activation-order transformer, unactivated Skill transformer, source-order inversion, tenant-bypassing Skill rewrite
+
+**Valid Stop Response Replacement**:
+A Stop Response Replacement whose complete text contains non-whitespace content. Its text is preserved exactly as supplied; an empty or whitespace-only value is not a response-suppression request and is invalid.
+_Avoid_: empty replacement, implicit output suppression, normalized replacement text
+
+**Stop Replacement Output Contract**:
+The shared Handler result contract in which an allowing Stop Output Transformer may place one Valid Stop Response Replacement in `hookSpecificOutput.replacementText`. Command, HTTP, and prompt Handlers use the same contract; omitting it preserves the current candidate text.
+_Avoid_: handler-specific replacement schema, top-level replacement field, implicit textual output
+
+**Stop Transformation Snapshot Continuity**:
+The rule that an output-transforming or validating Stop Handler that explicitly requests a Hook Conversation Snapshot receives the existing snapshot without filtering or substituting the current candidate Assistant Response. Its `assistant_response` field still carries the Handler's current pipeline text, while the snapshot may contain the original candidate under ordinary snapshot rules.
+_Avoid_: transformed snapshot, candidate redaction, snapshot-payload rewriting
+
+**Dynamic Stop Transformation Matching**:
+The rule that each Stop Output Transformer's conditional eligibility is evaluated immediately before it processes the current pipeline text, while Stop Validation Phase eligibility is evaluated only after the pipeline produces its final text. Conditions therefore assess the text their Handler can actually process.
+_Avoid_: original-only pipeline condition, pre-transformation validation condition, static completion plan
+
+**Per-attempt Stop Transformation Requirement**:
+The rule that a Stop Output Transformer participates in every candidate completion attempt for which it is eligible. A once-only Handler cannot be a Stop Output Transformer because it would allow a later candidate to bypass the declared transformation.
+_Avoid_: once-only transformer, first-candidate-only rewrite, optional later transformation
+
+**Text-only Stop Output Transformation**:
+The first-release boundary that applies Stop Response Replacements only to an extractable final Assistant Response text. It neither changes nor suppresses media, attachments, tool cards, or other structured output, and does not start a transformation pipeline for a turn with no extractable Assistant Response text.
+_Avoid_: media rewrite, attachment suppression, structured-output transformation, universal response filter
+
+**Text-only Strict Completion Delivery**:
+The delivery rule that withholds only candidate Assistant Response text while Strict Completion Finalization is active. Tool status, progress, approval, and other non-response events remain live and are not part of the output-transformation contract.
+_Avoid_: whole-turn buffering, hidden tool progress, transformed progress card
+
+**Stop Validation Phase**:
+The concurrent phase of a Stop completion attempt after its Stop Output Transformation Pipeline has produced its final candidate. Its non-transforming Handlers audit or gate that final candidate without changing it.
+_Avoid_: ordered validator chain, pre-transformation validation, output transform
+
 **Agent Profile Hook Distribution**:
 The explicit one-time copying of a source tenant's complete executable **Agent Profile Hook** unit to selected target tenants' Default Agent Profiles. The unit contains the Hook configuration and every referenced **Agent Profile Hook Script**; each target receives its own independent copy.
 _Avoid_: shared Hook, configuration-only distribution, cross-tenant Hook ownership
@@ -637,7 +865,7 @@ The single mutable Chat card representing one W+ SOP Clarification Session and s
 _Avoid_: one resume card per transition, latest question as resume state, multiple active controls
 
 **W+ SOP Clarification Session**:
-A revisioned clarification process produced by `wplus-sop-miner`, bound to one owning Chat and containing the currently valid questions, answers, confirmed facts, and SOP result state. An owning Chat may have at most one active or paused session at a time. After that session is terminated, a new session may be created in the same Chat while the earlier session and its cards remain available as history. Producing and validating the final SOP does not by itself complete the session: the workspace must then present the Miner's evidence-backed memory candidates for explicit per-candidate consent, with a Skip All action. The session completes normally only after those choices are resolved. Normal completion restores the owning Chat input immediately but leaves the user on the final workspace result view; the Chat card becomes a read-only Completed entry that can reopen the result and history. Pausing restores normal Chat input, but later ordinary Chat turns remain outside the saved SOP state; resuming uses only the session's current valid revision unless the user explicitly adds information from inside the workspace.
+A revisioned clarification process produced by `wplus-sop-miner`, bound to one owning Chat and containing the currently valid questions, answers, confirmed facts, and SOP result state. An owning Chat may have at most one active or paused session at a time. After that session is terminated, a new session may be created in the same Chat while the earlier session and its cards remain available as history. Producing and validating the final SOP does not by itself complete the session: the workspace first presents the result bundle for explicit confirmation, then presents the Miner's typed, evidence-backed memory candidates for explicit per-candidate consent, with a Skip All action. Approving a candidate means that its complete sanitized content has passed the W+ memory policy's privacy and deduplication checks and has been written to the corresponding W+ memory scope; a status-only approval is not sufficient. The session completes normally only after the result and every memory choice are resolved. Normal completion restores the owning Chat input immediately but leaves the user on the final workspace result view; the Chat card becomes a read-only Completed entry that can reopen the result and history. Pausing restores normal Chat input, but later ordinary Chat turns remain outside the saved SOP state; resuming uses only the session's current valid revision unless the user explicitly adds information from inside the workspace.
 _Avoid_: Chat session, skill invocation, Plan Mode session
 
 **Pending W+ SOP Exit**:
@@ -653,16 +881,20 @@ The read-only artifact retained when a user permanently terminates an incomplete
 _Avoid_: partial SOP, assumed completion, builder-ready result
 
 **W+ SOP Result Bundle**:
-The validated final output of a normally completed clarification session: the readable SOP, `sop_spec.json`, and escaped HTML visualization. The first workspace release supports viewing and downloading these artifacts and states that they are ready for a later explicit `wplus-skill-builder` invocation; it neither invokes nor embeds the Builder.
-_Avoid_: automatic Builder invocation, incomplete SOP bundle, implicit handoff
+The validated final output generated by the owning Agent after all clarification stages: `sop_spec.json`, the readable Markdown SOP, the static HTML SOP, and the template-based sanitized example-result HTML. A result is deliverable only after all four files have been validated and exposed through the platform file-delivery tool. Generation makes the bundle previewable and downloadable but does not complete the session. The user must explicitly confirm the bundle before memory review begins. The workspace states that confirmed artifacts are ready for a later explicit `wplus-skill-builder` invocation; it neither invokes nor embeds the Builder.
+_Avoid_: automatic Builder invocation, server-synthesized download, incomplete SOP bundle, handwritten delivery URL, implicit handoff
+
+**W+ SOP Authorized Memory Write**:
+The policy-checked batch Agent operation started only after the user has decided every unresolved sanitized memory candidate in one workspace submission. The server atomically binds all approved candidates and their resolved JSONL targets to one Agent run, after the prior owning-Chat run is fully idle. That Agent invokes the Miner memory-store script once per approved candidate and emits one batch result containing every appended, duplicate, or failed outcome. All-rejected batches start no Agent; failed items remain retryable in a later batch. Common W+ knowledge, anonymous user preferences, and fully sanitized SOP patterns remain separate scopes. Personalized memory exists only when the caller supplied an anonymous user scope.
+_Avoid_: per-candidate Agent run, incomplete decision set, request-thread write, root MEMORY.md write, inferred user scope, unbound Agent run, approval flag without policy check, duplicate append, untyped candidate
 
 **W+ SOP Workspace V1 Privacy Scope**:
 The first workspace release adds no dedicated client or server feature for detecting, blocking, or automatically redacting sensitive text in clarification answers. Existing CoPaw controls and the Miner's privacy rules remain applicable, but new workspace-specific sensitive-input enforcement is outside this feature scope.
 _Avoid_: claimed PII protection, implicit redaction, weakening Miner policy
 
 **W+ SOP Workspace Entry**:
-The explicit transition from an owning Chat into a W+ SOP Workspace. A direct user invocation of `wplus-sop-miner` may enter immediately; an implicitly detected invocation must first render a clickable Chat confirmation card with Confirm and Reject actions. Confirm creates the W+ SOP Clarification Session, uses the already-submitted original request as the Miner's initial input, navigates to the new workspace, and begins producing the first clarification question without requiring resubmission. Reject cancels the Miner invocation, keeps the user in normal Chat, and returns the original request to the normal Chat agent for processing. The rejected turn must suppress `wplus-sop-miner` re-detection so the confirmation card cannot loop, and it does not create or activate a W+ SOP Clarification Session.
-_Avoid_: silent route switch, automatic implicit entry, Plan Mode entry
+The explicit transition from an owning Chat into a W+ SOP Workspace. A user explicitly invokes `wplus-sop-miner` either through the Chat's skill-selection interaction or by typing the exact `@wplus-sop-miner` mention in the message body; ordinary text without that exact mention never creates a new W+ entry. Either invocation first renders a clickable Chat confirmation card. Confirm idempotently creates the persisted W+ SOP Clarification Session in `GeneratingStageProposal`, then uses the already-submitted original request as the Miner's initial input and navigates to the workspace. The Miner's first output is only a validated 2–4-stage proposal; it cannot produce clarification questions until the user confirms or adjusts that queue. Existing active or paused sessions retain their Return or Resume entry.
+_Avoid_: fuzzy text inference, bare skill-name inference, silent route switch, Plan Mode entry
 
 **Plan Delegation**:
 An optional Main Agent action in Plan Mode that creates a SubAgent Run through the normal delegation mechanism. Plan Delegation is allowed but is never automatic or required by Plan Mode.
@@ -1946,6 +2178,552 @@ _Avoid_: BeforeStop compatibility alias, automatic event translation
 **Stop Trigger**:
 The boundary at which a normal candidate Assistant Response is about to complete a request. Tool-hook terminal-stop paths and turns without a candidate Assistant Response skip Stop.
 _Avoid_: tool termination audit, no-output completion hook
+
+## New-session capability language
+
+**Capability Domain**:
+The broad work direction a user can choose when starting a new chat, such as document processing or data analysis. One Capability Domain contains multiple **Capabilities**.
+_Avoid_: category, skill category, capability level one
+
+**Capability**:
+An actionable type of work within one **Capability Domain**, such as extraction and conversion or data cleaning. A Capability contains multiple **Scenario Presets**.
+_Avoid_: subcategory, function, skill
+
+**Source-owned Capability Domain**:
+A **Capability Domain** maintained by the administrator of one Source and selectable by all tenant users under that Source. It is an editable member of that Source's capability catalog rather than a globally fixed product taxonomy.
+_Avoid_: built-in category, tenant capability domain, personal category
+
+**Source-owned Capability**:
+A **Capability** maintained by the administrator of one Source beneath a **Source-owned Capability Domain** and selectable by all tenant users under that Source. It is not an Agent Profile capability or a Skill.
+_Avoid_: built-in capability, tenant capability, skill
+
+**Capability Catalog Tree**:
+The strict one-to-many hierarchy in a **Scenario Preset Catalog**: each **Source-owned Capability** has exactly one **Source-owned Capability Domain** parent, and each **Source-owned Scenario Preset** has exactly one **Source-owned Capability** parent. Nodes are not shared across parents; reuse requires creating a separate preset.
+_Avoid_: tag graph, many-to-many catalog, shared preset reference
+
+**Three-level New-chat Selector**:
+The visible new-chat browse-and-compose structure for a **Scenario Preset Catalog**: independent Capability Domain cards first, the selected domain's Capability tabs second, and the selected Capability's Scenario Presets in a recommended-scenario strip inside the composer third. Capability Domain browsing is visible but is not included in the submitted message.
+_Avoid_: flat capability list, hidden first level, domain marker, separate scenario page
+
+**Effective Catalog Visibility**:
+The condition for a catalog node to appear in new-chat selection: the node itself and every ancestor in its **Capability Catalog Tree** are enabled. Disabling a parent does not change descendant enablement, so eligible descendants reappear if the parent is enabled again.
+_Avoid_: child-state cascade, visible descendant of disabled parent, global catalog state
+
+**Catalog Leaf Deletion**:
+The deletion rule for a **Scenario Preset Catalog**: only a node without children may be deleted. A Capability or Capability Domain must first have its descendants deleted or moved; disabling is the non-destructive way to hide a subtree.
+_Avoid_: cascade delete, recursive removal, orphaned catalog node
+
+**Scenario Preset**:
+A named, reusable task starting point under one **Capability**. It supplies an editable **Prompt Draft** and may declare **Preset Context References**; selecting it does not execute the task or become a system instruction.
+_Avoid_: scenario, Prompt, command, automatic task
+
+**Prompt Draft**:
+The user-editable starting text placed in a new chat's composer when a **Scenario Preset** is selected. It is ordinary user-message content until the user submits it.
+_Avoid_: system prompt, instruction, skill directive, generated answer
+
+**Prompt Draft Replacement**:
+Selecting a **Scenario Preset** immediately replaces the composer Prompt Draft with that preset's Prompt Draft. The user may then edit it freely before submission.
+_Avoid_: confirmation dialog, append-by-default, locked template text
+
+**Preset Context Reference**:
+A Skill or Callable MCP Tool declared by a **Scenario Preset** and resolved against the current chat's available or provisionally session-enabled Context References. Resolved references are sent through the ordinary structured context-reference parameter and backend revalidation, but are not inserted as `@` text into the user's **Prompt Draft**.
+_Avoid_: raw prompt injection, hidden authorization grant, visible @ token
+
+**Implicit Preset Context Binding**:
+The automatic association of a **Scenario Preset**'s resolved **Preset Context References** with the next submitted message. The association is created by selecting the preset, is not independently shown or removed in the composer, and remains subject to the ordinary Context Reference Turn Scope and backend revalidation.
+_Avoid_: user-editable capability list, persistent session binding, authorization bypass
+
+**Session-scoped Marketplace Resource View**:
+The temporary Skill and MCP availability granted to one Chat session from resources declared by its selected **Scenario Preset**. It may make a marketplace resource usable when it is absent from the tenant or Agent's persistent configuration, lasts until that Chat session ends, and never writes to tenant or Agent configuration.
+_Avoid_: tenant installation, Agent config mutation, permanent marketplace enablement
+
+**Temporary Marketplace Resource Binding**:
+The session-lifetime association between a **Scenario Preset** and its resolved marketplace Skill or MCP resource. It is released with the Chat session; each actual use still goes through the resource's normal availability, credential, Tool Guard, and approval checks.
+_Avoid_: turn-only reference, persistent distribution, permission grant
+
+**Temporary MCP Credential Resolution**:
+The rule for a marketplace MCP in a **Session-scoped Marketplace Resource View**: resolve only a credential reference already owned by the current tenant, allow credential-free public services, and omit the MCP when required credentials cannot be resolved. A Scenario Preset never stores or transfers secret values.
+_Avoid_: Source credential sharing, preset API key, cross-tenant secret copy
+
+**Latest Marketplace Resource Resolution**:
+The version policy for a marketplace Skill or MCP named by a **Scenario Preset**: the preset stores the stable resource identity without pinning a version, and a new Chat session resolves the latest eligible market version at session initialization.
+_Avoid_: preset-pinned version, silent historical version reuse, arbitrary unversioned package
+
+**Session Marketplace Resource Snapshot**:
+The immutable set of marketplace Skill and MCP versions resolved when a **Scenario Preset** initializes a Chat session. A market update does not change this snapshot during the session; a later Chat session resolves the latest eligible versions again.
+_Avoid_: hot-reloaded market resource, live latest lookup, per-turn version drift
+
+**Session Marketplace Snapshot Recovery**:
+The rule for reopening an existing Chat: restore its saved **Session Marketplace Resource Snapshot** rather than resolving the selected Scenario Preset or market latest versions again. A snapshot entry whose resource or tenant credential is no longer valid becomes unavailable without replacing the rest of the snapshot.
+_Avoid_: refresh-time latest lookup, preset reapplication, partial snapshot rewrite
+
+**Scenario Context Lock**:
+The lifecycle boundary of new-chat capability selection: a **Scenario Preset** may be chosen only while a Chat has no submitted user message. After the first message is submitted, its **Capability Marker**, Prompt Draft history, and session resource snapshot remain fixed; changing scenario requires creating a new Chat.
+_Avoid_: mid-chat scenario switch, per-turn capability replacement, mutable session context
+
+**Capability Catalog Identity**:
+The immutable, opaque ID of a Capability Domain, Capability, or Scenario Preset. IDs are globally unique within one Source's **Capability Catalog Tree**, remain stable when names or parents are edited, and are never reused after deletion; names are display fields rather than references.
+_Avoid_: name-based identity, parent-scoped ID, recycled catalog ID
+
+**Sibling Catalog Name Uniqueness**:
+The naming constraint for one catalog parent: after trimming surrounding whitespace and applying case-insensitive comparison, sibling Capability Domains, Capabilities, or Scenario Presets may not share a name. Identical names under different parents are allowed.
+_Avoid_: globally unique display name, case-sensitive duplicate, name as foreign key
+
+**Catalog Node Relocation**:
+The administrator operation that moves a Capability to another Capability Domain or a Scenario Preset to another Capability within the same Source. Relocation preserves the node's **Capability Catalog Identity**, name, Prompt Draft, and resource bindings; only later new Chats use the new tree path, while existing Chats retain their original context.
+_Avoid_: delete-and-recreate move, ID rewrite, historical Chat rewrite
+
+**Unavailable Preset Resource**:
+A marketplace Skill or MCP named by a Scenario Preset that cannot be resolved when a new Chat initializes, including a delisted or deleted market resource. The preset remains intact, available resources still bind without a terminal-user warning, and an administrator may repair the binding without automatic catalog mutation.
+_Avoid_: automatic preset deletion, silent full failure, rewritten scenario binding
+
+**Preset MCP Service Binding**:
+The declaration of one complete marketplace MCP service by a Scenario Preset. It provisionally makes that service and its callable tool set available in the Chat's **Session-scoped Marketplace Resource View**, rather than selecting or preferring one individual MCP tool.
+_Avoid_: `server + tool` binding, MCP tool preference, unrestricted host tool access
+
+**Session MCP Tool Snapshot**:
+The immutable callable tool set discovered for one **Preset MCP Service Binding** when a Chat session initializes. Service-side tool additions, removals, or changes do not alter the active session's tool set; a later Chat session discovers a new set.
+_Avoid_: live MCP tool discovery, per-turn service expansion, hot-reloaded tool list
+
+**Session-scoped Marketplace Skill Activation**:
+The activation of a marketplace Skill in a **Session-scoped Marketplace Resource View**. The Chat's first scenario message receives the same trusted Skill-use instruction semantics as an explicit `@Skill` selection, without adding visible `@skill` text; the activated Skill remains available for later messages in that Chat without repeated instruction injection.
+_Avoid_: visible Skill marker, per-turn duplicated directive, tool-only Skill exposure
+
+**Resource-free Scenario Preset**:
+A Scenario Preset that has a Prompt Draft but declares no marketplace Skill or MCP service. It remains a valid selectable scenario and creates no Session-scoped Marketplace Resource View.
+_Avoid_: invalid empty binding, Skill-required preset, MCP-required preset
+
+**Unselected New-chat State**:
+The initial state of a new Chat before a user explicitly chooses a Scenario Preset. The composer remains an ordinary empty prompt, carries no Capability Marker or marketplace-resource snapshot, and may submit a free-form request directly.
+_Avoid_: default scenario, automatic prompt fill, implicit capability selection
+
+**Catalog Browsing Selection**:
+The non-semantic initial expansion of the first enabled Capability Domain and its first enabled Capability by catalog order in an **Unselected New-chat State**. It only determines which Scenario Presets are displayed and does not select a Scenario Preset, fill a Prompt Draft, or create a session resource snapshot.
+_Avoid_: default scenario selection, automatic context binding, initial prompt value
+
+**Persistent-resource Preference**:
+The source-selection rule for a Scenario Preset resource: use the current tenant or Agent's already enabled Skill or MCP configuration when it corresponds to the market resource; create a **Session-scoped Marketplace Resource View** only when no corresponding persistent resource exists. The Session Marketplace Resource Snapshot records the actual source and version used.
+_Avoid_: scenario-overrides-tenant configuration, always-market resource, ignored persistent capability
+
+**Submit-time Scenario Resolution**:
+The resource-initialization boundary for a selected Scenario Preset: selecting, switching, or cancelling a preset before the first message changes only local composer state; the backend resolves the current catalog entry, resource bindings, persistent-resource preference, credentials, and market versions only when the first message is submitted, then persists the resulting session snapshot.
+_Avoid_: click-time installation, front-end authority, pre-submit MCP connection
+
+**Stale Scenario Selection**:
+The submit-time outcome when a selected Scenario Preset was deleted or disabled after the composer displayed it. The backend refuses session initialization, the user's Prompt Draft remains editable, and the stale Capability Marker and pending bindings are cleared instead of silently submitting a free-form message; relocation alone does not make a stable-ID selection stale.
+_Avoid_: silent downgrade, discarded draft, move-invalidated ID
+
+**Scenario Catalog Change Scope**:
+The visibility boundary for an administrator's Scenario Preset Catalog mutation. An unsubmitted new Chat resolves the current catalog entry and bindings at first-message submission without overwriting its edited Prompt Draft; an existing Chat retains its historical Capability Marker and Session Marketplace Resource Snapshot, and never receives catalog changes retroactively.
+_Avoid_: live draft overwrite, historical message rewrite, active-session catalog hot reload
+
+**Scenario Catalog Administrator**:
+An existing Super Manager or manager authorized for the current Source who may maintain that Source's Scenario Preset Catalog. It is a permission use of the established Source configuration role model, not a separate role; ordinary users may only read the catalog's effective visible entries.
+_Avoid_: scenario-specific role, client-side-only authorization, tenant-wide catalog editor
+
+**Sibling Catalog Order**:
+The explicit order of Capability Domains, Capabilities, or Scenario Presets among siblings in one parent scope. New nodes and relocated nodes enter at the destination's end; administrators persist later ordering explicitly, and new-chat display plus Catalog Browsing Selection follow that order.
+_Avoid_: creation-time-only order, alphabetical default order, global catalog sequence
+
+**Scenario Catalog Management Page**:
+The single Source-administrator settings page that presents the whole Scenario Preset Catalog as a three-level tree. It manages nodes in place and opens a Scenario Preset detail drawer for its Prompt Draft and marketplace-resource bindings; it does not split each catalog level into an independent page.
+_Avoid_: three disconnected settings pages, flat prompt-library editor, cascading-delete manager
+
+**Empty Scenario Catalog**:
+The initial Scenario Preset Catalog state for a Source before its Scenario Catalog Administrator creates entries. The product ships no seeded Capability Domains, Capabilities, or Scenario Presets; visual drafts are interaction references only and never become Source content automatically.
+_Avoid_: draft-derived seed data, global default catalog, automatic Source content provisioning
+
+**Scenario Selector Availability**:
+The condition for displaying three-level capability selection in a new Chat: the Source must have at least one complete, effectively visible Capability Domain-to-Capability-to-Scenario Preset path. Without one, the welcome view presents only the ordinary free-form composer.
+_Avoid_: empty selector, partial catalog navigation, blocked free-form Chat
+
+**New-chat Catalog Read Freshness**:
+The first-release update behavior for Scenario Preset Catalog display: a new Chat welcome view reads the current effective catalog when it opens, without live push or polling for an already-open view. Refreshing or opening another new Chat obtains later changes, while selection and submit-time validation remain authoritative server-side.
+_Avoid_: real-time catalog subscription, stale-client authority, client-only catalog validation
+
+**Empty Catalog Management State**:
+The Scenario Catalog Management Page state when its Source has no catalog entries. It gives concise guidance to create a Capability Domain and offers only that creation action; it does not seed examples or reproduce visual-draft content.
+_Avoid_: automatic sample catalog, empty tree without guidance, draft-content import
+
+**Source-wide Market Binding**:
+The administrator's ability to bind any currently listed market Skill or MCP resource under the Source to a Scenario Preset, regardless of the administrator's own institution visibility. The binding is revalidated against each end user's institution at submit time; an institution-ineligible resource becomes an **Unavailable Preset Resource** for that user.
+_Avoid_: administrator-bbk snapshot, user-wide bypass, source binding as authorization
+
+**Invalid Catalog Resource Binding**:
+A retained Scenario Preset resource binding whose market resource is no longer visible or resolvable in the management view. It displays its stable identity, last-known label, and invalid reason; an administrator may remove or replace it, but may save the scenario without an immediate repair.
+_Avoid_: hidden stale binding, blocked scenario edit, automatic binding deletion
+
+**Silent Preset Resource Degradation**:
+The runtime behavior when one or more Scenario Preset resources are unavailable: continue the first message with the remaining available resources and do not show the end user a partial-availability notice or resource failure details. Administrators can diagnose and repair the binding through the management view and server diagnostics.
+_Avoid_: terminal-user degradation alert, all-or-nothing scenario failure, exposed credential reason
+
+**Resource-empty Scenario Session**:
+A Chat initialized from a Scenario Preset for which no declared marketplace Skill or MCP resource can be resolved. The Atomic Scenario Marker and Prompt Draft still submit, the session snapshot records no active preset resources, and the Agent continues with its ordinary capabilities without a terminal-user warning.
+_Avoid_: rejected scenario, hidden fallback session, resource-error dialog
+
+**Free-form Chat Session**:
+A Chat whose first message is submitted from an Unselected New-chat State. It contains neither a Capability Marker nor a Session Marketplace Resource Snapshot and uses only the ordinary persistent capabilities of the current Agent.
+_Avoid_: implicit scenario, default marketplace session, inferred capability selection
+
+**Eligible Market Resource**:
+A market Skill or MCP resource that is currently available for new Scenario Preset bindings under the Source and visible to at least one institution. Inactive, delisted, or otherwise unresolved resources cannot be newly bound, while older bindings to them remain as Invalid Catalog Resource Bindings for repair.
+_Avoid_: inactive resource selection, hidden stale binding, runtime-only eligibility
+
+**Scenario Session Initialization Log**:
+The structured application log emitted when a first message initializes a Scenario Preset Chat. It identifies the Source, Chat, catalog-node IDs, each resource's type, stable ID, actual source, resolved version, availability outcome, and a non-sensitive initialization result; it excludes Prompt Draft content, Skill content, MCP configuration, credentials, and user input. It is diagnostic output rather than a separate audit database, file, or usage aggregate.
+_Avoid_: full-prompt audit copy, secret-bearing resource log, dedicated scenario audit store
+
+**Session Snapshot Metadata**:
+The existing Chat metadata that persists a Session Marketplace Resource Snapshot so an existing Chat can restore its exact scenario resources after refresh or reopening. It is session state, not a separate Scenario Session Audit Record or analytics store.
+_Avoid_: external snapshot database, durable audit log, refresh-time market lookup
+
+**Scenario Session Agent Lock**:
+The rule that a Chat initialized from a Scenario Preset retains the Agent selected when its first message creates the Session Marketplace Resource Snapshot. Later Agent-selection changes cannot alter that Chat's execution Agent, so persistent-resource preference and temporary resource bindings remain coherent.
+_Avoid_: mid-session Agent switch, resource snapshot rebinding, mutable scenario Agent
+
+**Idempotent Scenario Initialization**:
+The Chat-ID-scoped rule for first-message scenario setup: only the first successful submission creates and persists a Session Marketplace Resource Snapshot; concurrent or retried submissions reuse it without resolving market versions again or emitting duplicate success initialization logs. A failed initialization writes no snapshot and may be retried.
+_Avoid_: duplicate snapshot creation, retry-time latest lookup, partial failed snapshot
+
+**Scenario Session Resource Cleanup**:
+The lifecycle cleanup for a Chat's Session Marketplace Resource Snapshot and Chat-exclusive temporary MCP connections. Permanent Chat deletion removes both immediately while leaving persistent tenant and Agent resources untouched; a recoverable deletion retains the snapshot until permanent deletion, and restoration resumes the original snapshot without a new market resolution.
+_Avoid_: persistent resource deletion, delete-time latest lookup, unrecoverable snapshot loss
+
+**Preset Resource Binding Order**:
+The administrator-defined order of marketplace Skill bindings within one Scenario Preset. New bindings append to the end, removed-and-readded bindings receive a new end position, and the order determines trusted Skill-use instruction order without being shown in the user's message; MCP service bindings are snapshotted separately and do not participate in this Skill instruction order.
+_Avoid_: alphabetical injection order, market response order, user-visible resource order
+
+**Capability Marker**:
+The user-visible `@`-prefixed label for the selected second-level **Capability**, added to the submitted message when a **Scenario Preset** is selected. It omits the parent Capability Domain, is ordinary user-message text for communicating the selected capability, and does not select a Skill or MCP Tool; those references remain governed only by the **Implicit Preset Context Binding**.
+_Avoid_: Skill mention, MCP mention, trusted selector, hidden directive
+
+**Atomic Scenario Marker**:
+The non-editable **Capability Marker** prefix coupled to a selected **Scenario Preset**, placed before its Prompt Draft in the submitted user message. Users may modify the Prompt Draft freely, but deleting the whole marker cancels the scenario selection and removes its **Implicit Preset Context Binding**.
+_Avoid_: independently editable marker, stale hidden binding, removable capability panel
+
+**Marker-only Scenario Message**:
+A valid first user message consisting only of an **Atomic Scenario Marker** after the user clears its Prompt Draft. It retains the selected Scenario Preset, initializes its Session Marketplace Resource Snapshot, and is not rejected merely because no task body follows the marker.
+_Avoid_: required non-empty draft, invalid capability-only message, implicit scenario cancellation
+
+**Source-owned Scenario Preset**:
+A **Scenario Preset** maintained by the administrator of one Source and shared as read-only selectable content by all tenant users under that Source. It is not a user-private preset or an Agent Profile asset.
+_Avoid_: tenant preset, personal template, Skill preset
+
+**Scenario Preset Catalog**:
+The Source-managed hierarchy of **Source-owned Capability Domains**, their **Source-owned Capabilities**, and their enabled **Source-owned Scenario Presets** exposed to new-chat capability selection. Catalog management is separate from submitting a **Prompt Draft**.
+_Avoid_: prompt library, skill registry, chat history
+
+**Goal Runtime**:
+The host-owned, persistent control layer that advances one **Goal** across Main Agent turns while enforcing lifecycle, resource, and verification rules. It does not replace the Main Agent Runtime or create a second delegation system.
+_Avoid_: agent loop, autonomous tool, subagent orchestrator
+
+**Goal**:
+A stable user-desired outcome, expressed as a revisioned Contract with completion criteria and execution constraints. A Goal is distinct from its changeable Plan and the individual Tasks used to advance it.
+_Avoid_: plan, task list, agent turn, SubAgent Run
+
+**Goal Runtime First Phase**:
+The first deliverable of Goal Runtime: one Goal at a time with durable state, automatic continuation, pause/resume/cancel, budgets, and independent natural-language completion review. Task-graph and multi-Goal orchestration are later phases.
+_Avoid_: task graph, multi-goal scheduler, full team orchestration
+
+**Goal Scope**:
+The immutable execution identity captured when a Goal is created: its Tenant, Source, Agent Profile, and Chat. At most one non-terminal Goal belongs to one Chat, while Goals in distinct Chats can proceed independently.
+_Avoid_: tenant-wide Goal, Agent-wide Goal, globally serialized Goal
+
+**Goal Lifecycle State**:
+The host-authoritative state of a Goal: `ACTIVE`, `WAITING`, `PAUSED`, `BLOCKED`, `LIMITED`, `INTERRUPTED`, `COMPLETE`, or `CANCELLED`. `COMPLETE` and `CANCELLED` are terminal; the remaining states are recoverable only through their defined transition conditions.
+_Avoid_: Agent-declared completion, terminal wait, failed-as-blocked
+
+**Waiting Goal**:
+A non-terminal Goal with no useful immediate Main Agent action and one or more explicit external wake events, such as approval, a Background SubAgent result, or a managed job result.
+_Avoid_: polling loop, idle ACTIVE Goal, user-paused Goal
+
+**Blocked Goal**:
+A non-terminal Goal for which no valid action can currently advance the Goal and resolution needs user input, a Direct Goal Edit, or a change in an external condition. Budget exhaustion is not a Blocked Goal.
+_Avoid_: action failure, waiting Goal, resource limit
+
+**Limited Goal**:
+A non-terminal Goal stopped by an exhausted resource budget. In the first phase, the only budget is a code-defined Main Agent turn limit; it is not user-visible or user-adjustable, but the user may explicitly resume the Goal to reset that limit and begin a new execution-budget cycle.
+_Avoid_: Blocked Goal, completed budget, automatic retry, user-configurable budget
+
+**Goal Turn Resolution**:
+The structured recommendation returned after one Main Agent turn: `continue`, `wait`, `propose_completion`, or `blocked`, with the evidence or wake conditions required by that recommendation. The Goal Runtime validates it and alone performs the resulting lifecycle transition or continuation scheduling.
+_Avoid_: natural-language handoff, Agent-controlled state transition, implicit loop continuation
+
+**Goal Contract**:
+The user-confirmed agreement for one Goal Revision that defines objective, completion criteria, constraints, and autonomy boundary. It is immutable within that Revision and is not weakened or replaced by planning, Steering, or execution; only a user-submitted Direct Goal Edit can create a later Revision. The code-defined Goal Turn Budget remains an internal runtime guard outside the Contract.
+_Avoid_: Agent plan, prompt summary, mutable task list, inferred permission
+
+**Goal Constraint**:
+A user-confirmed execution boundary within a Goal Contract, represented in the first phase as short `must_preserve` and `must_not_do` text lists. It is distinct from a Completion Criterion and does not itself grant or revoke tool permission; actual enforcement remains with the existing Tool Guard and approval path.
+_Avoid_: acceptance test, Tool Guard policy, implementation plan, constraint compiler
+
+**Goal Autonomy Boundary**:
+The user-confirmed statement of which Goal actions may proceed automatically and which must use existing approval. It never enlarges the ordinary runtime's Tool Guard, data-access, sandbox, or approval permissions.
+_Avoid_: Goal-specific privilege, approval bypass, inferred consent
+
+**Goal Creation Confirmation**:
+The user's explicit approval of a proposed Goal Contract before the Goal Runtime creates and activates its persistent Goal. A direct-start interaction may shorten the UI path but does not omit the user-visible Contract or its confirmation.
+_Avoid_: inferred acceptance, first-turn execution, silent autonomous start
+
+**Completion Criterion**:
+A Goal Contract acceptance condition expressed in natural language as a requirement, observable assertion, verification method, and expected outcome. It directs an independent Completion Judge, rather than requiring an executable verification DSL or constituting an objectively repeatable proof by itself. A Main Agent cannot satisfy a criterion by self-assessment.
+_Avoid_: Agent self-assessment, raw tool-call criterion, executable-only acceptance condition, automatically provable success claim
+
+**Goal Verification Method**:
+The Contract-bound natural-language guidance for how a Completion Judge should assess a Completion Criterion. It can describe commands, file or artifact state, API state, database state, or other relevant observation without being an executable tool-call schema.
+_Avoid_: Main Agent self-assessment, raw Tool Call contract, completion-time criterion replacement
+
+**Completion Judge**:
+The runtime-owned, independent model evaluation that decides whether each Contract-bound Completion Criterion is satisfied after a Main Agent proposes completion. It uses the Goal's creation-time frozen Effective Model in a separate, restricted invocation; receives the active Contract and candidate evidence; may use existing read-only tools under ordinary Tool Guard, path-boundary, and approval rules; and returns an accept or reject decision with a reason. It cannot modify the Contract, execute Goal work, or declare new acceptance conditions.
+_Avoid_: Main Agent self-assessment, mutating reviewer, free-form Contract rewrite, unguarded tool access
+
+**Bounded Completion Review Package**:
+The minimum runtime-built context supplied to a Completion Judge: the frozen active Contract and Revision, the Main Agent's completion proposal and candidate evidence references, relevant current-turn tool results, and authorised read-only workspace access. It excludes the full Chat history, the Main Agent's private Plan and reasoning, and raw Background SubAgent logs.
+_Avoid_: full transcript replay, private-plan review, hidden reasoning audit, raw SubAgent-log injection
+
+**Plan Mutability Boundary**:
+The distinction between the user-confirmed Goal Contract and the private, changeable Initial Execution Plan. Replanning may replace steps, risks, or next focus without changing the Goal; changing the Contract requires a Direct Goal Edit and a new confirmed Goal Revision.
+_Avoid_: user-approved steps, immutable plan, plan-as-acceptance, silent Contract rewrite
+
+**Contract-bound Completion Review**:
+The rule that each Completion Criterion and its natural-language Verification Method are approved as part of the Goal Contract. A Main Agent may provide candidate evidence and a Completion Judge may perform proportionate read-only inspection, but neither may replace, weaken, or add acceptance conditions during execution.
+_Avoid_: completion-time criterion substitution, easier acceptance test, Agent-chosen Contract rewrite
+
+**Goal Turn Budget**:
+The code-defined first-phase resource guard limiting how many Main Agent turns one Goal may consume in its current Budget Cycle. It is not included in the Goal Contract or exposed for user modification; exhaustion transitions the Goal to `LIMITED`, never to `COMPLETE`.
+_Avoid_: completion threshold, success quota, user-configurable budget, automatic completion
+
+**Goal Budget Cycle**:
+One allocation of the code-defined Goal Turn Budget for a Goal. A user-initiated resume from `LIMITED` resets the budget and starts a new Budget Cycle; a Direct Goal Edit does not reset it or silently restart the Goal.
+_Avoid_: automatic retry, budget increase, hidden continuation
+
+**Goal Wake Event**:
+An observed event permitted to reactivate a Waiting Goal in the first phase: completion of a Goal-owned Background SubAgent Run, resolution of a pending tool approval, or an explicit user interaction in that Goal's Chat. Other external asynchronous systems are not Goal wake sources in this phase.
+_Avoid_: polling signal, generic event bus, arbitrary external callback
+
+**Goal-owned Background SubAgent Run**:
+An existing Background SubAgent Run started by a Main Agent while advancing one Goal and recorded with that Goal's identity. It remains a bounded delegated task rather than a Goal owner; it may produce candidate evidence only for its matching Goal.
+_Avoid_: Goal SubAgent type, autonomous Goal owner, recursive Goal worker
+
+**Goal Steering**:
+Any user input received while a Goal is active, initially treated as execution context for the current Goal Revision. It cannot change the Contract through text; a Contract change requires the separate Direct Goal Edit interaction.
+_Avoid_: implicit Goal change, model-proposed revision, unclassified user message
+
+**Goal Edit**:
+The user-initiated direct editing of a confirmed Goal Contract's objective, Completion Criteria, verification definitions, Constraints, or Autonomy Boundary. Main Agent output and ordinary Steering cannot initiate or populate a Goal Edit; after explicit user confirmation, it creates a new Goal Revision.
+_Avoid_: model-proposed revision, implicit Contract patch, text-only scope expansion
+
+**Direct Goal Edit**:
+The Goal Monitor interaction in which the user edits Contract fields directly and submits the complete resulting Contract. Submission is confirmation; it does not block or interrupt the current Main Agent turn, and the new Contract becomes a pending Goal Revision applied atomically at the current turn's settlement boundary.
+_Avoid_: Agent-suggested edit, conversational auto-edit, partial field mutation, blocking edit
+
+**Goal Control Command**:
+A user-requested pause, resume, cancellation, or confirmed Direct Goal Edit control recorded durably against a Goal. In the first phase, every command takes effect only at the current Main Agent turn's settlement boundary: that turn may finish and persist its result, but no subsequent continuation begins before the Goal Runtime applies the command.
+_Avoid_: immediate turn interruption, discarded turn result, concurrent transition
+
+**Goal Control Command Precedence**:
+When more than one Goal Control Command is pending at a Main Agent turn's settlement boundary, the Goal Runtime applies only the highest-precedence command: `CANCEL`, then Direct Goal Edit, then `PAUSE`, then `RESUME`. Lower-precedence commands remain auditable as superseded and cause no intermediate state transition.
+_Avoid_: command race, sequential conflicting transition, last-write-wins control
+
+**Goal Turn Settlement Boundary**:
+The point after a Main Agent naturally finishes its current reasoning loop and any tool call it has already begun, when the Goal Runtime persists its result and applies pending Goal Control Commands. The first phase does not preempt an executing tool or promise stronger cancellation than the ordinary runtime provides.
+_Avoid_: forced tool termination, immediate control transition, rollback guarantee
+
+**Completion Review Rejection**:
+A Completion Judge decision that a Contract-bound Completion Criterion is not yet satisfied or lacks sufficient evidence for acceptance. It prevents `COMPLETE` and becomes durable review feedback for the next Main Agent turn; an evidence-insufficiency rejection must state what further evidence is needed. It is not by itself a Blocked Goal.
+_Avoid_: successful completion, Main Agent opinion, immediate blocker
+
+**Completion Review Circuit Breaker**:
+The first-phase liveness guard that independently moves a Goal to `BLOCKED` after three consecutive Completion Review Rejections for one Completion Criterion within one Goal Revision. Other criteria do not consume that counter; its recorded review feedback remains available for user Steering, Direct Goal Edit, or a later manual resume.
+_Avoid_: terminal failure, budget limit, unrelated verification failures
+
+**First-phase Goal Liveness Guard**:
+The limited first-phase protection against useless autonomous work: the code-defined Goal Turn Budget and the Completion Review Circuit Breaker. Generic progress scoring or no-progress detection is intentionally deferred until it can be defined with auditable evidence.
+_Avoid_: subjective progress score, heuristic stagnation blocker, unlimited continuation
+
+**Goal Store**:
+The MySQL-backed source of truth for Goal lifecycle state, Goal Revisions and their Contracts, turn settlements, verification evidence/results, pending control commands, and budget cycles. In-memory execution state and Chat Checkpoint projections are not authoritative Goal state.
+_Avoid_: workspace JSON state, Chat Checkpoint, process-local Goal registry
+
+**Goal Execution Owner**:
+The single application instance that owns a Goal's continuous first-phase execution through its sticky request. It runs automatic continuation turns locally until a terminal or user-controlled boundary; cross-instance lease acquisition and scheduler takeover are outside the first phase.
+_Avoid_: distributed Goal lease, scheduler owner, cross-Pod continuation
+
+**Interrupted Goal**:
+The `INTERRUPTED` non-terminal Goal State, entered when its Goal Execution Owner stops before a later continuation can begin. Its last persisted turn settlement remains authoritative; it does not auto-resume after instance loss, and the user must explicitly resume it from the Chat.
+_Avoid_: user-paused Goal, orphaned Goal takeover, automatic crash recovery, lost Goal state
+
+**Frozen Goal Execution Identity**:
+The Goal Scope's Tenant, Source, Agent Profile, and effective Model captured when a Goal is created. They cannot be switched during any Revision of that Goal; a Direct Goal Edit changes only the Contract.
+_Avoid_: mid-Goal Agent switch, live model rebinding, revision-based identity change, mixed-identity evidence
+
+**Goal Runtime Snapshot**:
+The MySQL-persisted recovery state for a Goal: current lifecycle state and Revision, active Contract, progress and verified evidence references, remaining Goal Turn Budget, active Goal-owned Background SubAgent links, and pending Goal Control Commands. It is sufficient to resume after a later user action without making runtime logs authoritative.
+_Avoid_: audit log snapshot, conversation summary, in-memory-only state
+
+**Goal Audit Log**:
+Structured append-only runtime logging for Goal creation and confirmation, turn resolutions, verification calls/results, state transitions, control commands, and interruption/recovery. Entries are correlated by Goal ID, Revision, and turn ID; complete prompts and raw tool output are not required as the audit record.
+_Avoid_: MySQL audit table, unstructured print trace, prompt archive
+
+**Structured Goal Turn Resolution**:
+The runtime-validated JSON envelope returned by a Main Agent turn. It contains a `decision` (`continue`, `wait`, `propose_completion`, or `blocked`) plus the decision-specific summary, next focus, evidence references, wake conditions, completion proposal, or blocker fields. Invalid or unparseable envelopes do not trigger continuation or completion.
+_Avoid_: Markdown status guess, regex-derived lifecycle, free-form handoff
+
+**In-request Goal Event Loop**:
+The single Goal Execution Owner's asynchronous loop that runs automatic turns and waits without LLM polling for permitted Goal Wake Events. It resumes directly on those events within the sticky request and deliberately has no independent cross-instance scheduler in the first phase.
+_Avoid_: polling loop, distributed scheduler, background takeover
+
+**Explicit Goal Control Action**:
+A dedicated user-facing control/API operation for pausing, resuming, cancelling, or opening a Direct Goal Edit. It writes a Goal Control Command directly instead of interpreting ordinary chat text; ordinary user messages remain Goal Steering and cannot alter the Contract.
+_Avoid_: text-command parsing, implicit pause keyword, hidden cancellation
+
+**Goal Monitor Entry**:
+A compact Chat-level shortcut, analogous to the existing Background SubAgent monitor entry, that opens a user-requested Goal summary and its explicit control actions. It follows the same compact-trigger and collapsible-panel interaction pattern, while remaining a distinct Goal surface rather than a displayed SubAgent Run. Goal intermediate turns do not create Chat timeline messages.
+_Avoid_: per-turn chat message, exposed internal reasoning, SubAgent Run display
+
+**Goal Monitor Summary**:
+The user-visible content of a Goal Monitor Entry: the confirmed Goal Contract summary, lifecycle state, passed and remaining Completion Criteria, the latest verification failure or waiting/blocker reason, and current turn sequence, with available explicit controls. It excludes internal Plans, model reasoning, raw tool output, and raw SubAgent logs.
+_Avoid_: reasoning trace, full execution transcript, SubAgent detail pane
+
+**Goal Contract Confirmation Card**:
+The blocking Composer interaction that presents only a proposed Goal Contract for explicit user confirmation before Goal creation and activation. The private Initial Execution Plan is not shown for approval. Rejecting it returns to ordinary message editing and does not create a Goal or begin autonomous execution.
+_Avoid_: assistant timeline message, implicit acceptance, post-start contract edit
+
+**Goal-ready Proposal**:
+The redesigned `submit_proposed_plan` output that directly contains a user-reviewable Goal Contract Draft. It replaces the legacy generic title/summary/steps/risks/verification plan shape, rather than mapping those fields into Goal terms after submission; any execution approach remains internal Main Agent context.
+_Avoid_: legacy Proposed Plan mapping, inferred Contract, user-approved step list
+
+**Goal Contract Draft**:
+The proposed pre-confirmation form of a Goal Contract, containing the objective, Completion Criteria with deterministic verification definitions, Constraints, and Autonomy Boundary. User confirmation makes it the active Contract for a new Goal or Goal Revision.
+_Avoid_: accepted execution plan, mutable task list, implicit Goal
+
+**Editable Goal Proposal**:
+The pre-creation Goal-ready Proposal state in which the user may directly edit every Goal Contract Draft field: objective, Completion Criteria and their verification definitions, Constraints, and Autonomy Boundary. Edits are revalidated and reconfirmed as one proposal; they do not create a Goal until confirmation succeeds. The Initial Execution Plan remains private to the Main Agent.
+_Avoid_: post-start Contract patch, implicit Contract revision, partial confirmation, read-only generated criterion
+
+**Confirmed Goal Contract Boundary**:
+The lifecycle boundary after which objective, Completion Criteria, Constraints, and Autonomy Boundary are editable only through Direct Goal Edit. A submitted direct edit creates a pending Goal Revision and becomes active at the next Goal Turn settlement boundary; direct editing is not available through ordinary Steering or Main Agent output.
+_Avoid_: mutable active Contract, field-level silent rewrite, model-initiated revision
+
+**Pending Goal Revision**:
+The user-submitted Direct Goal Edit that has passed Contract validation but is waiting for the current Main Agent turn to settle. It does not alter the active Contract or current turn; at settlement the Goal Runtime atomically activates it, discards the old Revision's pending decision effects, and starts later execution from the new Contract.
+_Avoid_: immediate in-turn rewrite, Main Agent revision proposal, partially active Contract
+
+**Immediate Goal Revision Activation**:
+The no-turn rule for Direct Goal Edit: when a Goal has no running Main Agent turn, a validated submitted edit activates its new Revision immediately. An edited `WAITING` Goal becomes `ACTIVE` and starts a new turn so old wait conditions cannot hold the new Contract; `PAUSED`, `BLOCKED`, `LIMITED`, and `INTERRUPTED` retain their state until explicit Resume. Only an edit submitted during a running turn remains Pending until the turn settlement boundary.
+_Avoid_: waiting for nonexistent turn, stale waiting condition, edit-triggered non-waiting auto-resume, stale Revision resume
+
+**Prior Revision SubAgent Run**:
+A Goal-owned Background SubAgent Run launched under an earlier Goal Revision after a newer Revision becomes active. It is allowed to finish under existing lifecycle rules, but its result cannot automatically satisfy the newer Revision or produce its completion evidence; a Main Agent must explicitly reverify any reused result for the active Revision.
+_Avoid_: forced edit cancellation, automatic cross-Revision evidence, stale completion result
+
+**Prior Revision Verification Run**:
+A Verification Run launched under an earlier Goal Revision after a newer Revision becomes active. It may naturally finish or receive its existing approval outcome, but its result is recorded only for the earlier Revision and cannot transition the active Revision to `COMPLETE`; the active Revision begins with every Completion Criterion unverified.
+_Avoid_: cross-Revision completion, forced verification cancellation, inherited verification pass
+
+**Goal Edit Validation Failure**:
+The rejected Direct Goal Edit outcome when the submitted Contract fails field or deterministic-verification validation. The active Revision and lifecycle state remain unchanged; the Monitor receives field-level errors and no partial Revision is created or filled by the Main Agent.
+_Avoid_: partial Contract activation, model auto-completion, invalid Revision
+
+**Initial Execution Plan**:
+The private first execution approach generated by the Main Agent after a Goal Contract is confirmed, such as first steps and next focus. It is never shown for user approval, may be replaced through replanning, and does not belong to the Goal Contract.
+_Avoid_: user-approved plan, Goal objective, Completion Criterion, permanent plan
+
+**Unified Goal Proposal Entry**:
+The rule that explicit Goal Mode and Plan Mode both produce the same Goal-ready Proposal and use the same Goal Contract Confirmation Card. On confirmation, Plan Mode atomically exits and Goal Mode begins; Contract and verification semantics have no entry-specific variant.
+_Avoid_: Plan-to-Goal field mapping, parallel proposal schema, implicit mode crossover
+
+**Goal Contract Clarification**:
+The use of the existing structured clarification interaction before a Goal-ready Proposal when objective, Completion Criteria, deterministic verification, Constraints, or Autonomy Boundary remain materially unresolved. No Goal is created until these points can form an editable, valid Goal Contract Draft.
+_Avoid_: implicit Contract gap, premature Goal creation, unverified criterion
+
+**Goal Monitor API**:
+The read-only Goal snapshot endpoint plus independent pause, resume, cancel, and Direct Goal Edit action endpoints used by the Goal Monitor Entry. Contract mutation never uses ordinary text or a generic PATCH; it follows the direct-edit submission flow.
+_Avoid_: mutable snapshot endpoint, text control API, Agent-proposed Contract patch
+
+**Recent Goal Monitor Selection**:
+The Chat-scoped selection rule that returns the most recently created Goal still in any non-terminal lifecycle state; when none exists, it returns the most recently created Goal in that Chat. A Chat may contain multiple sequential Goals, but the shortcut exposes only one.
+_Avoid_: all-Goal dashboard, oldest active Goal, concurrent Goal chooser
+
+**Sequential Chat Goals**:
+The rule that one Chat may create multiple Goals only in order: a new Goal is allowed after the previous Goal reaches `COMPLETE` or `CANCELLED`; `PAUSED`, `BLOCKED`, `LIMITED`, and `Interrupted Goal` remain non-terminal and cannot be bypassed by starting or switching to another Goal.
+_Avoid_: parallel Goals, suspended Goal switching, hidden Goal queue
+
+**Goal Mode Release**:
+The automatic return to ordinary Chat behavior when a Goal reaches `COMPLETE` or `CANCELLED`. Later user messages require a fresh Explicit Goal Mode Entry and a newly confirmed Goal Contract to create another Goal.
+_Avoid_: sticky Goal mode, post-completion autonomous loop, implicit next Goal
+
+**Goal Non-terminal Control Hold**:
+The rule that `PAUSED`, `BLOCKED`, `LIMITED`, and `Interrupted Goal` retain the current Goal's control ownership and prevent a sequential Chat Goal from bypassing it. Explicit Resume continues the current Revision from its persisted state; `LIMITED` starts a new Goal Budget Cycle and `BLOCKED` preserves its failure count. Direct Goal Edit creates a newly confirmed Revision.
+_Avoid_: non-terminal release, implicit retry, bypass Goal
+
+**Completion Review Run**:
+The Goal Runtime's independent Completion Judge evaluation after a Main Agent proposes completion. The Judge may use only first-phase read-only tools through the existing Tool Guard, path boundaries, and approval flow; its decisions, reasons, evidence references, and pending approval are persisted in the Goal Runtime Snapshot. If a tool needs approval, the Goal enters `WAITING` and approval resumes the same Run without consuming a Main Agent turn; denied approval is a Completion Review Rejection with its explicit reason.
+_Avoid_: Main Agent self-test claim, unguarded host check, mutating completion check
+
+**Mandatory Completion Set**:
+The complete set of Completion Criteria in a first-phase Goal Contract. Every member must be accepted by Contract-bound Completion Review before the Goal Runtime can enter `COMPLETE`; the first phase has no optional criteria or partial-completion state.
+_Avoid_: best-effort criterion, optional acceptance check, partial success
+
+**Completion Review Evidence**:
+The candidate evidence references considered by a Completion Review Run for one Completion Criterion in one Goal Revision, together with that Run's accepted decision. An accepted decision marks the criterion satisfied and resets its rejection counter; a new Revision does not inherit it as satisfied evidence.
+_Avoid_: Main Agent claim, cross-Revision proof, permanently valid test result
+
+**Incremental Goal Verification**:
+The first-phase revalidation rule: after an environment-writing Main Agent turn, its Structured Goal Turn Resolution identifies the Completion Criteria affected by that change, and the Goal Runtime reruns only their Contract-bound Verification. Unaffected verified evidence remains valid within the same Goal Revision; `COMPLETE` still requires valid successful evidence for every Mandatory Completion Criterion.
+_Avoid_: global verification invalidation, dependency graph, unchecked changed criterion
+
+**Goal Continuation Context**:
+The bounded, runtime-built input for the next Main Agent turn when a prior turn settles with `continue` or after a permitted Goal Wake Event. It carries the confirmed Contract and current Revision, pending Steering, verified and remaining Completion Criteria, relevant verification failures, and the next focus. Goal-owned Background SubAgent links are runtime-internal wake and lifecycle state; the Main Agent obtains all SubAgent information through its existing tools and its own conversation context rather than receiving it inline. It is not a full replay of the chat transcript.
+_Avoid_: Agent self-recursion, full conversation replay, inline SubAgent state or result injection, free-form continuation guess
+
+**Completion Proposal Turn**:
+A Main Agent turn that proposes Goal completion and supplies evidence references, but does not itself finish the Goal Chat Stream. Its conclusion remains pending until the independent Verification Run passes every Mandatory Completion Criterion.
+_Avoid_: final answer, Agent-declared completion, unverified success message
+
+**Goal Finalization Turn**:
+The final short, read-only and tool-free Main Agent turn started after every required Verification Run passes, or when a Goal request must close in a non-active state. It produces the formal Chat response and ends the Goal Chat Stream; it neither advances the Goal nor consumes the Goal Turn Budget.
+_Avoid_: pre-verification final answer, Goal Runtime-authored delivery, budgeted execution turn, failed-verification completion
+
+**Finalization Fallback**:
+The fixed minimal system response emitted when a Goal Finalization Turn cannot produce text because of a model or infrastructure failure. The Goal Runtime closes the current request without retrying or changing the persisted Goal state; the user can inspect the authoritative Goal Monitor Summary.
+_Avoid_: fabricated Agent conclusion, finalization retry loop, implicit Goal transition
+
+**Goal Mode Exclusivity**:
+The Composer and runtime rule that Goal Mode cannot coexist with Plan Mode or Explicit Expert Selection. Entering Goal Mode clears those selections; a non-terminal Goal prevents switching to them until the Goal is released, while Goal-owned Background SubAgent delegation remains available under existing rules.
+_Avoid_: expert-assisted Goal, Plan Goal overlap, mid-Goal identity switch
+
+**Explicit Goal Mode Entry**:
+The user's deliberate selection of Goal Mode in the Chat Composer before submitting a request. It authorizes Contract proposal and later confirmation, but a Main Agent in ordinary chat may only recommend Goal Mode and cannot create a Goal by itself.
+_Avoid_: inferred Goal start, Agent-initiated autonomous run, normal chat continuation
+
+**Goal Steering Queue**:
+The ordered durable collection of ordinary user messages received while a Goal is `ACTIVE` or `WAITING`. They do not create parallel normal Agent requests; after the current turn settles, the next Goal Turn receives them as execution context in arrival order.
+_Avoid_: concurrent chat request, immediate turn interruption, unordered prompt merge
+
+**Goal-as-Chat Controller**:
+The first-phase role of Goal Runtime as an invisible controller of one Chat request: it decides whether the Main Agent execution continues or the request ends, while the Chat UI continues to show only the existing Main Agent/tool process and final response. Goal lifecycle summaries and controls are exposed only through the Goal Monitor Entry.
+_Avoid_: Goal chat message, Goal status transcript, separate Goal conversation
+
+**Goal Chat Stream**:
+The existing Chat request stream carrying Main Agent and tool events across automatic Goal turns. It has no Goal-specific timeline messages; it remains open through `ACTIVE` and `WAITING`, then ends after a Goal Finalization Turn when the current request is concluded.
+_Avoid_: per-turn Goal message, hidden autonomous stream, premature response completion
+
+**Waiting Goal Stream**:
+The open Goal Chat Stream state while a Goal waits for a permitted Goal Wake Event. It emits no LLM status message; a wake event resumes the same in-request Goal Event Loop. If the transport disconnects first, the Goal becomes an Interrupted Goal rather than completing or cancelling.
+_Avoid_: waiting poll output, synthetic assistant response, disconnect cancellation
+
+**Goal Request Finalization**:
+The end of the current Goal Chat Stream after a Goal Finalization Turn. `COMPLETE` and `CANCELLED` also release Goal Mode, while `PAUSED`, `BLOCKED`, and `LIMITED` remain non-terminal Goal states that retain control ownership and require a later explicit resume in a new sticky request.
+_Avoid_: terminal-only stream closure, non-terminal Goal release, runtime-authored final reply
+
+**Non-active Goal Request Closure**:
+The first-phase connection rule that closes the current Chat request after Finalization when a Goal is `PAUSED`, `BLOCKED`, or `LIMITED`. `INTERRUPTED` instead loses its request with the owner instance and has no Finalization Turn. Only `ACTIVE` and `WAITING` retain the current request; explicit Resume starts a new sticky request for the same Goal.
+_Avoid_: long-held paused connection, reconnect auto-resume, terminal-only closure, impossible crash finalization
+
+**Internal Goal Turn Boundary**:
+The intercepted normal-completion signal from a Main Agent turn while Goal Mode remains in control. The runtime settles the turn and may continue, wait, verify, or finalize without emitting a terminal Chat completion event; only the Goal Finalization Turn completes the frontend response stream.
+_Avoid_: per-turn SSE completion, hidden loop recursion, duplicate assistant response
 
 ## Example Dialogue
 

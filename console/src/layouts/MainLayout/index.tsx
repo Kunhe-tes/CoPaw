@@ -16,6 +16,7 @@ import ChannelsPage from "../../pages/Control/Channels";
 import SessionsPage from "../../pages/Control/Sessions";
 import CronJobsPage from "../../pages/Control/CronJobs";
 import FeaturedCasesPage from "../../pages/Control/FeaturedCases";
+import ScenarioPresetsPage from "../../pages/Control/ScenarioPresets";
 import GreetingPage from "../../pages/Control/Greeting";
 import HeartbeatPage from "../../pages/Control/Heartbeat";
 import HookManagementPage from "../../pages/Control/HookManagement";
@@ -46,7 +47,9 @@ import ReportViewPage from "../../pages/ReportView";
 import MarketPage from "../../pages/Market";
 import MySkillsPage from "../../pages/MySkills";
 import MyMCPPage from "../../pages/MyMCP";
+import WPlusSopWorkspace from "../../pages/WPlusSopWorkspace";
 import ExpertsPage from "../../pages/Experts";
+import ExpertCommunityPage from "../../pages/ExpertCommunity";
 
 import { useDynamicRender } from "@/components/agentscope-chat/DynamicRenderContext";
 
@@ -59,6 +62,7 @@ const pathToKey: Record<string, string> = {
   "/cron-jobs": "cron-jobs",
   "/greeting-management": "greeting-management",
   "/featured-cases-management": "featured-cases-management",
+  "/scenario-presets-management": "scenario-presets-management",
   "/heartbeat": "heartbeat",
   "/hook-management": "hook-management",
   "/skills": "skills",
@@ -95,6 +99,7 @@ const pathToKey: Record<string, string> = {
   "/my-skills": "my-skills",
   "/my-mcp": "my-mcp",
   "/experts": "experts",
+  "/expert-community": "expert-community",
 };
 
 export default function MainLayout() {
@@ -138,7 +143,9 @@ export default function MainLayout() {
     <Layout className={styles.mainLayout}>
       {!hideHeader && <Header />}
       <Layout>
-        {!hideGlobalShell && <Sidebar selectedKey={selectedKey} />}
+        {!hideGlobalShell && (
+          <Sidebar selectedKey={selectedKey} withoutHeader={hideHeader} />
+        )}
         <Content
           className={`page-container${
             hideGlobalShell ? "" : " page-container--with-sidebar"
@@ -159,6 +166,10 @@ export default function MainLayout() {
                 <Route path="/" element={<Navigate to="/chat" replace />} />
               )}
               <Route path="/chat/*" element={<Chat />} />
+              <Route
+                path="/wplus-sop/:sessionId"
+                element={<WPlusSopWorkspace />}
+              />
               <Route path="/channels" element={<ChannelsPage />} />
               <Route path="/sessions" element={<SessionsPage />} />
               <Route path="/cron-jobs" element={<CronJobsPage />} />
@@ -166,6 +177,10 @@ export default function MainLayout() {
               <Route
                 path="/featured-cases-management"
                 element={<FeaturedCasesPage />}
+              />
+              <Route
+                path="/scenario-presets-management"
+                element={<ScenarioPresetsPage />}
               />
               <Route path="/heartbeat" element={<HeartbeatPage />} />
               <Route path="/hook-management" element={<HookManagementPage />} />
@@ -212,6 +227,10 @@ export default function MainLayout() {
               <Route path="/my-skills" element={<MySkillsPage />} />
               <Route path="/my-mcp" element={<MyMCPPage />} />
               <Route path="/experts" element={<ExpertsPage />} />
+              <Route
+                path="/expert-community"
+                element={<ExpertCommunityPage />}
+              />
             </Routes>
           </div>
         </Content>

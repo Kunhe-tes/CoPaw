@@ -84,7 +84,11 @@ def _setup_runner(monkeypatch) -> AgentRunner:
     runner.session = SimpleNamespace(mutate_session_state=AsyncMock())
     runner._start_query_trace = AsyncMock(return_value=None)
     runner._end_trace_if_needed = AsyncMock()
-    runner._load_query_retry_settings = lambda: (2, 1, 0.0, 0.0)
+
+    def load_query_retry_settings(_agent_config=None):
+        return (2, 1, 0.0, 0.0)
+
+    runner._load_query_retry_settings = load_query_retry_settings
     runner._handle_query_error = AsyncMock()
     runner._cleanup_query_resources = AsyncMock()
     runner._cleanup_blocked_runtime_start = AsyncMock()
@@ -150,6 +154,39 @@ def test_load_query_retry_settings_applies_current_source_override(
 
     with bind_source_system_config(effective):
         assert runner._load_query_retry_settings() == (3, 2, 1.5, 12.0)
+
+
+def test_load_query_retry_settings_uses_supplied_config_snapshot(
+    monkeypatch,
+):
+    runner = AgentRunner(agent_id="test-agent")
+    runner.tenant_id = "tenant-a"
+    agent_config = SimpleNamespace(
+        running=SimpleNamespace(
+            query_retry=SimpleNamespace(
+                enabled=True,
+                max_retries=2,
+                backoff_base=0.5,
+                backoff_cap=3.0,
+            ),
+        ),
+    )
+
+    def fail_load_agent_config(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("retry settings should use the preflight config")
+
+    monkeypatch.setattr(
+        "src.swe.app.runner.runner.load_agent_config",
+        fail_load_agent_config,
+    )
+
+    assert runner._load_query_retry_settings(agent_config) == (
+        3,
+        2,
+        0.5,
+        3.0,
+    )
 
 
 async def _collect_until_exception(runner: AgentRunner, request):

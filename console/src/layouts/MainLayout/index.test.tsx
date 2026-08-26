@@ -48,7 +48,12 @@ vi.mock("../Header", () => ({
 }));
 
 vi.mock("../Sidebar", () => ({
-  default: () => <aside data-testid="global-sidebar" />,
+  default: ({ withoutHeader }: { withoutHeader?: boolean }) => (
+    <aside
+      data-testid="global-sidebar"
+      data-without-header={String(Boolean(withoutHeader))}
+    />
+  ),
 }));
 
 vi.mock("../../components/ConsoleCronBubble", () => ({
@@ -71,7 +76,10 @@ describe("MainLayout global shell", () => {
     );
 
     expect(screen.queryByTestId("global-header")).not.toBeInTheDocument();
-    expect(screen.getByTestId("global-sidebar")).toBeInTheDocument();
+    expect(screen.getByTestId("global-sidebar")).toHaveAttribute(
+      "data-without-header",
+      "true",
+    );
   });
 
   it("renders Header and Sidebar for other sources", () => {
@@ -84,6 +92,9 @@ describe("MainLayout global shell", () => {
     );
 
     expect(screen.getByTestId("global-header")).toBeInTheDocument();
-    expect(screen.getByTestId("global-sidebar")).toBeInTheDocument();
+    expect(screen.getByTestId("global-sidebar")).toHaveAttribute(
+      "data-without-header",
+      "false",
+    );
   });
 });

@@ -424,6 +424,29 @@ async def test_tool_guard_pending_extra_includes_request_scope_ids(
 
 
 @pytest.mark.asyncio
+async def test_tool_guard_pending_extra_carries_goal_id_only_in_goal_mode(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    agent = _FakeAgent(tmp_path)
+    agent._request_context["goal_id"] = "goal-1"
+    approval_service = _RecordingApprovalService()
+    agent._tool_guard_approval_service = approval_service
+    monkeypatch.setattr(
+        "swe.app.approvals.notify_cron_approval_pending",
+        AsyncMock(),
+    )
+
+    await agent._acting_with_approval(
+        {"id": "tool-goal", "name": "execute_shell_command", "input": {}},
+        "execute_shell_command",
+        ToolGuardResult(tool_name="execute_shell_command", params={}),
+    )
+
+    assert approval_service.create_pending_kwargs["extra"]["goal_id"] == "goal-1"
+
+
+@pytest.mark.asyncio
 async def test_waiting_approval_card_uses_notified_request_id(
     tmp_path,
     monkeypatch,

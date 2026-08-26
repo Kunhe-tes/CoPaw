@@ -8,13 +8,19 @@ export interface ExpertPayload {
   skills: string[];
   mcps: string[] | null;
   tools: Record<string, unknown>;
-  model: Record<string, string> | null;
+  model: { provider: string; id: string } | null;
   budget: Record<string, number>;
 }
 
 export interface AgentOwnedExpertMetadata {
   declared_skills: string[];
   declared_mcps: string[] | null;
+  model: { provider: string; id: string } | null;
+  community?: {
+    item_id: string;
+    version: string;
+    content_fingerprint: string;
+  } | null;
 }
 
 export interface ExpertDefinition {
@@ -35,7 +41,11 @@ export interface Expert {
   toml: string;
 }
 
-const mutation = (method: "POST" | "PUT" | "DELETE", body?: unknown, revision?: string) => ({
+const mutation = (
+  method: "POST" | "PUT" | "DELETE",
+  body?: unknown,
+  revision?: string,
+) => ({
   method,
   body: body === undefined ? undefined : JSON.stringify(body),
   headers: revision ? { "If-Match": revision } : undefined,
@@ -43,14 +53,28 @@ const mutation = (method: "POST" | "PUT" | "DELETE", body?: unknown, revision?: 
 
 export const expertsApi = {
   listExperts: () => request<Expert[]>("/experts"),
-  previewExpert: (payload: ExpertPayload) => request<Expert>("/experts/preview", mutation("POST", payload)),
-  createExpert: (payload: ExpertPayload) => request<Expert>("/experts", mutation("POST", payload)),
+  previewExpert: (payload: ExpertPayload) =>
+    request<Expert>("/experts/preview", mutation("POST", payload)),
+  createExpert: (payload: ExpertPayload) =>
+    request<Expert>("/experts", mutation("POST", payload)),
   updateExpert: (id: string, payload: ExpertPayload, revision: string) =>
-    request<Expert>(`/experts/${encodeURIComponent(id)}`, mutation("PUT", payload, revision)),
+    request<Expert>(
+      `/experts/${encodeURIComponent(id)}`,
+      mutation("PUT", payload, revision),
+    ),
   enableExpert: (id: string, revision: string) =>
-    request<Expert>(`/experts/${encodeURIComponent(id)}/enable`, mutation("POST", undefined, revision)),
+    request<Expert>(
+      `/experts/${encodeURIComponent(id)}/enable`,
+      mutation("POST", undefined, revision),
+    ),
   disableExpert: (id: string, revision: string) =>
-    request<Expert>(`/experts/${encodeURIComponent(id)}/disable`, mutation("POST", undefined, revision)),
+    request<Expert>(
+      `/experts/${encodeURIComponent(id)}/disable`,
+      mutation("POST", undefined, revision),
+    ),
   deleteExpert: (id: string, revision: string) =>
-    request<void>(`/experts/${encodeURIComponent(id)}`, mutation("DELETE", undefined, revision)),
+    request<void>(
+      `/experts/${encodeURIComponent(id)}`,
+      mutation("DELETE", undefined, revision),
+    ),
 };

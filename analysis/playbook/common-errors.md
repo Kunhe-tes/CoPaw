@@ -2,6 +2,29 @@
 
 本文档只收录仓库中已经出现过、且有明确入口可追的高频报错。
 
+## 后端启动报 ModuleNotFoundError: No module named 'trace_sdk'
+
+### 症状
+
+- 开发环境启动 `swe app` 或导入 `swe.app._app` 时，在 AgentTraceSDK
+  导入阶段报 `ModuleNotFoundError: No module named 'trace_sdk'`
+- 环境无法安装私有分发包 `LR34.05-AgentTraceSDK`
+
+### 第一落点
+
+- [src/swe/tracing/agent_trace_sdk.py](../../src/swe/tracing/agent_trace_sdk.py)
+- 私有依赖仍由 [pyproject.toml](../../pyproject.toml) 声明，生产环境默认
+  保持缺包即失败
+
+### 开发环境处理
+
+- 仅在本地无法安装私有包时，显式启动：
+  `SWE_ALLOW_MISSING_TRACE_SDK=true swe app`
+- 该开关只把 AgentTraceSDK 替换为 no-op 实现，不会关闭 Swe 自身的
+  tracing manager
+- 不要将该变量加入部署环境。变量未设置或不是 `true` 时，会重新抛出
+  原始导入错误，防止生产环境静默失去 Agent Trace
+
 ## MCP 报 mcp_transport_error
 
 ### 症状
@@ -160,6 +183,28 @@
   - shell 子进程 env 里存在后端 `SWE_WORKING_DIR` / `SWE_SECRET_DIR`
   - 租户 `.secret/envs.json` 中同名 key 不会覆盖
   - `PYTHONPATH` 等解释器边界变量仍被过滤
+
+## Shell 脚本结束后报 _wrap_path_function missing specs
+
+### 症状
+
+- `execute_shell_command` 执行的 Python 脚本本身成功完成
+- 工具输出的 stderr 额外出现：
+  - `Error in sitecustomize; set PYTHONVERBOSE for traceback:`
+  - `TypeError: _wrap_path_function() missing 1 required positional argument: 'specs'`
+
+### 典型原因
+
+- Shell 工具为 Python 子进程生成并注入 `sitecustomize.py`；它在解释器启动时安装租户路径守卫
+- 运行中的服务仍使用旧 guard 源码，其中 `_wrap_path_function(module, name, specs)` 的调用遗漏了第三个参数
+- Python 将 `sitecustomize` 导入失败作为 stderr warning 处理并继续执行，因此错误会和脚本输出一起在工具返回时出现
+
+### 第一落点与处理
+
+- [src/swe/security/python_runtime_path_guard.py](../../src/swe/security/python_runtime_path_guard.py)
+- [tests/unit/test_python_runtime_path_guard.py](../../tests/unit/test_python_runtime_path_guard.py)
+- 现行源码必须保证每个 `_wrap_path_function()` 调用传入 `specs`，并运行 `test_runtime_guard_starts_python_without_sitecustomize_error`
+- 该 guard 被生成到子进程临时目录，修复源码后必须重新安装应用并重启 `swe app`；容器部署则需要重建镜像并滚动更新实例
 
 ## MCP 注册时报 App not Subscribe This MCP Server
 

@@ -1,8 +1,9 @@
 # Chat API
 
-本文档说明当前 Console 使用的两个聊天接口：
+本文档说明当前 Console 使用的三个聊天接口：
 
 - `POST /api/console/chat`：提交一轮对话并通过 SSE 接收流式结果。
+- `GET /api/chats/{chat_id}`：读取指定 ChatSpec 的当前在线会话详情。
 - `GET /api/chats/{chat_id}/history`：读取指定 ChatSpec 的压缩归档历史。
 
 ## 通用约定
@@ -15,10 +16,11 @@
 
 ```text
 /api/agents/{agent_id}/console/chat
+/api/agents/{agent_id}/chats/{chat_id}
 /api/agents/{agent_id}/chats/{chat_id}/history
 ```
 
-本文主体只描述用户请求中指定的两个非 agent-scoped 路径。
+本文主体只描述用户请求中指定的三个非 agent-scoped 路径。
 
 ### 身份与请求头
 
@@ -315,7 +317,174 @@ data: {"error":"internal server error"}
 
 ---
 
-## 2. 获取压缩归档历史
+## 2. 读取当前在线会话详情
+
+### 基本信息
+
+```http
+GET /api/chats/{chat_id}
+```
+
+该接口返回指定 ChatSpec 的当前在线会话状态：会话元数据、当前在线消息、实时运行状态与归档可用性元数据。它读取的是尚未压缩归档的在线 memory 消息，不等同于 `GET /api/chats/{chat_id}/history` 返回的压缩归档历史。当消息因压缩被移出在线 memory 后，需要通过历史接口继续读取。响应中的消息按时间线正序排列。
+
+### 路径参数
+
+| 参数 | 类型 | 必填 | 说明 |
+| --- | --- | --- | --- |
+| `chat_id` | `string` | 是 | 后端 `ChatSpec.id`，必须是规范格式 UUID。它不是逻辑 `session_id`。 |
+
+### 请求示例
+
+```bash
+curl "${BASE_URL}/api/chats/2d5f8fb3-6b17-4c77-b5a1-1e03f9dc2d41" \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "X-Tenant-Id: tenant-a" \
+  -H "X-User-Id: user-001" \
+  -H "X-Source-Id: portal"
+```
+
+### 成功响应
+
+HTTP 状态码为 `200`，响应头为 `Content-Type: application/json`。响应模型为 `ChatHistory`：
+
+```json
+{
+  "chat": {
+    "id": "2d5f8fb3-6b17-4c77-b5a1-1e03f9dc2d41",
+    "name": "本周销售数据总结",
+    "session_id": "session-user-001",
+    "user_id": "user-001",
+    "channel": "console",
+    "created_at": "2026-08-17T07:00:00+00:00",
+    "updated_at": "2026-08-17T08:02:00+00:00",
+    "meta": {
+      "source_id": "portal"
+    },
+    "status": "idle"
+  },
+  "messages": [
+    {
+      "sequence_number": null,
+      "object": "message",
+      "status": "completed",
+      "error": null,
+      "id": "msg-025",
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "sequence_number": null,
+          "object": "content",
+          "status": "completed",
+          "error": null,
+          "type": "text",
+          "index": null,
+          "delta": false,
+          "msg_id": null,
+          "text": "本周销售额较上周增长 12%。"
+        }
+      ],
+      "code": null,
+      "message": null,
+      "usage": null,
+      "metadata": {
+        "original_id": "msg-025",
+        "original_name": "assistant",
+        "metadata": {}
+      },
+      "timestamp": "2026-08-17T07:59:00+00:00"
+    }
+  ],
+  "status": "idle",
+  "archive": {
+    "has_more": true,
+    "boundaries": [
+      {
+        "id": "boundary-001",
+        "archived_message_count": 24,
+        "first_message_id": "msg-001",
+        "last_message_id": "msg-024",
+        "created_at": "2026-08-17T08:00:00+00:00",
+        "first_timestamp": "2026-08-17T07:30:00+00:00",
+        "last_timestamp": "2026-08-17T07:59:00+00:00"
+      }
+    ]
+  }
+}
+```
+
+### 响应字段
+
+#### 顶层字段
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `chat` | `object\|null` | ChatSpec 会话元数据。 |
+| `messages` | `array` | 当前在线消息，按时间线正序排列；可能包含任务会话消息与模型调用失败标记消息。 |
+| `status` | `string` | 实时运行状态：`idle`、`running` 或 `stopping`。 |
+| `archive` | `object` | 归档可用性元数据，见下表。 |
+
+#### `chat` 字段（ChatSpec）
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `id` | `string` | ChatSpec UUID，与路径参数 `chat_id` 一致。 |
+| `name` | `string` | 会话名称；默认 `New Chat`，异步标题生成后为会话标题。 |
+| `session_id` | `string` | 逻辑会话 ID，创建时由请求传入（如 `session-user-001`）。 |
+| `user_id` | `string` | 会话所属用户 ID。 |
+| `channel` | `string` | 通道标识，默认 `console`。 |
+| `created_at` | `string` | 创建时间（ISO 8601）。 |
+| `updated_at` | `string` | 最近更新时间（ISO 8601）。 |
+| `meta` | `object` | 附加元数据；可能包含 `source_id`、`agent_id` 等。 |
+| `status` | `string` | ChatSpec 持久化状态字段，默认 `idle`；与顶层实时运行 `status` 不是同一个值。 |
+
+#### `messages[]` 字段
+
+消息对象沿用 AgentScope Runtime `Message`，字段与历史接口的 `messages[]` 一致，包含 `id`、`object`、`type`、`role`、`status`、`content`、`code`、`message`、`usage`、`metadata`、`timestamp`。在线消息的 `metadata` 通常包含 `original_id`、`original_name` 与原始 metadata；携带审批元数据的消息会附带当前审批状态。接口在返回前会过滤隐藏上下文内容。
+
+#### `archive` 字段
+
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| `has_more` | `boolean` | 是否存在更早的已归档消息；为 `true` 时可通过历史接口继续分页读取。 |
+| `boundaries` | `array` | 已产生的压缩边界列表；每项字段与历史接口的 `boundaries[]` 一致。 |
+
+### 空消息状态
+
+如果 chat 存在但还没有可返回的在线消息（例如刚创建、尚未开始推理，或全部消息已压缩归档），接口仍返回 `200`：
+
+```json
+{
+  "chat": {
+    "id": "2d5f8fb3-6b17-4c77-b5a1-1e03f9dc2d41",
+    "name": "New Chat",
+    "session_id": "session-user-001",
+    "user_id": "user-001",
+    "channel": "console",
+    "created_at": "2026-08-17T07:00:00+00:00",
+    "updated_at": "2026-08-17T07:00:00+00:00",
+    "meta": {},
+    "status": "idle"
+  },
+  "messages": [],
+  "status": "idle",
+  "archive": {
+    "has_more": false,
+    "boundaries": []
+  }
+}
+```
+
+### HTTP 错误
+
+| 状态码 | 典型原因 | 示例响应 |
+| --- | --- | --- |
+| `400` | 身份头缺失/非法，具体取决于中间件配置。 | `{ "detail": "X-Source-Id header is required" }` |
+| `404` | `chat_id` 对应的 ChatSpec 不存在，或 chat 不属于请求身份（user/source/agent 不匹配）。身份不匹配时返回 404 而非 403，避免泄露会话存在性。 | `{ "detail": "Chat not found: 2d5f8fb3-..." }` |
+
+---
+
+## 3. 获取压缩归档历史
 
 ### 基本信息
 
@@ -487,7 +656,7 @@ HTTP 状态码为 `200`，响应头为 `Content-Type: application/json`。响应
 
 ---
 
-## 3. 两个接口的关系
+## 4. 三个接口的关系
 
 | 场景 | 使用接口 | 关键 ID |
 | --- | --- | --- |

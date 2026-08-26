@@ -279,13 +279,6 @@ def _find_market_skill_item(
     )
 
 
-def _skill_task_result_payload(
-    result: DistributeResponse,
-) -> dict[str, object]:
-    """构造技能分发的任务结果摘要。"""
-    return result.model_dump()
-
-
 async def _run_skill_distribution_task(
     *,
     task_id: str,
@@ -308,42 +301,78 @@ async def _run_skill_distribution_task(
             operator_name=operator_name,
             req=req,
         )
-        conflict_map = {item.user_id: item.reason for item in result.conflicts}
+        result_map = {
+            item.user_id: item
+            for item in getattr(result, "results", [])
+            if getattr(item, "user_id", "")
+        }
+        conflict_ids = {item.user_id for item in result.conflicts}
+        succeeded_count = 0
+        failed_count = 0
         for user_id in target_user_ids:
-            if user_id in conflict_map:
+            item_result = result_map.get(user_id)
+            if item_result is not None:
+                if item_result.success:
+                    succeeded_count += 1
+                else:
+                    failed_count += 1
+                await store.record_item_result(
+                    task_id=task_id,
+                    target_id=user_id,
+                    success=bool(item_result.success),
+                    item_status=(
+                        "succeeded" if item_result.success else "failed"
+                    ),
+                    error_message=item_result.error,
+                    result={
+                        "item_id": item_id,
+                        "status": item_result.status,
+                        "error": item_result.error,
+                    },
+                )
+            elif user_id in conflict_ids:
+                failed_count += 1
+                conflict_reason = next(
+                    item.reason
+                    for item in result.conflicts
+                    if item.user_id == user_id
+                )
                 await store.record_item_result(
                     task_id=task_id,
                     target_id=user_id,
                     success=False,
-                    error_message=conflict_map[user_id],
+                    item_status="failed",
+                    error_message=conflict_reason,
                     result={
                         "item_id": item_id,
                         "status": "conflict",
+                        "error": conflict_reason,
                     },
                 )
             else:
+                failed_count += 1
                 await store.record_item_result(
                     task_id=task_id,
                     target_id=user_id,
-                    success=True,
-                    result=_skill_task_result_payload(result),
+                    success=False,
+                    item_status="failed",
+                    error_message="distribution result missing",
+                    result={
+                        "item_id": item_id,
+                        "status": "failed",
+                        "error": "distribution result missing",
+                    },
                 )
         await store.finish_task(
             task_id=task_id,
             status=(
                 "succeeded"
-                if result.conflict_count == 0
-                else (
-                    "failed"
-                    if result.distributed_count == 0
-                    else "partial_failed"
-                )
+                if failed_count == 0
+                else ("failed" if succeeded_count == 0 else "partial_failed")
             ),
-            done_count=result.distributed_count,
-            failed_count=result.conflict_count,
-            error_message=(
-                None if result.conflict_count == 0 else "部分目标分发失败"
-            ),
+            done_count=succeeded_count + failed_count,
+            failed_count=failed_count,
+            error_message=(None if failed_count == 0 else "部分目标分发失败"),
             result=result.model_dump(),
         )
     except Exception as exc:  # pylint: disable=broad-except
@@ -558,6 +587,7 @@ def _process_skill_upload_single(
     str,
     bool,
     Optional[str],
+    Optional[str],
 ]:
     """处理单个技能的上架逻辑.
 
@@ -607,7 +637,15 @@ def _process_skill_upload_single(
             "existing_creator_name": existing.creator_name,
             "existing_version": existing.version,
         }
-        return None, conflict_info, name, resolved_cn_name, False, None
+        return (
+            None,
+            conflict_info,
+            name,
+            resolved_cn_name,
+            False,
+            None,
+            final_skill_id,
+        )
 
     version_unchanged = False
     cn_name_changed = False
@@ -663,7 +701,15 @@ def _process_skill_upload_single(
 
     save_index(svc.marketplace_root, source_id, items)
 
-    return name, None, name, resolved_cn_name, version_unchanged, item.item_id
+    return (
+        name,
+        None,
+        name,
+        resolved_cn_name,
+        version_unchanged,
+        item.item_id,
+        final_skill_id,
+    )
 
 
 async def _process_published_skill_record(
@@ -836,6 +882,7 @@ async def publish_skill_upload(
                 resolved_cn_name,
                 version_unchanged,
                 item_id,
+                final_skill_id,
             ) = await asyncio.to_thread(
                 _process_skill_upload_single,
                 skill_dir,
@@ -901,6 +948,7 @@ async def publish_skill_upload(
         description=parsed_description,
         cn_name=parsed_cn_name,
         version_unchanged=has_unchanged,
+        skill_id=final_skill_id,
     )
     if conflicts:
         result.conflicts = conflicts

@@ -121,11 +121,13 @@ async def test_candidate_install_archives_only_its_prefix_and_keeps_delta_recove
     await memory.add(second)
 
     manager = object.__new__(ReMeLightMemoryManager)
+    manager.working_dir = str(tmp_path)
     manager.get_in_memory_memory = lambda **_kwargs: memory
     assert await manager.schedule_precompaction(
         chat_id=chat_id,
         watermark=0,
         messages=[first],
+        memory=memory,
     )
 
     later = _message(3)
@@ -133,6 +135,7 @@ async def test_candidate_install_archives_only_its_prefix_and_keeps_delta_recove
     assert await manager.install_ready_precompaction(
         chat_id=chat_id,
         messages=[first],
+        memory=memory,
     )
 
     state = await memory.chat_checkpoint_store.read_checkpoint_state(chat_id)

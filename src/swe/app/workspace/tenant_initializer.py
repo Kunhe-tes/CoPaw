@@ -26,6 +26,33 @@ from .bootstrap_state import (
 logger = logging.getLogger(__name__)
 
 
+def _inherit_zhaohu_from_template(
+    base_channels: dict[str, Any],
+    template_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """新租户 zhaohu 配置继承自 source 模板（default 用户）agent.json。
+
+    以 base_channels（config.json + env 默认）为基准，用模板 agent.json 的
+    zhaohu 非空字段覆盖同名字段；空值不覆盖，保留默认兜底。
+    """
+    channels = dict(base_channels)
+    template_channels = template_payload.get("channels") or {}
+    tpl_zhaohu = template_channels.get("zhaohu")
+    if not isinstance(tpl_zhaohu, dict) or not tpl_zhaohu:
+        return channels
+    merged = dict(channels.get("zhaohu") or {})
+    for key, value in tpl_zhaohu.items():
+        if (
+            value is None
+            or value == ""
+            or (isinstance(value, (list, dict)) and not value)
+        ):
+            continue
+        merged[key] = value
+    channels["zhaohu"] = merged
+    return channels
+
+
 class TenantInitializer:
     """Bootstrap a tenant directory with required structure and agents."""
 
@@ -534,8 +561,11 @@ class TenantInitializer:
                 source_agent_config_path.read_text(encoding="utf-8"),
             )
             agent_payload["workspace_dir"] = str(default_workspace)
-            agent_payload["channels"] = tenant_config.channels.model_dump(
-                exclude_none=True,
+            channels = tenant_config.channels.model_dump(exclude_none=True)
+            # 继承 source 下 default 用户（模板）agent.json 的 zhaohu 配置
+            agent_payload["channels"] = _inherit_zhaohu_from_template(
+                channels,
+                agent_payload,
             )
             agent_config_model = AgentProfileConfig(**agent_payload)
             write_bootstrap_json(

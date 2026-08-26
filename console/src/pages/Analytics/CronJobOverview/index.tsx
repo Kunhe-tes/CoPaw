@@ -1,8 +1,11 @@
 import {
   ArrowLeft,
+  ArrowDownUp,
   Banknote,
   CalendarDays,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   ChevronRight,
   Eye,
   FileText,
@@ -51,6 +54,15 @@ const { Option } = Select;
 
 type TimeRange = "day" | "week" | "month" | "custom";
 type SummaryMetricTone = "blue" | "green" | "orange" | "red";
+type SortDirection = "asc" | "desc";
+type BranchRankingSortKey = Exclude<
+  keyof CronJobOverviewPageData["branchRankingRows"][number],
+  "rank" | "bbkId" | "branchName"
+>;
+type BranchManagerSortableMetric = Exclude<
+  keyof BranchManagerSummaryItem,
+  "user_id" | "user_name"
+>;
 
 const failureReasonOptions = [
   "子任务执行失败",
@@ -76,6 +88,16 @@ const DRILL_DOWN_TABLE_SCROLL = {
 
 const formatRatioPercent = (value?: number | null) =>
   `${((value ?? 0) * 100).toFixed(2)}%`;
+
+const parseRankingValue = (value: string | number) => {
+  const numericValue = Number(String(value).replace(/[%\s,]/g, ""));
+  return Number.isFinite(numericValue) ? numericValue : 0;
+};
+
+const branchManagerMetricSorter =
+  (key: BranchManagerSortableMetric) =>
+  (left: BranchManagerSummaryItem, right: BranchManagerSummaryItem) =>
+    Number(left[key] ?? 0) - Number(right[key] ?? 0);
 
 type SummaryMetricDefinition = {
   key: string;
@@ -171,6 +193,14 @@ const emptyOverviewData: CronJobOverviewPageData = {
   },
   anomalyRankRows: [],
 };
+
+function renderPanelLoading() {
+  return (
+    <div className={styles.listFootnote} data-testid="cron-panel-loading">
+      加载中...
+    </div>
+  );
+}
 
 function isValidDateParam(value: string | null) {
   if (!value) {
@@ -334,7 +364,9 @@ function TaskRankingTable({
 }) {
   return (
     <section className={`${styles.panel} ${styles.behaviorPanel}`}>
-      <Spin spinning={loading} tip="加载分行排行...">
+      {loading ? (
+        renderPanelLoading()
+      ) : (
         <div className={styles.tableScroller}>
           <table className={styles.behaviorTable}>
             <colgroup>
@@ -403,113 +435,196 @@ function TaskRankingTable({
             </tbody>
           </table>
         </div>
-      </Spin>
+      )}
     </section>
   );
 }
 
 function RankingTable({
   data,
+  loading = false,
   onRowClick,
   selectedBranchId,
 }: {
   data: CronJobOverviewPageData["branchRankingRows"];
+  loading?: boolean;
   onRowClick: (bbkId: string, bbkName: string) => void;
   selectedBranchId: string | null;
 }) {
+  const [sortConfig, setSortConfig] = useState<{
+    key: BranchRankingSortKey;
+    direction: SortDirection;
+  } | null>(null);
+  const sortedData = useMemo(() => {
+    if (!sortConfig) {
+      return data;
+    }
+    return [...data].sort((left, right) => {
+      const leftValue = parseRankingValue(left[sortConfig.key]);
+      const rightValue = parseRankingValue(right[sortConfig.key]);
+      const result = leftValue - rightValue;
+      return sortConfig.direction === "asc" ? result : -result;
+    });
+  }, [data, sortConfig]);
+
+  const handleSort = (key: BranchRankingSortKey) => {
+    setSortConfig((current) => {
+      if (!current || current.key !== key) {
+        return { key, direction: "desc" };
+      }
+      if (current.direction === "desc") {
+        return { key, direction: "asc" };
+      }
+      return null;
+    });
+  };
+
+  const renderSortableHeader = (title: string, key: BranchRankingSortKey) => {
+    const isActive = sortConfig?.key === key;
+    const Icon = isActive
+      ? sortConfig?.direction === "desc"
+        ? ChevronDown
+        : ChevronUp
+      : ArrowDownUp;
+    return (
+      <span className={styles.sortableHeader}>
+        {title}
+        <button
+          type="button"
+          className={`${styles.sortButton} ${
+            isActive ? styles.sortButtonActive : ""
+          }`.trim()}
+          aria-label={`${title}排序`}
+          aria-pressed={isActive}
+          title={`${title}排序`}
+          onClick={(event) => {
+            event.stopPropagation();
+            handleSort(key);
+          }}
+        >
+          <Icon size={13} aria-hidden="true" />
+        </button>
+      </span>
+    );
+  };
+
   return (
     <section className={`${styles.panel} ${styles.behaviorPanel}`}>
-      <div className={styles.tableScroller}>
-        <table className={styles.behaviorTable}>
-          <colgroup>
-            <col style={{ width: 42 }} />
-            <col style={{ width: 95 }} />
-            <col style={{ width: 55 }} />
-            <col style={{ width: 55 }} />
-            <col style={{ width: 55 }} />
-            <col style={{ width: 55 }} />
-            <col style={{ width: 65 }} />
-            <col style={{ width: 80 }} />
-            <col style={{ width: 80 }} />
-            <col style={{ width: 65 }} />
-            <col style={{ width: 65 }} />
-            <col style={{ width: 55 }} />
-            <col style={{ width: 80 }} />
-            <col style={{ width: 55 }} />
-            <col style={{ width: 55 }} />
-            <col style={{ width: 70 }} />
-            <col style={{ width: 80 }} />
-          </colgroup>
-          <thead>
-            <tr>
-              <th className={styles.indexCell} />
-              <th>分行名称</th>
-              <th>技能数</th>
-              <th>任务总数</th>
-              <th>成功执行数</th>
-              <th>已读任务数</th>
-              <th>涉及客户经理数</th>
-              <th>查看结果的客户经理数</th>
-              <th>查看方案客户经理数</th>
-              <th>去洞察的客户经理数</th>
-              <th>去电访的客户经理数</th>
-              <th>推荐的客户数</th>
-              <th>被客户经理查看的客户数</th>
-              <th>去洞察客户数</th>
-              <th>去电访客户数</th>
-              <th>接触客户数</th>
-              <th>接触客户率</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.map((row, index) => {
-              const isClickable = row.bbkId && row.rank !== "...";
-              const isSelected = row.bbkId && row.bbkId === selectedBranchId;
+      {loading ? (
+        renderPanelLoading()
+      ) : (
+        <div className={styles.tableScroller}>
+          <table
+            className={`${styles.behaviorTable} ${styles.skillBranchRankingTable}`}
+          >
+            <colgroup>
+              <col style={{ width: 42 }} />
+              <col style={{ width: 92 }} />
+              {Array.from({ length: 15 }).map((_, index) => (
+                <col key={index} style={{ width: 68 }} />
+              ))}
+            </colgroup>
+            <thead>
+              <tr>
+                <th className={styles.indexCell} />
+                <th>分行名称</th>
+                <th>{renderSortableHeader("技能数", "skillCount")}</th>
+                <th>{renderSortableHeader("任务总数", "totalTasks")}</th>
+                <th>{renderSortableHeader("成功执行数", "successCount")}</th>
+                <th>{renderSortableHeader("已读任务数", "readTasks")}</th>
+                <th>
+                  {renderSortableHeader("涉及客户经理数", "involvedManagers")}
+                </th>
+                <th>
+                  {renderSortableHeader(
+                    "查看结果的客户经理数",
+                    "resultViewManagers",
+                  )}
+                </th>
+                <th>
+                  {renderSortableHeader("查看方案客户经理数", "planManagers")}
+                </th>
+                <th>
+                  {renderSortableHeader(
+                    "去洞察的客户经理数",
+                    "insightManagers",
+                  )}
+                </th>
+                <th>
+                  {renderSortableHeader("去电访的客户经理数", "phoneManagers")}
+                </th>
+                <th>
+                  {renderSortableHeader("推荐的客户数", "recommendedCustomers")}
+                </th>
+                <th>
+                  {renderSortableHeader(
+                    "被客户经理查看的客户数",
+                    "viewedCustomers",
+                  )}
+                </th>
+                <th>
+                  {renderSortableHeader("去洞察客户数", "insightCustomers")}
+                </th>
+                <th>
+                  {renderSortableHeader("去电访客户数", "phoneCustomers")}
+                </th>
+                <th>
+                  {renderSortableHeader("接触客户数", "contactedCustomers")}
+                </th>
+                <th>{renderSortableHeader("接触客户率", "contactRate")}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sortedData.map((row, index) => {
+                const isClickable = row.bbkId && row.rank !== "...";
+                const isSelected = row.bbkId && row.bbkId === selectedBranchId;
+                const rank = sortConfig ? index + 1 : row.rank;
 
-              return (
-                <tr
-                  key={`${row.branchName}-${index}`}
-                  className={
-                    `${row.rank === "..." ? styles.mutedRow : ""} ${
-                      isSelected ? styles.selectedRow : ""
-                    } ${isClickable ? styles.clickableRow : ""}`.trim() ||
-                    undefined
-                  }
-                  onClick={() => {
-                    if (isClickable) {
-                      onRowClick(row.bbkId, row.branchName);
-                    }
-                  }}
-                >
-                  <td className={styles.indexCell}>{row.rank}</td>
-                  <td
+                return (
+                  <tr
+                    key={`${row.branchName}-${index}`}
                     className={
-                      isClickable ? styles.branchNameLink : styles.branchName
+                      `${row.rank === "..." ? styles.mutedRow : ""} ${
+                        isSelected ? styles.selectedRow : ""
+                      } ${isClickable ? styles.clickableRow : ""}`.trim() ||
+                      undefined
                     }
+                    onClick={() => {
+                      if (isClickable) {
+                        onRowClick(row.bbkId, row.branchName);
+                      }
+                    }}
                   >
-                    <span>{row.branchName}</span>
-                  </td>
-                  <td>{row.skillCount}</td>
-                  <td>{row.totalTasks}</td>
-                  <td>{row.successCount}</td>
-                  <td>{row.readTasks}</td>
-                  <td>{row.involvedManagers}</td>
-                  <td>{row.resultViewManagers}</td>
-                  <td>{row.planManagers}</td>
-                  <td>{row.insightManagers}</td>
-                  <td>{row.phoneManagers}</td>
-                  <td>{row.recommendedCustomers}</td>
-                  <td>{row.viewedCustomers}</td>
-                  <td>{row.insightCustomers}</td>
-                  <td>{row.phoneCustomers}</td>
-                  <td>{row.contactedCustomers}</td>
-                  <td>{row.contactRate}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+                    <td className={styles.indexCell}>{rank}</td>
+                    <td
+                      className={
+                        isClickable ? styles.branchNameLink : styles.branchName
+                      }
+                    >
+                      <span>{row.branchName}</span>
+                    </td>
+                    <td>{row.skillCount}</td>
+                    <td>{row.totalTasks}</td>
+                    <td>{row.successCount}</td>
+                    <td>{row.readTasks}</td>
+                    <td>{row.involvedManagers}</td>
+                    <td>{row.resultViewManagers}</td>
+                    <td>{row.planManagers}</td>
+                    <td>{row.insightManagers}</td>
+                    <td>{row.phoneManagers}</td>
+                    <td>{row.recommendedCustomers}</td>
+                    <td>{row.viewedCustomers}</td>
+                    <td>{row.insightCustomers}</td>
+                    <td>{row.phoneCustomers}</td>
+                    <td>{row.contactedCustomers}</td>
+                    <td>{row.contactRate}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }
@@ -571,9 +686,11 @@ function DonutChart({ items }: { items: CronJobOverviewFailureReason[] }) {
 function FailureReasonPanel({
   data,
   onOpenDetail,
+  loading = false,
 }: {
   data: CronJobOverviewFailureReason[];
   onOpenDetail: () => void;
+  loading?: boolean;
 }) {
   return (
     <article className={styles.reasonPanel}>
@@ -588,22 +705,26 @@ function FailureReasonPanel({
           <ChevronRight size={14} />
         </button>
       </div>
-      <div className={styles.reasonContent}>
-        <DonutChart items={data} />
-        <div className={styles.reasonLegend}>
-          {data.map((item) => (
-            <div key={item.name} className={styles.reasonRow}>
-              <span>
-                <i style={{ backgroundColor: item.color }} />
-                {item.name}
-              </span>
-              <strong>
-                {item.percent.toFixed(2)}% ({item.count})
-              </strong>
-            </div>
-          ))}
+      {loading ? (
+        renderPanelLoading()
+      ) : (
+        <div className={styles.reasonContent}>
+          <DonutChart items={data} />
+          <div className={styles.reasonLegend}>
+            {data.map((item) => (
+              <div key={item.name} className={styles.reasonRow}>
+                <span>
+                  <i style={{ backgroundColor: item.color }} />
+                  {item.name}
+                </span>
+                <strong>
+                  {item.percent.toFixed(2)}% ({item.count})
+                </strong>
+              </div>
+            ))}
+          </div>
         </div>
-      </div>
+      )}
     </article>
   );
 }
@@ -641,36 +762,42 @@ function MiniSummaryCard({
 
 function RankTable({
   data,
+  loading = false,
 }: {
   data: CronJobOverviewPageData["anomalyRankRows"];
+  loading?: boolean;
 }) {
   return (
     <section className={`${styles.panel} ${styles.rankPanel}`}>
       <h2>分行异常排行</h2>
-      <div className={styles.tableScroller}>
-        <table className={styles.rankTable}>
-          <thead>
-            <tr>
-              <th className={styles.indexCell} />
-              <th>分行名称</th>
-              <th>报错执行次数</th>
-              <th>报错率</th>
-              <th>受影响客户经理数</th>
-            </tr>
-          </thead>
-          <tbody>
-            {data.map((row) => (
-              <tr key={row.rank}>
-                <td className={styles.indexCell}>{row.rank}</td>
-                <td className={styles.branchName}>{row.branchName}</td>
-                <td>{row.alertExecutions}</td>
-                <td>{row.alertRate}</td>
-                <td>{row.affectedManagers}</td>
+      {loading ? (
+        renderPanelLoading()
+      ) : (
+        <div className={styles.tableScroller}>
+          <table className={styles.rankTable}>
+            <thead>
+              <tr>
+                <th className={styles.indexCell} />
+                <th>分行名称</th>
+                <th>报错执行次数</th>
+                <th>报错率</th>
+                <th>受影响客户经理数</th>
               </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+            </thead>
+            <tbody>
+              {data.map((row) => (
+                <tr key={row.rank}>
+                  <td className={styles.indexCell}>{row.rank}</td>
+                  <td className={styles.branchName}>{row.branchName}</td>
+                  <td>{row.alertExecutions}</td>
+                  <td>{row.alertRate}</td>
+                  <td>{row.affectedManagers}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </section>
   );
 }
@@ -1482,10 +1609,22 @@ export default function CronJobOverviewPage() {
       </header>
 
       <section className={styles.summaryGrid} aria-label="概览指标">
-        {summaryMetrics.map((metric) => (
-          <SummaryCard key={metric.key} metric={metric} />
-        ))}
-        <ReportSummaryCard metric={reportMetric} />
+        {loading ? (
+          Array.from({ length: summaryMetricDefinitions.length + 1 }).map(
+            (_, index) => (
+              <article key={index} className={styles.summaryCard}>
+                {renderPanelLoading()}
+              </article>
+            ),
+          )
+        ) : (
+          <>
+            {summaryMetrics.map((metric) => (
+              <SummaryCard key={metric.key} metric={metric} />
+            ))}
+            <ReportSummaryCard metric={reportMetric} />
+          </>
+        )}
       </section>
 
       <p className={styles.formulaNote}>
@@ -1517,7 +1656,7 @@ export default function CronJobOverviewPage() {
               </span>
             </h3>
             <Table
-              className={styles.drillDownTable}
+              className={`${styles.drillDownTable} ${styles.branchSkillDrillDownTable}`}
               dataSource={taskSkills}
               rowKey="skill_name"
               loading={taskSkillsLoading}
@@ -1732,26 +1871,37 @@ export default function CronJobOverviewPage() {
         <div className={styles.anomalyLeft}>
           <h2>分行层异常诊断</h2>
           <div className={styles.miniSummaryGrid}>
-            <MiniSummaryCard
-              icon={Banknote}
-              title="受影响分行数"
-              value={overviewData.anomalySummary.affectedBranches}
-              unit={overviewData.anomalySummary.affectedBranchesUnit}
-            />
-            <MiniSummaryCard
-              icon={UserRoundCheck}
-              title="受影响客户经理数"
-              value={overviewData.anomalySummary.affectedManagers}
-              unit={overviewData.anomalySummary.affectedManagersUnit}
-              tone="orange"
-            />
+            {loading ? (
+              Array.from({ length: 2 }).map((_, index) => (
+                <article key={index} className={styles.miniSummaryCard}>
+                  {renderPanelLoading()}
+                </article>
+              ))
+            ) : (
+              <>
+                <MiniSummaryCard
+                  icon={Banknote}
+                  title="受影响分行数"
+                  value={overviewData.anomalySummary.affectedBranches}
+                  unit={overviewData.anomalySummary.affectedBranchesUnit}
+                />
+                <MiniSummaryCard
+                  icon={UserRoundCheck}
+                  title="受影响客户经理数"
+                  value={overviewData.anomalySummary.affectedManagers}
+                  unit={overviewData.anomalySummary.affectedManagersUnit}
+                  tone="orange"
+                />
+              </>
+            )}
           </div>
           <FailureReasonPanel
             data={overviewData.failureReasons}
+            loading={loading}
             onOpenDetail={() => setFailedTaskModalOpen(true)}
           />
         </div>
-        <RankTable data={overviewData.anomalyRankRows} />
+        <RankTable data={overviewData.anomalyRankRows} loading={loading} />
       </section>
       <FailedTaskModal
         open={failedTaskModalOpen}
@@ -1945,6 +2095,7 @@ export default function CronJobOverviewPage() {
       </h2>
       <RankingTable
         data={overviewData.branchRankingRows}
+        loading={loading}
         onRowClick={handleSelectBranch}
         selectedBranchId={selectedBranch?.bbk_id ?? null}
       />
@@ -1991,6 +2142,7 @@ export default function CronJobOverviewPage() {
                   key: "skill_count",
                   width: 70,
                   align: "center",
+                  sorter: branchManagerMetricSorter("skill_count"),
                 },
                 {
                   title: "任务总数",
@@ -1998,6 +2150,7 @@ export default function CronJobOverviewPage() {
                   key: "total_tasks",
                   width: 70,
                   align: "center",
+                  sorter: branchManagerMetricSorter("total_tasks"),
                 },
                 {
                   title: "成功执行数",
@@ -2005,6 +2158,7 @@ export default function CronJobOverviewPage() {
                   key: "success_count",
                   width: 70,
                   align: "center",
+                  sorter: branchManagerMetricSorter("success_count"),
                 },
                 {
                   title: "已读任务数",
@@ -2012,6 +2166,7 @@ export default function CronJobOverviewPage() {
                   key: "read_tasks",
                   width: 70,
                   align: "center",
+                  sorter: branchManagerMetricSorter("read_tasks"),
                 },
                 {
                   title: "推荐客户数",
@@ -2019,6 +2174,7 @@ export default function CronJobOverviewPage() {
                   key: "recommended_customers",
                   width: 80,
                   align: "center",
+                  sorter: branchManagerMetricSorter("recommended_customers"),
                 },
                 {
                   title: "查看方案客户数",
@@ -2026,6 +2182,7 @@ export default function CronJobOverviewPage() {
                   key: "viewed_customers",
                   width: 90,
                   align: "center",
+                  sorter: branchManagerMetricSorter("viewed_customers"),
                 },
                 {
                   title: "去洞察客户数",
@@ -2033,6 +2190,7 @@ export default function CronJobOverviewPage() {
                   key: "insight_customers",
                   width: 80,
                   align: "center",
+                  sorter: branchManagerMetricSorter("insight_customers"),
                 },
                 {
                   title: "去电访客户数",
@@ -2040,6 +2198,7 @@ export default function CronJobOverviewPage() {
                   key: "phone_customers",
                   width: 80,
                   align: "center",
+                  sorter: branchManagerMetricSorter("phone_customers"),
                 },
                 {
                   title: "接触客户数",
@@ -2047,6 +2206,7 @@ export default function CronJobOverviewPage() {
                   key: "contacted_customers",
                   width: 80,
                   align: "center",
+                  sorter: branchManagerMetricSorter("contacted_customers"),
                 },
                 {
                   title: "接触客户率",
@@ -2054,6 +2214,7 @@ export default function CronJobOverviewPage() {
                   key: "contact_rate",
                   width: 90,
                   align: "center",
+                  sorter: branchManagerMetricSorter("contact_rate"),
                   render: (v: number | null | undefined) =>
                     formatRatioPercent(v),
                 },

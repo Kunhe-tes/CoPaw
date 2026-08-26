@@ -649,6 +649,7 @@ def test_build_agent_request_includes_runtime_scope():
 
     req = executor._build_agent_request(job, "user-a", "session-a")
 
+    assert req["execution_origin"] == "scheduled"
     assert req["source_id"] == "source-a"
     assert req["scope_id"] == context_module.encode_scope_id(
         "tenant-a",

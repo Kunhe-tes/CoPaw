@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Callable, Awaitable
 
 from fastapi import Request, HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
 from swe.config.context import (
@@ -237,11 +237,11 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
             return response
 
         except _TenantBootstrapUnavailable as exc:
-            raise HTTPException(
+            return JSONResponse(
                 status_code=503,
-                detail="Tenant bootstrap unavailable",
+                content={"detail": "Tenant bootstrap unavailable"},
                 headers={"Retry-After": str(exc.retry_after_seconds)},
-            ) from exc
+            )
         except Exception:
             if is_timing:
                 log_provider_models_middleware_error(
@@ -300,30 +300,34 @@ class TenantWorkspaceMiddleware(BaseHTTPMiddleware):
             # Get user_name and bbk_id from request state for database record
             user_name = getattr(request.state, "user_name", None)
             bbk_id = getattr(request.state, "bbk_id", None)
-            resolve_identity_started_at = time.perf_counter()
-            resolved_identity = await resolve_user_identity(
-                tenant_id=getattr(request.state, "tenant_id", None)
-                or tenant_id,
-                source_id=source_id,
-                user_name=user_name,
-                bbk_id=bbk_id,
-                headers={
-                    key: value
-                    for key, value in {
-                        "Content-Type": "application/json",
-                        "Authorization": request.headers.get(
-                            "Authorization",
-                        ),
-                    }.items()
-                    if value
-                },
-                allow_remote_lookup=True,
-            )
-            resolve_identity_ms = int(
-                (time.perf_counter() - resolve_identity_started_at) * 1000,
-            )
-            user_name = resolved_identity.user_name
-            bbk_id = resolved_identity.bbk_id
+            resolve_identity_ms = 0
+            if not user_name or not bbk_id:
+                resolve_identity_started_at = time.perf_counter()
+                resolved_identity = await resolve_user_identity(
+                    tenant_id=getattr(request.state, "tenant_id", None)
+                    or tenant_id,
+                    source_id=source_id,
+                    user_name=user_name,
+                    bbk_id=bbk_id,
+                    headers={
+                        key: value
+                        for key, value in {
+                            "Content-Type": "application/json",
+                            "Authorization": request.headers.get(
+                                "Authorization",
+                            ),
+                        }.items()
+                        if value
+                    },
+                    allow_remote_lookup=True,
+                )
+                resolve_identity_ms = int(
+                    (time.perf_counter() - resolve_identity_started_at) * 1000,
+                )
+                user_name = resolved_identity.user_name
+                bbk_id = resolved_identity.bbk_id
+                request.state.user_name = user_name
+                request.state.bbk_id = bbk_id
 
             # Ensure tenant is bootstrapped (minimal - directories only)
             bootstrap_started_at = time.perf_counter()

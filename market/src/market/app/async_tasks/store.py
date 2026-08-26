@@ -170,11 +170,13 @@ class AsyncTaskStore:
         task_id: str,
         target_id: str,
         success: bool,
+        item_status: str | None = None,
         result: Any = None,
         error_message: str | None = None,
     ) -> None:
         """更新单个目标的执行结果。"""
         target_name = _extract_target_name(result)
+        status = item_status or ("succeeded" if success else "failed")
         await self.db.execute(
             """
             UPDATE swe_async_task_items
@@ -185,13 +187,31 @@ class AsyncTaskStore:
             WHERE task_id = %s AND target_id = %s
             """,
             (
-                "succeeded" if success else "failed",
+                status,
                 target_name,
                 _json_dumps(result),
                 error_message,
                 task_id,
                 target_id,
             ),
+        )
+        await self.db.execute(
+            """
+            UPDATE swe_async_tasks
+            SET done_count = (
+                    SELECT COUNT(*)
+                    FROM swe_async_task_items
+                    WHERE task_id = %s
+                      AND status IN ('succeeded', 'created', 'skipped', 'failed')
+                ),
+                failed_count = (
+                    SELECT COUNT(*)
+                    FROM swe_async_task_items
+                    WHERE task_id = %s AND status = 'failed'
+                )
+            WHERE task_id = %s
+            """,
+            (task_id, task_id, task_id),
         )
 
     async def finish_task(

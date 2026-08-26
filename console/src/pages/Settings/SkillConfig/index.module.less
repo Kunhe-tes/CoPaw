@@ -1,5 +1,7 @@
 .page {
   min-height: 100%;
+  display: flex;
+  flex-direction: column;
   background: var(--console-management-canvas, #fff);
   color: var(--console-management-text, #111827);
   font-family: var(
@@ -115,20 +117,19 @@
 }
 
 .workspace {
+  flex: 1;
   display: grid;
   grid-template-columns: minmax(210px, 240px) minmax(300px, 0.82fr) minmax(
       390px,
       1.5fr
     );
-  min-height: 680px;
-  border-bottom: 1px solid var(--console-management-border, #e5e7eb);
 }
 
 .skillListPanel,
 .rulePanel,
 .inspectionPanel {
   min-width: 0;
-  padding: 28px 24px;
+  padding: 28px 20px;
 }
 
 .skillListPanel,
@@ -144,6 +145,7 @@
   justify-content: space-between;
   gap: 12px;
   margin-bottom: 18px;
+  padding: 0 2px;
 
   h2 {
     margin: 0;
@@ -157,6 +159,27 @@
   display: flex;
   align-items: center;
   gap: 6px;
+}
+
+.skillListHeader {
+  display: grid;
+  gap: 2px;
+  margin-bottom: 18px;
+
+  .panelHeader {
+    margin-bottom: 0;
+  }
+}
+
+.skillListHint {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--console-management-text-muted, #8a94a6);
+  font-size: 11px;
+  line-height: 16px;
+  padding: 0 2px;
+  white-space: nowrap;
 }
 
 .refreshButton {
@@ -174,6 +197,29 @@
 .skillList {
   display: grid;
   gap: 5px;
+  max-height: max(240px, calc(100vh - 172px));
+  max-height: max(240px, calc(100dvh - 172px));
+  padding-right: 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: var(--console-management-border-strong, #d0d7e2) transparent;
+
+  &:focus-visible {
+    outline: 2px solid var(--console-management-primary, #3769fc);
+    outline-offset: 2px;
+    border-radius: 7px;
+  }
+
+  &::-webkit-scrollbar {
+    width: 6px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    border-radius: 3px;
+    background: var(--console-management-border-strong, #d0d7e2);
+  }
 }
 
 .skillListEmpty {
@@ -212,6 +258,15 @@
 
   &:hover {
     background: var(--console-management-primary-soft, #eef4ff);
+  }
+
+  &:hover,
+  &:focus-within {
+    .editIconButton {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
   }
 }
 
@@ -252,10 +307,32 @@
   place-items: center;
   border-radius: 6px;
   color: var(--console-management-text-muted, #8a94a6);
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(2px);
+  transition:
+    opacity 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
 
-  &:hover {
+  &:hover,
+  &:focus-visible {
     color: var(--console-management-primary-hover, #2957dc);
-    background: var(--console-management-primary-soft, #eef4ff);
+    background: transparent;
+  }
+}
+
+@media (hover: none) {
+  .editIconButton {
+    opacity: 1;
+    pointer-events: auto;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .editIconButton {
+    transition: none;
   }
 }
 
@@ -525,8 +602,16 @@
 
 .depthTrack {
   height: 4px;
+  overflow: hidden;
   border-radius: 2px;
   background: var(--console-management-border, #e5e7eb);
+}
+
+.depthTrackFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--console-management-primary, #3769fc);
 }
 
 .placeholderHint {

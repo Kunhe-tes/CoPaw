@@ -82,3 +82,41 @@ def build_skill_use_directives(
         )
 
     return directives
+
+
+def resolve_scenario_skill_names(
+    *,
+    workspace_dir: Path,
+    channel: str,
+    resource_ids: Iterable[object],
+) -> list[str]:
+    """Map market skill IDs to already-enabled local runtime skill names.
+
+    Scenario selection never installs a package here.  It can only reuse a
+    Skill already admitted to this tenant/Agent workspace, which preserves the
+    existing scanner, channel enablement, and filesystem trust boundary.
+    """
+    wanted = {
+        value.strip()
+        for value in resource_ids
+        if isinstance(value, str) and value.strip()
+    }
+    if not wanted:
+        return []
+
+    resolved: list[str] = []
+    for name in resolve_effective_skills(workspace_dir, channel):
+        skill_dir = resolve_effective_skill_dir(workspace_dir, name)
+        skill_path = skill_dir / "SKILL.md" if skill_dir is not None else None
+        if skill_path is None or not skill_path.is_file():
+            continue
+        try:
+            metadata = frontmatter.loads(
+                skill_path.read_text(encoding="utf-8"),
+            )
+        except (OSError, UnicodeError, ValueError, TypeError, YAMLError):
+            continue
+        skill_id = str(metadata.get("skill_id") or "").strip()
+        if name in wanted or skill_id in wanted:
+            resolved.append(name)
+    return resolved

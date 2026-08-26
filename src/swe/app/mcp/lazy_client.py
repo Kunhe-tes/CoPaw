@@ -9,6 +9,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -86,15 +87,19 @@ class LazyMCPClient:
         create_client: Callable[[], Awaitable[Any]],
         discovery_cache: MCPToolDiscoveryCache,
         connect_timeout: float = 30.0,
+        frozen_tools: list[dict[str, Any]] | None = None,
     ) -> None:
         self.name = name
         self._discovery_key = discovery_key
         self._create_client = create_client
         self._discovery_cache = discovery_cache
         self._connect_timeout = connect_timeout
+        self._frozen_tools = _deserialize_frozen_tools(frozen_tools)
         self.on_progress_callback = None
 
     async def list_tools(self) -> list[Any]:
+        if self._frozen_tools is not None:
+            return list(self._frozen_tools)
         return await self._discovery_cache.get_or_discover(
             self._discovery_key,
             self._discover_tools,
@@ -174,6 +179,32 @@ class LazyMCPClient:
                 self.name,
                 type(error).__name__,
             )
+
+
+def _deserialize_frozen_tools(
+    tools: list[dict[str, Any]] | None,
+) -> tuple[Any, ...] | None:
+    if tools is None:
+        return None
+    result: list[Any] = []
+    for item in tools:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        result.append(
+            SimpleNamespace(
+                name=name,
+                description=str(item.get("description") or ""),
+                inputSchema=(
+                    dict(item.get("inputSchema"))
+                    if isinstance(item.get("inputSchema"), dict)
+                    else {}
+                ),
+            ),
+        )
+    return tuple(result)
 
 
 def mcp_tool_json_schema(tool: Any) -> dict[str, Any]:

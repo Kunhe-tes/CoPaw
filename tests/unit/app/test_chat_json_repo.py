@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shutil
@@ -29,6 +30,47 @@ def _saved_chats_payload(chats: list[ChatSpec]) -> str:
         indent=2,
         sort_keys=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_creates_one_session_chat_across_repository_instances(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.json"
+    first = JsonChatRepository(path)
+    second = JsonChatRepository(path)
+    first_spec = ChatSpec(session_id="s1", user_id="u1", channel="console")
+    second_spec = ChatSpec(session_id="s1", user_id="u1", channel="console")
+
+    (first_chat, first_created), (second_chat, second_created) = (
+        await asyncio.gather(
+            first.create_chat_if_absent_by_session(first_spec),
+            second.create_chat_if_absent_by_session(second_spec),
+        )
+    )
+
+    assert first_created != second_created
+    assert first_chat.id == second_chat.id
+    assert len(await JsonChatRepository(path).list_chats()) == 1
+
+
+@pytest.mark.asyncio
+async def test_chat_repo_serializes_cross_instance_upserts_without_lost_updates(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.json"
+    first = JsonChatRepository(path)
+    second = JsonChatRepository(path)
+    first_spec = ChatSpec(session_id="s1", user_id="u1", channel="console")
+    second_spec = ChatSpec(session_id="s2", user_id="u2", channel="console")
+
+    await asyncio.gather(
+        first.upsert_chat(first_spec),
+        second.upsert_chat(second_spec),
+    )
+
+    chats = await JsonChatRepository(path).list_chats()
+    assert {chat.session_id for chat in chats} == {"s1", "s2"}
 
 
 @pytest.mark.asyncio

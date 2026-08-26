@@ -232,7 +232,10 @@ def test_scheduler_runtime_config_ignores_non_scheduler_stale_env(
 ) -> None:
     from scheduler.app.services.cron import scheduling_service as module
 
-    monkeypatch.delenv("SCHEDULER_CRON_DISPATCHED_STALE_SECONDS", raising=False)
+    monkeypatch.delenv(
+        "SCHEDULER_CRON_DISPATCHED_STALE_SECONDS",
+        raising=False,
+    )
 
     monkeypatch.setenv("OTHER_CRON_DISPATCHED_STALE_SECONDS", "9")
 
@@ -258,7 +261,9 @@ def test_extract_model_identity_accepts_flat_provider_model_fields() -> None:
 
 
 @pytest.mark.asyncio
-async def test_child_dispatch_calls_swe_callback_and_marks_dispatched() -> None:
+async def test_child_dispatch_calls_swe_callback_and_marks_dispatched() -> (
+    None
+):
     store = _DispatchStore(
         [
             {
@@ -294,6 +299,7 @@ async def test_child_dispatch_calls_swe_callback_and_marks_dispatched() -> None:
             "agent_id": "default",
             "job_id": "child-1",
             "dispatch_attempt": 1,
+            "execution_key": "child-1:batch-1:1",
             "dispatch_intent_id": 1,
             "dispatch_batch_id": "batch-1",
             "parent_scheduled_fire_at": "",
@@ -339,7 +345,9 @@ async def test_child_dispatch_passes_attempt_count_to_swe_callback() -> None:
 
 
 @pytest.mark.asyncio
-async def test_child_dispatch_forwards_passthrough_headers_to_swe_callback() -> None:
+async def test_child_dispatch_forwards_passthrough_headers_to_swe_callback() -> (
+    None
+):
     store = _DispatchStore(
         [
             {
@@ -421,6 +429,7 @@ async def test_parent_intent_dispatches_to_swe_callback_like_child() -> None:
             "agent_id": "default",
             "job_id": "parent-1",
             "dispatch_attempt": 1,
+            "execution_key": "parent-1:batch-1:2",
             "dispatch_intent_id": 2,
             "dispatch_batch_id": "batch-1",
             "parent_scheduled_fire_at": "2026-07-01T01:00:00+00:00",
@@ -434,7 +443,9 @@ async def test_parent_intent_dispatches_to_swe_callback_like_child() -> None:
 
 
 @pytest.mark.asyncio
-async def test_callback_failure_schedules_retry_instead_of_completing() -> None:
+async def test_callback_failure_schedules_retry_instead_of_completing() -> (
+    None
+):
     store = _DispatchStore(
         [
             {
@@ -655,7 +666,9 @@ async def test_dispatch_ready_skips_scope_without_lease() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_ready_recovers_stale_dispatched_before_capacity_gate() -> None:
+async def test_dispatch_ready_recovers_stale_dispatched_before_capacity_gate() -> (
+    None
+):
     store = _DispatchStore(
         [
             {
@@ -993,7 +1006,9 @@ async def test_parent_callback_dispatches_using_current_batch_model_scope(
 
 
 @pytest.mark.asyncio
-async def test_dispatch_ready_without_real_scopes_does_not_register_default_capacity() -> None:
+async def test_dispatch_ready_without_real_scopes_does_not_register_default_capacity() -> (
+    None
+):
     store = _DispatchStore([])
     store.scopes = []
     store.latest_capacity = None
@@ -1247,7 +1262,9 @@ async def test_parent_callback_adds_batch_offset_to_trigger_time(
     assert jobs[0]["payload"]["swe_server_domain"] == "http://tenant-swe.local"
 
 
-def test_parent_callback_uses_upcoming_fire_inside_batch_prefire_window() -> None:
+def test_parent_callback_uses_upcoming_fire_inside_batch_prefire_window() -> (
+    None
+):
     callback_received_at = datetime(
         2026,
         7,

@@ -165,6 +165,7 @@ class SweCronCallbackClient:
         dispatch_intent_id: int,
         dispatch_batch_id: str,
         dispatch_attempt: int,
+        execution_key: str = "",
         parent_scheduled_fire_at: str = "",
         provider_id: str = DEFAULT_PROVIDER_ID,
         model_id: str = DEFAULT_MODEL_ID,
@@ -196,6 +197,8 @@ class SweCronCallbackClient:
         }
         if parent_scheduled_fire_at:
             payload["parent_scheduled_fire_at"] = parent_scheduled_fire_at
+        if execution_key:
+            payload["execution_key"] = execution_key
         logger.info(
             "scheduler_swe_callback_attempt batch_id=%s intent_id=%s "
             "job_id=%s attempt=%s provider_id=%s model_id=%s",
@@ -971,8 +974,12 @@ def _callback_scheduled_fire_at(
         )
         if upcoming_fire_at is not None:
             until_upcoming = upcoming_fire_at - _ensure_aware_utc(now)
-            if timedelta(0) <= until_upcoming <= timedelta(
-                minutes=offset_minutes,
+            if (
+                timedelta(0)
+                <= until_upcoming
+                <= timedelta(
+                    minutes=offset_minutes,
+                )
             ):
                 return upcoming_fire_at
 
@@ -1478,6 +1485,9 @@ def _build_execution_callback_kwargs(
         "dispatch_intent_id": int(_row_get(row, "id") or 0),
         "dispatch_batch_id": _row_text(row, "batch_id"),
         "dispatch_attempt": _positive_int(_row_get(row, "attempt_count")) or 1,
+        "execution_key": (
+            f"{_row_text(row, 'job_id')}:{_row_text(row, 'batch_id')}:{int(_row_get(row, 'id') or 0)}"
+        ),
         "parent_scheduled_fire_at": _first_truthy_text(
             payload.get("parent_scheduled_fire_at"),
             payload.get("scheduled_fire_at"),
@@ -1507,6 +1517,7 @@ def _dispatch_mark_details(
     return {
         "callback_source": DISPATCH_CALLBACK_SOURCE,
         "dispatch_attempt": callback_kwargs["dispatch_attempt"],
+        "execution_key": callback_kwargs["execution_key"],
         "provider_id": callback_kwargs["provider_id"],
         "model_id": callback_kwargs["model_id"],
         "scope_id": callback_kwargs["scope_id"],

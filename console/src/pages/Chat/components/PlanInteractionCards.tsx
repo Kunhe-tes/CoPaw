@@ -8,6 +8,8 @@ import type {
   ChatPlanClarificationCardData,
   PlanClarificationField,
   ChatPlanReviewCardData,
+  ChatGoalProposalCardData,
+  ChatGoalCompletionCriterion,
   PlanClarificationOption,
 } from "../messageMeta";
 import {
@@ -191,12 +193,19 @@ function findLatestPlanClarificationCard(
   return null;
 }
 
-type ActivePlanInteraction = {
-  type: "clarification";
-  data: ChatPlanClarificationCardData;
-  instanceKey: string;
-  sourceKey: string | null;
-};
+type ActivePlanInteraction =
+  | {
+      type: "clarification";
+      data: ChatPlanClarificationCardData;
+      instanceKey: string;
+      sourceKey: string | null;
+    }
+  | {
+      type: "goal_proposal";
+      data: ChatGoalProposalCardData;
+      instanceKey: string;
+      sourceKey: string | null;
+    };
 
 function findLatestActivePlanInteractionCard(
   messages: IAgentScopeRuntimeWebUIMessage[],
@@ -225,6 +234,15 @@ function findLatestActivePlanInteractionCard(
         return null;
       }
 
+      if (isGoalProposalCardData(card.data)) {
+        return {
+          type: "goal_proposal",
+          data: card.data,
+          instanceKey,
+          sourceKey: null,
+        };
+      }
+
       if (isPlanClarificationCardData(card.data)) {
         return {
           type: "clarification",
@@ -238,6 +256,16 @@ function findLatestActivePlanInteractionCard(
     }
   }
   return null;
+}
+
+function isGoalProposalCardData(
+  data: unknown,
+): data is ChatGoalProposalCardData {
+  return (
+    Boolean(data) &&
+    typeof data === "object" &&
+    (data as { card_type?: unknown }).card_type === "goal_proposal"
+  );
 }
 
 function boundedIndex(index: number, count: number): number {
@@ -1017,6 +1045,153 @@ export function PlanReviewMessageCard({
   );
 }
 
+function GoalProposalCard({
+  data,
+  cardInstanceKey,
+  onComplete,
+}: {
+  data: ChatGoalProposalCardData;
+  cardInstanceKey: string;
+  onComplete?: () => void;
+}) {
+  const { onConfirmGoalProposal } = useChatPlanReviewRenderContext();
+  const [objective, setObjective] = useState(data.objective);
+  const [criteriaText, setCriteriaText] = useState(
+    JSON.stringify(data.completion_criteria, null, 2),
+  );
+  const [mustPreserve, setMustPreserve] = useState(
+    data.constraints.must_preserve.join("\n"),
+  );
+  const [mustNotDo, setMustNotDo] = useState(
+    data.constraints.must_not_do.join("\n"),
+  );
+  const [autonomyBoundary, setAutonomyBoundary] = useState(
+    data.autonomy_boundary,
+  );
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setObjective(data.objective);
+    setCriteriaText(JSON.stringify(data.completion_criteria, null, 2));
+    setMustPreserve(data.constraints.must_preserve.join("\n"));
+    setMustNotDo(data.constraints.must_not_do.join("\n"));
+    setAutonomyBoundary(data.autonomy_boundary);
+    setError(null);
+  }, [cardInstanceKey, data]);
+
+  const submit = async () => {
+    if (!onConfirmGoalProposal) {
+      setError("Goal 创建入口不可用");
+      return;
+    }
+    let criteria: ChatGoalCompletionCriterion[];
+    try {
+      const parsed = JSON.parse(criteriaText);
+      if (!Array.isArray(parsed) || parsed.length === 0) {
+        throw new Error("完成条件不能为空");
+      }
+      criteria = parsed;
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "完成条件 JSON 无效");
+      return;
+    }
+    if (!objective.trim() || !autonomyBoundary.trim()) {
+      setError("目标和自主边界不能为空");
+      return;
+    }
+    setSubmitting(true);
+    setError(null);
+    try {
+      const created = await onConfirmGoalProposal({
+        card_type: "goal_proposal",
+        objective: objective.trim(),
+        completion_criteria: criteria,
+        constraints: {
+          must_preserve: mustPreserve.split("\n").map((item) => item.trim()).filter(Boolean),
+          must_not_do: mustNotDo.split("\n").map((item) => item.trim()).filter(Boolean),
+        },
+        autonomy_boundary: autonomyBoundary.trim(),
+      });
+      emit({
+        type: "handleSubmit",
+        data: {
+          query: "开始执行已确认的 Goal",
+          fileList: [],
+          biz_params: {
+            mode: "normal",
+            goal_id: created.goal_id,
+          },
+        },
+      });
+      onComplete?.();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Goal 创建失败");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className={styles.planReviewCard} aria-label="Goal Contract Draft">
+      <header className={styles.reviewHeader}>
+        <div className={styles.reviewHeading}>
+          <strong>Goal Contract Draft</strong>
+          <p className={styles.reviewStatus}>确认后开始执行</p>
+        </div>
+      </header>
+      <div className={styles.reviewContent}>
+        <label htmlFor="goal-proposal-objective">整体目标</label>
+        <textarea
+          id="goal-proposal-objective"
+          value={objective}
+          onChange={(event) => setObjective(event.target.value)}
+          rows={2}
+        />
+        <label htmlFor="goal-proposal-criteria">完成条件（JSON）</label>
+        <textarea
+          id="goal-proposal-criteria"
+          value={criteriaText}
+          onChange={(event) => setCriteriaText(event.target.value)}
+          rows={8}
+        />
+        <label htmlFor="goal-proposal-preserve">必须保留（每行一项）</label>
+        <textarea
+          id="goal-proposal-preserve"
+          value={mustPreserve}
+          onChange={(event) => setMustPreserve(event.target.value)}
+          rows={2}
+        />
+        <label htmlFor="goal-proposal-not-do">禁止操作（每行一项）</label>
+        <textarea
+          id="goal-proposal-not-do"
+          value={mustNotDo}
+          onChange={(event) => setMustNotDo(event.target.value)}
+          rows={2}
+        />
+        <label htmlFor="goal-proposal-autonomy">自主边界</label>
+        <textarea
+          id="goal-proposal-autonomy"
+          value={autonomyBoundary}
+          onChange={(event) => setAutonomyBoundary(event.target.value)}
+          rows={3}
+        />
+        {error ? <p role="alert">{error}</p> : null}
+      </div>
+      <footer className={styles.reviewActions}>
+        <button
+          type="button"
+          className={styles.reviewPrimaryButton}
+          disabled={submitting}
+          onClick={() => void submit()}
+        >
+          {submitting ? "创建中…" : "确认并开始执行"}
+        </button>
+      </footer>
+    </section>
+  );
+}
+
 export function ActivePlanInteractionComposer({
   defaultComposer,
 }: {
@@ -1037,6 +1212,16 @@ export function ActivePlanInteractionComposer({
 
   if (completedInstanceKey === interaction.instanceKey) {
     return defaultComposer;
+  }
+
+  if (interaction.type === "goal_proposal") {
+    return (
+      <GoalProposalCard
+        data={interaction.data}
+        cardInstanceKey={interaction.instanceKey}
+        onComplete={() => setCompletedInstanceKey(interaction.instanceKey)}
+      />
+    );
   }
 
   return (

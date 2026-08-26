@@ -273,7 +273,6 @@ class ReMeLightMemoryManager(BaseMemoryManager):
         )
         self._reme_version_ok: bool = self._check_reme_version()
         self._reme = None
-        self._chat_memory_cache: dict[str, Any] = {}
 
         logger.info(
             f"ReMeLightMemoryManager init: "
@@ -630,45 +629,45 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
             min_score=min_score,
         )
 
+    def create_request_memory(
+        self,
+        chat_id: str,
+    ) -> "ReMeInMemoryMemory | None":
+        """Create one isolated online memory owned by the current request."""
+        self._warn_if_version_mismatch()
+        if self._reme is None:
+            return None
+        agent_config = self._load_agent_config()
+        memory = self._reme.get_in_memory_memory(
+            as_token_counter=get_swe_token_counter(agent_config),
+        )
+        memory = _clone_unbound_chat_memory(memory)
+
+        from .conversation_archive import attach_conversation_archive
+
+        return attach_conversation_archive(
+            memory,
+            Path(self.working_dir) / "dialog",
+            chat_id,
+        )
+
     def get_in_memory_memory(
         self,
         chat_id: str | None = None,
         **_kwargs,
     ) -> "ReMeInMemoryMemory | None":
-        """Retrieve the in-memory memory object with token counting support."""
+        """Compatibility wrapper; Chat memories are still request-owned."""
+        if chat_id:
+            return self.create_request_memory(chat_id)
         self._warn_if_version_mismatch()
         if self._reme is None:
             return None
-        if chat_id:
-            cached_memory = getattr(
-                self,
-                "_chat_memory_cache",
-                {},
-            ).get(chat_id)
-            if cached_memory is not None:
-                return cached_memory
         agent_config = self._load_agent_config()
-        memory = self._reme.get_in_memory_memory(
-            as_token_counter=get_swe_token_counter(agent_config),
+        return _clone_unbound_chat_memory(
+            self._reme.get_in_memory_memory(
+                as_token_counter=get_swe_token_counter(agent_config),
+            ),
         )
-        if not chat_id:
-            return memory
-
-        attached_chat_id = getattr(memory, "_chat_checkpoint_chat_id", None)
-        if attached_chat_id is not None and attached_chat_id != chat_id:
-            memory = _clone_unbound_chat_memory(memory)
-
-        from .conversation_archive import attach_conversation_archive
-
-        attached_memory = attach_conversation_archive(
-            memory,
-            Path(self.working_dir) / "dialog",
-            chat_id,
-        )
-        if not hasattr(self, "_chat_memory_cache"):
-            self._chat_memory_cache = {}
-        self._chat_memory_cache[chat_id] = attached_memory
-        return attached_memory
 
     async def archive_checkpoint_messages(
         self,
@@ -676,11 +675,9 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         chat_id: str,
         messages: list[Msg],
         candidate_id: str,
+        memory: "ReMeInMemoryMemory",
     ) -> Any:
         """Archive source messages and install the selected Chat checkpoint."""
-        memory = self.get_in_memory_memory(chat_id=chat_id)
-        if memory is None:
-            raise RuntimeError("ReMe in-memory memory is unavailable")
         return await memory.archive_checkpoint_messages(messages, candidate_id)
 
     async def schedule_precompaction(
@@ -689,13 +686,11 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         chat_id: str,
         watermark: int,
         messages: list[Msg],
+        memory: "ReMeInMemoryMemory",
         **kwargs,
     ) -> bool:
         """Persist a revision-bound candidate without changing live memory."""
         del watermark, kwargs
-        memory = self.get_in_memory_memory(chat_id=chat_id)
-        if memory is None:
-            return False
         from .chat_checkpoint import EvidenceItem, PrecompactionCandidate
 
         source_message_ids = tuple(message.id for message in messages)
@@ -768,11 +763,9 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         *,
         chat_id: str,
         messages: list[Msg] | None = None,
+        memory: "ReMeInMemoryMemory",
     ) -> bool:
         """Install a still-valid candidate and refresh its Markdown projection."""
-        memory = self.get_in_memory_memory(chat_id=chat_id)
-        if memory is None:
-            return False
         if not messages:
             # Installing a cursor-advancing candidate without atomically
             # archiving its source prefix can hide journal evidence.
@@ -784,11 +777,9 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         *,
         chat_id: str,
         messages: list[Msg],
+        memory: "ReMeInMemoryMemory",
     ) -> bool:
         """Install a reference-only record before one emergency retry."""
-        memory = self.get_in_memory_memory(chat_id=chat_id)
-        if memory is None:
-            return False
         await memory.install_degraded_checkpoint(messages)
         return True
 
@@ -799,17 +790,28 @@ See: https://docs.trychroma.com/docs/overview/troubleshooting#sqlite
         epoch: int,
         **kwargs,
     ) -> Any:
-        """Delegate request-bound recovery to the Chat-attached memory."""
-        memory = self.get_in_memory_memory(chat_id=chat_id)
-        if memory is None:
-            return []
-        return await memory.recover_evidence(epoch=epoch, **kwargs)
+        """Recover durable Chat evidence without acquiring online memory."""
+        from .conversation_archive import ConversationArchiveStore
 
-    async def reset_context_epoch(self, *, chat_id: str, reason: str) -> Any:
+        archive_store = ConversationArchiveStore(
+            Path(self.working_dir) / "dialog",
+        )
+        refs = kwargs.pop("refs", ())
+        return await archive_store.recover_evidence(
+            chat_id=chat_id,
+            epoch=epoch,
+            refs=refs,
+            **kwargs,
+        )
+
+    async def reset_context_epoch(
+        self,
+        *,
+        chat_id: str,
+        reason: str,
+        memory: "ReMeInMemoryMemory",
+    ) -> Any:
         """Reset the Chat epoch while retaining physical archive evidence."""
-        memory = self.get_in_memory_memory(chat_id=chat_id)
-        if memory is None:
-            raise RuntimeError("ReMe in-memory memory is unavailable")
         return await memory.reset_context_epoch(reason=reason)
 
     # ------------------------------------------------------------------

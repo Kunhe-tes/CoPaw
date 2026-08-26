@@ -81,6 +81,112 @@ class TestReactAgentTaskProgressPrompt:
         agent._agent_config = SimpleNamespace(heartbeat=None)
         return agent
 
+    def test_rebuild_sys_prompt_skips_file_reads_when_freshness_unchanged(
+        self,
+        monkeypatch,
+    ):
+        """未变化时不重读 prompt 文件，但仍修正 session memory 系统消息。"""
+        agent = self._build_agent()
+        agent._sys_prompt = "cached prompt"
+        agent._sys_prompt_freshness_token = ("same",)
+        agent.memory = SimpleNamespace(
+            content=[
+                (Msg(name="system", role="system", content="stale"), []),
+            ],
+        )
+        monkeypatch.setattr(
+            SWEAgent,
+            "_current_system_prompt_freshness_token",
+            lambda _agent: ("same",),
+        )
+
+        def fail_build(_agent):
+            raise AssertionError("system prompt should be reused")
+
+        monkeypatch.setattr(SWEAgent, "_build_sys_prompt", fail_build)
+
+        SWEAgent.rebuild_sys_prompt(agent)
+
+        assert agent.memory.content[0][0].content == "cached prompt"
+
+    def test_rebuild_sys_prompt_rebuilds_after_prompt_file_changes(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """prompt 文件变更后应重新构建并更新 session memory。"""
+        agents_md = tmp_path / "AGENTS.md"
+        agents_md.write_text("first prompt", encoding="utf-8")
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+        agent._workspace_dir = tmp_path
+        agent._agent_config = SimpleNamespace(
+            heartbeat=None,
+            system_prompt_files=["AGENTS.md"],
+        )
+        with bind_source_system_config(_build_effective_config(False)):
+            agent._sys_prompt = SWEAgent._build_sys_prompt(agent)
+            agent._sys_prompt_freshness_token = (
+                SWEAgent._current_system_prompt_freshness_token(agent)
+            )
+        agent.memory = SimpleNamespace(
+            content=[
+                (Msg(name="system", role="system", content="stale"), []),
+            ],
+        )
+        agents_md.write_text(
+            "second prompt with changed content",
+            encoding="utf-8",
+        )
+
+        with bind_source_system_config(_build_effective_config(False)):
+            SWEAgent.rebuild_sys_prompt(agent)
+
+        assert "second prompt with changed content" in agent._sys_prompt
+        assert agent.memory.content[0][0].content == agent._sys_prompt
+
+    def test_rebuild_sys_prompt_rebuilds_after_active_model_changes(
+        self,
+        monkeypatch,
+    ):
+        """模型能力指纹变化后应重新构建 multimodal 相关提示词。"""
+        agent = self._build_agent()
+        monkeypatch.setattr(
+            SWEAgent,
+            "_active_model_prompt_token",
+            lambda _agent: ("provider-a", "model-a", False, False, False),
+        )
+        with bind_source_system_config(_build_effective_config(False)):
+            agent._sys_prompt = "cached prompt"
+            agent._sys_prompt_freshness_token = (
+                SWEAgent._current_system_prompt_freshness_token(agent)
+            )
+        agent.memory = SimpleNamespace(
+            content=[
+                (Msg(name="system", role="system", content="stale"), []),
+            ],
+        )
+        monkeypatch.setattr(
+            SWEAgent,
+            "_active_model_prompt_token",
+            lambda _agent: ("provider-a", "model-b", True, True, False),
+        )
+
+        def build_prompt(_agent):
+            return "rebuilt prompt"
+
+        monkeypatch.setattr(SWEAgent, "_build_sys_prompt", build_prompt)
+
+        with bind_source_system_config(_build_effective_config(False)):
+            SWEAgent.rebuild_sys_prompt(agent)
+
+        assert agent._sys_prompt == "rebuilt prompt"
+        assert agent.memory.content[0][0].content == "rebuilt prompt"
+
     def test_build_sys_prompt_skips_task_progress_when_disabled(
         self,
         monkeypatch,
@@ -182,6 +288,36 @@ class TestReactAgentTaskProgressPrompt:
         assert "After the user answers one question series" in prompt
         assert "all decision-tree branches" in prompt
 
+    def test_build_sys_prompt_adds_goal_proposal_contract_shape(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_system_prompt_from_working_dir",
+            lambda **_: "base prompt",
+        )
+        monkeypatch.setattr(
+            react_agent_module,
+            "build_multimodal_hint",
+            lambda: "",
+        )
+        agent = self._build_agent()
+        agent._request_context = {"goal_mode_enabled": True}
+
+        with bind_source_system_config(_build_effective_config(False)):
+            prompt = SWEAgent._build_sys_prompt(agent)
+
+        for field in (
+            "requirement",
+            "observable_assertion",
+            "verification_method",
+            "expected_outcome",
+            "must_preserve",
+            "must_not_do",
+        ):
+            assert field in prompt
+
     def test_build_sys_prompt_omits_plan_mode_instruction_in_normal_mode(
         self,
         monkeypatch,
@@ -199,7 +335,9 @@ class TestReactAgentTaskProgressPrompt:
         )
         agent = self._build_agent()
 
-        with bind_source_system_config(_build_plan_interaction_tools_config(True)):
+        with bind_source_system_config(
+            _build_plan_interaction_tools_config(True),
+        ):
             prompt = SWEAgent._build_sys_prompt(agent)
 
         assert "use ask_plan_clarification tool" not in prompt
@@ -557,7 +695,9 @@ def test_is_chat_task_progress_enabled_reads_false_string_as_disabled():
 
 def test_plan_interaction_tools_switch_is_disabled_by_default():
     """普通模式计划交互工具必须在 Source 配置中默认关闭。"""
-    assert build_default_source_system_config_payload()["feature_switches"] == {
+    assert build_default_source_system_config_payload()[
+        "feature_switches"
+    ] == {
         "chat_task_progress_enabled": True,
         "database_access_guard_enabled": True,
         "normal_mode_plan_interaction_tools_enabled": False,

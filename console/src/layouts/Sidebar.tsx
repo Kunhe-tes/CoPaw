@@ -64,11 +64,15 @@ const { Sider } = Layout;
 
 interface SidebarProps {
   selectedKey: string;
+  withoutHeader?: boolean;
 }
 
 // ── Sidebar ───────────────────────────────────────────────────────────────
 
-export default function Sidebar({ selectedKey }: SidebarProps) {
+export default function Sidebar({
+  selectedKey,
+  withoutHeader = false,
+}: SidebarProps) {
   const navigate = useNavigate();
   const { t } = useTranslation();
   const { message } = useAppMessage();
@@ -231,6 +235,16 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/featured-cases-management",
       label: t("nav.featuredCasesManagement", "精选案例管理"),
     },
+    ...(canManageCurrentSourceConfig
+      ? [
+          {
+            key: "scenario-presets-management",
+            icon: <Settings size={18} />,
+            path: "/scenario-presets-management",
+            label: "场景预设管理",
+          },
+        ]
+      : []),
     {
       key: "environments",
       icon: <SparkInternetLine size={18} />,
@@ -243,12 +257,16 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       path: "/security",
       label: t("nav.security"),
     },
-    {
-      key: "skill-config",
-      icon: <SlidersHorizontal size={18} />,
-      path: "/skill-config",
-      label: t("nav.skillConfig", "SKILL 配置"),
-    },
+    ...(isRMassistSource
+      ? [
+          {
+            key: "skill-config",
+            icon: <SlidersHorizontal size={18} />,
+            path: "/skill-config",
+            label: t("nav.skillConfig", "Skill 配置"),
+          },
+        ]
+      : []),
     ...(canManageCurrentSourceConfig
       ? [
           {
@@ -387,6 +405,11 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       label: collapsed ? null : t("nav.market"),
       icon: <Store size={16} />,
     },
+    {
+      key: "expert-community",
+      label: collapsed ? null : "专家社区",
+      icon: <SearchCheck size={16} />,
+    },
     // 4. 运行中心
     {
       key: "run-center",
@@ -438,6 +461,15 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
             : t("nav.featuredCasesManagement", "精选案例管理"),
           icon: <SparkFileTxtLine size={16} />,
         },
+        ...(canManageCurrentSourceConfig
+          ? [
+              {
+                key: "scenario-presets-management",
+                label: collapsed ? null : "场景预设管理",
+                icon: <Settings size={16} />,
+              },
+            ]
+          : []),
         {
           key: "environments",
           label: collapsed ? null : t("nav.environments"),
@@ -448,11 +480,15 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
           label: collapsed ? null : t("nav.security"),
           icon: <SparkBrowseLine size={16} />,
         },
-        {
-          key: "skill-config",
-          label: collapsed ? null : t("nav.skillConfig", "SKILL 配置"),
-          icon: <SlidersHorizontal size={16} />,
-        },
+        ...(isRMassistSource
+          ? [
+              {
+                key: "skill-config",
+                label: collapsed ? null : t("nav.skillConfig", "Skill 配置"),
+                icon: <SlidersHorizontal size={16} />,
+              },
+            ]
+          : []),
         ...(canManageCurrentSourceConfig
           ? [
               {
@@ -582,7 +618,9 @@ export default function Sidebar({ selectedKey }: SidebarProps) {
       width={collapsed ? 72 : 240}
       className={`${styles.sider}${
         collapsed ? ` ${styles.siderCollapsed}` : ""
-      }${isDark ? ` ${styles.siderDark}` : ""}`}
+      }${isDark ? ` ${styles.siderDark}` : ""}${
+        withoutHeader ? ` ${styles.siderWithoutHeader}` : ""
+      }`}
     >
       {/* ==================== 选择智能体 (Kun He) - 已注释 ==================== */}
       {/* <div className={styles.agentSelectorContainer}>

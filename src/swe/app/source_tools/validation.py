@@ -26,6 +26,12 @@ _CONTRACT_ASSIGNMENTS = {
 _STANDARD_LIBRARY_MODULES = frozenset(sys.stdlib_module_names) | {
     "__future__",
 }
+_APPROVED_THIRD_PARTY_MODULES = frozenset(
+    {"requests", "PIL", "numpy", "pandas"},
+)
+_ALLOWED_IMPORT_MODULES = (
+    _STANDARD_LIBRARY_MODULES | _APPROVED_THIRD_PARTY_MODULES
+)
 
 
 class SourceToolValidationError(ValueError):
@@ -106,9 +112,10 @@ def _validate_import(node: ast.Import | ast.ImportFrom) -> None:
     )
     for module in modules:
         root = module.split(".", 1)[0]
-        if root not in _STANDARD_LIBRARY_MODULES:
+        if root not in _ALLOWED_IMPORT_MODULES:
             raise SourceToolValidationError(
-                f"imports must use the Python standard library only: {module}",
+                "imports must use the Python standard library or approved "
+                f"third-party packages: {module}",
             )
 
 

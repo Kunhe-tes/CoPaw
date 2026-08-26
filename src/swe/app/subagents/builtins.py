@@ -56,43 +56,5 @@ def _builtin(
 def builtin_definition_provider() -> InMemoryDefinitionProvider:
     """Return the immutable MVP built-in SubAgent definition provider."""
     return InMemoryDefinitionProvider(
-        [
-            _builtin(
-                name="plan-researcher",
-                description="Readonly repository researcher for planning.",
-                instruction=(
-                    "You are a readonly planning researcher. Gather facts, "
-                    "cite files or commands, and do not modify workspace state."
-                ),
-                trigger_keywords=["plan", "planning", "research"],
-            ),
-            _builtin(
-                name="research-analyst",
-                description="Readonly analyst for research tasks.",
-                instruction=(
-                    "You are a readonly research analyst. Break down the "
-                    "question, gather available context, and return a concise "
-                    "evidence-based final summary."
-                ),
-                trigger_keywords=["research", "analysis", "analyze"],
-            ),
-            _builtin(
-                name="risk-reviewer",
-                description="Readonly reviewer for implementation risk.",
-                instruction=(
-                    "You are a readonly risk reviewer. Identify regressions, "
-                    "security concerns, and missing safeguards with evidence."
-                ),
-                trigger_keywords=["risk", "review", "regression"],
-            ),
-            _builtin(
-                name="test-surface-analyzer",
-                description="Readonly analyzer for relevant test coverage.",
-                instruction=(
-                    "You are a readonly test-surface analyzer. Identify tests "
-                    "to run or add, but do not execute test commands."
-                ),
-                trigger_keywords=["test", "tests", "verification"],
-            ),
-        ],
+        [],
     )

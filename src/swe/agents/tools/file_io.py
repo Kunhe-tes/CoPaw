@@ -3,6 +3,7 @@
 # pylint: disable=line-too-long
 import asyncio
 from contextlib import suppress
+import json
 import logging
 import os
 from pathlib import Path
@@ -89,13 +90,12 @@ def _resolve_writable_file_path(file_path: str) -> str:
     except TenantPathBoundaryError:
         expanded_path = os.path.expanduser(file_path)
         path_obj = Path(expanded_path)
-        tenant_root = get_current_tenant_root().resolve()
         candidate = (
             path_obj if path_obj.is_absolute() else (base_dir / path_obj)
         ).resolve(strict=False)
 
         try:
-            candidate.relative_to(tenant_root)
+            candidate.relative_to(get_current_tenant_root().resolve())
         except ValueError as exc:
             raise TenantPathBoundaryError(
                 "Write target escapes the tenant workspace boundary.",
@@ -108,6 +108,27 @@ def _resolve_writable_file_path(file_path: str) -> str:
     return str(resolved)
 
 
+def _is_created_workspace_skill_write_target(
+    target: Path,
+    workspace_dir: Path,
+) -> bool:
+    try:
+        relative_path = target.relative_to(workspace_dir / "skills")
+    except ValueError:
+        return False
+    if not relative_path.parts:
+        return False
+
+    manifest_path = workspace_dir / "skill.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+
+    entry = manifest.get("skills", {}).get(relative_path.parts[0])
+    return isinstance(entry, dict) and entry.get("source") == "customized"
+
+
 def _raise_if_protected_skill_write_target(
     target: Path,
     workspace_dir: Path,
@@ -118,6 +139,11 @@ def _raise_if_protected_skill_write_target(
         resolved_workspace / "skills",
         resolved_workspace / ".disabled_skills",
     )
+    if _is_created_workspace_skill_write_target(
+        resolved_target,
+        resolved_workspace,
+    ):
+        return
     if any(
         resolved_target == root or resolved_target.is_relative_to(root)
         for root in protected_roots

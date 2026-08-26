@@ -30,6 +30,27 @@ def test_accepts_static_source_tool_contract():
 
 
 @pytest.mark.parametrize(
+    "import_statement",
+    [
+        "import requests",
+        "from requests import Session",
+        "from PIL import Image",
+        "from numpy.linalg import norm",
+        "import pandas as pd",
+    ],
+)
+def test_accepts_approved_third_party_imports(import_statement):
+    script = VALID_SCRIPT.replace(
+        "async def execute(arguments, context):",
+        f"{import_statement}\n\nasync def execute(arguments, context):",
+    )
+
+    contract = validate_source_tool_script(script.encode())
+
+    assert contract.name == "lookup_invoice"
+
+
+@pytest.mark.parametrize(
     "script, message",
     [
         (

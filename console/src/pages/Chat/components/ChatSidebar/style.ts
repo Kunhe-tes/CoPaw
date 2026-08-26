@@ -8,49 +8,80 @@ export default createGlobalStyle`
   flex-shrink: 0;
   display: flex;
   flex-direction: row;
+  width: ${DESIGN_TOKENS.sidebarWidth}px;
   height: 100%;
+  overflow: hidden;
+  transition: width 200ms cubic-bezier(0.25, 1, 0.5, 1);
 }
 
 .chat-sidebar-wrapper--collapsed {
-  /* When collapsed, only the 64px toolbar shows */
+  width: ${DESIGN_TOKENS.toolbarWidth}px;
+  overflow: visible;
+
+  .chat-sidebar-collapse-toggle {
+    position: absolute;
+    top: ${DESIGN_TOKENS.toolbarIconPaddingTop}px;
+    left: ${DESIGN_TOKENS.toolbarIconPaddingLeft}px;
+    z-index: 1;
+    width: ${DESIGN_TOKENS.toolbarIconSize}px;
+    height: ${DESIGN_TOKENS.toolbarIconSize}px;
+    border-radius: 6px;
+  }
+
+  .collapsed-toolbar-icons {
+    padding-top: 76px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-sidebar-wrapper {
+    transition: none;
+  }
 }
 
 /* ─── Collapse toggle button ─── */
 .chat-sidebar-collapse-toggle {
-  position: absolute;
-  right: -11px;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 50;
-  width: 22px;
-  height: 22px;
-  border-radius: 50%;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  background: #FFFFFF;
+  flex: none;
+  border: none;
+  background: transparent;
+  color: ${DESIGN_TOKENS.colorTextMuted};
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
   padding: 0;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
-  transition: all 0.2s ease;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
 
-  svg {
-    transition: transform 0.2s ease;
+  &--expanded {
+    position: absolute;
+    top: 6px;
+    right: 2px;
+    z-index: 1;
+    width: 28px;
+    height: 28px;
+    border-radius: 6px;
   }
 
   &:hover {
-    border-color: ${DESIGN_TOKENS.colorPrimary};
-    box-shadow: 0 2px 8px rgba(55, 105, 252, 0.2);
+    background-color: rgba(55, 105, 252, 0.08);
+    color: ${DESIGN_TOKENS.colorPrimary};
+  }
 
-    svg path {
-      stroke: ${DESIGN_TOKENS.colorPrimary};
-    }
+  &:active {
+    background-color: rgba(55, 105, 252, 0.14);
+  }
+
+  &:focus-visible {
+    outline: 2px solid ${DESIGN_TOKENS.colorPrimary};
+    outline-offset: 2px;
   }
 }
 
 /* ─── Expanded sidebar ─── */
 .chat-sidebar {
+  position: relative;
   width: ${DESIGN_TOKENS.sidebarWidth}px;
   height: 100%;
   background-color: ${DESIGN_TOKENS.colorBgSidebar};
@@ -90,6 +121,10 @@ export default createGlobalStyle`
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: rgba(0, 0, 0, 0.12) transparent;
+}
+
+.chat-sidebar-content-record-list--without-header {
+  height: calc(100vh - 139px + 56px);
 }
 
 /* History section */
@@ -160,8 +195,9 @@ export default createGlobalStyle`
 
 /* New topic button */
 .chat-sidebar-new-topic {
-  padding: 24px 20px;
+  padding: 35px 20px 12px;
   display: flex;
+  align-items: center;
   justify-content: center;
 }
 

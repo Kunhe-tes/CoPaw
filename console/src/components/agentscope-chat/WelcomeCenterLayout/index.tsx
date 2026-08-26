@@ -22,10 +22,16 @@ import { featuredCasesApi } from "@/api/modules/featuredCases";
 import type { FeaturedCase } from "@/api/types/featuredCases";
 import type { SkillMentionsData } from "../SkillMentions/useSkillMentions";
 import { SkillTokenEditor } from "../SkillMentions/SkillTokenEditor";
+import ScenarioPresetSelector from "../ScenarioPresetSelector";
+import type {
+  ScenarioPresetCapability,
+  ScenarioPresetScenario,
+} from "@/api/types/scenarioPreset";
 import sendIcon from "../../../assets/icons/send_highlight.svg";
 import { useTranslation } from "react-i18next";
 import VoiceRecorderQuickMenuItem from "@/components/GlobalVoiceRecorder/VoiceRecorderQuickMenuItem";
 import { useVoiceRecorderTrigger } from "@/components/GlobalVoiceRecorder/context";
+import { DESIGN_TOKENS } from "@/config/designTokens";
 import ComposerQuickMenu, {
   ComposerQuickMenuItem,
 } from "@/components/agentscope-chat/ComposerQuickMenu";
@@ -39,6 +45,11 @@ import {
 } from "../chatInputDraft";
 
 const RUNTIME_INPUT_UPLOAD_FILE_EVENT = "pasteFile";
+const WELCOME_INPUT_CARD_STYLE = {
+  boxSizing: "border-box",
+  maxWidth: "100%",
+  width: `${DESIGN_TOKENS.inputCardWidth + 40}px`,
+} as const;
 const PLACEHOLDER_OPTIONS = [
   "告诉我你要做什么，我将召唤相应专家，为你执行...",
   "有什么要求都告诉我，我会越用越懂你...",
@@ -52,6 +63,7 @@ interface WelcomeCenterLayoutProps {
   quickMenuItems?: React.ReactNode | React.ReactNode[];
   prefixItems?: React.ReactNode | React.ReactNode[];
   onSubmit: (data: IAgentScopeRuntimeWebUIInputData) => void | Promise<void>;
+  onScenarioPresetSubmit?: (scenarioPresetId: string) => void;
   skillMentions?: SkillMentionsData;
 }
 
@@ -75,6 +87,7 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     placeholder,
     quickMenuItems,
     prefixItems,
+    onScenarioPresetSubmit,
   } = props;
   const { t } = useTranslation();
   const inputState = useChatAnywhereInput((value) => ({
@@ -90,6 +103,10 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
   const [loadingCase, setLoadingCase] = useState(false);
   const [mentionMenuContainer, setMentionMenuContainer] =
     useState<HTMLDivElement | null>(null);
+  const [selectedScenario, setSelectedScenario] = useState<{
+    capability: ScenarioPresetCapability;
+    scenario: ScenarioPresetScenario;
+  } | null>(null);
   const uploadRef = useRef<GetRef<typeof Upload>>(null);
   const voiceRecorder = useVoiceRecorderTrigger();
   const inputValueRef = useRef(inputValue);
@@ -111,6 +128,19 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       setFileList(next);
     },
     [],
+  );
+  const effectiveSkillMentions = useMemo<SkillMentionsData>(
+    () =>
+      skillMentions || {
+        items: [],
+        selected: [],
+        loading: false,
+        error: false,
+        onOpen: () => undefined,
+        onChange: () => undefined,
+        onRetry: () => undefined,
+      },
+    [skillMentions],
   );
 
   // 组件挂载时随机选择placeholder文案
@@ -155,7 +185,11 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
     if (isSubmittingRef.current) return;
 
     const submittedInputValue = inputValueRef.current;
-    const query = submittedInputValue.trim();
+    const promptDraft = submittedInputValue.trim();
+    const capabilityMarker = selectedScenario
+      ? `@${selectedScenario.capability.name}`
+      : "";
+    const query = [capabilityMarker, promptDraft].filter(Boolean).join(" ");
     if (!query) return;
     const uploadedFiles = fileListRef.current.filter((file) =>
       Boolean(file.response?.url),
@@ -179,6 +213,9 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         return;
       }
 
+      if (selectedScenario) {
+        onScenarioPresetSubmit?.(selectedScenario.scenario.id);
+      }
       await Promise.resolve(
         onSubmit(typeof next === "object" ? next : inputData),
       );
@@ -194,7 +231,14 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       isSubmittingRef.current = false;
       setIsSubmitting(false);
     }
-  }, [beforeSubmit, onSubmit, setCurrentFileList, setCurrentInputValue]);
+  }, [
+    beforeSubmit,
+    onScenarioPresetSubmit,
+    onSubmit,
+    selectedScenario,
+    setCurrentFileList,
+    setCurrentInputValue,
+  ]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLElement>) => {
@@ -212,6 +256,20 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
       setCurrentInputValue(text);
     },
     [inputDisabled, setCurrentInputValue],
+  );
+
+  const handleScenarioSelect = useCallback(
+    ({
+      capability,
+      scenario,
+    }: {
+      capability: ScenarioPresetCapability;
+      scenario: ScenarioPresetScenario;
+    }) => {
+      setSelectedScenario({ capability, scenario });
+      setCurrentInputValue(scenario.prompt_draft);
+    },
+    [setCurrentInputValue],
   );
 
   // Handle "看案例" click - fetch detail from API
@@ -366,63 +424,115 @@ export default function WelcomeCenterLayout(props: WelcomeCenterLayoutProps) {
         {/* Greeting */}
         <div className="welcome-greeting">{greeting}</div>
 
-        {/* Input Card with upload */}
-        <div className="welcome-input-card" ref={setMentionMenuContainer}>
-          {/* Attachment preview area */}
-          {fileList.length > 0 && (
-            <div style={{ marginBottom: -8, marginTop: -8, marginLeft: -20 }}>
-              <Attachments
-                items={fileList}
-                onChange={(info) => setCurrentFileList(info.fileList)}
-              />
-            </div>
-          )}
-
-          {skillMentions ? (
-            <SkillTokenEditor
-              aria-label="消息"
-              className="welcome-input-placeholder welcome-skill-editor"
-              disabled={isSubmitting}
-              mentionMenuContainer={mentionMenuContainer}
-              mentionMenuPlacement="bottom"
-              onKeyDown={handleKeyDown}
-              onValueChange={setCurrentInputValue}
-              placeholder={placeholder || randomPlaceholder}
-              skillMentions={skillMentions}
-              value={inputValue}
-            />
-          ) : (
-            <Input.TextArea
-              className="welcome-input-placeholder"
-              value={inputValue}
-              onChange={(e) => setCurrentInputValue(e.target.value)}
-              onKeyDown={handleKeyDown}
-              placeholder={placeholder || randomPlaceholder}
-              autoSize={{ minRows: 1, maxRows: 5 }}
-              bordered={false}
-              disabled={inputDisabled || isSubmitting}
-            />
-          )}
-          <div className="welcome-input-actions">
-            <div className="welcome-input-actions-left">
-              <ComposerQuickMenu
-                disabled={inputDisabled || isSubmitting}
-                triggerLabel={t("chat.quickMenu.trigger", "快捷操作")}
-              >
-                {mergedQuickMenuItems}
-              </ComposerQuickMenu>
-              {prefixItems}
-            </div>
-            <button
-              className="welcome-input-send-btn"
-              onClick={handleSend}
-              disabled={inputDisabled || isSubmitting || !inputValue.trim()}
-              type="button"
+        <ScenarioPresetSelector
+          disabled={inputDisabled || isSubmitting}
+          onBrowseChange={() => setSelectedScenario(null)}
+          onSelect={handleScenarioSelect}
+          selectedScenarioId={selectedScenario?.scenario.id}
+        >
+          {({
+            capability,
+            onScenarioSelect,
+            scenarios,
+            selectedScenarioId,
+          }) => (
+            <div
+              className="welcome-input-card"
+              ref={setMentionMenuContainer}
+              style={WELCOME_INPUT_CARD_STYLE}
             >
-              <img src={sendIcon} alt="发送" width={24} height={24} />
-            </button>
-          </div>
-        </div>
+              {capability && scenarios.length > 0 && (
+                <div className="welcome-scene-strip" aria-label="推荐场景">
+                  <span className="welcome-scene-title">推荐场景</span>
+                  <div className="welcome-scene-list">
+                    {scenarios.map((scenario) => (
+                      <button
+                        key={scenario.id}
+                        aria-pressed={selectedScenarioId === scenario.id}
+                        className={`welcome-scene-button${
+                          selectedScenarioId === scenario.id ? " is-active" : ""
+                        }`}
+                        disabled={inputDisabled || isSubmitting}
+                        onClick={() => onScenarioSelect(scenario)}
+                        type="button"
+                      >
+                        {scenario.name}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Attachment preview area */}
+              {fileList.length > 0 && (
+                <div
+                  style={{ marginBottom: -8, marginTop: -8, marginLeft: -20 }}
+                >
+                  <Attachments
+                    items={fileList}
+                    onChange={(info) => setCurrentFileList(info.fileList)}
+                  />
+                </div>
+              )}
+
+              {skillMentions || selectedScenario ? (
+                <SkillTokenEditor
+                  aria-label="消息"
+                  className="welcome-input-placeholder welcome-skill-editor"
+                  disabled={inputDisabled || isSubmitting}
+                  fixedToken={
+                    selectedScenario
+                      ? {
+                          text: `@${selectedScenario.capability.name}`,
+                          onRemove: () => setSelectedScenario(null),
+                        }
+                      : undefined
+                  }
+                  mentionMenuContainer={mentionMenuContainer}
+                  mentionMenuPlacement="bottom"
+                  onKeyDown={handleKeyDown}
+                  onValueChange={setCurrentInputValue}
+                  placeholder={placeholder || randomPlaceholder}
+                  skillMentions={effectiveSkillMentions}
+                  value={inputValue}
+                />
+              ) : (
+                <Input.TextArea
+                  className="welcome-input-placeholder"
+                  value={inputValue}
+                  onChange={(event) => setCurrentInputValue(event.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder={placeholder || randomPlaceholder}
+                  autoSize={{ minRows: 1, maxRows: 5 }}
+                  bordered={false}
+                  disabled={inputDisabled || isSubmitting}
+                />
+              )}
+              <div className="welcome-input-actions">
+                <div className="welcome-input-actions-left">
+                  <ComposerQuickMenu
+                    disabled={inputDisabled || isSubmitting}
+                    triggerLabel={t("chat.quickMenu.trigger", "快捷操作")}
+                  >
+                    {mergedQuickMenuItems}
+                  </ComposerQuickMenu>
+                  {prefixItems}
+                </div>
+                <button
+                  className="welcome-input-send-btn"
+                  onClick={handleSend}
+                  disabled={
+                    inputDisabled ||
+                    isSubmitting ||
+                    (!inputValue.trim() && !selectedScenario)
+                  }
+                  type="button"
+                >
+                  <img src={sendIcon} alt="发送" width={24} height={24} />
+                </button>
+              </div>
+            </div>
+          )}
+        </ScenarioPresetSelector>
 
         {/* Featured Cases */}
         <div className="welcome-cases-area">

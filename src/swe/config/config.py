@@ -194,6 +194,20 @@ class ZhaohuConfig(BaseChannelConfig):
         ),
     )
     session_end_push_enabled: bool = False
+    # 会话结束推送跳转链接前缀（使用人在招乎配置页自行配置，配置后推送附带跳转链接）
+    session_end_push_link_prefix: str = Field(
+        default_factory=lambda: EnvVarLoader.get_str(
+            "SWE_ZHAOHU_SESSION_END_PUSH_LINK_PREFIX",
+            "",
+        ),
+    )
+    # 跳转链接使用的 ID 类型："chat_id" 或 "session_id"
+    session_end_push_link_id_type: str = Field(
+        default_factory=lambda: EnvVarLoader.get_str(
+            "SWE_ZHAOHU_SESSION_END_PUSH_LINK_ID_TYPE",
+            "session_id",
+        ),
+    )
 
 
 class ConsoleConfig(BaseChannelConfig):
@@ -761,6 +775,11 @@ class HookRuntimeRunningConfig(BaseModel):
             "单次请求中所有自动续跑机制共享的最大轮数；"
             "未配置时按各机制预算推导"
         ),
+    )
+    max_stop_transform_seconds: float = Field(
+        default=30.0,
+        gt=0,
+        description="Stop 输出变换流水线的总时限（秒）",
     )
 
     @model_validator(mode="before")
@@ -1479,6 +1498,12 @@ def _default_builtin_tools() -> Dict[str, BuiltinToolConfig]:
             description="update task progress state",
             display_to_user=False,
         ),
+        "emit_wplus_sop_event": BuiltinToolConfig(
+            name="emit_wplus_sop_event",
+            enabled=True,
+            description="commit a typed W+ SOP workspace event",
+            display_to_user=False,
+        ),
     }
 
 
@@ -1613,7 +1638,7 @@ class ProcessLimitsConfig(BaseModel):
     shell: bool = True
     mcp_stdio: bool = False
     cpu_time_limit_seconds: int | None = Field(default=30, ge=1)
-    memory_max_mb: int | None = Field(default=150, ge=1)
+    memory_max_mb: int | None = Field(default=34000, ge=1)
     shell_max_concurrent: int | None = Field(default=5, ge=1)
     shell_acquire_timeout_seconds: float = Field(default=5, gt=0)
 

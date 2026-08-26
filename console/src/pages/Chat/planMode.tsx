@@ -237,7 +237,7 @@ export function PlanModeMenuItem({
     <ComposerQuickMenuItem
       icon={showIcon ? <OrderedListOutlined /> : undefined}
       interactive
-      label={<span className={styles.planModeToggleLabel}>{label}</span>}
+      label={label}
       extra={
         <Switch
           size="small"
@@ -258,12 +258,14 @@ export function ActivePlanModeButton({
   disabled = false,
   label,
   displayLabel,
+  showIcon = true,
   onDisable,
 }: {
   enabled: boolean;
   disabled?: boolean;
   label: string;
   displayLabel?: string;
+  showIcon?: boolean;
   onDisable: () => void;
 }) {
   const [isRendered, setIsRendered] = React.useState(enabled);
@@ -315,7 +317,9 @@ export function ActivePlanModeButton({
       disabled={disabled || isExiting}
       onClick={onDisable}
     >
-      <OrderedListOutlined className={styles.planModeActiveIcon} />
+      {showIcon && (
+        <OrderedListOutlined className={styles.planModeActiveIcon} />
+      )}
       <CloseCircleFilled className={styles.planModeCloseIcon} />
       <span>{displayLabel || label}</span>
     </button>

@@ -73,6 +73,7 @@ export function ComposerQuickMenuItem(props: ComposerQuickMenuItemProps) {
 export interface ComposerQuickMenuSubmenuProps
   extends Omit<ComposerQuickMenuItemProps, "extra" | "onClick"> {
   children?: React.ReactNode;
+  panelWidth?: string;
 }
 
 export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
@@ -83,8 +84,14 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
     icon,
     interactive: _interactive,
     label,
+    panelWidth,
   } = props;
   const [open, setOpen] = useState(false);
+  const submenuRef = useRef<HTMLDivElement>(null);
+  const submenuPanelRef = useRef<HTMLDivElement>(null);
+  const [submenuPanelStyle, setSubmenuPanelStyle] =
+    useState<React.CSSProperties | null>(null);
+  const [submenuOpensLeft, setSubmenuOpensLeft] = useState(false);
   const items = useMemo(
     () => React.Children.toArray(children).filter(Boolean),
     [children],
@@ -95,6 +102,49 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
       setOpen(false);
     }
   }, [disabled]);
+
+  const expanded = open && !disabled;
+
+  useLayoutEffect(() => {
+    if (!expanded || !submenuRef.current || !submenuPanelRef.current) {
+      setSubmenuPanelStyle(null);
+      setSubmenuOpensLeft(false);
+      return undefined;
+    }
+
+    const updateSubmenuPosition = () => {
+      const gap = 8;
+      const viewportPadding = 16;
+      const submenuRect = submenuRef.current?.getBoundingClientRect();
+      const panelRect = submenuPanelRef.current?.getBoundingClientRect();
+      if (!submenuRect || !panelRect) {
+        return;
+      }
+
+      const availableRight = Math.max(
+        0,
+        window.innerWidth - submenuRect.right - gap - viewportPadding,
+      );
+      const availableLeft = Math.max(
+        0,
+        submenuRect.left - gap - viewportPadding,
+      );
+      const opensLeft =
+        availableRight < panelRect.width && availableLeft > availableRight;
+      const availableWidth = opensLeft ? availableLeft : availableRight;
+
+      setSubmenuOpensLeft(opensLeft);
+      setSubmenuPanelStyle({
+        width: `${Math.min(panelRect.width, availableWidth)}px`,
+        left: opensLeft ? "auto" : `calc(100% + ${gap}px)`,
+        right: opensLeft ? `calc(100% + ${gap}px)` : "auto",
+      });
+    };
+
+    updateSubmenuPosition();
+    window.addEventListener("resize", updateSubmenuPosition);
+    return () => window.removeEventListener("resize", updateSubmenuPosition);
+  }, [expanded, panelWidth]);
 
   if (items.length === 0) {
     return (
@@ -107,11 +157,10 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
     );
   }
 
-  const expanded = open && !disabled;
-
   return (
     <div
       className={styles.submenu}
+      ref={submenuRef}
       onMouseEnter={() => {
         if (!disabled) {
           setOpen(true);
@@ -167,7 +216,16 @@ export function ComposerQuickMenuSubmenu(props: ComposerQuickMenuSubmenuProps) {
         </span>
       </div>
       {expanded ? (
-        <div className={styles.submenuPanel} role="menu">
+        <div
+          ref={submenuPanelRef}
+          className={styles.submenuPanel}
+          data-opens-left={submenuOpensLeft || undefined}
+          role="menu"
+          style={
+            submenuPanelStyle ||
+            (panelWidth ? { width: panelWidth } : undefined)
+          }
+        >
           {items.map((item, index) => (
             <div
               key={(React.isValidElement(item) && item.key) || index}

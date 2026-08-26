@@ -47,6 +47,7 @@ from .migration import (
 )
 from .channels.registry import register_custom_channel_routes
 from ..tracing import init_trace_manager, close_trace_manager
+from ..tracing.agent_trace_sdk import shutdown_global_tracer
 from ..database import get_database_config
 from .service_heartbeat import start_service_heartbeat, stop_service_heartbeat
 from .crons.notification_worker import CronNotificationWorker
@@ -487,7 +488,6 @@ async def _initialize_approval_audit_store(
         app.state.approval_audit_store = approval_audit_store
         get_approval_service().set_store(approval_audit_store)
         if approval_audit_store.is_available:
-            await approval_audit_store.initialize()
             logger.info("Approval audit storage initialized")
         else:
             logger.warning(
@@ -519,7 +519,6 @@ async def _initialize_skill_scan_history(
         return
 
     try:
-        await store.initialize()
         recorder = SkillScanHistoryRecorder(store)
         await recorder.start()
         app.state.skill_scan_history_recorder = recorder
@@ -547,7 +546,6 @@ async def _initialize_cron_broadcast_children_store(
         )
         app.state.cron_broadcast_children_store = cron_broadcast_children_store
         if cron_broadcast_children_store.is_available:
-            await cron_broadcast_children_store.initialize()
             logger.info("Cron broadcast children snapshot storage initialized")
         else:
             logger.warning(
@@ -571,7 +569,6 @@ async def _initialize_cron_broadcast_task_store(
         cron_broadcast_task_store = CronBroadcastTaskStore(db_connection)
         app.state.cron_broadcast_task_store = cron_broadcast_task_store
         if cron_broadcast_task_store.is_available:
-            await cron_broadcast_task_store.initialize()
             logger.info("Cron broadcast task storage initialized")
         else:
             logger.warning(
@@ -601,7 +598,6 @@ async def _initialize_skill_readiness(
             multi_agent_manager=multi_agent_manager,
         )
         if skill_readiness_store.is_available:
-            await skill_readiness_store.initialize()
             logger.info("SkillReadiness storage initialized")
         else:
             logger.warning(
@@ -636,11 +632,14 @@ def _initialize_continuous_governance(
         logger.warning("Failed to initialize continuous governance: %s", e)
 
 
-def _initialize_database_backed_modules(db_connection: Any | None) -> None:
+async def _initialize_database_backed_modules(
+    db_connection: Any | None,
+) -> None:
     """初始化只在数据库可用时启用的附属模块。"""
     if db_connection is None:
         return
     try:
+        from .goals.registry import initialize_goal_service
         from .greeting.router import init_greeting_module
         from .featured_case.router import init_featured_case_module
         from .feedback.router import init_feedback_module
@@ -648,15 +647,18 @@ def _initialize_database_backed_modules(db_connection: Any | None) -> None:
         from .html_preview_clicks.router import (
             init_html_preview_click_module,
         )
+        from .scenario_preset.router import init_scenario_preset_module
 
+        await initialize_goal_service(db_connection)
         init_greeting_module(db_connection)
         init_featured_case_module(db_connection)
         init_feedback_module(db_connection)
         init_skill_result_module(db_connection)
         init_html_preview_click_module(db_connection)
+        await init_scenario_preset_module(db_connection)
         logger.info(
-            "Greeting, FeaturedCase, Feedback, SkillResult and HTML "
-            "preview click modules initialized",
+            "Greeting, FeaturedCase, Feedback, SkillResult, HTML preview click "
+            "and ScenarioPreset modules initialized",
         )
 
         from .workspace.tenant_init_source_store import (
@@ -766,6 +768,11 @@ async def _shutdown_lifespan_resources(
         logger.info("Tracing manager closed")
     except Exception as e:
         logger.warning("Error closing tracing manager: %s", e)
+
+    try:
+        shutdown_global_tracer()
+    except Exception as e:
+        logger.warning("Error closing AgentTraceSDK global tracer: %s", e)
 
     try:
         await stop_service_heartbeat()
@@ -900,7 +907,7 @@ async def lifespan(
         multi_agent_manager,
     )
 
-    _initialize_database_backed_modules(db_connection)
+    await _initialize_database_backed_modules(db_connection)
 
     startup_elapsed = time.time() - startup_start_time
     logger.info(

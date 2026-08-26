@@ -13,7 +13,7 @@ import {
   type RefSelectProps,
 } from "antd";
 import { CircleX, Plus, RefreshCw, Settings2, SquarePen } from "lucide-react";
-import { cronJobApi } from "@/api/modules/cronjob";
+import { mySkillsApi, type SweSkillListItem } from "@/api/modules/mySkills";
 import {
   buildSkillConfigCreatePayload,
   buildSkillConfigUpdatePayload,
@@ -22,25 +22,24 @@ import {
   type SkillConfigFormValues,
   type SkillConfigItem,
 } from "@/api/modules/skillConfig";
-import type { CronJobSpecOutput } from "@/api/types";
 import { getBbkDisplayName } from "@/constants/bbk";
-import { DEFAULT_BBK_ID } from "@/constants/identity";
+import { DEFAULT_BBK_ID, DEFAULT_SOURCE_ID } from "@/constants/identity";
 import { useAppMessage } from "@/hooks/useAppMessage";
 import { useIframeStore } from "@/stores/iframeStore";
 import {
-  getSkillInspectionMock,
-  type SkillInspectionPlaceholder,
-} from "./inspectionMock";
+  buildSkillInspectionData,
+  type SkillInspectionData,
+} from "./inspectionData";
 import styles from "./index.module.less";
 
 type EditorMode = "view" | "create" | "edit";
 
 interface SkillConfigEditorValues extends SkillConfigFormValues {
-  cronJobId?: string;
+  selectedSkillId?: string;
 }
 
 const DEFAULT_FORM_VALUES: SkillConfigEditorValues = {
-  cronJobId: undefined,
+  selectedSkillId: undefined,
   skillId: "",
   name: "",
   sort: 1,
@@ -73,7 +72,7 @@ function getErrorStatus(error: unknown): number | undefined {
 
 function toEditorValues(item: SkillConfigItem): SkillConfigEditorValues {
   return {
-    cronJobId: item.skillId,
+    selectedSkillId: item.skillId,
     skillId: item.skillId,
     name: item.name,
     sort: Math.max(1, item.sort || 1),
@@ -102,29 +101,42 @@ function SkillList({
   refreshing: boolean;
 }) {
   return (
-    <aside className={styles.skillListPanel} aria-label="SKILL 列表">
-      <div className={styles.panelHeader}>
-        <h2>SKILL 列表</h2>
-        <div className={styles.skillListActions}>
-          <Tooltip title="刷新列表">
-            <Button
-              className={styles.refreshButton}
-              type="text"
-              size="small"
-              icon={<RefreshCw size={15} />}
-              loading={refreshing}
-              onClick={onRefresh}
-              aria-label="刷新 SKILL 列表"
-            />
-          </Tooltip>
-          {items.length ? (
-            <Button type="primary" size="small" onClick={onCreate}>
-              新增
-            </Button>
-          ) : null}
+    <aside className={styles.skillListPanel} aria-label="Skill 列表">
+      <div className={styles.skillListHeader}>
+        <div className={styles.panelHeader}>
+          <h2>Skill 列表</h2>
+          <div className={styles.skillListActions}>
+            <Tooltip title="刷新列表">
+              <Button
+                className={styles.refreshButton}
+                type="text"
+                size="small"
+                icon={<RefreshCw size={15} />}
+                loading={refreshing}
+                onClick={onRefresh}
+                aria-label="刷新 Skill 列表"
+              />
+            </Tooltip>
+            {items.length ? (
+              <Button type="primary" size="small" onClick={onCreate}>
+                新增
+              </Button>
+            ) : null}
+          </div>
         </div>
+        {items.length ? (
+          <span className={styles.skillListHint}>
+            <SquarePen size={12} aria-hidden="true" />
+            悬停条目可编辑
+          </span>
+        ) : null}
       </div>
-      <div className={styles.skillList}>
+      <div
+        className={styles.skillList}
+        role="region"
+        aria-label="Skill 列表内容"
+        tabIndex={items.length ? 0 : undefined}
+      >
         {items.length ? (
           items.map((item) => {
             const selected = selectedId === item.skillId;
@@ -166,7 +178,7 @@ function SkillList({
           })
         ) : (
           <div className={styles.skillListEmpty} role="status">
-            <strong>暂无 SKILL 数据</strong>
+            <strong>暂无 Skill 数据</strong>
             <span>完成右侧配置并创建后，将显示在这里。</span>
           </div>
         )}
@@ -175,11 +187,7 @@ function SkillList({
   );
 }
 
-function InspectionPanel({
-  data,
-}: {
-  data: SkillInspectionPlaceholder | null;
-}) {
+function InspectionPanel({ data }: { data: SkillInspectionData | null }) {
   return (
     <section
       className={styles.inspectionPanel}
@@ -217,18 +225,40 @@ function InspectionPanel({
           <span className={styles.sectionMarker} aria-hidden="true" />
           <h3>L2 客户级方案模块滚动深度</h3>
         </div>
-        <div className={styles.depthList}>
+        <div
+          className={styles.depthList}
+          role="list"
+          aria-label="客户级方案模块滚动深度"
+        >
           {data?.depthItems.map((item, index) => (
-            <div className={styles.depthRow} key={item.label}>
-              <span className={styles.depthIndex}>{index + 1}</span>
+            <div
+              className={styles.depthRow}
+              key={item.id || item.label}
+              role="listitem"
+              aria-label={
+                item.exposureCount === undefined
+                  ? undefined
+                  : `${item.label}：曝光 ${item.exposureCount} 次，占比 ${item.value}`
+              }
+            >
+              <span className={styles.depthIndex}>
+                {item.sequence ?? index + 1}
+              </span>
               <span className={styles.depthLabel}>{item.label}</span>
               <strong>{item.value}</strong>
-              <span className={styles.depthTrack} aria-hidden="true" />
+              <span className={styles.depthTrack} aria-hidden="true">
+                <span
+                  className={styles.depthTrackFill}
+                  style={{ width: `${item.ratePercent ?? 0}%` }}
+                />
+              </span>
             </div>
           ))}
         </div>
         <p className={styles.placeholderHint}>
-          回检接口接入后，将在此展示真实触达与转化数据。
+          {data?.depthTotalCount === undefined
+            ? "客户级方案模块滚动深度暂无数据"
+            : `曝光总数 ${data.depthTotalCount}`}
         </p>
       </div>
     </section>
@@ -238,10 +268,11 @@ function InspectionPanel({
 export default function SkillConfigPage() {
   const { message } = useAppMessage();
   const bbkId = useIframeStore((state) => state.bbk) || DEFAULT_BBK_ID;
+  const sourceId = useIframeStore((state) => state.source) || DEFAULT_SOURCE_ID;
   const [form] = Form.useForm<SkillConfigEditorValues>();
   const nameSelectRef = useRef<RefSelectProps>(null);
   const [configs, setConfigs] = useState<SkillConfigItem[]>([]);
-  const [cronJobs, setCronJobs] = useState<CronJobSpecOutput[]>([]);
+  const [marketSkills, setMarketSkills] = useState<SweSkillListItem[]>([]);
   const [activityClasses, setActivityClasses] = useState<ActivityClassItem[]>(
     [],
   );
@@ -249,12 +280,14 @@ export default function SkillConfigPage() {
   const [selectedConfig, setSelectedConfig] = useState<SkillConfigItem | null>(
     null,
   );
-  const [inspection, setInspection] =
-    useState<SkillInspectionPlaceholder | null>(null);
+  const [inspection, setInspection] = useState<SkillInspectionData | null>(
+    null,
+  );
   const [mode, setMode] = useState<EditorMode>("view");
   const [loading, setLoading] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [detailReloadKey, setDetailReloadKey] = useState(0);
   const [detailLoading, setDetailLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -266,8 +299,13 @@ export default function SkillConfigPage() {
     }
   }, [mode]);
 
-  const cronOptions = useMemo(() => {
-    const options = cronJobs.map((job) => ({ value: job.id, label: job.name }));
+  const skillNameOptions = useMemo(() => {
+    const options = marketSkills
+      .filter((skill) => skill.skill_id)
+      .map((skill) => ({
+        value: skill.skill_id,
+        label: skill.cn_name || skill.skill_name || skill.skill_id,
+      }));
     if (
       selectedConfig &&
       !options.some((option) => option.value === selectedConfig.skillId)
@@ -278,7 +316,7 @@ export default function SkillConfigPage() {
       });
     }
     return options;
-  }, [cronJobs, selectedConfig]);
+  }, [marketSkills, selectedConfig]);
 
   const groupOptions = useMemo(() => {
     const options = [...activityClasses]
@@ -314,10 +352,10 @@ export default function SkillConfigPage() {
     setListError(null);
     Promise.allSettled([
       skillConfigApi.listSkillConfigs(bbkId),
-      cronJobApi.listCronJobs(),
+      mySkillsApi.listSweSkills(sourceId),
       skillConfigApi.listActivityClasses(bbkId),
     ])
-      .then(([configResult, cronResult, activityClassResult]) => {
+      .then(([configResult, skillResult, activityClassResult]) => {
         if (cancelled) return;
         if (configResult.status === "fulfilled") {
           setConfigs(configResult.value);
@@ -338,10 +376,11 @@ export default function SkillConfigPage() {
           setListError(errorMessage);
           message.error(errorMessage);
         }
-        if (cronResult.status === "fulfilled") {
-          setCronJobs(cronResult.value ?? []);
+        if (skillResult.status === "fulfilled") {
+          setMarketSkills(skillResult.value.skills ?? []);
         } else {
-          message.error("定时任务列表加载失败");
+          setMarketSkills([]);
+          message.error("Skill 名称列表加载失败");
         }
         if (activityClassResult.status === "fulfilled") {
           setActivityClasses(activityClassResult.value);
@@ -360,15 +399,30 @@ export default function SkillConfigPage() {
     return () => {
       cancelled = true;
     };
-  }, [bbkId, message, reloadKey]);
+  }, [bbkId, message, reloadKey, sourceId]);
 
   useEffect(() => {
     if (!selectedId || mode === "create") return;
     let cancelled = false;
     setDetailLoading(true);
+    const inspectionPromise = Promise.allSettled([
+      skillConfigApi.getPreviewStats(selectedId, bbkId),
+      skillConfigApi.getValueReturnStats(selectedId, bbkId),
+      skillConfigApi.getSkillExposureStats(selectedId, bbkId),
+    ]).then(([previewResult, valueReturnResult, exposureResult]) =>
+      buildSkillInspectionData(
+        previewResult.status === "fulfilled" ? previewResult.value : undefined,
+        valueReturnResult.status === "fulfilled"
+          ? valueReturnResult.value
+          : undefined,
+        exposureResult.status === "fulfilled"
+          ? exposureResult.value
+          : undefined,
+      ),
+    );
     Promise.all([
       skillConfigApi.getSkillConfigDetail(selectedId, bbkId),
-      getSkillInspectionMock(selectedId),
+      inspectionPromise,
     ])
       .then(([detail, inspectionData]) => {
         if (cancelled) return;
@@ -379,7 +433,7 @@ export default function SkillConfigPage() {
       .catch((error) => {
         if (!cancelled) {
           message.error(
-            error instanceof Error ? error.message : "SKILL 详情加载失败",
+            error instanceof Error ? error.message : "Skill 详情加载失败",
           );
         }
       })
@@ -389,14 +443,14 @@ export default function SkillConfigPage() {
     return () => {
       cancelled = true;
     };
-  }, [bbkId, form, message, mode, selectedId]);
+  }, [bbkId, detailReloadKey, form, message, mode, selectedId]);
 
-  const handleCreate = async () => {
+  const handleCreate = () => {
     setMode("create");
     setSelectedId(null);
     setSelectedConfig(null);
     form.setFieldsValue(DEFAULT_FORM_VALUES);
-    setInspection(await getSkillInspectionMock("new"));
+    setInspection(buildSkillInspectionData());
   };
 
   const handleSelect = (item: SkillConfigItem) => {
@@ -419,6 +473,7 @@ export default function SkillConfigPage() {
         setSelectedId(firstConfig.skillId);
         setSelectedConfig(null);
         setInspection(null);
+        setDetailReloadKey((key) => key + 1);
       } else if (mode !== "create") {
         setSelectedId(null);
         setSelectedConfig(null);
@@ -426,18 +481,18 @@ export default function SkillConfigPage() {
       }
     } catch (error) {
       message.error(
-        error instanceof Error ? error.message : "SKILL 列表刷新失败",
+        error instanceof Error ? error.message : "Skill 列表刷新失败",
       );
     } finally {
       setRefreshing(false);
     }
   };
 
-  const handleCronJobChange = (jobId: string) => {
-    const job = cronJobs.find((item) => item.id === jobId);
+  const handleSkillChange = (skillId: string) => {
+    const skill = marketSkills.find((item) => item.skill_id === skillId);
     form.setFieldsValue({
-      skillId: jobId,
-      name: job?.name || jobId,
+      skillId,
+      name: skill?.cn_name || skill?.skill_name || skillId,
     });
   };
 
@@ -457,6 +512,16 @@ export default function SkillConfigPage() {
 
   const handleSave = async () => {
     const values = await form.validateFields();
+    const selectedMarketSkill = marketSkills.find(
+      (item) => item.skill_id === values.skillId,
+    );
+    const valuesForSubmit = {
+      ...values,
+      name:
+        selectedMarketSkill?.cn_name ||
+        selectedMarketSkill?.skill_name ||
+        values.name,
+    };
     setSaving(true);
     try {
       const groupName = groupOptions.find(
@@ -467,7 +532,7 @@ export default function SkillConfigPage() {
           configs.find((item) => item.bbkId === bbkId)?.bbkName ||
           getBbkDisplayName(bbkId);
         const createPayload = buildSkillConfigCreatePayload(
-          values,
+          valuesForSubmit,
           bbkId,
           bbkName,
           groupName,
@@ -477,10 +542,10 @@ export default function SkillConfigPage() {
         );
         setSelectedConfig(createdConfig);
         form.setFieldsValue(toEditorValues(createdConfig));
-        message.success("SKILL 触发规则创建成功");
+        message.success("Skill 触发规则创建成功");
       } else {
         const updatePayload = buildSkillConfigUpdatePayload(
-          values,
+          valuesForSubmit,
           selectedConfig ?? undefined,
           bbkId,
           groupName,
@@ -490,7 +555,7 @@ export default function SkillConfigPage() {
         );
         setSelectedConfig(updatedConfig);
         form.setFieldsValue(toEditorValues(updatedConfig));
-        message.success("SKILL 触发规则更新成功");
+        message.success("Skill 触发规则更新成功");
       }
     } catch (error) {
       if (error instanceof Error) message.error(error.message);
@@ -504,7 +569,7 @@ export default function SkillConfigPage() {
       const nextConfigs = await loadConfigs();
       setSelectedId(values.skillId || nextConfigs[0]?.skillId || null);
     } catch {
-      message.warning("保存成功，但 SKILL 列表刷新失败，请稍后重试");
+      message.warning("保存成功，但 Skill 列表刷新失败，请稍后重试");
     } finally {
       setSaving(false);
     }
@@ -535,7 +600,7 @@ export default function SkillConfigPage() {
                 aria-hidden="true"
               />
             }
-            title="SKILL 配置加载失败"
+            title="Skill 配置加载失败"
             subTitle={listError}
             extra={
               <Button
@@ -562,7 +627,7 @@ export default function SkillConfigPage() {
             image={<Settings2 size={52} strokeWidth={1.35} />}
             description={
               <div className={styles.emptyCopy}>
-                <strong>暂无 SKILL 配置</strong>
+                <strong>暂无 Skill 配置</strong>
                 <span>创建第一条触发规则后，可在这里查看和维护回检配置。</span>
               </div>
             }
@@ -573,7 +638,7 @@ export default function SkillConfigPage() {
               icon={<Plus size={17} />}
               onClick={handleCreate}
             >
-              新增 SKILL
+              新增 Skill
             </Button>
           </Empty>
         </div>
@@ -592,7 +657,7 @@ export default function SkillConfigPage() {
             <div className={styles.rulePanelHeader}>
               <div className={styles.sectionHeading}>
                 <span className={styles.sectionMarker} aria-hidden="true" />
-                <h2 id="rule-title">SKILL 触发规则</h2>
+                <h2 id="rule-title">Skill 触发规则</h2>
               </div>
               {mode !== "view" ? (
                 <div className={styles.formActions}>
@@ -628,21 +693,21 @@ export default function SkillConfigPage() {
                 className={styles.ruleForm}
               >
                 <Form.Item
-                  name="cronJobId"
-                  label="SKILL 名称"
-                  rules={[{ required: true, message: "请选择SKILL名称" }]}
+                  name="selectedSkillId"
+                  label="Skill 名称"
+                  rules={[{ required: true, message: "请选择 Skill 名称" }]}
                 >
                   <Select
                     ref={nameSelectRef}
-                    disabled={mode === "view"}
+                    disabled={mode !== "create"}
                     showSearch
                     optionFilterProp="label"
-                    options={cronOptions}
-                    placeholder="请选择SKILL名称（定时任务）"
-                    onChange={handleCronJobChange}
+                    options={skillNameOptions}
+                    placeholder="请选择 Skill 名称"
+                    onChange={handleSkillChange}
                   />
                 </Form.Item>
-                <Form.Item name="skillId" label="SKILL ID">
+                <Form.Item name="skillId" label="Skill ID">
                   <Input
                     disabled
                     className={styles.skillIdInput}

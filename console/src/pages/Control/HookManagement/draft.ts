@@ -25,6 +25,7 @@ export function createHandler(type: HookHandlerType): HookHandlerDraft {
     timeout: 10,
     statusMessage: "",
     once: false,
+    outputTransform: false,
     includeConversationSnapshot: false,
     conversationSnapshotLimit: 50,
     failPolicy: "allow",
@@ -166,5 +167,8 @@ export function defaultContext(event: HookEventName): Record<string, unknown> {
     user_id: "current-user",
     agent_id: "default",
     channel: "console",
+    ...(event === "Stop"
+      ? { assistant_response: "这是用于测试的候选回复。" }
+      : {}),
   };
 }

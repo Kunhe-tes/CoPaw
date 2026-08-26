@@ -16,6 +16,8 @@ from pydantic import (
     model_validator,
 )
 
+from ..goals.models import CompletionCriterion, GoalConstraints
+
 PlanStatus = Literal["proposed", "revision_requested", "accepted", "exited"]
 PlanReviewDecisionType = Literal["revise", "execute", "exit_plan"]
 PlanClarificationKind = Literal[
@@ -134,6 +136,23 @@ class ProposedPlanCreate(_StrictPlanModel):
         if not cleaned:
             raise ValueError("must not be empty")
         return cleaned
+
+
+class GoalProposal(_StrictPlanModel):
+    """Goal-ready proposal shared by explicit Goal Mode and Plan Mode."""
+
+    card_type: Literal["goal_proposal"] = "goal_proposal"
+    objective: str
+    completion_criteria: list[CompletionCriterion] = Field(min_length=1)
+    constraints: GoalConstraints
+    autonomy_boundary: str
+
+    @field_validator("objective", "autonomy_boundary")
+    @classmethod
+    def _goal_text_required(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be empty")
+        return value.strip()
 
 
 class PlanReviewDecision(_StrictPlanModel):

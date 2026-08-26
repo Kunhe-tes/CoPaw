@@ -24,6 +24,7 @@ from ...config.context import (
     is_valid_identity_value,
     resolve_runtime_tenant_id,
     resolve_scope_id,
+    resolve_storage_tenant_id,
 )
 from ...config.scope_conversion import (
     decode_canonical_scope_id,
@@ -223,19 +224,60 @@ def _validate_dispatch_callback_ids(
         )
 
 
+def _dispatch_callback_value(
+    params: dict[str, Any],
+    *keys: str,
+    default: str = "",
+) -> str:
+    for key in keys:
+        value = params.get(key)
+        if value:
+            return str(value)
+    return default
+
+
 def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
     return {
-        "tenant_id": str(params.get("tenant_id") or ""),
-        "source_id": str(params.get("source_id") or ""),
-        "scope_id": str(params.get("scope_id") or params.get("scopeId") or ""),
-        "from_id": str(params.get("from_id") or params.get("fromId") or ""),
-        "agent_id": str(params.get("agent_id") or _STATIC_AGENT_ID),
-        "job_id": str(params.get("job_id") or ""),
-        "parent_scheduled_fire_at": str(
-            params.get("parent_scheduled_fire_at") or "",
+        "tenant_id": _dispatch_callback_value(params, "tenant_id"),
+        "source_id": _dispatch_callback_value(params, "source_id"),
+        "scope_id": _dispatch_callback_value(params, "scope_id", "scopeId"),
+        "from_id": _dispatch_callback_value(params, "from_id", "fromId"),
+        "agent_id": _dispatch_callback_value(
+            params,
+            "agent_id",
+            default=_STATIC_AGENT_ID,
         ),
-        "provider_id": str(params.get("provider_id") or "default"),
-        "model_id": str(params.get("model_id") or "default"),
+        "job_id": _dispatch_callback_value(params, "job_id"),
+        "parent_scheduled_fire_at": _dispatch_callback_value(
+            params,
+            "parent_scheduled_fire_at",
+        ),
+        "provider_id": _dispatch_callback_value(
+            params,
+            "provider_id",
+            default="default",
+        ),
+        "model_id": _dispatch_callback_value(
+            params,
+            "model_id",
+            default="default",
+        ),
+        "cron_execution_key": _dispatch_callback_value(
+            params,
+            "cron_execution_key",
+            "execution_key",
+        ),
+        "scheduled_fire_at": _dispatch_callback_value(
+            params,
+            "scheduled_fire_at",
+            "fire_time",
+            "trigger_time",
+        ),
+        "external_execution_id": _dispatch_callback_value(
+            params,
+            "external_execution_id",
+            "execution_id",
+        ),
     }
 
 
@@ -634,6 +676,7 @@ def _require_internal_token(
 )
 async def ensure_source_template(
     payload: InternalEnsureSourceTemplateRequest,
+    request: Request,
     authorization: Optional[str] = Header(None),
     x_internal_token: Optional[str] = Header(None),
 ) -> InternalEnsureSourceTemplateResponse:
@@ -651,6 +694,12 @@ async def ensure_source_template(
             detail="Source template unavailable",
             headers={"Retry-After": str(exc.retry_after_seconds)},
         ) from exc
+    pool = getattr(request.app.state, "tenant_workspace_pool", None)
+    if pool is not None and result.status in {"created", "repaired"}:
+        scope = resolve_storage_tenant_id("default", payload.source_id) or (
+            f"default_{payload.source_id}"
+        )
+        await pool.invalidate_bootstrap(scope, reason="source_template_reload")
     return InternalEnsureSourceTemplateResponse(
         source_id=result.source_id,
         template_name=result.template_name,

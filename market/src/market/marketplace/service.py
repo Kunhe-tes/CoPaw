@@ -6,7 +6,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 import shutil
+import tempfile
+import tomllib
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,11 +33,15 @@ from .fs import (
     _mask_env_value,
     copy_mcp_to_user,
     copy_skill_to_user,
+    get_expert_dir,
+    get_expert_definition_path,
+    get_user_expert_dir,
     get_mcp_dir,
     get_skill_dir,
     get_user_disabled_skills_dir,
     get_user_skill_manifest_path,
     get_user_skills_dir,
+    _validate_path_segment,
     load_index,
     migrate_legacy_scope_dir_if_needed,
     mutate_user_skill_manifest,
@@ -47,16 +55,21 @@ from .fs import (
     normalize_skill_name,
 )
 from .skill_registry import SkillRegistry
+from ..runtime.context import decode_scope_id
+from ..runtime.config_store import MCPClientConfig
 from .models import MarketItem
 from .schemas import (
     DistributeRequest,
     DistributeResponse,
+    DistributeTenantResult,
     DistributionRecord,
     MCPDistributionRequest,
     MCPDistributionResponse,
     MCPDistributionTenantResult,
     MarketMCPDetail,
     MarketMCPItem,
+    MarketExpertDetail,
+    MarketExpertResponse,
     MarketSkillDetail,
     MarketSkillResponse,
     MCPConfigDetail,
@@ -67,8 +80,14 @@ from .schemas import (
     RecallRequest,
     RecallResponse,
     RecallResultItem,
+    ExpertDistributionRequest,
+    ExpertDistributionResponse,
+    ExpertInstallRequest,
+    ExpertOperationResult,
+    ExpertRecallResponse,
     SkillUserStat,
 )
+from .expert_version_service import ExpertVersionService
 from .version_service import SkillVersionService
 
 if TYPE_CHECKING:
@@ -131,6 +150,32 @@ class SkillVersionConflictError(Exception):
 
 class MCPVersionConflictError(Exception):
     """MCP 同步快照时 version_id 撞车（同 version_id 不同 signature）。"""
+
+
+class ExpertNameConflictError(ValueError):
+    """专家同名冲突异常。"""
+
+    def __init__(
+        self,
+        existing_item_id: str,
+        existing_name: str,
+        existing_creator_id: str = "",
+        existing_creator_name: str = "",
+        existing_version: str = "",
+    ) -> None:
+        self.existing_item_id = existing_item_id
+        self.existing_name = existing_name
+        self.existing_creator_id = existing_creator_id
+        self.existing_creator_name = existing_creator_name
+        self.existing_version = existing_version
+        super().__init__(
+            f"Expert with name '{existing_name}' already exists "
+            f"(created by {existing_creator_name or existing_creator_id})",
+        )
+
+
+class ExpertDependencyError(ValueError):
+    """专家声明依赖缺失异常。"""
 
 
 _BINARY_PREVIEW_SUFFIXES = {
@@ -254,6 +299,172 @@ def _sort_items_by_updated_at_desc(
 def _bump_patch(version: str) -> str:
     """Increment patch version: '1.0.0' -> '1.0.1'（委托共享工具）."""
     return _shared_bump_patch(version)
+
+
+def _next_expert_version(current_version: str, existing_ids: set[str]) -> str:
+    """为专家生成下一个唯一补丁版本."""
+    candidate = (
+        "1.0.0" if not current_version else _bump_patch(current_version)
+    )
+    for _ in range(100):
+        if candidate not in existing_ids:
+            return candidate
+        candidate = _bump_patch(candidate)
+    return candidate
+
+
+def _read_expert_definition(source_dir: Path) -> dict[str, Any]:
+    """读取专家 definition.toml."""
+    definition_path = source_dir / "definition.toml"
+    if not definition_path.exists():
+        raise ValueError("definition.toml not found")
+    try:
+        return tomllib.loads(definition_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError(f"Invalid expert definition: {exc}") from exc
+
+
+def _as_str_list(value: object) -> list[str]:
+    """将 TOML 字段归一为字符串列表."""
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in value:
+        if isinstance(item, str) and item.strip():
+            result.append(item.strip())
+    return result
+
+
+def _extract_expert_dependencies(
+    definition: dict[str, Any],
+) -> tuple[list[str], list[str]]:
+    """提取专家声明的 Skills / MCP 依赖."""
+    skills = _as_str_list(definition.get("skills"))
+    mcps = _as_str_list(definition.get("mcps")) or _as_str_list(
+        definition.get("mcp"),
+    )
+
+    dependencies = definition.get("dependencies")
+    if isinstance(dependencies, dict):
+        if not skills:
+            skills = _as_str_list(dependencies.get("skills"))
+        if not mcps:
+            mcps = _as_str_list(dependencies.get("mcps")) or _as_str_list(
+                dependencies.get("mcp"),
+            )
+    _validate_expert_dependency_names(skills, "skill")
+    _validate_expert_dependency_names(mcps, "MCP")
+    return skills, mcps
+
+
+def _validate_expert_dependency_names(
+    names: list[str],
+    dependency_type: str,
+) -> None:
+    """Keep declared dependency names inside the package's private roots."""
+    for name in names:
+        if name in {".", ".."} or any(
+            separator in name for separator in ("/", "\\", "\x00")
+        ):
+            raise ExpertDependencyError(
+                f"Declared dependency {dependency_type} has an unsafe path: {name}",
+            )
+
+
+def _normalize_expert_mcp_config(
+    config: dict[str, Any],
+    mcp_name: str,
+) -> dict[str, Any]:
+    """Validate one frozen MCP while preserving its complete configuration."""
+    normalized = normalize_mcp_config_data(config)
+    normalized.setdefault("name", mcp_name)
+    try:
+        MCPClientConfig.model_validate(normalized)
+    except ValueError as exc:
+        raise ExpertDependencyError(
+            f"Invalid bundled MCP config: {mcp_name}",
+        ) from exc
+    return normalized
+
+
+def _copy_expert_package(source_dir: Path, target_dir: Path) -> None:
+    """把专家包同步到目标目录，保留 versions/ 和 versions.json."""
+    preserve = {"versions", "versions.json"}
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{target_dir.name}-", dir=target_dir.parent),
+    )
+    backup = target_dir.with_name(f".{target_dir.name}.backup")
+    try:
+        for entry in source_dir.iterdir():
+            if entry.name in preserve:
+                continue
+            target = staging / entry.name
+            if entry.is_dir():
+                shutil.copytree(entry, target)
+            else:
+                shutil.copy2(entry, target)
+        if target_dir.is_dir():
+            for name in preserve:
+                existing = target_dir / name
+                if existing.is_dir():
+                    shutil.copytree(existing, staging / name)
+                elif existing.is_file():
+                    shutil.copy2(existing, staging / name)
+        if backup.exists():
+            shutil.rmtree(backup)
+        if target_dir.exists():
+            os.replace(target_dir, backup)
+        os.replace(staging, target_dir)
+        if backup.exists():
+            shutil.rmtree(backup)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        if not target_dir.exists() and backup.exists():
+            os.replace(backup, target_dir)
+        raise
+
+
+def _community_toml(
+    toml_text: str,
+    item_id: str,
+    version: str,
+    fingerprint: str,
+) -> str:
+    """在本地专家 TOML 末尾写入社区来源元数据。"""
+    toml_text = _without_community_toml(toml_text)
+    suffix = "\n" if toml_text.endswith("\n") else "\n\n"
+    return (
+        toml_text
+        + suffix
+        + "[community]\n"
+        + f"item_id = {json.dumps(item_id, ensure_ascii=False)}\n"
+        + f"version = {json.dumps(version, ensure_ascii=False)}\n"
+        + f"content_fingerprint = {json.dumps(fingerprint, ensure_ascii=False)}\n"
+    )
+
+
+def _without_community_toml(toml_text: str) -> str:
+    """Remove received-community metadata before publishing a new source."""
+    return re.sub(
+        r"(?ms)\n\[community\]\n.*?(?=\n\[[^\]]+\]\n|\Z)",
+        "\n",
+        toml_text,
+    )
+
+
+def _community_ref_from_toml(path: Path) -> dict[str, str] | None:
+    try:
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return None
+    value = payload.get("community")
+    if not isinstance(value, dict):
+        return None
+    keys = ("item_id", "version", "content_fingerprint")
+    if not all(isinstance(value.get(key), str) for key in keys):
+        return None
+    return {key: value[key] for key in keys}
 
 
 def _decode_creator_name(value: str) -> str:
@@ -539,12 +750,53 @@ class MarketplaceService:
         self.skill_registry = SkillRegistry(db)
         self.skill_scan_history_recorder: Any | None = None
 
+    def _get_expert_version_service(self) -> ExpertVersionService:
+        """获取社区专家版本服务."""
+        return ExpertVersionService(self.marketplace_root)
+
+    async def _log_expert_operation(
+        self,
+        source_id: str,
+        operator_id: str,
+        operator_name: str,
+        operation: str,
+        item: MarketItem,
+        *,
+        target_user_id: str = "",
+        target_user_name: str = "",
+        target_bbk_id: str = "",
+    ) -> None:
+        if not self.db.is_connected:
+            return
+        try:
+            await self.db.execute(
+                _LOG_MARKET_OP_SQL,
+                (
+                    source_id,
+                    operator_id,
+                    operator_name,
+                    operation,
+                    "expert",
+                    item.item_id,
+                    item.name,
+                    target_user_id,
+                    target_user_name,
+                    target_bbk_id,
+                ),
+            )
+        except Exception as exc:  # pragma: no cover - audit must not block ops
+            logger.warning(
+                "Failed to log expert operation %s: %s",
+                operation,
+                exc,
+            )
+
     async def _trigger_agent_reload(
         self,
         user_id: str,
         agent_id: str = "default",
         source_id: str | None = None,
-    ) -> None:
+    ) -> bool:
         """通过 HTTP 回调触发 src/swe 的 Agent 重载."""
         url = f"{SWE_INTERNAL_URL}/api/internal/agents/{agent_id}/reload"
         headers = {}
@@ -555,23 +807,40 @@ class MarketplaceService:
         if source_id:
             params["source_id"] = source_id
 
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    url,
-                    params=params,
-                    headers=headers,
-                )
-                if response.status_code == 200:
-                    logger.info(
-                        f"Agent reload triggered for '{agent_id}' (tenant={user_id}, source={source_id})",
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as client:
+                    response = await client.post(
+                        url,
+                        params=params,
+                        headers=headers,
                     )
-                else:
+                    if response.status_code == 200:
+                        logger.info(
+                            "Agent reload triggered for '%s' (tenant=%s, source=%s)",
+                            agent_id,
+                            user_id,
+                            source_id,
+                        )
+                        return True
                     logger.warning(
-                        f"Agent reload failed: {response.status_code} - {response.text}",
+                        "Agent reload failed on attempt %s: %s - %s",
+                        attempt + 1,
+                        response.status_code,
+                        response.text,
                     )
-        except Exception as e:
-            logger.warning(f"Failed to trigger agent reload: {e}")
+            except Exception as exc:
+                logger.warning(
+                    "Failed to trigger agent reload on attempt %s: %s",
+                    attempt + 1,
+                    exc,
+                )
+        logger.error(
+            "Agent reload remained unavailable after retries (tenant=%s, source=%s)",
+            user_id,
+            source_id,
+        )
+        return False
 
     def _scan_skill_or_raise(
         self,
@@ -1197,6 +1466,1055 @@ class MarketplaceService:
 
         return True
 
+    async def list_expert_items(
+        self,
+        source_id: str,
+        user_bbk_id: str,
+        category_id: Optional[int] = None,
+        bbk_ids: Optional[list[str]] = None,
+    ) -> list[MarketExpertResponse]:
+        """列出市场社区专家."""
+        items = load_index(self.marketplace_root, source_id)
+        expert_items = [
+            item
+            for item in items
+            if item.item_type == "expert" and item.status == "active"
+        ]
+        expert_items = _sort_items_by_updated_at_desc(expert_items)
+
+        if category_id is not None:
+            expert_items = [
+                item
+                for item in expert_items
+                if item.category_id == category_id
+            ]
+        if bbk_ids is not None and len(bbk_ids) > 0:
+            expert_items = [
+                item
+                for item in expert_items
+                if item.bbk_ids and any(bbk in item.bbk_ids for bbk in bbk_ids)
+            ]
+
+        return [
+            MarketExpertResponse(
+                item_id=item.item_id,
+                name=item.name,
+                description=item.description,
+                version=item.version,
+                creator_id=item.creator_id,
+                creator_name=_decode_creator_name(item.creator_name),
+                category_id=item.category_id,
+                bbk_ids=item.bbk_ids,
+                status=item.status,
+                created_at=item.created_at,
+                updated_at=item.updated_at,
+            )
+            for item in expert_items
+        ]
+
+    async def get_expert_detail(
+        self,
+        source_id: str,
+        item_id: str,
+        user_bbk_id: str,
+    ) -> MarketExpertDetail | None:
+        """获取社区专家详情."""
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                current
+                for current in items
+                if current.item_id == item_id and current.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None or not _item_visible(item, user_bbk_id):
+            return None
+
+        version_svc = self._get_expert_version_service()
+        versions = version_svc.list_versions(source_id, item_id)
+
+        definition: dict[str, Any] = {}
+        definition_path = get_expert_definition_path(
+            self.marketplace_root,
+            source_id,
+            item_id,
+        )
+        if definition_path.exists():
+            try:
+                definition = tomllib.loads(
+                    definition_path.read_text(encoding="utf-8"),
+                )
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                definition = {}
+
+        return MarketExpertDetail(
+            item_id=item.item_id,
+            name=item.name,
+            description=item.description,
+            version=item.version,
+            creator_id=item.creator_id,
+            creator_name=_decode_creator_name(item.creator_name),
+            category_id=item.category_id,
+            bbk_ids=item.bbk_ids,
+            status=item.status,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+            versions=versions.get("versions", []),
+            definition=definition,
+        )
+
+    # pylint: disable=too-many-statements
+    async def publish_expert(
+        self,
+        source_id: str,
+        source_dir: Path,
+        operator_id: str = "",
+        operator_name: str = "",
+        overwrite: bool = False,
+    ) -> tuple[MarketItem, bool]:
+        """发布社区专家."""
+        source_dir = Path(source_dir)
+        definition = _read_expert_definition(source_dir)
+        expert_name = str(definition.get("name", "")).strip()
+        if not expert_name:
+            raise ValueError("Expert name is required")
+        creator_id = str(definition.get("creator_id", "")).strip()
+        if not creator_id:
+            raise ValueError("creator_id is required")
+        creator_name = str(definition.get("creator_name", "")).strip()
+        description = str(definition.get("description", "")).strip()
+        category_id = definition.get("category_id")
+        if category_id is not None and not isinstance(category_id, int):
+            raise ValueError("category_id must be an integer")
+        bbk_ids = (
+            [
+                str(value).strip()
+                for value in definition.get("bbk_ids", [])
+                if str(value).strip()
+            ]
+            if isinstance(definition.get("bbk_ids"), list)
+            else []
+        )
+
+        declared_skills, declared_mcps = _extract_expert_dependencies(
+            definition,
+        )
+        skill_dirs = (
+            sorted(
+                path
+                for path in (source_dir / "skills").iterdir()
+                if path.is_dir()
+            )
+            if (source_dir / "skills").is_dir()
+            else []
+        )
+        scan_results: list[dict[str, Any]] = []
+        for skill_dir in skill_dirs:
+            skill_name = skill_dir.name
+            skill_dir = source_dir / "skills" / skill_name
+            skill_md = skill_dir / "SKILL.md"
+            if not skill_md.is_file():
+                raise ExpertDependencyError(
+                    f"Missing declared dependency skill: {skill_name}",
+                )
+            scan_result = scan_skill_directory(
+                skill_dir,
+                skill_name=skill_name,
+            )
+            if scan_result is not None:
+                scan_results.append(scan_result.to_dict())
+        for skill_name in declared_skills:
+            if not (source_dir / "skills" / skill_name).is_dir():
+                raise ExpertDependencyError(
+                    f"Missing declared dependency skill: {skill_name}",
+                )
+        for mcp_name in declared_mcps:
+            mcp_json = source_dir / "mcp" / mcp_name / "mcp.json"
+            try:
+                config = json.loads(mcp_json.read_text(encoding="utf-8"))
+            except (
+                OSError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise ExpertDependencyError(
+                    f"Invalid bundled MCP config: {mcp_name}",
+                ) from exc
+            if not isinstance(config, dict):
+                raise ExpertDependencyError(
+                    f"Invalid bundled MCP config: {mcp_name}",
+                )
+            _normalize_expert_mcp_config(config, mcp_name)
+
+        items = load_index(self.marketplace_root, source_id)
+        existing = next(
+            (
+                item
+                for item in items
+                if item.item_type == "expert" and item.name == expert_name
+            ),
+            None,
+        )
+        if existing is not None and not overwrite:
+            raise ExpertNameConflictError(
+                existing_item_id=existing.item_id,
+                existing_name=existing.name,
+                existing_creator_id=existing.creator_id,
+                existing_creator_name=existing.creator_name,
+                existing_version=existing.version,
+            )
+
+        now = datetime.now(timezone.utc).isoformat()
+        if existing is None:
+            item = MarketItem(
+                item_id=str(uuid.uuid4()),
+                item_type="expert",
+                name=expert_name,
+                description=description,
+                version="1.0.0",
+                creator_id=creator_id,
+                creator_name=creator_name,
+                category_id=category_id,
+                bbk_ids=bbk_ids,
+                status="active",
+                created_at=now,
+                updated_at=now,
+            )
+            items.append(item)
+        else:
+            item = existing
+
+        expert_root = get_expert_dir(
+            self.marketplace_root,
+            source_id,
+            item.item_id,
+        )
+        _copy_expert_package(source_dir, expert_root)
+        definition_path = expert_root / "definition.toml"
+        definition_path.write_text(
+            _without_community_toml(
+                definition_path.read_text(encoding="utf-8"),
+            ),
+            encoding="utf-8",
+        )
+        (expert_root / "scan_result.json").unlink(missing_ok=True)
+        version_svc = self._get_expert_version_service()
+        signature = version_svc.calculate_signature(expert_root)
+        (expert_root / "scan_result.json").write_text(
+            json.dumps({"skills": scan_results}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        manifest = version_svc._load_versions_manifest(source_id, item.item_id)
+        current_version = next(
+            (version for version in manifest.versions if version.is_current),
+            None,
+        )
+
+        if current_version and current_version.signature == signature:
+            item.version = current_version.version_id
+            item.description = description
+            item.creator_id = creator_id
+            item.creator_name = creator_name
+            item.category_id = category_id
+            item.bbk_ids = bbk_ids
+            item.status = "active"
+            item.updated_at = now
+            save_index(self.marketplace_root, source_id, items)
+            await self._log_expert_operation(
+                source_id,
+                operator_id,
+                operator_name,
+                "publish",
+                item,
+            )
+            return item, True
+
+        existing_ids = {version.version_id for version in manifest.versions}
+        version_id = (
+            "1.0.0"
+            if not manifest.versions
+            else _next_expert_version(item.version, existing_ids)
+        )
+        snapshot = version_svc.create_version_snapshot(
+            source_id=source_id,
+            item_id=item.item_id,
+            source_dir=expert_root,
+            version_id=version_id,
+            expert_name=expert_name,
+            creator=operator_id or creator_id,
+            creator_name=operator_name or creator_name,
+            description="",
+            signature=signature,
+        )
+        item.version = snapshot.version_id
+        item.description = description
+        item.creator_id = creator_id
+        item.creator_name = creator_name
+        item.category_id = category_id
+        item.bbk_ids = bbk_ids
+        item.status = "active"
+        item.updated_at = now
+        save_index(self.marketplace_root, source_id, items)
+        await self._log_expert_operation(
+            source_id,
+            operator_id,
+            operator_name,
+            "publish",
+            item,
+        )
+        return item, False
+
+    async def publish_expert_from_profile(
+        self,
+        source_id: str,
+        user_id: str,
+        agent_id: str,
+        definition_id: str,
+        *,
+        category_id: int | None = None,
+        bbk_ids: list[str] | None = None,
+        creator_name: str = "",
+        overwrite: bool = False,
+    ) -> tuple[MarketItem, bool]:
+        """Publish one Agent Profile expert without accepting arbitrary paths."""
+        _validate_path_segment(definition_id, "definition_id")
+        expert_dir = get_user_expert_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        definition_path = expert_dir / f"{definition_id}.toml"
+        if not definition_path.is_file():
+            raise ValueError("expert definition not found")
+        try:
+            definition = tomllib.loads(
+                definition_path.read_text(encoding="utf-8"),
+            )
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ValueError("expert definition is invalid") from exc
+        declared_skills, declared_mcps = _extract_expert_dependencies(
+            definition,
+        )
+        received_variant = isinstance(definition.get("community"), dict)
+        workspace_dir = expert_dir.parent
+        with tempfile.TemporaryDirectory(prefix="expert-publish-") as temp_dir:
+            source_dir = Path(temp_dir)
+            source_dir.joinpath("skills").mkdir()
+            source_dir.joinpath("mcp").mkdir()
+            definition_text = definition_path.read_text(encoding="utf-8")
+            fields = [
+                f"creator_id = {json.dumps(user_id, ensure_ascii=False)}",
+                f"creator_name = {json.dumps(creator_name, ensure_ascii=False)}",
+            ]
+            if category_id is not None:
+                fields.append(f"category_id = {category_id}")
+            if bbk_ids:
+                fields.append(
+                    f"bbk_ids = {json.dumps(bbk_ids, ensure_ascii=False)}",
+                )
+            for field in fields:
+                field_name = field.split(" = ", 1)[0]
+                field_pattern = rf"(?m)^{re.escape(field_name)}\s*=.*$"
+                if re.search(field_pattern, definition_text):
+                    definition_text = re.sub(
+                        field_pattern,
+                        field,
+                        definition_text,
+                        count=1,
+                    )
+                else:
+                    definition_text = field + "\n" + definition_text
+            (source_dir / "definition.toml").write_text(
+                definition_text,
+                encoding="utf-8",
+            )
+            frozen_dir = expert_dir / f"{definition_id}.dependencies"
+            for skill_name in declared_skills:
+                frozen_skill = frozen_dir / "skills" / skill_name
+                source_skill = (
+                    frozen_skill
+                    if frozen_skill.is_dir()
+                    else (workspace_dir / "skills" / skill_name)
+                )
+                if not source_skill.is_dir():
+                    raise ExpertDependencyError(
+                        f"Missing declared dependency skill: {skill_name}",
+                    )
+                shutil.copytree(
+                    source_skill,
+                    source_dir / "skills" / skill_name,
+                )
+            mcp_payload: dict[str, Any] = {}
+            frozen_config = frozen_dir / "mcp" / "config.json"
+            if frozen_config.is_file():
+                try:
+                    raw_payload = json.loads(
+                        frozen_config.read_text(encoding="utf-8"),
+                    )
+                except (
+                    OSError,
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                ) as exc:
+                    raise ExpertDependencyError(
+                        "Invalid frozen MCP config",
+                    ) from exc
+                if isinstance(raw_payload, dict):
+                    mcp_payload = raw_payload
+            if declared_mcps:
+                agent_config_path = workspace_dir / "agent.json"
+                agent_payload: dict[str, Any] = {}
+                if agent_config_path.is_file():
+                    try:
+                        loaded = json.loads(
+                            agent_config_path.read_text(encoding="utf-8"),
+                        )
+                        agent_payload = (
+                            loaded if isinstance(loaded, dict) else {}
+                        )
+                    except (
+                        OSError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        raise ExpertDependencyError(
+                            "Agent profile MCP config is invalid",
+                        ) from exc
+                clients = (agent_payload.get("mcp") or {}).get("clients") or {}
+                for mcp_name in declared_mcps:
+                    mcp_file = frozen_dir / "mcp" / mcp_name / "mcp.json"
+                    config = mcp_payload.get(mcp_name) or clients.get(mcp_name)
+                    if not isinstance(config, dict) and mcp_file.is_file():
+                        try:
+                            raw_config = json.loads(
+                                mcp_file.read_text(encoding="utf-8"),
+                            )
+                        except (
+                            OSError,
+                            UnicodeDecodeError,
+                            json.JSONDecodeError,
+                        ) as exc:
+                            raise ExpertDependencyError(
+                                f"Invalid declared dependency MCP: {mcp_name}",
+                            ) from exc
+                        config = raw_config
+                    if not isinstance(config, dict):
+                        raise ExpertDependencyError(
+                            f"Missing declared dependency MCP: {mcp_name}",
+                        )
+                    (source_dir / "mcp" / mcp_name).mkdir()
+                    (source_dir / "mcp" / mcp_name / "mcp.json").write_text(
+                        json.dumps(config, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+            return await self.publish_expert(
+                source_id,
+                source_dir,
+                operator_id=user_id,
+                operator_name=creator_name,
+                # A received expert is a new source if re-shared.  It must
+                # never overwrite the community item it originated from.
+                overwrite=overwrite and not received_variant,
+            )
+
+    async def restore_expert_version(
+        self,
+        source_id: str,
+        item_id: str,
+        version_id: str,
+        operator_id: str = "",
+        operator_name: str = "",
+    ) -> MarketItem:
+        """恢复历史专家版本为当前版本."""
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                current
+                for current in items
+                if current.item_id == item_id and current.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"Expert item {item_id} not found")
+
+        expert_root = get_expert_dir(self.marketplace_root, source_id, item_id)
+        version_svc = self._get_expert_version_service()
+        version_svc.restore_version(
+            source_id,
+            item_id,
+            version_id,
+            expert_root,
+        )
+
+        item.version = version_id
+        item.status = "active"
+        item.updated_at = datetime.now(timezone.utc).isoformat()
+        save_index(self.marketplace_root, source_id, items)
+        await self._log_expert_operation(
+            source_id,
+            operator_id,
+            operator_name,
+            "restore",
+            item,
+        )
+        return item
+
+    async def unpublish_expert(
+        self,
+        source_id: str,
+        item_id: str,
+        operator_id: str,
+        operator_name: str,
+    ) -> bool:
+        """下架社区专家."""
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                current
+                for current in items
+                if current.item_id == item_id and current.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None:
+            return False
+
+        item.status = "inactive"
+        item.updated_at = datetime.now(timezone.utc).isoformat()
+        save_index(self.marketplace_root, source_id, items)
+        await self._log_expert_operation(
+            source_id,
+            operator_id,
+            operator_name,
+            "unpublish",
+            item,
+        )
+        return True
+
+    def _expert_current_package(
+        self,
+        source_id: str,
+        item_id: str,
+    ) -> tuple[MarketItem, Path, str]:
+        items = load_index(self.marketplace_root, source_id)
+        item = next(
+            (
+                entry
+                for entry in items
+                if entry.item_id == item_id and entry.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None or item.status != "active":
+            raise ValueError(f"Expert item {item_id} is not active")
+        root = get_expert_dir(self.marketplace_root, source_id, item_id)
+        definition_path = root / "definition.toml"
+        if not definition_path.is_file():
+            raise ValueError(f"Expert definition {item_id} is missing")
+        versions = self._get_expert_version_service().list_versions(
+            source_id,
+            item_id,
+        )
+        current = next(
+            (
+                entry
+                for entry in versions["versions"]
+                if entry.get("is_current")
+            ),
+            None,
+        )
+        fingerprint = str((current or {}).get("signature") or "")
+        if not fingerprint:
+            raise ExpertDependencyError(
+                f"Expert package {item_id} has no current version signature",
+            )
+        current_signature = (
+            self._get_expert_version_service().calculate_signature(root)
+        )
+        if current_signature != fingerprint:
+            raise ExpertDependencyError(
+                f"Expert package {item_id} failed integrity verification",
+            )
+        return item, root, fingerprint
+
+    def _expert_item(self, source_id: str, item_id: str) -> MarketItem:
+        item = next(
+            (
+                entry
+                for entry in load_index(self.marketplace_root, source_id)
+                if entry.item_id == item_id and entry.item_type == "expert"
+            ),
+            None,
+        )
+        if item is None:
+            raise ValueError(f"Expert item {item_id} not found")
+        return item
+
+    def _find_received_expert(
+        self,
+        user_id: str,
+        source_id: str,
+        agent_id: str,
+        item_id: str,
+    ) -> tuple[Path, dict[str, str]] | None:
+        root = get_user_expert_dir(self.swe_root, user_id, agent_id, source_id)
+        if not root.exists():
+            return None
+        for path in root.glob("*.toml"):
+            reference = _community_ref_from_toml(path)
+            if reference and reference["item_id"] == item_id:
+                return path, reference
+        return None
+
+    def _received_expert_paths(
+        self,
+        user_id: str,
+        source_id: str,
+        item_id: str,
+    ) -> list[tuple[Path, str]]:
+        """Find a received item across every Agent Profile for one user."""
+        effective_user_id = resolve_effective_user_id(user_id, source_id)
+        user_root = migrate_legacy_scope_dir_if_needed(
+            self.swe_root,
+            effective_user_id,
+        )
+        workspaces_root = user_root / "workspaces"
+        if not workspaces_root.exists():
+            return []
+        matches: list[tuple[Path, str]] = []
+        for profile_root in workspaces_root.iterdir():
+            if not profile_root.is_dir():
+                continue
+            agents_root = profile_root / "agents"
+            if not agents_root.exists():
+                continue
+            for definition_path in agents_root.glob("*.toml"):
+                reference = _community_ref_from_toml(definition_path)
+                if reference and reference["item_id"] == item_id:
+                    matches.append((definition_path, profile_root.name))
+        return matches
+
+    def _release_expert_session_views(
+        self,
+        user_id: str,
+        source_id: str,
+        agent_id: str,
+        definition_id: str,
+    ) -> None:
+        """Drop Chat-local views before a received expert is withdrawn."""
+        expert_dir = get_user_expert_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        session_root = expert_dir.parent / ".expert_sessions"
+        if not session_root.is_dir() or session_root.is_symlink():
+            return
+        target_name = str(definition_id)
+        for chat_root in session_root.iterdir():
+            if not chat_root.is_dir() or chat_root.is_symlink():
+                continue
+            target = chat_root / target_name
+            if target.is_symlink():
+                continue
+            if target.is_dir():
+                shutil.rmtree(target, ignore_errors=True)
+
+    def _received_expert_user_ids(self, source_id: str) -> list[str]:
+        """Find local user scopes for all-user recall without relying on DB."""
+        if not self.swe_root.exists():
+            return []
+        user_ids: set[str] = set()
+        default_scope = f"default_{source_id}"
+        for scope_dir in self.swe_root.iterdir():
+            if not scope_dir.is_dir():
+                continue
+            if scope_dir.name == default_scope:
+                user_ids.add("default")
+                continue
+            try:
+                user_id, scope_source = decode_scope_id(scope_dir.name)
+            except ValueError:
+                continue
+            if scope_source == source_id:
+                user_ids.add(user_id)
+        return sorted(user_ids)
+
+    # pylint: disable=too-many-statements
+    def _install_expert_for_user(
+        self,
+        source_id: str,
+        item_id: str,
+        user_id: str,
+        agent_id: str,
+        operator_id: str,
+        *,
+        update: bool,
+    ) -> ExpertOperationResult:
+        item, package_root, fingerprint = self._expert_current_package(
+            source_id,
+            item_id,
+        )
+        target_root = get_user_expert_dir(
+            self.swe_root,
+            user_id,
+            agent_id,
+            source_id,
+        )
+        target_root.mkdir(parents=True, exist_ok=True)
+        received = self._find_received_expert(
+            user_id,
+            source_id,
+            agent_id,
+            item_id,
+        )
+        if received is None and update:
+            update = False
+        if received is not None and not update:
+            return ExpertOperationResult(
+                user_id=user_id,
+                success=False,
+                reason="expert already installed",
+            )
+        if received is not None:
+            definition_path, existing_ref = received
+            definition_id = definition_path.stem
+            enabled = False
+            try:
+                existing_payload = tomllib.loads(
+                    definition_path.read_text(encoding="utf-8"),
+                )
+                enabled = bool(existing_payload.get("enabled", False))
+            except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                enabled = False
+        else:
+            definition_id = str(uuid.uuid4())
+            enabled = True
+            from swe.app.subagents import builtin_definition_provider
+
+            builtin_names = {
+                definition.name
+                for definition in builtin_definition_provider().list_definitions()
+            }
+            if item.name in builtin_names:
+                return ExpertOperationResult(
+                    user_id=user_id,
+                    success=False,
+                    reason="expert name conflicts with builtin definition",
+                )
+            for path in target_root.glob("*.toml"):
+                try:
+                    payload = tomllib.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+                    continue
+                if payload.get("name") == item.name:
+                    return ExpertOperationResult(
+                        user_id=user_id,
+                        success=False,
+                        reason="expert name conflicts with local definition",
+                    )
+            definition_path = target_root / f"{definition_id}.toml"
+
+        try:
+            source_definition = (package_root / "definition.toml").read_text(
+                encoding="utf-8",
+            )
+            source_payload = tomllib.loads(source_definition)
+        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+            raise ExpertDependencyError(
+                "Community expert definition is unreadable",
+            ) from exc
+        declared_skills, declared_mcps = _extract_expert_dependencies(
+            source_payload,
+        )
+        for skill_name in declared_skills:
+            skill_root = package_root / "skills" / skill_name
+            if (
+                not skill_root.is_dir()
+                or not (skill_root / "SKILL.md").is_file()
+            ):
+                raise ExpertDependencyError(
+                    f"Missing declared dependency skill: {skill_name}",
+                )
+        for mcp_name in declared_mcps:
+            config_path = package_root / "mcp" / mcp_name / "mcp.json"
+            try:
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+            except (
+                OSError,
+                UnicodeDecodeError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise ExpertDependencyError(
+                    f"Invalid bundled MCP config: {mcp_name}",
+                ) from exc
+            if not isinstance(config, dict):
+                raise ExpertDependencyError(
+                    f"Invalid bundled MCP config: {mcp_name}",
+                )
+            _normalize_expert_mcp_config(config, mcp_name)
+        definition_text = _community_toml(
+            source_definition,
+            item_id,
+            item.version,
+            fingerprint,
+        )
+        if "enabled =" in definition_text:
+            definition_text = re.sub(
+                r"(?m)^enabled\s*=\s*(true|false)\s*$",
+                f"enabled = {'true' if enabled else 'false'}",
+                definition_text,
+            )
+        else:
+            definition_text = (
+                f"enabled = {'true' if enabled else 'false'}\n"
+                + definition_text
+            )
+        temporary = definition_path.with_name(
+            f".{definition_path.name}.{uuid.uuid4().hex}.tmp",
+        )
+        temporary.write_text(definition_text, encoding="utf-8")
+        dependency_root = target_root / f"{definition_id}.dependencies"
+        temporary_root = dependency_root.with_name(
+            f".{dependency_root.name}.source-{uuid.uuid4().hex}",
+        )
+        backup_root = dependency_root.with_name(
+            f".{dependency_root.name}.backup-{uuid.uuid4().hex}",
+        )
+        try:
+            temporary_root.mkdir(parents=True, exist_ok=True)
+            for directory in ("skills", "mcp"):
+                source = package_root / directory
+                if source.exists():
+                    shutil.copytree(source, temporary_root / directory)
+            mcp_root = temporary_root / "mcp"
+            if mcp_root.exists():
+                mcp_payload: dict[str, Any] = {}
+                for mcp_dir in mcp_root.iterdir():
+                    config_path = mcp_dir / "mcp.json"
+                    if not mcp_dir.is_dir() or not config_path.is_file():
+                        continue
+                    try:
+                        config = json.loads(
+                            config_path.read_text(encoding="utf-8"),
+                        )
+                    except (
+                        OSError,
+                        UnicodeDecodeError,
+                        json.JSONDecodeError,
+                    ) as exc:
+                        raise ExpertDependencyError(
+                            f"Invalid bundled MCP config: {mcp_dir.name}",
+                        ) from exc
+                    if not isinstance(config, dict):
+                        raise ExpertDependencyError(
+                            f"Invalid bundled MCP config: {mcp_dir.name}",
+                        )
+                    mcp_payload[mcp_dir.name] = _normalize_expert_mcp_config(
+                        config,
+                        mcp_dir.name,
+                    )
+                (mcp_root / "config.json").write_text(
+                    json.dumps(mcp_payload, ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            dependency_swapped = False
+            try:
+                if dependency_root.exists():
+                    os.replace(dependency_root, backup_root)
+                os.replace(temporary_root, dependency_root)
+                dependency_swapped = True
+                os.replace(temporary, definition_path)
+            except BaseException:
+                if dependency_swapped and dependency_root.exists():
+                    shutil.rmtree(dependency_root, ignore_errors=True)
+                if backup_root.exists():
+                    os.replace(backup_root, dependency_root)
+                raise
+        finally:
+            temporary.unlink(missing_ok=True)
+            if temporary_root.exists():
+                shutil.rmtree(temporary_root, ignore_errors=True)
+            if backup_root.exists():
+                shutil.rmtree(backup_root, ignore_errors=True)
+        return ExpertOperationResult(
+            user_id=user_id,
+            success=True,
+            definition_id=definition_id,
+        )
+
+    async def install_expert(
+        self,
+        source_id: str,
+        item_id: str,
+        user_id: str,
+        agent_id: str = "default",
+        operator_id: str = "",
+    ) -> ExpertOperationResult:
+        result = self._install_expert_for_user(
+            source_id,
+            item_id,
+            user_id,
+            agent_id,
+            operator_id,
+            update=False,
+        )
+        if result.success:
+            await self._log_expert_operation(
+                source_id,
+                operator_id,
+                "",
+                "receive",
+                self._expert_item(source_id, item_id),
+                target_user_id=user_id,
+            )
+            await self._trigger_agent_reload(user_id, agent_id, source_id)
+        return result
+
+    async def distribute_expert(
+        self,
+        source_id: str,
+        item_id: str,
+        operator_id: str,
+        req: ExpertDistributionRequest,
+    ) -> ExpertDistributionResponse:
+        item, _, _ = self._expert_current_package(source_id, item_id)
+        target_users = await self._resolve_target_users(
+            source_id,
+            DistributeRequest(
+                target_type=req.target_type,
+                target_values=req.target_values,
+            ),
+        )
+        results: list[ExpertOperationResult] = []
+        for user in target_users:
+            try:
+                result = self._install_expert_for_user(
+                    source_id,
+                    item_id,
+                    user["tenant_id"],
+                    "default",
+                    operator_id,
+                    update=True,
+                )
+            except Exception as exc:
+                result = ExpertOperationResult(
+                    user_id=user["tenant_id"],
+                    success=False,
+                    reason=str(exc),
+                )
+            results.append(result)
+            await self._log_expert_operation(
+                source_id,
+                operator_id,
+                "",
+                "distribute",
+                item,
+                target_user_id=user["tenant_id"],
+                target_user_name=user.get("tenant_name", ""),
+                target_bbk_id=user.get("bbk_id", ""),
+            )
+            if result.success:
+                await self._trigger_agent_reload(
+                    user["tenant_id"],
+                    "default",
+                    source_id,
+                )
+        return ExpertDistributionResponse(
+            item_id=item_id,
+            distributed_count=sum(result.success for result in results),
+            conflict_count=sum(not result.success for result in results),
+            results=results,
+        )
+
+    async def recall_expert(
+        self,
+        source_id: str,
+        item_id: str,
+        operator_id: str,
+        target_user_ids: list[str] | None = None,
+    ) -> ExpertRecallResponse:
+        item = self._expert_item(source_id, item_id)
+        users = target_user_ids
+        if users is None:
+            db_users = [
+                user["tenant_id"]
+                for user in await self._resolve_target_users(
+                    source_id,
+                    DistributeRequest(target_type="all"),
+                )
+            ]
+            users = sorted(
+                set(db_users) | set(self._received_expert_user_ids(source_id)),
+            )
+        results: list[ExpertOperationResult] = []
+        for user_id in users:
+            matched_agent_ids: set[str] = set()
+            try:
+                matches = self._received_expert_paths(
+                    user_id,
+                    source_id,
+                    item_id,
+                )
+                for definition_path, agent_id in matches:
+                    matched_agent_ids.add(agent_id)
+                    self._release_expert_session_views(
+                        user_id,
+                        source_id,
+                        agent_id,
+                        definition_path.stem,
+                    )
+                    definition_path.unlink(missing_ok=True)
+                    dependency_root = definition_path.with_name(
+                        f"{definition_path.stem}.dependencies",
+                    )
+                    if dependency_root.exists():
+                        shutil.rmtree(dependency_root)
+                removed = len(matches)
+                result = ExpertOperationResult(
+                    user_id=user_id,
+                    success=bool(removed),
+                    reason=None if removed else "received expert not found",
+                )
+            except Exception as exc:
+                result = ExpertOperationResult(
+                    user_id=user_id,
+                    success=False,
+                    reason=str(exc),
+                )
+            results.append(result)
+            await self._log_expert_operation(
+                source_id,
+                operator_id,
+                "",
+                "recall",
+                item,
+                target_user_id=user_id,
+            )
+            if result.success:
+                for agent_id in matched_agent_ids or {"default"}:
+                    reloaded = await self._trigger_agent_reload(
+                        user_id,
+                        agent_id,
+                        source_id,
+                    )
+                    if not reloaded:
+                        result.success = False
+                        result.reason = (
+                            "agent reload failed; withdrawal is pending retry"
+                        )
+        return ExpertRecallResponse(
+            item_id=item_id,
+            recalled_count=sum(result.success for result in results),
+            failed_count=sum(not result.success for result in results),
+            results=results,
+        )
+
     async def delete_market_skill(
         self,
         source_id: str,
@@ -1408,15 +2726,17 @@ class MarketplaceService:
         target_users = await self._resolve_target_users(source_id, req)
         count = 0
         conflicts: list[dict] = []
+        results: list[DistributeTenantResult] = []
 
         for user in target_users:
+            tenant_id = user["tenant_id"]
             try:
                 result = copy_skill_to_user(
                     marketplace_root=self.marketplace_root,
                     source_id=source_id,
                     item_id=item_id,
                     swe_root=self.swe_root,
-                    user_id=user["tenant_id"],
+                    user_id=tenant_id,
                     skill_name=safe_skill_name,
                     original_name=item.name,
                     description=item.description,
@@ -1429,10 +2749,19 @@ class MarketplaceService:
                 if result.get("status") == "conflict":
                     conflicts.append(
                         {
-                            "user_id": user["tenant_id"],
+                            "user_id": tenant_id,
                             "skill_name": safe_skill_name,
                             "reason": result.get("reason", "unknown"),
                         },
+                    )
+                    results.append(
+                        DistributeTenantResult(
+                            user_id=tenant_id,
+                            success=False,
+                            status="conflict",
+                            skill_name=safe_skill_name,
+                            error=result.get("reason", "unknown"),
+                        ),
                     )
                     continue
 
@@ -1440,7 +2769,7 @@ class MarketplaceService:
                 metadata = result.get("metadata") or {}
                 final_enabled = bool(result["final_enabled"])
                 self.register_skill_in_manifest(
-                    user["tenant_id"],
+                    tenant_id,
                     safe_skill_name,
                     "default",
                     source_id,
@@ -1455,7 +2784,7 @@ class MarketplaceService:
                     skill_id=skill_id,
                     skill_name=safe_skill_name,
                     cn_name=cn_name,
-                    tenant_id=user["tenant_id"],
+                    tenant_id=tenant_id,
                     tenant_name=user.get("tenant_name", ""),
                     bbk_id=user.get("bbk_id", ""),
                     source=f"marketplace:{item_id}",
@@ -1467,21 +2796,38 @@ class MarketplaceService:
                 if not inserted:
                     logger.warning(
                         "分发成功但 swe_skills 写入失败: user=%s, skill=%s",
-                        user["tenant_id"],
+                        tenant_id,
                         safe_skill_name,
                     )
                 if final_enabled:
                     await self._trigger_agent_reload(
-                        user["tenant_id"],
+                        tenant_id,
                         "default",
                         source_id,
                     )
                 count += 1
+                results.append(
+                    DistributeTenantResult(
+                        user_id=tenant_id,
+                        success=True,
+                        status="distributed",
+                        skill_name=safe_skill_name,
+                    ),
+                )
             except Exception as e:
                 logger.warning(
                     "Failed to copy skill to user %s: %s",
-                    user["tenant_id"],
+                    tenant_id,
                     e,
+                )
+                results.append(
+                    DistributeTenantResult(
+                        user_id=tenant_id,
+                        success=False,
+                        status="failed",
+                        skill_name=safe_skill_name,
+                        error=str(e),
+                    ),
                 )
                 continue
 
@@ -1497,7 +2843,7 @@ class MarketplaceService:
                             "skill",
                             item_id,
                             item.name,
-                            user["tenant_id"],
+                            tenant_id,
                             user.get("tenant_name", ""),
                             user.get("bbk_id", ""),
                         ),
@@ -1508,7 +2854,13 @@ class MarketplaceService:
         return DistributeResponse(
             distributed_count=count,
             conflict_count=len(conflicts),
+            failed_count=sum(
+                1
+                for item in results
+                if not item.success and item.status != "conflict"
+            ),
             conflicts=conflicts,
+            results=results,
             item_id=item_id,
         )
 
