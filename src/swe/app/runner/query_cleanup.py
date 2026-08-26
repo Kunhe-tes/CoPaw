@@ -267,7 +267,9 @@ async def cleanup_query_resources(
                 runtime=runtime,
                 session_state_loaded=session_state_loaded,
             )
-        except BaseException as exc:
+        except asyncio.CancelledError as exc:
+            session_save_error = exc
+        except Exception as exc:
             session_save_error = exc
     cleanup_results = await asyncio.gather(
         owner._update_chat_during_cleanup(runtime),

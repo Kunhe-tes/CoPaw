@@ -495,29 +495,8 @@ def _build_task_run_record(
     if not memory_entries:
         return None
 
-    started_at: str | None = None
-    ended_at: str | None = None
-    preview_text = ""
-
-    for entry in memory_entries:
-        payload = _extract_memory_entry_payload(entry)
-        if not payload:
-            continue
-        timestamp = payload.get("timestamp")
-        if isinstance(timestamp, str) and timestamp and not started_at:
-            started_at = timestamp
-        if isinstance(timestamp, str) and timestamp:
-            ended_at = timestamp
-
-    for entry in reversed(memory_entries):
-        payload = _extract_memory_entry_payload(entry)
-        if not payload or payload.get("role") != "assistant":
-            continue
-        preview_text = _extract_text_from_message_content(
-            payload.get("content"),
-        )
-        if preview_text:
-            break
+    started_at, ended_at = _task_run_timestamps(memory_entries)
+    preview_text = _task_run_preview(memory_entries)
 
     now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     started_at = started_at or now
@@ -534,6 +513,34 @@ def _build_task_run_record(
     if execution_key:
         record["execution_key"] = execution_key
     return record
+
+
+def _task_run_timestamps(
+    memory_entries: list[Any],
+) -> tuple[str | None, str | None]:
+    started_at: str | None = None
+    ended_at: str | None = None
+    for entry in memory_entries:
+        payload = _extract_memory_entry_payload(entry)
+        timestamp = payload.get("timestamp") if payload else None
+        if not isinstance(timestamp, str) or not timestamp:
+            continue
+        started_at = started_at or timestamp
+        ended_at = timestamp
+    return started_at, ended_at
+
+
+def _task_run_preview(memory_entries: list[Any]) -> str:
+    for entry in reversed(memory_entries):
+        payload = _extract_memory_entry_payload(entry)
+        if not payload or payload.get("role") != "assistant":
+            continue
+        preview_text = _extract_text_from_message_content(
+            payload.get("content"),
+        )
+        if preview_text:
+            return preview_text
+    return ""
 
 
 def _is_approval(text: str) -> bool:
