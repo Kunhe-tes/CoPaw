@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import inspect
+import json
 from pathlib import Path
 
 import pytest
 from agentscope.tool import Toolkit
+from pydantic import ValidationError
 
 from swe.agents.tools.planning import (
     ask_plan_clarification,
@@ -425,13 +427,18 @@ async def test_submit_proposed_plan_emits_goal_contract_draft(
 
     response = await tool(
         objective="Fix failing test",
-        completion_criteria=[{
-            "requirement": "Tests pass",
-            "observable_assertion": "Focused test command exits successfully",
-            "verification_method": "command: pytest tests/unit -q",
-            "expected_outcome": "exit 0",
-        }],
-        constraints={"must_preserve": ["Existing behavior"], "must_not_do": []},
+        completion_criteria=[
+            {
+                "requirement": "Tests pass",
+                "observable_assertion": "Focused test command exits successfully",
+                "verification_method": "command: pytest tests/unit -q",
+                "expected_outcome": "exit 0",
+            },
+        ],
+        constraints={
+            "must_preserve": ["Existing behavior"],
+            "must_not_do": [],
+        },
         autonomy_boundary="No deployment",
     )
 
@@ -445,15 +452,20 @@ async def test_submit_proposed_plan_emits_goal_contract_draft(
 async def test_submit_proposed_plan_can_emit_goal_ready_contract_draft(
     tmp_path: Path,
 ) -> None:
-    tool = create_submit_proposed_plan_tool(request_context={}, workspace_dir=tmp_path)
+    tool = create_submit_proposed_plan_tool(
+        request_context={},
+        workspace_dir=tmp_path,
+    )
     response = await tool(
         objective="Ship Goal Runtime",
-        completion_criteria=[{
-            "requirement": "API exists",
-            "observable_assertion": "route is registered",
-            "verification_method": "inspect OpenAPI",
-            "expected_outcome": "route is listed",
-        }],
+        completion_criteria=[
+            {
+                "requirement": "API exists",
+                "observable_assertion": "route is registered",
+                "verification_method": "inspect OpenAPI",
+                "expected_outcome": "route is listed",
+            },
+        ],
         constraints={"must_preserve": [], "must_not_do": ["change auth"]},
         autonomy_boundary="No deployment",
     )
@@ -505,3 +517,86 @@ def test_submit_proposed_plan_schema_requires_goal_contract_fields(
         "constraints",
         "autonomy_boundary",
     }
+
+
+def test_submit_proposed_plan_schema_exposes_goal_contract_item_fields(
+    tmp_path: Path,
+) -> None:
+    tool = create_submit_proposed_plan_tool(
+        request_context={},
+        workspace_dir=tmp_path,
+    )
+    toolkit = Toolkit()
+    toolkit.register_tool_function(tool)
+
+    parameters = toolkit.tools["submit_proposed_plan"].json_schema["function"][
+        "parameters"
+    ]
+    definitions = parameters["$defs"]
+    assert set(definitions["CompletionCriterion"]["properties"]) == {
+        "requirement",
+        "observable_assertion",
+        "verification_method",
+        "expected_outcome",
+    }
+    assert set(definitions["GoalConstraints"]["properties"]) == {
+        "must_preserve",
+        "must_not_do",
+    }
+
+
+@pytest.mark.asyncio
+async def test_submit_proposed_plan_reports_the_invalid_criterion_field(
+    tmp_path: Path,
+) -> None:
+    tool = create_submit_proposed_plan_tool(
+        request_context={},
+        workspace_dir=tmp_path,
+    )
+
+    with pytest.raises(ValidationError, match="expected_outcome"):
+        await tool(
+            objective="Ship a verified change",
+            completion_criteria=[
+                {
+                    "requirement": "Tests pass",
+                    "observable_assertion": "The focused suite succeeds",
+                    "verification_method": "Run pytest",
+                },
+            ],
+            constraints={"must_preserve": [], "must_not_do": []},
+            autonomy_boundary="No deployment",
+        )
+
+
+@pytest.mark.asyncio
+async def test_submit_proposed_plan_accepts_canonical_json_text_inputs(
+    tmp_path: Path,
+) -> None:
+    tool = create_submit_proposed_plan_tool(
+        request_context={},
+        workspace_dir=tmp_path,
+    )
+    criteria = [
+        {
+            "requirement": "Tests pass",
+            "observable_assertion": "The focused suite succeeds",
+            "verification_method": "Run pytest",
+            "expected_outcome": "exit 0",
+        },
+    ]
+    constraints = {
+        "must_preserve": ["Existing behavior"],
+        "must_not_do": [],
+    }
+
+    response = await tool(
+        objective="Ship a verified change",
+        completion_criteria=json.dumps(criteria),
+        constraints=json.dumps(constraints),
+        autonomy_boundary="No deployment",
+    )
+
+    card = response.metadata["plan_interaction_card"]
+    assert card["completion_criteria"] == criteria
+    assert card["constraints"] == constraints

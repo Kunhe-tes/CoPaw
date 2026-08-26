@@ -13,6 +13,7 @@ from ...app.plans import (
     PlanClarificationCard,
     GoalProposal,
 )
+from ...app.goals.models import CompletionCriterion, GoalConstraints
 
 _PLAN_CARD_METADATA_KEY = "plan_interaction_card"
 _DIRECT_CLARIFICATION_KINDS = frozenset(
@@ -394,12 +395,15 @@ def create_submit_proposed_plan_tool(
 
     async def submit_proposed_plan(
         objective: str,
-        completion_criteria: list[dict[str, str]] | str,
-        constraints: dict[str, list[str]] | str,
+        completion_criteria: list[CompletionCriterion] | str,
+        constraints: GoalConstraints | str,
         autonomy_boundary: str,
     ) -> ToolResponse:
         """Submit a Goal-ready Contract Draft for explicit user confirmation."""
-        criteria = _coerce_json_array(completion_criteria, "completion_criteria")
+        criteria = _coerce_json_array(
+            completion_criteria,
+            "completion_criteria",
+        )
         parsed_constraints = constraints
         if isinstance(parsed_constraints, str):
             parsed_constraints = json.loads(parsed_constraints)

@@ -142,6 +142,7 @@ class CommandHandler(ConversationCommandHandlerMixin):
         await self.memory_manager.reset_context_epoch(
             chat_id=chat_id,
             reason=reason,
+            memory=self.memory,
         )
 
     async def _process_compact(

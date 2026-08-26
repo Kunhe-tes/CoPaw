@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Process-local access point for the application-owned Goal service."""
 
 from __future__ import annotations
@@ -17,7 +18,6 @@ async def initialize_goal_service(db: Any | None) -> GoalService | None:
     if not store.is_available:
         _service = None
         return None
-    await store.initialize()
     _service = GoalService(store)
     return _service
 

@@ -1,0 +1,23 @@
+{
+  "enabled": true,
+  "events": {
+    "Stop": [
+      {
+        "id": "normalize-final-output",
+        "hooks": [
+          {
+            "id": "normalize-final-output-text",
+            "type": "command",
+            "argv": [
+              "python",
+              "scripts/normalize_final_output.py"
+            ],
+            "timeout": 5,
+            "failPolicy": "block",
+            "outputTransform": true
+          }
+        ]
+      }
+    ]
+  }
+}

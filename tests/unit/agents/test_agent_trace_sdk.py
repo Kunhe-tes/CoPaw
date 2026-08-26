@@ -20,19 +20,12 @@ def test_reasoning_uses_chat_traced_without_output_capture() -> None:
     assert config["output_arguments_factory"]("model output") == {}
 
 
-def test_summarizing_uses_chat_traced_without_output_capture() -> None:
-    config = SWEAgent._summarizing._trace_sdk_config
-    agent = SimpleNamespace(
-        _resolved_model_slot={"provider_id": "provider-1", "model": "model-1"},
-    )
-
-    assert config["request_model_factory"](agent) == "model-1"
-    assert config["provider_name_factory"](agent) == "provider-1"
-    assert config["output_arguments_factory"]("summary") == {}
+def test_only_main_reasoning_uses_chat_traced() -> None:
+    assert not hasattr(SWEAgent._summarizing, "_trace_sdk_config")
 
 
-def test_approved_tool_uses_execute_tool_traced() -> None:
-    config = ToolGuardMixin._run_approved_tool_call._trace_sdk_config
+def test_common_tool_execution_uses_execute_tool_traced() -> None:
+    config = ToolGuardMixin._run_tool_call_with_hard_timeout._trace_sdk_config
     agent = SimpleNamespace()
     tool_input = {"command": "pwd"}
 
@@ -55,3 +48,6 @@ def test_approved_tool_uses_execute_tool_traced() -> None:
         == tool_input
     )
     assert config["output_arguments_factory"]({"content": "tool output"}) == {}
+    assert not hasattr(
+        ToolGuardMixin._run_approved_tool_call, "_trace_sdk_config",
+    )

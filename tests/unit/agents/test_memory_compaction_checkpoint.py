@@ -48,6 +48,7 @@ async def test_governance_schedules_only_new_watermarks() -> None:
     hook = MemoryCompactionHook(manager)
     agent = SimpleNamespace(
         _request_context={"chat_id": "chat-1"},
+        memory=SimpleNamespace(),
         model=object(),
         formatter=object(),
     )
@@ -82,7 +83,11 @@ async def test_governance_scheduling_is_side_effect_only() -> None:
 
     manager = SimpleNamespace(schedule_precompaction=AsyncMock())
     hook = MemoryCompactionHook(manager)
-    agent = SimpleNamespace(model=object(), formatter=object())
+    agent = SimpleNamespace(
+        model=object(),
+        formatter=object(),
+        memory=SimpleNamespace(),
+    )
     decision = ContextBudgetDecision(65, 0.65, "governance", 0)
 
     hook._schedule_governance_precompaction(
@@ -109,7 +114,10 @@ async def test_active_stage_installs_ready_candidate_before_reme() -> None:
         install_ready_precompaction=AsyncMock(return_value=True),
     )
     hook = MemoryCompactionHook(manager)
-    agent = SimpleNamespace(_request_context={"chat_id": "chat-1"})
+    agent = SimpleNamespace(
+        _request_context={"chat_id": "chat-1"},
+        memory=SimpleNamespace(),
+    )
     running = SimpleNamespace(
         max_input_length=100,
         context_compact=ContextCompactConfig(),
@@ -119,6 +127,7 @@ async def test_active_stage_installs_ready_candidate_before_reme() -> None:
     manager.install_ready_precompaction.assert_awaited_once_with(
         chat_id="chat-1",
         messages=[],
+        memory=agent.memory,
     )
 
 
@@ -133,7 +142,10 @@ async def test_active_candidate_remeasures_before_one_legacy_fallback() -> (
         install_ready_precompaction=AsyncMock(return_value=True),
     )
     hook = MemoryCompactionHook(manager)
-    agent = SimpleNamespace(_request_context={"chat_id": "chat-1"})
+    agent = SimpleNamespace(
+        _request_context={"chat_id": "chat-1"},
+        memory=SimpleNamespace(),
+    )
     running = SimpleNamespace(
         max_input_length=100,
         context_compact=ContextCompactConfig(),
@@ -161,7 +173,10 @@ async def test_install_checkpoint_stage_requests_legacy_fallback_when_active() -
         install_ready_precompaction=AsyncMock(return_value=True),
     )
     hook = MemoryCompactionHook(manager)
-    agent = SimpleNamespace(_request_context={"chat_id": "chat-1"})
+    agent = SimpleNamespace(
+        _request_context={"chat_id": "chat-1"},
+        memory=SimpleNamespace(),
+    )
     running = SimpleNamespace(
         max_input_length=100,
         context_compact=ContextCompactConfig(),
@@ -180,6 +195,7 @@ async def test_install_checkpoint_stage_requests_legacy_fallback_when_active() -
     manager.install_ready_precompaction.assert_awaited_once_with(
         chat_id="chat-1",
         messages=[],
+        memory=agent.memory,
     )
     remeasure.assert_awaited_once()
 
@@ -196,7 +212,10 @@ async def test_emergency_stage_installs_degraded_reference_checkpoint_once() -> 
         install_degraded_checkpoint=AsyncMock(),
     )
     hook = MemoryCompactionHook(manager)
-    agent = SimpleNamespace(_request_context={"chat_id": "chat-1"})
+    agent = SimpleNamespace(
+        _request_context={"chat_id": "chat-1"},
+        memory=SimpleNamespace(),
+    )
     running = SimpleNamespace(
         max_input_length=100,
         context_compact=ContextCompactConfig(),
@@ -211,6 +230,7 @@ async def test_emergency_stage_installs_degraded_reference_checkpoint_once() -> 
     manager.install_degraded_checkpoint.assert_awaited_once_with(
         chat_id="chat-1",
         messages=[],
+        memory=agent.memory,
     )
 
 
@@ -272,6 +292,7 @@ async def test_emergency_degradation_remeasures_then_retries_reme_once(
     manager.install_degraded_checkpoint.assert_awaited_once_with(
         chat_id="chat-1",
         messages=[message],
+        memory=memory,
     )
     assert token_counter.count.await_count == 3
     manager.compact_memory.assert_awaited_once()
@@ -366,6 +387,10 @@ async def test_schedule_precompaction_persists_revision_bound_candidate() -> (
         chat_id=chat_id,
         watermark=0,
         messages=[message],
+        memory=SimpleNamespace(
+            content=[(message, [])],
+            chat_checkpoint_store=store,
+        ),
     )
     candidate = store.write_pending_candidate.await_args.args[1]
     assert candidate.base_revision == 0
@@ -412,5 +437,6 @@ async def test_schedule_precompaction_rejects_ambiguous_duplicate_online_ids() -
         chat_id=chat_id,
         watermark=0,
         messages=[first, second],
+        memory=memory,
     )
     store.write_pending_candidate.assert_not_awaited()

@@ -100,6 +100,7 @@ async def test_legacy_archive_advances_event_cursor_for_next_candidate(
         chat_id=chat_id,
         watermark=0,
         messages=[retained],
+        memory=memory,
     )
 
 
@@ -293,22 +294,28 @@ async def test_reme_memory_factory_attaches_archive_only_for_a_chat_id(
         lambda _config: object(),
     )
 
-    assert manager.get_in_memory_memory() is raw_memory
+    unbound_memory = manager.get_in_memory_memory()
+    assert unbound_memory is not raw_memory
+    assert not hasattr(unbound_memory, "chat_checkpoint_store")
     chat_id = _chat_id()
-    assert manager.get_in_memory_memory(chat_id=chat_id) is raw_memory
-    assert manager.get_in_memory_memory(chat_id=chat_id) is raw_memory
-    assert factory_calls == 2
-    assert hasattr(raw_memory, "archive_compacted_messages")
+    first_memory = manager.get_in_memory_memory(chat_id=chat_id)
+    second_memory = manager.get_in_memory_memory(chat_id=chat_id)
+    assert first_memory is not raw_memory
+    assert second_memory is not first_memory
+    assert factory_calls == 3
+    assert hasattr(first_memory, "archive_compacted_messages")
 
     other_chat = _chat_id()
     other_memory = manager.get_in_memory_memory(chat_id=other_chat)
     assert other_memory is not raw_memory
-    assert manager.get_in_memory_memory(chat_id=chat_id) is raw_memory
-    await raw_memory.add(_message(1))
+    assert manager.get_in_memory_memory(chat_id=chat_id) is not first_memory
+    await first_memory.add(_message(1))
     await other_memory.add(_message(2))
-    await manager.get_in_memory_memory(chat_id=chat_id).add(_message(3))
-    first_state = await raw_memory.chat_checkpoint_store.read_checkpoint_state(
-        chat_id,
+    await second_memory.add(_message(3))
+    first_state = (
+        await first_memory.chat_checkpoint_store.read_checkpoint_state(
+            chat_id,
+        )
     )
     second_state = (
         await other_memory.chat_checkpoint_store.read_checkpoint_state(
@@ -477,6 +484,7 @@ async def test_load_history_resets_checkpoint_epoch_before_replacing_memory(
     manager.reset_context_epoch.assert_awaited_once_with(
         chat_id=chat_id,
         reason="load_history",
+        memory=memory,
     )
     assert [message.id for message, _marks in memory.content] == [
         "message-1",

@@ -16,6 +16,7 @@ async def prepare_query_preflight(
     user_id: str,
     query: str | None,
     request: AgentRequest,
+    session_execution: object | None = None,
 ) -> _QueryPreflight:
     """Resolve approval and user-prompt hook state before a query starts."""
     (
@@ -39,6 +40,7 @@ async def prepare_query_preflight(
     hook_overlay = await owner._load_query_preflight_overlay(
         session_id=session_id,
         user_id=user_id,
+        session_execution=session_execution,
     )
     hook_additional_context = ""
     if query and owner._query_preflight_hooks_enabled(
@@ -46,12 +48,17 @@ async def prepare_query_preflight(
         agent_config,
         hook_overlay,
     ):
+        prompt_hook_args = {
+            "request": request,
+            "tenant_hooks": tenant_hooks,
+            "agent_config": agent_config,
+            "overlay": hook_overlay,
+            "prompt": query,
+        }
+        if session_execution is not None:
+            prompt_hook_args["session_execution"] = session_execution
         prompt_hook_result = await owner._emit_query_user_prompt_submit_hook(
-            request=request,
-            tenant_hooks=tenant_hooks,
-            agent_config=agent_config,
-            overlay=hook_overlay,
-            prompt=query,
+            **prompt_hook_args,
         )
         if prompt_hook_result.decision in {
             HookDecision.BLOCK,

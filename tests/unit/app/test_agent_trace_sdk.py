@@ -36,6 +36,7 @@ async def test_query_handler_creates_one_server_root_span(tmp_path) -> None:
     request = SimpleNamespace(
         session_id="session-1",
         user_id="user-1",
+        source_id="source-request",
         channel="console",
         channel_meta={},
     )
@@ -55,11 +56,118 @@ async def test_query_handler_creates_one_server_root_span(tmp_path) -> None:
     assert root["kind"] == "SERVER"
     assert root["parent_span_id"] is None
     assert root["trace_fields"]["user_id"] == "user-1"
-    assert root["trace_fields"]["session_id"] == "session-1"
+    assert root["trace_fields"]["task_id"] == "session-1"
+    assert root["trace_fields"]["session_id"].startswith("turn-")
+    assert (
+        request.channel_meta["turn_id"] == root["trace_fields"]["session_id"]
+    )
     assert root["trace_fields"]["agent_id"] == "agent-1"
     assert root["trace_fields"]["agent_version"] == __version__
-    assert root["trace_fields"]["task_id"]
+    assert root["trace_fields"]["source_id"] == "source-request"
     assert root["attributes"]["agent.user_message"] == "original question"
+
+
+@pytest.mark.asyncio
+async def test_query_handler_uses_channel_meta_source_for_root_span(
+    tmp_path,
+) -> None:
+    reset()
+    runner = AgentRunner(agent_id="agent-1", workspace_dir=tmp_path)
+    runner._query_execution = QueryExecution(_Adapter())
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={"source_id": "source-meta"},
+    )
+
+    frames = [
+        frame
+        async for frame in runner.query_handler(
+            [Msg(name="user", role="user", content="question")],
+            request=request,
+        )
+    ]
+
+    assert len(frames) == 1
+    assert spans[0]["trace_fields"]["source_id"] == "source-meta"
+
+
+@pytest.mark.asyncio
+async def test_query_handler_uses_default_source_for_root_span(
+    tmp_path,
+) -> None:
+    reset()
+    runner = AgentRunner(agent_id="agent-1", workspace_dir=tmp_path)
+    runner._query_execution = QueryExecution(_Adapter())
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+    )
+
+    frames = [
+        frame
+        async for frame in runner.query_handler(
+            [Msg(name="user", role="user", content="question")],
+            request=request,
+        )
+    ]
+
+    assert len(frames) == 1
+    assert spans[0]["trace_fields"]["source_id"] == "default"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_request_skips_agent_trace_sdk(tmp_path) -> None:
+    reset()
+    runner = AgentRunner(agent_id="agent-1", workspace_dir=tmp_path)
+    runner._query_execution = QueryExecution(_Adapter())
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel="console",
+        channel_meta={},
+        execution_origin="scheduled",
+    )
+
+    frames = [
+        frame
+        async for frame in runner.query_handler(
+            [Msg(name="user", role="user", content="scheduled question")],
+            request=request,
+        )
+    ]
+
+    assert len(frames) == 1
+    assert spans == []
+
+
+@pytest.mark.asyncio
+async def test_request_missing_required_trace_fields_skips_agent_trace_sdk(
+    tmp_path,
+) -> None:
+    reset()
+    runner = AgentRunner(agent_id="agent-1", workspace_dir=tmp_path)
+    runner._query_execution = QueryExecution(_Adapter())
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="",
+        channel="console",
+        channel_meta={},
+    )
+
+    frames = [
+        frame
+        async for frame in runner.query_handler(
+            [Msg(name="user", role="user", content="question")],
+            request=request,
+        )
+    ]
+
+    assert len(frames) == 1
+    assert spans == []
 
 
 class _AdmissionOwner:
@@ -75,7 +183,14 @@ class _AdmissionOwner:
 @pytest.mark.asyncio
 async def test_admission_is_a_child_span_of_agent_run() -> None:
     reset()
-    fields = TraceFields("task-1", "user-1", "session-1", "agent-1", "1.0")
+    fields = TraceFields(
+        "task-1",
+        "user-1",
+        "session-1",
+        "agent-1",
+        "1.0",
+        "source-1",
+    )
     request = SimpleNamespace()
 
     async with global_tracer.start_as_current_span(
@@ -157,7 +272,14 @@ class _AttemptOwner:
 @pytest.mark.asyncio
 async def test_retry_attempt_is_a_child_span_of_agent_run() -> None:
     reset()
-    fields = TraceFields("task-1", "user-1", "session-1", "agent-1", "1.0")
+    fields = TraceFields(
+        "task-1",
+        "user-1",
+        "session-1",
+        "agent-1",
+        "1.0",
+        "source-1",
+    )
     request = SimpleNamespace()
 
     async with global_tracer.start_as_current_span(

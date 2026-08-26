@@ -36,8 +36,19 @@ export type HookScriptUploadResponse = {
   failed: Array<{ filename: string; reason: string }>;
 };
 
+export type HookManualTestSummary = {
+  handler_id: string;
+  decision: string;
+  failed: boolean;
+  failure_type: string;
+  status: string;
+  output_transform: boolean;
+  replacement_applied: boolean;
+  replacement_length: number;
+};
+
 export type HookManualTestResponse = {
-  redacted_summary: Record<string, unknown>;
+  redacted_summary: HookManualTestSummary;
 };
 
 export type HookDistributionRequest = {

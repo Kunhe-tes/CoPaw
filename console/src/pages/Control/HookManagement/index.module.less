@@ -64,6 +64,46 @@
   align-items: center;
   max-width: 360px;
 }
+.outputTransform {
+  margin: 18px 0;
+  padding: 12px 0;
+  border-top: 1px solid var(--console-management-border);
+  border-bottom: 1px solid var(--console-management-border);
+}
+.outputTransformDetails,
+.outputTransformSummary {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  color: var(--console-management-text-secondary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.outputTransformDetails p,
+.outputTransformSummary p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.onceTransformReason {
+  margin: -4px 0 0;
+  color: var(--console-management-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.transformContract {
+  max-width: 100%;
+  max-height: 180px;
+  margin: 0;
+  padding: 10px;
+  overflow: auto;
+  background: var(--console-management-surface-subtle);
+  border: 1px solid var(--console-management-border);
+  border-radius: 6px;
+  color: var(--console-management-text);
+  font-family: var(--console-font-mono);
+  font-size: 12px;
+  white-space: pre-wrap;
+}
 .scripts {
   max-width: 980px;
 }

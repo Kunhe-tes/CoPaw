@@ -45,7 +45,6 @@ async def _service(request: Request) -> GoalService:
             status_code=503,
             detail="Goal Runtime database is unavailable",
         )
-    await store.initialize()
     return GoalService(store)
 
 

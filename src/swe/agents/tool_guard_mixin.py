@@ -23,9 +23,9 @@ import uuid as _uuid
 from typing import Any, Literal, NoReturn
 
 from agentscope.message import Msg, ToolResultBlock
-from trace_sdk import execute_tool_traced
 
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
+from ..tracing.agent_trace_sdk import execute_tool_traced
 from ..app.runner.tool_output_frames import tool_output_invocation
 from .hook_runtime import HookRuntime
 from .hook_runtime.conversation_snapshot import capture_conversation_snapshot
@@ -146,9 +146,22 @@ _SELECTED_EXPERT_WAIT_TIMEOUT_MS = 3000
 _GOAL_ENVIRONMENT_WRITE_TOOLS = frozenset({"write_file", "edit_file"})
 _GOAL_MUTATING_SHELL_TOKENS = frozenset(
     {
-        "rm ", "mv ", "cp ", "mkdir", "touch", "tee ", ">", ">>",
-        "sed -i", "git commit", "git reset", "git checkout", "git clean",
-        "pip install", "npm install", "pnpm install",
+        "rm ",
+        "mv ",
+        "cp ",
+        "mkdir",
+        "touch",
+        "tee ",
+        ">",
+        ">>",
+        "sed -i",
+        "git commit",
+        "git reset",
+        "git checkout",
+        "git clean",
+        "pip install",
+        "npm install",
+        "pnpm install",
     },
 )
 
@@ -377,6 +390,11 @@ class ToolGuardMixin:
         finally:
             await self.memory.add(tool_res_msg)
 
+    @execute_tool_traced(
+        tool_name_factory=lambda self, tool_call, tool_name, tool_input: tool_name,
+        input_arguments_factory=lambda self, tool_call, tool_name, tool_input: tool_input,
+        output_arguments_factory=lambda result: {},
+    )
     async def _run_tool_call_with_hard_timeout(
         self,
         tool_call: dict[str, Any],
@@ -1735,10 +1753,9 @@ class ToolGuardMixin:
                 tool_input,
             )
             request_context = getattr(self, "_request_context", {}) or {}
-            if (
-                request_context.get("goal_id")
-                and _goal_tool_may_write_environment(tool_name, tool_input)
-            ):
+            if request_context.get(
+                "goal_id",
+            ) and _goal_tool_may_write_environment(tool_name, tool_input):
                 request_context["_goal_turn_environment_changed"] = True
             return result
 
@@ -1897,13 +1914,6 @@ class ToolGuardMixin:
             )
         return bool(consumed)
 
-    @execute_tool_traced(
-        tool_name_factory=lambda self, tool_call, tool_name, tool_input: (tool_name),
-        input_arguments_factory=lambda self, tool_call, tool_name, tool_input: (
-            tool_input
-        ),
-        output_arguments_factory=lambda result: {},
-    )
     async def _run_approved_tool_call(
         self,
         tool_call: dict[str, Any],

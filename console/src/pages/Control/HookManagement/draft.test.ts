@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   addHandler,
+  defaultContext,
   isScriptReference,
   moveHandler,
   removeHandler,
@@ -107,5 +108,14 @@ describe("Hook configuration draft helpers", () => {
 
     expect(next.events.PostToolUse).toEqual(scenario.groups);
     expect(next.events.PreToolUse).toEqual(config.events.PreToolUse);
+  });
+
+  it("prefills a candidate assistant response only for Stop manual tests", () => {
+    expect(defaultContext("Stop")).toMatchObject({
+      assistant_response: "这是用于测试的候选回复。",
+    });
+    expect(defaultContext("PreToolUse")).not.toHaveProperty(
+      "assistant_response",
+    );
   });
 });

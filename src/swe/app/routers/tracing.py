@@ -163,9 +163,13 @@ async def get_user_chat(
             messages = await _annotate_task_run_messages(
                 memory_state,
                 state[TASK_RUNS_STATE_KEY],
+                session_id=chat_spec.session_id,
             )
         else:
-            messages = await _messages_from_memory_state(memory_state)
+            messages = await _messages_from_memory_state(
+                memory_state,
+                session_id=chat_spec.session_id,
+            )
     messages.extend(task_messages)
     messages.sort(key=_message_sort_key)
     messages = await _annotate_approval_action_statuses(messages)

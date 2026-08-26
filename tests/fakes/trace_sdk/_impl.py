@@ -27,6 +27,7 @@ class TraceFields:
     session_id: str
     agent_id: str
     agent_version: str
+    source_id: str
 
 
 class Span:

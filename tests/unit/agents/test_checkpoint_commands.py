@@ -35,6 +35,7 @@ async def test_new_resets_context_epoch() -> None:
     manager.reset_context_epoch.assert_awaited_once_with(
         chat_id="chat-1",
         reason="new",
+        memory=handler.memory,
     )
 
 
@@ -60,4 +61,5 @@ async def test_clear_resets_context_epoch() -> None:
     manager.reset_context_epoch.assert_awaited_once_with(
         chat_id="chat-1",
         reason="clear",
+        memory=handler.memory,
     )
