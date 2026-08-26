@@ -224,34 +224,59 @@ def _validate_dispatch_callback_ids(
         )
 
 
+def _dispatch_callback_value(
+    params: dict[str, Any],
+    *keys: str,
+    default: str = "",
+) -> str:
+    for key in keys:
+        value = params.get(key)
+        if value:
+            return str(value)
+    return default
+
+
 def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
     return {
-        "tenant_id": str(params.get("tenant_id") or ""),
-        "source_id": str(params.get("source_id") or ""),
-        "scope_id": str(params.get("scope_id") or params.get("scopeId") or ""),
-        "from_id": str(params.get("from_id") or params.get("fromId") or ""),
-        "agent_id": str(params.get("agent_id") or _STATIC_AGENT_ID),
-        "job_id": str(params.get("job_id") or ""),
-        "parent_scheduled_fire_at": str(
-            params.get("parent_scheduled_fire_at") or "",
+        "tenant_id": _dispatch_callback_value(params, "tenant_id"),
+        "source_id": _dispatch_callback_value(params, "source_id"),
+        "scope_id": _dispatch_callback_value(params, "scope_id", "scopeId"),
+        "from_id": _dispatch_callback_value(params, "from_id", "fromId"),
+        "agent_id": _dispatch_callback_value(
+            params,
+            "agent_id",
+            default=_STATIC_AGENT_ID,
         ),
-        "provider_id": str(params.get("provider_id") or "default"),
-        "model_id": str(params.get("model_id") or "default"),
-        "cron_execution_key": str(
-            params.get("cron_execution_key")
-            or params.get("execution_key")
-            or "",
+        "job_id": _dispatch_callback_value(params, "job_id"),
+        "parent_scheduled_fire_at": _dispatch_callback_value(
+            params,
+            "parent_scheduled_fire_at",
         ),
-        "scheduled_fire_at": str(
-            params.get("scheduled_fire_at")
-            or params.get("fire_time")
-            or params.get("trigger_time")
-            or "",
+        "provider_id": _dispatch_callback_value(
+            params,
+            "provider_id",
+            default="default",
         ),
-        "external_execution_id": str(
-            params.get("external_execution_id")
-            or params.get("execution_id")
-            or "",
+        "model_id": _dispatch_callback_value(
+            params,
+            "model_id",
+            default="default",
+        ),
+        "cron_execution_key": _dispatch_callback_value(
+            params,
+            "cron_execution_key",
+            "execution_key",
+        ),
+        "scheduled_fire_at": _dispatch_callback_value(
+            params,
+            "scheduled_fire_at",
+            "fire_time",
+            "trigger_time",
+        ),
+        "external_execution_id": _dispatch_callback_value(
+            params,
+            "external_execution_id",
+            "execution_id",
         ),
     }
 
