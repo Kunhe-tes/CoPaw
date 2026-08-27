@@ -28,6 +28,10 @@ class TurnIdentity:
     msgid: str
     turn_id: str
 
+    def __post_init__(self) -> None:
+        if not all(isinstance(value, str) and value for value in (self.chat_id, self.msgid, self.turn_id)):
+            raise ValueError("chat_id, msgid, and turn_id are required")
+
     @classmethod
     def create(cls, *, chat_id: str, msgid: str) -> "TurnIdentity":
         from uuid import uuid4
@@ -48,6 +52,8 @@ class TurnOutcome:
     _TERMINAL: ClassVar[frozenset[TurnStatus]] = TERMINAL_STATUSES
 
     def __post_init__(self) -> None:
+        if not isinstance(self.identity, TurnIdentity):
+            raise TypeError("outcome identity must be a TurnIdentity")
         status = self.status
         if not isinstance(status, TurnStatus):
             object.__setattr__(self, "status", TurnStatus(status))
