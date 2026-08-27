@@ -15,6 +15,68 @@ from swe.app.runner.tool_output_frames import (
 
 
 @pytest.mark.asyncio
+async def test_stop_claim_requires_matching_turn_id_and_does_not_cancel_immediately():
+    tracker = TaskTracker()
+    release_stream = asyncio.Event()
+
+    async def _stream_fn(_payload):
+        yield 'data: {"before": true}\n\n'
+        await release_stream.wait()
+
+    queue, is_new = await tracker.attach_or_start(
+        "chat-turn",
+        {},
+        _stream_fn,
+        msgid="turn-1",
+    )
+    assert is_new is True
+    assert await queue.get()
+
+    wrong = await tracker.request_stop("chat-turn", msgid="turn-2")
+    assert wrong.accepted is False
+    assert await tracker.get_status("chat-turn") == "running"
+
+    accepted = await tracker.request_stop("chat-turn", msgid="turn-1")
+    assert accepted.accepted is True
+    assert accepted.chat_id == "chat-turn"
+    assert accepted.msgid == "turn-1"
+    assert await tracker.get_status("chat-turn") == "stopping"
+
+    release_stream.set()
+    await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_stop_claim_freezes_output_for_existing_and_reconnecting_subscribers():
+    tracker = TaskTracker()
+    release_stream = asyncio.Event()
+    queue, _ = await tracker.attach_or_start(
+        "chat-freeze",
+        {},
+        lambda _payload: _stream(release_stream),
+        msgid="turn-1",
+    )
+    assert await queue.get()
+
+    accepted = await tracker.request_stop("chat-freeze", msgid="turn-1")
+    assert accepted.accepted is True
+
+    reconnect = await tracker.attach("chat-freeze")
+    assert reconnect is not None
+    assert await reconnect.get()
+    release_stream.set()
+    assert await asyncio.wait_for(queue.get(), timeout=1) is None
+    assert await asyncio.wait_for(reconnect.get(), timeout=1) is None
+    await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
+
+
+async def _stream(release_stream):
+    yield 'data: {"before": true}\n\n'
+    await release_stream.wait()
+    yield 'data: {"after": true}\n\n'
+
+
+@pytest.mark.asyncio
 async def test_request_stop_marks_status_stopping_while_producer_is_cleaning_up():
     tracker = TaskTracker()
     stream_started = asyncio.Event()
@@ -143,7 +205,7 @@ async def test_idle_callback_and_task_registration_share_one_lock():
             {},
             _stream_fn,
             before_start=validate_claim,
-        )
+        ),
     )
     await asyncio.sleep(0)
     assert start_task.done() is False
