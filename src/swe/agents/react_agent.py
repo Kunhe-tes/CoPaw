@@ -46,6 +46,7 @@ from .tool_guard_mixin import (
     ToolGuardMixin,
 )
 from .tool_output_budget_mixin import ToolOutputBudgetMixin
+from .agent_trace_output import build_chat_output_arguments
 from .tools import (
     edit_file,
     execute_shell_command,
@@ -1790,7 +1791,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         provider_name_factory=lambda self, *args, **kwargs: (
             self._resolved_model_slot.get("provider_id")
         ),
-        output_arguments_factory=lambda result: {},
+        output_arguments_factory=build_chat_output_arguments,
     )
     async def _run_reasoning_with_internal_context(
         self,

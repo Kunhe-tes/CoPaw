@@ -27,6 +27,7 @@ from agentscope.message import Msg, ToolResultBlock
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
 from ..tracing.agent_trace_sdk import execute_tool_traced
 from ..app.runner.tool_output_frames import tool_output_invocation
+from .agent_trace_output import ToolTraceOutcome, build_tool_output_arguments
 from .hook_runtime import HookRuntime
 from .hook_runtime.conversation_snapshot import capture_conversation_snapshot
 from .hook_runtime.models import (
@@ -390,12 +391,7 @@ class ToolGuardMixin:
         finally:
             await self.memory.add(tool_res_msg)
 
-    @execute_tool_traced(
-        tool_name_factory=lambda self, tool_call, tool_name, tool_input: tool_name,
-        input_arguments_factory=lambda self, tool_call, tool_name, tool_input: tool_input,
-        output_arguments_factory=lambda result: {},
-    )
-    async def _run_tool_call_with_hard_timeout(
+    async def _run_tool_call_with_hard_timeout_impl(
         self,
         tool_call: dict[str, Any],
         tool_name: str,
@@ -454,6 +450,48 @@ class ToolGuardMixin:
                         timeout_text,
                     )
                     return None
+
+    @execute_tool_traced(
+        tool_name_factory=lambda self, _call, tool_name, _input: tool_name,
+        input_arguments_factory=lambda self, _call, _tool_name, tool_input: tool_input,
+        output_arguments_factory=build_tool_output_arguments,
+    )
+    async def _run_tool_call_with_hard_timeout_traced(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> ToolTraceOutcome:
+        result = await self._run_tool_call_with_hard_timeout_impl(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
+        terminal_output = result
+        if terminal_output is None:
+            terminal_output = self._extract_current_tool_response(
+                str(tool_call.get("id") or ""),
+                include_structured_failure=True,
+            )
+        return ToolTraceOutcome(
+            business_result=result,
+            terminal_output=terminal_output,
+            tool_name=tool_name,
+            mcp_server=self._resolve_mcp_server(tool_name),
+        )
+
+    async def _run_tool_call_with_hard_timeout(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
+        outcome = await self._run_tool_call_with_hard_timeout_traced(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
+        return outcome.business_result
 
     async def _persist_local_tool_timeout_result(
         self,
@@ -2004,7 +2042,7 @@ class ToolGuardMixin:
         await self.memory.add(tool_res_msg)
         return None
 
-    async def _acting_with_approval(
+    async def _acting_with_approval(  # pylint: disable=too-many-statements
         self,
         tool_call: dict[str, Any],
         tool_name: str,
