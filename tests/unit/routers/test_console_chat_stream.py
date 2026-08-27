@@ -1244,6 +1244,60 @@ def test_console_chat_stream_emits_keepalive_and_disables_proxy_buffering(
             )
 
 
+def test_console_chat_stream_exposes_server_turn_identity(monkeypatch) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _IdentityTracker(_FakeTaskTracker):
+        async def attach_or_start(
+            self,
+            _run_key,
+            _payload,
+            _stream_fn,
+            *,
+            msgid=None,
+            **_kwargs,
+        ):
+            assert msgid is not None
+            return object(), True
+
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=_IdentityTracker(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    response = TestClient(app).post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json={
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hi"}],
+                },
+            ],
+            "session_id": "session-1",
+            "user_id": "user-1",
+            "channel": "console",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-swe-chatid"] == "chat:session-1"
+    assert response.headers["x-swe-msgid"]
+    assert response.headers["x-swe-sessionid"] == "session-1"
+
+
 def test_console_chat_copies_b3_trace_id_to_native_meta(monkeypatch) -> None:
     app = FastAPI()
     app.include_router(console_router.router)
