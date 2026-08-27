@@ -3,10 +3,46 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from swe.agents.react_agent import SWEAgent
 from swe.agents.tool_guard_mixin import ToolGuardMixin
+from trace_sdk import chat_traced
+from trace_sdk._records import reset, spans
+
+
+@chat_traced(output_arguments_factory=lambda result: {"answer": result})
+async def _traced_sample() -> str:
+    return "done"
+
+
+@chat_traced(output_arguments_factory=lambda result: {"answer": result})
+async def _traced_failure() -> str:
+    raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_fake_sdk_records_output_factory_value():
+    reset()
+
+    await _traced_sample()
+
+    assert json.loads(spans[0]["attributes"]["cmb.output.arguments"]) == {
+        "answer": "done",
+    }
+
+
+@pytest.mark.asyncio
+async def test_fake_sdk_does_not_record_output_for_failed_call():
+    reset()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await _traced_failure()
+
+    assert "cmb.output.arguments" not in spans[0]["attributes"]
 
 
 def test_reasoning_uses_chat_traced_without_output_capture() -> None:
@@ -49,5 +85,6 @@ def test_common_tool_execution_uses_execute_tool_traced() -> None:
     )
     assert config["output_arguments_factory"]({"content": "tool output"}) == {}
     assert not hasattr(
-        ToolGuardMixin._run_approved_tool_call, "_trace_sdk_config",
+        ToolGuardMixin._run_approved_tool_call,
+        "_trace_sdk_config",
     )
