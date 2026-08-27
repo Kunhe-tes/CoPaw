@@ -1359,7 +1359,7 @@ async def test_build_lazy_mcp_clients_defers_client_creation_until_discovery(
 
 
 @pytest.mark.asyncio
-async def test_build_lazy_mcp_clients_never_forwards_user_headers_to_marketplace(
+async def test_build_lazy_mcp_clients_forwards_all_user_headers_to_marketplace(
     monkeypatch,
 ) -> None:
     import swe.app.runner.runner as runner_module
@@ -1390,12 +1390,20 @@ async def test_build_lazy_mcp_clients_never_forwards_user_headers_to_marketplace
         ),
         tenant_id="tenant-a",
         user_id="user-a",
-        passthrough_headers={"Authorization": "Bearer user-token"},
+        passthrough_headers={
+            "Authorization": "Bearer user-token",
+            "cookie": "sid=abc",
+            "X-B3-Traceid": "trace-1",
+        },
     )
 
     await clients[0].list_tools()
 
-    assert create_client.await_args.args[1] is None
+    assert create_client.await_args.args[1] == {
+        "Authorization": "Bearer user-token",
+        "cookie": "sid=abc",
+        "X-B3-Traceid": "trace-1",
+    }
 
 
 @pytest.mark.asyncio

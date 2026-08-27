@@ -1153,13 +1153,7 @@ def _build_lazy_mcp_clients(
         if not client_config.enabled:
             continue
 
-        effective_passthrough_headers = (
-            None
-            if str(getattr(client_config, "source", "") or "").startswith(
-                "marketplace:",
-            )
-            else passthrough_headers
-        )
+        effective_passthrough_headers = passthrough_headers
 
         config_payload = client_config.model_dump(mode="json")
         config_fingerprint = hashlib.sha256(
