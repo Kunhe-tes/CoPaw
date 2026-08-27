@@ -27,7 +27,10 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
 
-from ..mcp.http_headers import build_mcp_http_headers
+from ..mcp.http_headers import (
+    _filter_passthrough_headers,
+    build_mcp_http_headers,
+)
 from ..mcp.lazy_client import LazyMCPClient, get_mcp_tool_discovery_cache
 from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
@@ -1166,7 +1169,11 @@ def _build_lazy_mcp_clients(
         request_scope_headers = {
             header_name.casefold(): header_value
             for header_name, header_value in (
-                effective_passthrough_headers or {}
+                _filter_passthrough_headers(
+                    effective_passthrough_headers,
+                    url=getattr(client_config, "url", None),
+                )
+                or {}
             ).items()
         }
         request_scope_fingerprint = hashlib.sha256(
