@@ -50,10 +50,13 @@ async def _wake_goal_after_subagent(
     from ...app.goals.registry import get_goal_service
 
     terminal = await supervisor.wait_for_run(scope, run_id)
-    if terminal is None:
+    if terminal is None or terminal.status not in {"completed", "partial"}:
         return
     service = get_goal_service()
     if service is not None:
+        goal = await service.get(goal_id)
+        if getattr(getattr(goal, "state", None), "value", None) != "WAITING":
+            return
         await service.wake(goal_id, "Background SubAgent completed")
 
 
@@ -213,6 +216,9 @@ def create_background_subagent_tools(
                 )
             spec = DelegationSpec(
                 parent_thread_id=str(request_context.get("session_id") or ""),
+                parent_chat_id=str(request_context.get("chat_id") or ""),
+                parent_msgid=str(request_context.get("msgid") or ""),
+                goal_id=str(request_context.get("goal_id") or ""),
                 name=start_request.name,
                 objective=start_request.objective,
                 background=start_request.background,

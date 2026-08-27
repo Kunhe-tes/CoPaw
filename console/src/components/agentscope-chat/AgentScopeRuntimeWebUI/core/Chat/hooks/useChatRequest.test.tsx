@@ -538,6 +538,55 @@ describe("useChatRequest", () => {
     );
   });
 
+  it("uses the stream turn identity when stopping a started request", async () => {
+    const abortController = new AbortController();
+    const owner = createOwner({ chatId: null });
+    const currentQARef = {
+      current: {
+        abortController,
+        activeRequestOwner: owner,
+        response: {
+          id: "ui-response-a",
+          msgStatus: "generating",
+          cards: [],
+        },
+      },
+    } as CurrentQARef;
+    mocks.fetch.mockResolvedValue({
+      ok: true,
+      body: {},
+      headers: new Headers({
+        "X-Swe-Chatid": "chat-real-a",
+        "X-Swe-Msgid": "turn-a",
+        "X-Swe-Sessionid": "logical-a",
+      }),
+    } as Response);
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={vi.fn()}
+        onFinish={vi.fn()}
+      />,
+    );
+
+    const requestPromise = hookApi.request([], undefined, owner);
+    await waitFor(() => expect(owner.msgid).toBe("turn-a"));
+    await act(async () => {
+      await hookApi.cancelActiveRequest();
+    });
+    mocks.streamGate.resolve();
+    await requestPromise;
+
+    expect(mocks.cancel).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chat_id: "chat-real-a",
+        msgid: "turn-a",
+        logical_session_id: "logical-a",
+      }),
+    );
+  });
+
   it("finishes on completed response frames even when output is empty", async () => {
     mocks.fetch.mockResolvedValue({
       ok: true,

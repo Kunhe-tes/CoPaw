@@ -326,4 +326,29 @@ describe("useChatController", () => {
       { refreshList: false },
     );
   });
+
+  it("keeps the composer locked until the Stop request settles", async () => {
+    render(<Harness />);
+    mocks.setLoading.mockClear();
+    let finishStop: (() => void) | undefined;
+    mocks.cancelActiveRequest.mockImplementation(
+      () => new Promise<void>((resolve) => (finishStop = resolve)),
+    );
+    latestCurrentQARef!.current.response = {
+      id: "response-a",
+      msgStatus: "generating",
+      cards: [],
+    };
+
+    const stopPromise = latestController!.handleCancel();
+    await waitFor(() => expect(mocks.setLoading).toHaveBeenCalledWith(true));
+    expect(mocks.setLoading).not.toHaveBeenCalledWith(false);
+
+    finishStop?.();
+    await act(async () => {
+      await stopPromise;
+    });
+
+    expect(mocks.setLoading).toHaveBeenCalledWith(false);
+  });
 });

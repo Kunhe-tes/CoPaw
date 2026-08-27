@@ -482,6 +482,182 @@ async def test_admission_command_and_denial_cleanup_run_in_one_session_transacti
 
 
 @pytest.mark.asyncio
+async def test_admission_persists_user_anchor_before_preflight_and_agent_start(
+    monkeypatch,
+) -> None:
+    from swe.app.runner.query_execution import admission
+
+    session = _RecordingSession()
+    events: list[str] = []
+
+    class Owner:
+        def __init__(self) -> None:
+            self.session = session
+
+        async def _prepare_query_preflight(self, **_kwargs: Any):
+            events.append("preflight")
+            assert session.active_execution is not None
+            assert (
+                session.active_execution.state["turn_states"]["msg-1"][
+                    "status"
+                ]
+                == "admitted"
+            )
+            return _QueryPreflight(
+                response=Msg(
+                    name="Friday",
+                    role="assistant",
+                    content="blocked",
+                ),
+                cleanup_denied_memory=True,
+            )
+
+        async def _cleanup_denied_session_memory(self, **_kwargs: Any) -> None:
+            events.append("cleanup")
+
+    msg = Msg(name="user-1", role="user", content="hello")
+    msg.id = "msg-1"
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel_meta={"msgid": "msg-1"},
+    )
+    async for _item in admission.stream_admission(
+        Owner(),
+        [msg],
+        request=request,
+        query="hello",
+        session_id="session-1",
+        user_id="user-1",
+    ):
+        pass
+
+    assert events == ["preflight", "cleanup"]
+    assert session.commit_count == 1
+    assert (
+        session.committed_states[0]["turn_states"]["msg-1"]["message"][
+            "content"
+        ]
+        == "hello"
+    )
+
+
+@pytest.mark.asyncio
+async def test_admission_does_not_persist_control_command_as_user_turn(
+    monkeypatch,
+) -> None:
+    from swe.app.runner.query_execution import admission
+
+    session = _RecordingSession()
+
+    class Owner:
+        def __init__(self) -> None:
+            self.session = session
+
+        async def _prepare_query_preflight(self, **_kwargs: Any):
+            return _QueryPreflight()
+
+        async def _start_query_trace(self, *_args: Any) -> None:
+            return None
+
+        async def _end_trace_if_needed(self, *_args: Any) -> None:
+            return None
+
+    async def command_path(*_args: Any, **_kwargs: Any):
+        yield Msg(name="Friday", role="assistant", content="done"), True
+
+    monkeypatch.setattr(admission, "run_command_path", command_path)
+    command = Msg(name="user-1", role="user", content="/new")
+    command.id = "command-msg-1"
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        channel_meta={"msgid": "command-msg-1"},
+    )
+
+    async for _item in admission.stream_admission(
+        Owner(),
+        [command],
+        request=request,
+        query="/new",
+        session_id="session-1",
+        user_id="user-1",
+    ):
+        pass
+
+    assert session.commit_count == 0
+    assert session.active_execution is None
+
+
+def test_admitted_user_anchor_is_removed_from_loaded_agent_memory_before_reply() -> (
+    None
+):
+    from swe.app.runner.session_lifecycle import discard_admitted_user_anchor
+
+    anchor = Msg(name="user-1", role="user", content="hello")
+    anchor.id = "msg-1"
+    earlier = Msg(name="Friday", role="assistant", content="previous")
+    memory = SimpleNamespace(content=[(earlier, []), (anchor, [])])
+    agent = SimpleNamespace(memory=memory)
+
+    assert discard_admitted_user_anchor(agent, "msg-1") is True
+    assert memory.content == [(earlier, [])]
+
+
+def test_mark_stopped_turn_state_marks_last_displayable_assistant_message() -> (
+    None
+):
+    from swe.app.runner.session_lifecycle import mark_stopped_turn_state
+
+    state = {
+        "agent": {
+            "memory": {
+                "content": [
+                    [
+                        {
+                            "id": "user-1",
+                            "role": "user",
+                            "content": "hello",
+                        },
+                        [],
+                    ],
+                    [
+                        {
+                            "id": "assistant-1",
+                            "role": "assistant",
+                            "content": [{"type": "text", "text": "partial"}],
+                        },
+                        [],
+                    ],
+                ],
+            },
+        },
+    }
+
+    mark_stopped_turn_state(state, "user-1")
+
+    assert state["turn_states"]["user-1"]["status"] == "stopped"
+    assert (
+        state["agent"]["memory"]["content"][1][0]["metadata"]["turn_status"]
+        == "stopped"
+    )
+
+
+def test_mark_stopped_agent_memory_marks_last_assistant_message() -> None:
+    from swe.app.runner.session_lifecycle import mark_stopped_agent_memory
+
+    anchor = Msg(name="user-1", role="user", content="hello")
+    anchor.id = "msg-1"
+    assistant = Msg(name="Friday", role="assistant", content="partial")
+    agent = SimpleNamespace(
+        memory=SimpleNamespace(content=[(anchor, []), (assistant, [])]),
+    )
+
+    assert mark_stopped_agent_memory(agent, "msg-1") is True
+    assert assistant.metadata["turn_status"] == "stopped"
+
+
+@pytest.mark.asyncio
 async def test_admission_releases_transaction_before_normal_query_resource_cleanup() -> (
     None
 ):

@@ -24,10 +24,7 @@ import {
   isActiveChatRequestOwner,
   type ChatRequestOwner,
 } from "./requestOwnership";
-import {
-  createChatStreamAbortReason,
-  isAbortLikeError,
-} from "./abortReasons";
+import { createChatStreamAbortReason, isAbortLikeError } from "./abortReasons";
 import { emit } from "../../Context/useChatAnywhereEventEmitter";
 
 export const CONVERSATION_COMPACTION_EVENT = "conversation_compacted";
@@ -238,6 +235,12 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
   const processSSEResponse = useCallback(
     async (response: Response, owner: ChatRequestOwner) => {
+      const responseMsgid = response.headers?.get("X-Swe-Msgid");
+      const responseChatId = response.headers?.get("X-Swe-Chatid");
+      const responseSessionId = response.headers?.get("X-Swe-Sessionid");
+      if (responseMsgid) owner.msgid = responseMsgid;
+      if (responseChatId) owner.chatId = responseChatId;
+      if (responseSessionId) owner.logicalSessionId = responseSessionId;
       const responseHeaderTimestamp = getResponseHeaderTimestamp();
       const isOwnerActive = () =>
         isActiveChatRequestOwner(
@@ -287,6 +290,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
               session_id: owner.sessionId,
               logical_session_id: owner.logicalSessionId,
               chat_id: owner.chatId,
+              msgid: owner.msgid,
             }),
           ).catch((error) => {
             console.error(error);
@@ -448,10 +452,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             (chunkData as { object?: unknown }).object ===
               "wplus_sop_entry_proposal"
           ) {
-            if (
-              currentQARef.current.response &&
-              isLiveResponseMounted()
-            ) {
+            if (currentQARef.current.response && isLiveResponseMounted()) {
               currentQARef.current.response.cards = [
                 {
                   code: "WPlusSopEntryProposal",
@@ -701,6 +702,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           session_id: activeSessionId,
           logical_session_id: activeOwner?.logicalSessionId,
           chat_id: activeOwner?.chatId,
+          msgid: activeOwner?.msgid,
         }),
       ).catch((error) => {
         console.error(error);

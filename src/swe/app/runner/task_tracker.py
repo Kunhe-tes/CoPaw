@@ -71,6 +71,23 @@ class TaskTracker:
             return "idle"
         return state.status
 
+    async def is_turn_stopping(
+        self,
+        run_key: str,
+        msgid: str | None,
+    ) -> bool:
+        """Return whether the exact active answer turn has accepted Stop."""
+        if not run_key or not msgid:
+            return False
+        async with self._lock:
+            state = self._runs.get(run_key)
+            return bool(
+                state is not None
+                and not state.task.done()
+                and state.msgid == msgid
+                and state.status == "stopping",
+            )
+
     async def get_run_identity(
         self,
         run_key: str,

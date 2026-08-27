@@ -3437,6 +3437,9 @@ class AgentRunner(Runner):
             "channel": channel,
             "chat_id": chat.id if chat is not None else "",
             "turn_id": turn_id,
+            "msgid": (getattr(request, "channel_meta", None) or {}).get(
+                "msgid",
+            ),
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
             "agent_role": "main",
@@ -3445,6 +3448,7 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "_task_tracker": self._task_tracker,
             "cron_execution_key": getattr(
                 request,
                 "cron_execution_key",
@@ -4711,6 +4715,41 @@ class AgentRunner(Runner):
         if agent is not None:
             await agent.interrupt()
         raise AgentException("Task has been cancelled!") from exc
+
+    async def _settle_stopped_turn(
+        self,
+        *,
+        runtime: _QueryRuntime | None,
+        request: AgentRequest,
+        session_execution: Any,
+    ) -> None:
+        """Persist terminal Stop evidence without exposing persistence errors."""
+        if session_execution is None:
+            return
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        chat_id = channel_meta.get("chat_id")
+        msgid = channel_meta.get("msgid")
+        if not isinstance(chat_id, str) or not isinstance(msgid, str):
+            return
+        tracker = self._task_tracker
+        if tracker is None or await tracker.get_status(chat_id) != "stopping":
+            return
+        from .session_lifecycle import (
+            mark_stopped_agent_memory,
+            mark_stopped_turn_state,
+        )
+
+        try:
+            if runtime is not None:
+                mark_stopped_agent_memory(runtime.agent, msgid)
+            mark_stopped_turn_state(session_execution.state, msgid)
+            await session_execution.commit_state(session_execution.state)
+        except Exception:
+            logger.exception(
+                "Failed to persist stopped turn state chat_id=%s msgid=%s",
+                chat_id,
+                msgid,
+            )
 
     async def _handle_query_error(
         self,

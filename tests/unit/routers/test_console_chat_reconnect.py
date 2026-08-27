@@ -326,6 +326,37 @@ def test_console_chat_stop_returns_turn_bound_claim(monkeypatch) -> None:
     }
 
 
+def test_cancel_console_turn_subagents_does_not_cancel_goal_history() -> None:
+    cancelled_turns: list[tuple[str, str, str]] = []
+    cancelled_runs: list[str] = []
+
+    class _Supervisor:
+        async def cancel_turn_runs(self, scope, *, chat_id: str, msgid: str):
+            assert scope is not None
+            cancelled_turns.append(("scope", chat_id, msgid))
+
+        async def cancel(self, _scope, run_id: str):
+            cancelled_runs.append(run_id)
+
+    workspace = SimpleNamespace(
+        config=SimpleNamespace(),
+        tenant_id="tenant-1",
+        agent_id="agent-1",
+        subagent_supervisor=_Supervisor(),
+    )
+
+    asyncio.run(
+        console_router._cancel_console_turn_subagents(
+            workspace,
+            "chat-1",
+            "msg-current",
+        ),
+    )
+
+    assert cancelled_turns == [("scope", "chat-1", "msg-current")]
+    assert cancelled_runs == []
+
+
 def test_console_chat_stop_without_caller_identity_is_an_idle_noop(
     monkeypatch,
 ) -> None:
@@ -396,7 +427,9 @@ def test_console_chat_stop_session_fallback_rejects_ambiguous_active_turns(
             ]
 
         async def get_chat(self, _chat_id: str):
-            raise AssertionError("ambiguous early Stop must not resolve a chat")
+            raise AssertionError(
+                "ambiguous early Stop must not resolve a chat",
+            )
 
     class _StopTracker:
         async def get_run_identity(self, chat_id: str):

@@ -680,7 +680,9 @@ def _extract_goal_id(request_data: Union[AgentRequest, dict]) -> str | None:
     """Carry the server-owned Goal id into the existing Console run path."""
     if isinstance(request_data, AgentRequest):
         channel_meta = getattr(request_data, "channel_meta", None) or {}
-        value = getattr(request_data, "goal_id", None) or channel_meta.get("goal_id")
+        value = getattr(request_data, "goal_id", None) or channel_meta.get(
+            "goal_id",
+        )
     else:
         value = request_data.get("goal_id")
         channel_meta = request_data.get("channel_meta")
@@ -691,7 +693,9 @@ def _extract_goal_id(request_data: Union[AgentRequest, dict]) -> str | None:
     return value.strip()
 
 
-def _extract_goal_mode_enabled(request_data: Union[AgentRequest, dict]) -> bool:
+def _extract_goal_mode_enabled(
+    request_data: Union[AgentRequest, dict],
+) -> bool:
     """Read the explicit, one-request Goal Mode selector."""
     if isinstance(request_data, AgentRequest):
         channel_meta = getattr(request_data, "channel_meta", None) or {}
@@ -1105,6 +1109,9 @@ async def _start_new_chat(
         native_payload["meta"]["scenario_preset_snapshot"] = snapshot
         native_payload["meta"]["scenario_preset_snapshot_source"] = "chat_meta"
     native_payload["meta"]["chat_id"] = chat.id
+    get_status = getattr(tracker, "get_status", None)
+    if callable(get_status) and await get_status(chat.id) == "stopping":
+        raise HTTPException(status_code=409, detail="Chat is stopping")
     # Inject session_channel from chat record so downstream (e.g. session-end
     # push) can identify the session's original channel (e.g. zhaohu).
     if chat.channel and chat.channel != "console":
@@ -1841,6 +1848,77 @@ async def _claim_console_stop(
     return accepted, chat_id if accepted else None, msgid, "stopping"
 
 
+async def _cancel_console_turn_subagents(
+    workspace: Any,
+    chat_id: str,
+    msgid: str,
+) -> None:
+    """Best-effort cancel locally managed SubAgents for an accepted Stop."""
+    try:
+        from ...agents.tools.subagent_background import (
+            build_background_subagent_scope,
+            get_default_background_subagent_supervisor,
+        )
+
+        config = workspace.config
+        request_context = {
+            "tenant_id": getattr(workspace, "tenant_id", None),
+            "agent_id": getattr(workspace, "agent_id", None),
+            "chat_id": chat_id,
+            "msgid": msgid,
+        }
+        supervisor = getattr(workspace, "subagent_supervisor", None)
+        if supervisor is None:
+            supervisor = get_default_background_subagent_supervisor()
+        scope = build_background_subagent_scope(
+            parent_agent_config=config,
+            request_context=request_context,
+        )
+        cancel_turn_runs = getattr(supervisor, "cancel_turn_runs", None)
+        if callable(cancel_turn_runs):
+            await cancel_turn_runs(scope, chat_id=chat_id, msgid=msgid)
+    except Exception:
+        logger.exception(
+            "Failed to cancel stopped-turn SubAgents chat_id=%s msgid=%s",
+            chat_id,
+            msgid,
+        )
+
+
+async def _interrupt_console_goal(
+    workspace: Any,
+    chat_id: str,
+    msgid: str,
+) -> None:
+    """Interrupt an active Goal owned by the stopped Chat, if any."""
+    try:
+        from ..goals.registry import get_goal_service
+
+        service = get_goal_service()
+        if service is None:
+            return
+        goal = await service.recent_for_chat(chat_id)
+        if goal is None:
+            return
+        interrupt_turn_if_matches = getattr(
+            service,
+            "interrupt_turn_if_matches",
+            None,
+        )
+        if not callable(interrupt_turn_if_matches):
+            return
+        await interrupt_turn_if_matches(
+            goal.goal_id,
+            msgid,
+            "Chat Stop interrupted the active Goal turn",
+        )
+    except Exception:
+        logger.exception(
+            "Failed to interrupt Goal for stopped Chat %s",
+            chat_id,
+        )
+
+
 @router.post(
     "/chat/stop",
     status_code=200,
@@ -1865,6 +1943,7 @@ async def post_console_chat_stop(
         request,
     )
     if not request_user_id:
+        logger.warning("Rejected Console Stop without caller identity")
         return {"stopped": False, "accepted": False, "status": "idle"}
     if target_chat_id is None and session_id:
         candidates = await workspace.chat_manager.list_chats(
@@ -1877,7 +1956,9 @@ async def post_console_chat_stop(
             if chat.session_id == session_id
             and (
                 not request_source_id
-                or str((getattr(chat, "meta", None) or {}).get("source_id") or "")
+                or str(
+                    (getattr(chat, "meta", None) or {}).get("source_id") or "",
+                )
                 == request_source_id
             )
         ]
@@ -1918,6 +1999,30 @@ async def post_console_chat_stop(
     )
     if not accepted:
         return {"stopped": False, "accepted": False, "status": "idle"}
+    if isinstance(claimed_chat_id, str) and isinstance(claimed_msgid, str):
+        try:
+            from ..approvals import get_approval_service
+
+            await get_approval_service().supersede_pending_for_turn(
+                claimed_chat_id,
+                claimed_msgid,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to supersede stopped-turn approvals chat_id=%s msgid=%s",
+                claimed_chat_id,
+                claimed_msgid,
+            )
+        await _interrupt_console_goal(
+            workspace,
+            claimed_chat_id,
+            claimed_msgid,
+        )
+        await _cancel_console_turn_subagents(
+            workspace,
+            claimed_chat_id,
+            claimed_msgid,
+        )
     return {
         "stopped": True,
         "accepted": True,
