@@ -47,6 +47,39 @@ async def test_stop_claim_requires_matching_turn_id_and_does_not_cancel_immediat
 
 
 @pytest.mark.asyncio
+async def test_console_legacy_stop_is_cooperative_and_exposes_active_turn_id():
+    tracker = TaskTracker()
+    release_stream = asyncio.Event()
+
+    async def _stream_fn(_payload):
+        yield 'data: {"before": true}\n\n'
+        await release_stream.wait()
+
+    queue, is_new = await tracker.attach_or_start(
+        "chat-console-legacy",
+        {},
+        _stream_fn,
+        msgid="turn-server",
+    )
+    assert is_new is True
+    assert await queue.get()
+
+    identity = await tracker.get_run_identity("chat-console-legacy")
+    assert identity == ("chat-console-legacy", "turn-server")
+
+    claim = await tracker.claim_stop(
+        "chat-console-legacy",
+        cooperative=True,
+    )
+    assert claim.accepted is True
+    assert claim.msgid == "turn-server"
+    assert await tracker.get_status("chat-console-legacy") == "stopping"
+
+    release_stream.set()
+    await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
+
+
+@pytest.mark.asyncio
 async def test_stop_claim_freezes_output_for_existing_and_reconnecting_subscribers():
     tracker = TaskTracker()
     release_stream = asyncio.Event()

@@ -1029,6 +1029,9 @@ async def _start_new_chat(
         if getattr(workspace, "agent_id", None)
         else {}
     )
+    source_id = native_payload["meta"].get("source_id")
+    if source_id:
+        chat_meta["source_id"] = source_id
     created = False
     if scenario_preset_id:
         from ..scenario_preset.router import (
@@ -1128,6 +1131,14 @@ async def _start_new_chat(
         if scenario_preset_id and created:
             await workspace.chat_manager.delete_chats([chat.id])
         raise
+    msgid = await _resolve_console_turn_identity(
+        tracker,
+        chat.id,
+        msgid,
+        is_new_run=is_new_run,
+    )
+    if msgid is not None:
+        native_payload["meta"]["msgid"] = msgid
     if include_run_status:
         return queue, chat.id, msgid, is_new_run
     return queue, chat.id, msgid
@@ -1163,6 +1174,22 @@ async def _attach_console_run(
             stream_fn,
             **kwargs,
         )
+
+
+async def _resolve_console_turn_identity(
+    tracker: Any,
+    run_key: str,
+    proposed_msgid: str,
+    *,
+    is_new_run: bool,
+) -> str | None:
+    """Return an advertised turn ID only when it names the active run."""
+    get_run_identity = getattr(tracker, "get_run_identity", None)
+    if callable(get_run_identity):
+        identity = await get_run_identity(run_key)
+        if identity is not None and identity[0] == run_key:
+            return identity[1]
+    return proposed_msgid if is_new_run else None
 
 
 def _validate_console_chat_identity(
@@ -1767,6 +1794,53 @@ async def _dispatch_console_stream(
     )
 
 
+def _console_stop_request_identity(request: Request) -> tuple[str, str]:
+    """Return the caller identity available to the Console Stop endpoint."""
+    user_id = str(
+        getattr(request.state, "user_id", None)
+        or request.headers.get("X-User-Id")
+        or "",
+    ).strip()
+    source_id = str(
+        getattr(request.state, "source_id", None)
+        or request.headers.get("X-Source-Id")
+        or "",
+    ).strip()
+    return user_id, source_id
+
+
+async def _claim_console_stop(
+    tracker: Any,
+    chat_id: str,
+    msgid: str | None,
+) -> tuple[bool, str | None, str | None, str]:
+    """Claim a cooperative Stop while tolerating pre-turn tracker adapters."""
+    claim_stop = getattr(tracker, "claim_stop", None)
+    if callable(claim_stop):
+        try:
+            claim = await claim_stop(
+                chat_id,
+                msgid=msgid,
+                cooperative=True,
+            )
+        except TypeError as exc:
+            if "cooperative" not in str(exc):
+                raise
+            claim = await claim_stop(chat_id, msgid=msgid)
+        return (
+            bool(claim.accepted),
+            claim.chat_id,
+            claim.msgid,
+            claim.status,
+        )
+
+    request_stop = getattr(tracker, "request_stop", None)
+    if not callable(request_stop):
+        return False, None, None, "idle"
+    accepted = bool(await request_stop(chat_id))
+    return accepted, chat_id if accepted else None, msgid, "stopping"
+
+
 @router.post(
     "/chat/stop",
     status_code=200,
@@ -1787,11 +1861,37 @@ async def post_console_chat_stop(
     target_chat_id = chat_id
     if target_chat_id is None and msgid is not None:
         return {"stopped": False, "accepted": False, "status": "idle"}
+    request_user_id, request_source_id = _console_stop_request_identity(
+        request,
+    )
+    if not request_user_id:
+        return {"stopped": False, "accepted": False, "status": "idle"}
     if target_chat_id is None and session_id:
-        target_chat_id = await workspace.chat_manager.get_chat_id_by_session(
-            session_id,
-            "console",
+        candidates = await workspace.chat_manager.list_chats(
+            user_id=request_user_id,
+            channel="console",
         )
+        matches = [
+            chat
+            for chat in candidates
+            if chat.session_id == session_id
+            and (
+                not request_source_id
+                or str((getattr(chat, "meta", None) or {}).get("source_id") or "")
+                == request_source_id
+            )
+        ]
+        get_run_identity = getattr(tracker, "get_run_identity", None)
+        if not callable(get_run_identity):
+            return {"stopped": False, "accepted": False, "status": "idle"}
+        active_matches = [
+            chat
+            for chat in matches
+            if await get_run_identity(chat.id) is not None
+        ]
+        if len(active_matches) != 1:
+            return {"stopped": False, "accepted": False, "status": "idle"}
+        target_chat_id = active_matches[0].id
     if target_chat_id is None:
         return {"stopped": False, "accepted": False, "status": "idle"}
     chat = await workspace.chat_manager.get_chat(target_chat_id)
@@ -1801,25 +1901,29 @@ async def post_console_chat_stop(
             target_chat_id,
         )
         return {"stopped": False, "accepted": False, "status": "idle"}
-    request_user_id = str(getattr(request.state, "user_id", "") or "")
+    chat_meta = getattr(chat, "meta", None) or {}
+    chat_source_id = str(chat_meta.get("source_id") or "").strip()
     if (
-        request_user_id
-        and str(getattr(chat, "user_id", "")) != request_user_id
+        not request_user_id
+        or str(getattr(chat, "user_id", "")) != request_user_id
+        or (chat_source_id and chat_source_id != request_source_id)
     ):
         logger.warning(
             "Rejected Console Stop ownership chat_id=%s",
             target_chat_id,
         )
         return {"stopped": False, "accepted": False, "status": "idle"}
-    claim = await tracker.claim_stop(target_chat_id, msgid=msgid)
-    if not claim.accepted:
+    accepted, claimed_chat_id, claimed_msgid, status = (
+        await _claim_console_stop(tracker, target_chat_id, msgid)
+    )
+    if not accepted:
         return {"stopped": False, "accepted": False, "status": "idle"}
     return {
         "stopped": True,
         "accepted": True,
-        "status": claim.status,
-        "chat_id": claim.chat_id,
-        "msgid": claim.msgid,
+        "status": status,
+        "chat_id": claimed_chat_id,
+        "msgid": claimed_msgid,
     }
 
 
