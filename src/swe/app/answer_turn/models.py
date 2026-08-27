@@ -29,7 +29,7 @@ class TurnIdentity:
     turn_id: str
 
     def __post_init__(self) -> None:
-        if not all(isinstance(value, str) and value for value in (self.chat_id, self.msgid, self.turn_id)):
+        if not all(isinstance(value, str) and value for value in (self.chat_id, self.msgid, self.turn_id)) or not self.turn_id.startswith("turn-"):
             raise ValueError("chat_id, msgid, and turn_id are required")
 
     @classmethod
@@ -43,8 +43,9 @@ class TurnIdentity:
 
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
-    status: TurnStatus
     identity: TurnIdentity
+    status: TurnStatus
+    reason: str | None = None
     result: Any = None
     error: BaseException | str | None = None
     assistant_text: str | None = None
@@ -69,8 +70,8 @@ class TurnOutcome:
         result: Any = None,
     ) -> "TurnOutcome":
         return cls(
-            TurnStatus.COMPLETED,
             identity,
+            TurnStatus.COMPLETED,
             result,
             None,
             assistant_text,
@@ -83,7 +84,7 @@ class TurnOutcome:
         *,
         result: Any = None,
     ) -> "TurnOutcome":
-        return cls(TurnStatus.CANCELLED, identity, result=result)
+        return cls(identity, TurnStatus.CANCELLED, result=result)
 
     @classmethod
     def failed(
@@ -91,7 +92,7 @@ class TurnOutcome:
         identity: TurnIdentity,
         error: BaseException | str,
     ) -> "TurnOutcome":
-        return cls(TurnStatus.FAILED, identity, error=error)
+        return cls(identity, TurnStatus.FAILED, error=error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,3 +107,6 @@ class StopClaim:
     accepted: bool
     identity: TurnIdentity | None = None
     status: TurnStatus | None = None
+
+
+StopClaimResult = StopClaim

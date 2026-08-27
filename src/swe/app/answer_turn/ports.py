@@ -10,8 +10,8 @@ from .models import TurnIdentity, TurnOutcome
 Producer = Callable[[TurnIdentity, Any], Awaitable[Any]]
 
 
-class StreamPort(Protocol):
-    async def start(
+class TurnStreamPort(Protocol):
+    async def attach_or_start(
         self,
         identity: TurnIdentity,
         payload: Any,
@@ -19,14 +19,14 @@ class StreamPort(Protocol):
     ) -> Any:
         pass
 
-    async def attach(self, identity: TurnIdentity) -> Any | None:
+    async def stream(self, identity: TurnIdentity, queue: Any):
         pass
 
     async def close(self, identity: TurnIdentity) -> None:
         pass
 
 
-class ExecutionPort(Protocol):
+class TurnExecutionPort(Protocol):
     async def request_cooperative_stop(self, identity: TurnIdentity) -> None:
         pass
 
@@ -34,8 +34,8 @@ class ExecutionPort(Protocol):
         pass
 
 
-class SessionPort(Protocol):
-    async def persist(
+class TurnSessionPort(Protocol):
+    async def persist_outcome(
         self,
         identity: TurnIdentity,
         outcome: TurnOutcome,
@@ -43,16 +43,24 @@ class SessionPort(Protocol):
         pass
 
 
-class GoalPort(Protocol):
-    async def interrupt(self, identity: TurnIdentity) -> None:
+class TurnGoalPort(Protocol):
+    async def interrupt_if_matches(self, identity: TurnIdentity, reason: str) -> None:
         pass
 
 
-class SubagentPort(Protocol):
-    async def cancel(self, identity: TurnIdentity) -> None:
+class TurnSubAgentPort(Protocol):
+    async def cancel_for_turn(self, identity: TurnIdentity) -> None:
         pass
 
 
-class ApprovalPort(Protocol):
-    async def supersede(self, identity: TurnIdentity) -> None:
+class TurnApprovalPort(Protocol):
+    async def supersede_for_turn(self, identity: TurnIdentity) -> None:
         pass
+
+
+StreamPort = TurnStreamPort
+ExecutionPort = TurnExecutionPort
+SessionPort = TurnSessionPort
+GoalPort = TurnGoalPort
+SubagentPort = TurnSubAgentPort
+ApprovalPort = TurnApprovalPort
