@@ -59,7 +59,6 @@ class AnswerTurnCoordinator:
         self.approval = approval
         self.hard_cancel_delay = hard_cancel_delay
         self._turns: dict[str, _TurnState] = {}
-        self._settled: dict[TurnIdentity, TurnOutcome] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._global_lock = asyncio.Lock()
 
@@ -165,7 +164,14 @@ class AnswerTurnCoordinator:
                 return
             if state.status in TERMINAL_STATUSES:
                 return
-        await self.execution.hard_cancel(identity)
+        lock = await self._chat_lock(identity.chat_id)
+        async with lock:
+            state = self._turns.get(identity.chat_id)
+            if state is None or state.identity != identity:
+                return
+            if state.status in TERMINAL_STATUSES:
+                return
+            await self.execution.hard_cancel(identity)
 
     async def settle(
         self,
@@ -189,7 +195,6 @@ class AnswerTurnCoordinator:
             state.settlement_started = True
             state.status = outcome.status
             state.outcome = outcome
-            self._settled[identity] = outcome
         await self.session.persist(identity, outcome)
         await self.stream.close(identity)
         lock = await self._chat_lock(identity.chat_id)
