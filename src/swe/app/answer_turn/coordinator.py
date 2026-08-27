@@ -121,7 +121,10 @@ class AnswerTurnCoordinator:
         identity: TurnIdentity | str,
         *,
         msgid: str | None = None,
+        internal: bool = False,
     ) -> StopClaim:
+        if msgid is None and not internal:
+            return StopClaim(False, status=None)
         if isinstance(identity, str):
             async with self._global_lock:
                 current = self._turns.get(identity)
