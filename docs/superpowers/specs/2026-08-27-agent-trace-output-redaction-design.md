@@ -40,14 +40,15 @@ Tool Spans export one of these structures:
 {
   "status": "ok",
   "output_bytes": 128,
-  "truncated": false,
-  "output_sha256": "..."
+  "truncated": false
 }
 ```
 
 The second form applies to shell commands, file-reading tools, and all MCP
-tools unless a future explicit allowlist permits a preview. Error, empty, and
-timeout outcomes use `status` values of `error`, `empty`, and `timeout`.
+tools unless a future explicit allowlist permits a preview. It deliberately
+does not include an unkeyed output digest, because low-entropy output can be
+identified by hash comparison. Error, empty, and timeout outcomes use `status`
+values of `error`, `empty`, and `timeout`.
 
 Never export `Msg.metadata`, attachments, provider raw responses, full tool
 result blocks, tool invocation arguments, or arbitrary object fields.
