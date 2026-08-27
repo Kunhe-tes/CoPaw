@@ -93,7 +93,7 @@ async def test_claim_stop_orders_effects_and_is_idempotent():
     assert duplicate.accepted is True
     assert adapters["approval"].calls == [lease.identity]
     await coordinator.settle(
-        TurnOutcome.cancelled(lease.identity, result="stopped")
+        TurnOutcome.cancelled(lease.identity, result="stopped"),
     )
 
 
