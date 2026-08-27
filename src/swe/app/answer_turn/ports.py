@@ -37,7 +37,6 @@ class TurnExecutionPort(Protocol):
 class TurnSessionPort(Protocol):
     async def persist_outcome(
         self,
-        identity: TurnIdentity,
         outcome: TurnOutcome,
     ) -> None:
         pass
