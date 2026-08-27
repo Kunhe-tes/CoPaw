@@ -8,6 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.swe.app.routers import console as console_router
+from src.swe.app.runner.task_tracker import StopClaimResult
 
 
 class _FakeConsoleChannel:
@@ -268,3 +269,58 @@ def test_console_chat_reconnect_accepts_logical_session_id(
         ("session-existing", "console"),
     ]
     assert not chat_manager.get_or_create_calls
+
+
+def test_console_chat_stop_returns_turn_bound_claim(monkeypatch) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _StopChatManager:
+        async def get_chat(self, chat_id: str):
+            if chat_id == "chat-1":
+                return SimpleNamespace(
+                    id=chat_id,
+                    user_id="user-1",
+                    channel="console",
+                )
+            return None
+
+    class _StopTracker:
+        async def claim_stop(self, chat_id: str, msgid: str | None = None):
+            assert chat_id == "chat-1"
+            assert msgid == "msg-1"
+            return StopClaimResult(
+                True,
+                chat_id=chat_id,
+                msgid=msgid,
+                status="stopping",
+            )
+
+    workspace = SimpleNamespace(
+        chat_manager=_StopChatManager(),
+        task_tracker=_StopTracker(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    response = TestClient(app).post(
+        "/console/chat/stop",
+        params={"chat_id": "chat-1", "msgid": "msg-1"},
+        headers={"X-User-Id": "user-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "stopped": True,
+        "accepted": True,
+        "status": "stopping",
+        "chat_id": "chat-1",
+        "msgid": "msg-1",
+    }

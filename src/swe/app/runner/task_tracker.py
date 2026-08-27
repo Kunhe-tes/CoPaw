@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 _SENTINEL = None
 
 
+@dataclass(frozen=True)
+class StopClaimResult:
+    accepted: bool
+    chat_id: str | None = None
+    msgid: str | None = None
+    status: Literal["idle", "running", "stopping"] = "idle"
+
+
 @dataclass
 class _RunState:
     """Per-run state (task, queues, buffer), guarded by tracker lock."""
@@ -30,6 +38,8 @@ class _RunState:
     queues: list[asyncio.Queue] = field(default_factory=list)
     buffer: list[str] = field(default_factory=list)
     status: Literal["running", "stopping"] = "running"
+    msgid: str | None = None
+    stop_accepted: bool = False
 
 
 class TaskTracker:
@@ -190,15 +200,71 @@ class TaskTracker:
             except ValueError:
                 pass
 
-    async def request_stop(self, run_key: str) -> bool:
-        """Cancel the run. Returns ``True`` if it was running."""
+    async def claim_stop(
+        self,
+        run_key: str,
+        msgid: str | None = None,
+    ) -> StopClaimResult:
+        """Claim a run for stopping, optionally scoped to an answer turn.
+
+        The legacy Chat-ID-only form retains its immediate cancellation and
+        boolean return value. Turn-aware callers receive an immutable claim
+        result and a cooperative settlement window before cancellation.
+        """
         async with self._lock:
             state = self._runs.get(run_key)
             if state is None or state.task.done():
-                return False
+                return StopClaimResult(False, status="idle")
+            if msgid is not None and state.msgid != msgid:
+                return StopClaimResult(False, status=state.status)
+            if state.status == "stopping":
+                return StopClaimResult(
+                    True,
+                    chat_id=run_key,
+                    msgid=state.msgid,
+                    status="stopping",
+                )
             state.status = "stopping"
-            state.task.cancel()
-            return True
+            state.stop_accepted = True
+            if msgid is None:
+                state.task.cancel()
+                return StopClaimResult(
+                    True,
+                    chat_id=run_key,
+                    msgid=state.msgid,
+                    status="stopping",
+                )
+            task = state.task
+            result = StopClaimResult(
+                True,
+                chat_id=run_key,
+                msgid=state.msgid,
+                status="stopping",
+            )
+        asyncio.create_task(self._settle_stop(task, run_key))
+        return result
+
+    async def request_stop(
+        self,
+        run_key: str,
+        msgid: str | None = None,
+    ) -> bool | StopClaimResult:
+        """Compatibility wrapper for legacy boolean stop callers."""
+        result = await self.claim_stop(run_key, msgid=msgid)
+        return result if msgid is not None else result.accepted
+
+    async def _settle_stop(
+        self,
+        task: asyncio.Future,
+        run_key: str,
+    ) -> None:
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=5.0)
+        except asyncio.TimeoutError:
+            if not task.done():
+                task.cancel()
+        except (asyncio.CancelledError, Exception):
+            return
 
     async def mark_stopping(self, run_key: str) -> bool:
         """Mark an active run as stopping without cancelling it."""
@@ -215,6 +281,7 @@ class TaskTracker:
         payload: Any,
         stream_fn: Callable[..., Coroutine],
         *,
+        msgid: str | None = None,
         before_start: Callable[[], None] | None = None,
     ) -> tuple[asyncio.Queue, bool]:
         """Attach to an existing run or start a new one.
@@ -252,6 +319,7 @@ class TaskTracker:
                     run_key,
                     payload,
                     stream_fn,
+                    msgid=msgid,
                 )
 
     def _attach_or_start_unlocked(
@@ -259,6 +327,8 @@ class TaskTracker:
         run_key: str,
         payload: Any,
         stream_fn: Callable[..., Coroutine],
+        *,
+        msgid: str | None = None,
     ) -> tuple[asyncio.Queue, bool]:
         """Attach or register while the caller holds the tracker lock."""
 
@@ -275,6 +345,7 @@ class TaskTracker:
             task=asyncio.Future(),  # placeholder, replaced below
             queues=[my_queue],
             buffer=[],
+            msgid=msgid,
         )
         self._runs[run_key] = run
         tracker_ref = weakref.ref(self)
@@ -285,6 +356,8 @@ class TaskTracker:
                 if tracker is None:
                     return
                 async with tracker.lock:
+                    if run.status == "stopping":
+                        return
                     run.buffer.append(sse)
                     for q in run.queues:
                         q.put_nowait(sse)
@@ -293,9 +366,7 @@ class TaskTracker:
                 frame: ToolOutputFrame,
             ) -> None:
                 await _broadcast_sse(
-                    "data: "
-                    + json.dumps(frame, ensure_ascii=False)
-                    + "\n\n",
+                    "data: " + json.dumps(frame, ensure_ascii=False) + "\n\n",
                 )
 
             try:
