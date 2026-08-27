@@ -17,13 +17,13 @@ from .models import (
     TurnStatus,
 )
 from .ports import (
-    ApprovalPort,
-    ExecutionPort,
-    GoalPort,
+    TurnApprovalPort,
+    TurnExecutionPort,
+    TurnGoalPort,
     Producer,
-    SessionPort,
-    StreamPort,
-    SubagentPort,
+    TurnSessionPort,
+    TurnStreamPort,
+    TurnSubAgentPort,
 )
 
 
@@ -43,12 +43,12 @@ class AnswerTurnCoordinator:
     def __init__(
         self,
         *,
-        stream: StreamPort,
-        execution: ExecutionPort,
-        session: SessionPort,
-        goal: GoalPort,
-        subagent: SubagentPort,
-        approval: ApprovalPort,
+        stream: TurnStreamPort,
+        execution: TurnExecutionPort,
+        session: TurnSessionPort,
+        goal: TurnGoalPort,
+        subagent: TurnSubAgentPort,
+        approval: TurnApprovalPort,
         hard_cancel_delay: float = 5.0,
     ) -> None:
         self.stream = stream
@@ -78,21 +78,26 @@ class AnswerTurnCoordinator:
         async with lock:
             state = self._turns.get(chat_id)
             if state is not None and state.status not in TERMINAL_STATUSES:
-                queue = await self.stream.attach(state.identity)
-                if queue is not None:
-                    return TurnLease(state.identity, queue, False)
-                raise RuntimeError(
-                    "live answer turn has no attachable stream; refusing a "
-                    "second producer",
+                queue, _ = await self.stream.attach_or_start(
+                    state.identity, payload, producer,
                 )
+                return TurnLease(state.identity, queue, False)
 
             identity = TurnIdentity.create(
                 chat_id=chat_id,
                 msgid=msgid or f"msg-{uuid4().hex}",
             )
-            self._turns[chat_id] = _TurnState(identity, TurnStatus.ADMITTING)
-            queue = await self.stream.start(identity, payload, producer)
-            self._turns[chat_id].status = TurnStatus.RUNNING
+            new_state = _TurnState(identity, TurnStatus.ADMITTING)
+            self._turns[chat_id] = new_state
+            try:
+                queue, _ = await self.stream.attach_or_start(
+                    identity, payload, producer,
+                )
+            except BaseException:
+                self._turns.pop(chat_id, None)
+                raise
+            if self._turns.get(chat_id) is new_state:
+                new_state.status = TurnStatus.RUNNING
             return TurnLease(identity, queue, True)
 
     async def status(
@@ -151,9 +156,9 @@ class AnswerTurnCoordinator:
         return StopClaim(True, identity=identity, status=TurnStatus.STOPPING)
 
     async def _run_stop_effects(self, identity: TurnIdentity) -> None:
-        await self.approval.supersede(identity)
-        await self.goal.interrupt(identity)
-        await self.subagent.cancel(identity)
+        await self.approval.supersede_for_turn(identity)
+        await self.goal.interrupt_if_matches(identity, "stopped")
+        await self.subagent.cancel_for_turn(identity)
 
     async def _hard_cancel_watch(self, identity: TurnIdentity) -> None:
         await asyncio.sleep(self.hard_cancel_delay)
@@ -195,7 +200,7 @@ class AnswerTurnCoordinator:
             state.settlement_started = True
             state.status = outcome.status
             state.outcome = outcome
-        await self.session.persist(identity, outcome)
+        await self.session.persist_outcome(outcome)
         await self.stream.close(identity)
         lock = await self._chat_lock(identity.chat_id)
         async with lock:

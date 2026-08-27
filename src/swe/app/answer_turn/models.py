@@ -72,9 +72,8 @@ class TurnOutcome:
         return cls(
             identity,
             TurnStatus.COMPLETED,
-            result,
-            None,
-            assistant_text,
+            result=result,
+            assistant_text=assistant_text,
         )
 
     @classmethod

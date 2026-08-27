@@ -17,12 +17,15 @@ class InMemoryStream:
         self.close_calls: list[TurnIdentity] = []
         self._queues: dict[TurnIdentity, asyncio.Queue] = {}
 
-    async def start(self, identity, payload, producer):
+    async def attach_or_start(self, identity, payload, producer):
+        existing = await self.attach(identity)
+        if existing is not None:
+            return existing, False
         self.start_calls.append(identity)
         self.producer_calls += 1
         queue = self._queues.setdefault(identity, asyncio.Queue())
         asyncio.create_task(producer(identity, payload))
-        return queue
+        return queue, True
 
     async def attach(self, identity):
         self.attach_calls.append(identity)
@@ -51,8 +54,8 @@ class InMemorySession:
     def __init__(self) -> None:
         self.calls: list[tuple[TurnIdentity, TurnOutcome]] = []
 
-    async def persist(self, identity, outcome):
-        self.calls.append((identity, outcome))
+    async def persist_outcome(self, outcome):
+        self.calls.append((outcome.identity, outcome))
 
 
 class _Calls:
@@ -61,15 +64,15 @@ class _Calls:
 
 
 class InMemoryGoal(_Calls):
-    async def interrupt(self, identity):
+    async def interrupt_if_matches(self, identity, _reason):
         self.calls.append(identity)
 
 
 class InMemorySubagent(_Calls):
-    async def cancel(self, identity):
+    async def cancel_for_turn(self, identity):
         self.calls.append(identity)
 
 
 class InMemoryApproval(_Calls):
-    async def supersede(self, identity):
+    async def supersede_for_turn(self, identity):
         self.calls.append(identity)

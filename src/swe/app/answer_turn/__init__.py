@@ -5,6 +5,7 @@ from .coordinator import AnswerTurnCoordinator
 from .models import (
     TERMINAL_STATUSES,
     StopClaim,
+    StopClaimResult,
     TurnIdentity,
     TurnLease,
     TurnOutcome,
@@ -15,6 +16,7 @@ __all__ = [
     "AnswerTurnCoordinator",
     "TERMINAL_STATUSES",
     "StopClaim",
+    "StopClaimResult",
     "TurnIdentity",
     "TurnLease",
     "TurnOutcome",
