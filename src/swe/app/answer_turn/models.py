@@ -26,18 +26,21 @@ TERMINAL_STATUSES = frozenset(
 class TurnIdentity:
     chat_id: str
     msgid: str
+    turn_id: str
 
     @classmethod
-    def create(cls, chat_id: str, msgid: str | None = None) -> "TurnIdentity":
+    def create(cls, *, chat_id: str, msgid: str) -> "TurnIdentity":
         from uuid import uuid4
 
-        return cls(chat_id, msgid or f"turn-{uuid4().hex}")
+        if not chat_id or not msgid:
+            raise ValueError("chat_id and msgid are required")
+        return cls(chat_id, msgid, f"turn-{uuid4().hex}")
 
 
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
     status: TurnStatus
-    identity: TurnIdentity | None = None
+    identity: TurnIdentity
     result: Any = None
     error: BaseException | str | None = None
     assistant_text: str | None = None
@@ -54,18 +57,11 @@ class TurnOutcome:
     @classmethod
     def completed(
         cls,
-        identity_or_result: TurnIdentity | Any = None,
+        identity: TurnIdentity,
         *,
         assistant_text: str | None = None,
         result: Any = None,
     ) -> "TurnOutcome":
-        identity = (
-            identity_or_result
-            if isinstance(identity_or_result, TurnIdentity)
-            else None
-        )
-        if identity is None and result is None:
-            result = identity_or_result
         return cls(
             TurnStatus.COMPLETED,
             identity,
@@ -77,23 +73,16 @@ class TurnOutcome:
     @classmethod
     def cancelled(
         cls,
-        identity_or_result: TurnIdentity | Any = None,
+        identity: TurnIdentity,
         *,
         result: Any = None,
     ) -> "TurnOutcome":
-        identity = (
-            identity_or_result
-            if isinstance(identity_or_result, TurnIdentity)
-            else None
-        )
-        if identity is None and result is None:
-            result = identity_or_result
         return cls(TurnStatus.CANCELLED, identity, result=result)
 
     @classmethod
     def failed(
         cls,
-        identity: TurnIdentity | None,
+        identity: TurnIdentity,
         error: BaseException | str,
     ) -> "TurnOutcome":
         return cls(TurnStatus.FAILED, identity, error=error)

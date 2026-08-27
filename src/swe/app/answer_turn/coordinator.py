@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
 from .models import (
     TERMINAL_STATUSES,
@@ -32,6 +33,7 @@ class _TurnState:
     status: TurnStatus
     outcome: TurnOutcome | None = None
     stop_effects_started: bool = False
+    hard_cancel_watcher_started: bool = False
     settlement_started: bool = False
 
 
@@ -85,7 +87,10 @@ class AnswerTurnCoordinator:
                     "second producer",
                 )
 
-            identity = TurnIdentity.create(chat_id, msgid)
+            identity = TurnIdentity.create(
+                chat_id=chat_id,
+                msgid=msgid or f"msg-{uuid4().hex}",
+            )
             self._turns[chat_id] = _TurnState(identity, TurnStatus.ADMITTING)
             queue = await self.stream.start(identity, payload, producer)
             self._turns[chat_id].status = TurnStatus.RUNNING
@@ -121,6 +126,7 @@ class AnswerTurnCoordinator:
             identity = current.identity
         lock = await self._chat_lock(identity.chat_id)
         run_effects = False
+        start_watcher = False
         async with lock:
             state = self._turns.get(identity.chat_id)
             if state is None or state.identity != identity:
@@ -135,9 +141,14 @@ class AnswerTurnCoordinator:
             if not state.stop_effects_started:
                 state.stop_effects_started = True
                 run_effects = True
+            if not state.hard_cancel_watcher_started:
+                state.hard_cancel_watcher_started = True
+                start_watcher = True
         if run_effects:
             await self._run_stop_effects(identity)
-        asyncio.create_task(self._hard_cancel_watch(identity))
+            await self.execution.request_cooperative_stop(identity)
+        if start_watcher:
+            asyncio.create_task(self._hard_cancel_watch(identity))
         return StopClaim(True, identity=identity, status=TurnStatus.STOPPING)
 
     async def _run_stop_effects(self, identity: TurnIdentity) -> None:
@@ -154,27 +165,27 @@ class AnswerTurnCoordinator:
                 return
             if state.status in TERMINAL_STATUSES:
                 return
-        await self.execution.cancel(identity, hard=True)
+        await self.execution.hard_cancel(identity)
 
     async def settle(
         self,
         identity: TurnIdentity | TurnOutcome,
         outcome: TurnOutcome | None = None,
-    ) -> TurnOutcome:
+    ) -> bool:
         if isinstance(identity, TurnOutcome):
             outcome = identity
-            if outcome.identity is None:
-                raise ValueError("standalone outcome requires turn identity")
             identity = outcome.identity
         if outcome is None:
             raise TypeError("settle requires an outcome")
+        if outcome.identity != identity:
+            raise ValueError("outcome identity must match settled turn")
         lock = await self._chat_lock(identity.chat_id)
         async with lock:
             state = self._turns.get(identity.chat_id)
             if state is None or state.identity != identity:
-                return self._settled.get(identity, outcome)
+                return False
             if state.settlement_started:
-                return state.outcome or outcome
+                return False
             state.settlement_started = True
             state.status = outcome.status
             state.outcome = outcome
@@ -186,4 +197,4 @@ class AnswerTurnCoordinator:
             state = self._turns.get(identity.chat_id)
             if state is not None and state.identity == identity:
                 self._turns.pop(identity.chat_id, None)
-        return outcome
+        return True

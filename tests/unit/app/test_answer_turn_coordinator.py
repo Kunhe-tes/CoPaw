@@ -92,7 +92,9 @@ async def test_claim_stop_orders_effects_and_is_idempotent():
     duplicate = await coordinator.claim_stop(lease.identity, msgid="turn-1")
     assert duplicate.accepted is True
     assert adapters["approval"].calls == [lease.identity]
-    await coordinator.settle(lease.identity, TurnOutcome.cancelled("stopped"))
+    await coordinator.settle(
+        TurnOutcome.cancelled(lease.identity, result="stopped")
+    )
 
 
 @pytest.mark.asyncio
@@ -114,7 +116,7 @@ async def test_claim_stop_rejects_stale_msgid_and_hard_cancels_only_live_turn():
     await coordinator.claim_stop(lease.identity, msgid="turn-1")
     await asyncio.sleep(0.03)
     assert adapters["execution"].hard_cancel_calls == [lease.identity]
-    await coordinator.settle(lease.identity, TurnOutcome.cancelled())
+    await coordinator.settle(TurnOutcome.cancelled(lease.identity))
 
 
 @pytest.mark.asyncio
@@ -130,9 +132,9 @@ async def test_settle_persists_once_closes_stream_and_removes_active_turn():
         producer,
         msgid="turn-1",
     )
-    outcome = TurnOutcome.completed({"answer": 1})
-    assert await coordinator.settle(lease.identity, outcome) == outcome
-    assert await coordinator.settle(lease.identity, outcome) == outcome
+    outcome = TurnOutcome.completed(lease.identity, result={"answer": 1})
+    assert await coordinator.settle(outcome) is True
+    assert await coordinator.settle(outcome) is False
     assert adapters["session"].calls == [(lease.identity, outcome)]
     assert adapters["stream"].close_calls == [lease.identity]
     assert await coordinator.status(lease.identity) is None

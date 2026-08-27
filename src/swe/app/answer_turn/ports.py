@@ -27,12 +27,10 @@ class StreamPort(Protocol):
 
 
 class ExecutionPort(Protocol):
-    async def cancel(
-        self,
-        identity: TurnIdentity,
-        *,
-        hard: bool = False,
-    ) -> None:
+    async def request_cooperative_stop(self, identity: TurnIdentity) -> None:
+        pass
+
+    async def hard_cancel(self, identity: TurnIdentity) -> None:
         pass
 
 
