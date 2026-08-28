@@ -1356,27 +1356,108 @@ def _extract_assistant_response(
 ) -> str:
     """从 agent memory 的当前 turn 中提取最后的助手响应文本."""
     if not agent or not hasattr(agent, "memory"):
+        logger.warning(
+            "[STOP-DEBUG] extract reason=missing_agent_memory "
+            "memory_start=%d",
+            memory_start,
+        )
         return ""
 
     try:
         # memory.content 是 list of (Msg, marks) tuples
         memory = agent.memory.content
-        for msg, _marks in reversed(memory[max(memory_start, 0) :]):
+        start = max(memory_start, 0)
+        memory_total = len(memory) if isinstance(memory, list) else None
+        candidates: list[dict[str, Any]] = []
+        for index, entry in reversed(
+            (
+                list(enumerate(memory[start:], start))
+                if isinstance(memory, list)
+                else []
+            ),
+        ):
+            if not isinstance(entry, (tuple, list)) or not entry:
+                candidates.append(
+                    {"index": index, "reason": "invalid_memory_entry"},
+                )
+                continue
+            msg = entry[0]
+            role = getattr(msg, "role", None)
+            content = getattr(msg, "content", None)
+            metadata = getattr(msg, "metadata", None)
+            summary: dict[str, Any] = {
+                "index": index,
+                "role": role,
+                "content_type": type(content).__name__,
+                "metadata_fields": [
+                    key
+                    for key in ("event_type", "message_type", "kind", "type")
+                    if isinstance(metadata, dict) and key in metadata
+                ],
+            }
+            if isinstance(content, list):
+                summary["block_types"] = [
+                    (
+                        block.get("type")
+                        if isinstance(block, dict)
+                        else getattr(block, "type", None)
+                    )
+                    for block in content
+                ]
             if (
-                msg.role != "assistant"
+                role != "assistant"
                 or not hasattr(msg, "content")
                 or _is_live_assistant_event(msg)
             ):
+                summary["reason"] = (
+                    "role_or_missing_content"
+                    if role != "assistant" or not hasattr(msg, "content")
+                    else "live_assistant_event"
+                )
+                candidates.append(summary)
                 continue
             # content 可能是 list of blocks 或 string
             if isinstance(msg.content, str):
+                summary["text_len"] = len(msg.content)
+                summary["reason"] = "accepted"
+                logger.warning(
+                    "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
+                    "selected=%s candidates=%s",
+                    memory_total,
+                    start,
+                    summary,
+                    candidates,
+                )
                 return msg.content
             if isinstance(msg.content, list) and _has_only_text_blocks(
                 msg.content,
             ):
-                return _extract_text_from_blocks(msg.content)
+                response = _extract_text_from_blocks(msg.content)
+                summary["text_len"] = len(response)
+                summary["reason"] = "accepted"
+                logger.warning(
+                    "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
+                    "selected=%s candidates=%s",
+                    memory_total,
+                    start,
+                    summary,
+                    candidates,
+                )
+                return response
+            summary["reason"] = "unsupported_content"
+            candidates.append(summary)
+        logger.warning(
+            "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
+            "selected=None candidates=%s",
+            memory_total,
+            start,
+            candidates,
+        )
     except Exception as e:
-        logger.debug("Failed to extract assistant response: %s", e)
+        logger.warning(
+            "[STOP-DEBUG] extract reason=exception error_type=%s",
+            type(e).__name__,
+        )
 
     return ""
 
