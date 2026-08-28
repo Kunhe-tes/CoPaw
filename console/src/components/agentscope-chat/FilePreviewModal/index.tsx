@@ -5,7 +5,7 @@ import React, {
   useRef,
   useState,
 } from "react";
-import { Modal, message, Tooltip, Spin, Tabs } from "antd";
+import { Drawer, message, Modal, Tooltip, Spin, Tabs } from "antd";
 import { FullscreenOutlined } from "@ant-design/icons";
 import {
   SparkFalseLine,
@@ -32,7 +32,24 @@ import {
   type ClawFilePlanItem,
 } from "@/api/modules/dynamicRender";
 import { useIframeStore } from "@/stores/iframeStore";
+import type { FilePreviewPresentation } from "../FilePreviewPresentationContext";
 import styles from "./index.module.less";
+
+let splitPreviewCount = 0;
+
+function acquireSplitPreviewLayout() {
+  splitPreviewCount += 1;
+  document.documentElement.classList.add("copaw-file-preview-drawer-open");
+
+  return () => {
+    splitPreviewCount = Math.max(0, splitPreviewCount - 1);
+    if (splitPreviewCount === 0) {
+      document.documentElement.classList.remove(
+        "copaw-file-preview-drawer-open"
+      );
+    }
+  };
+}
 
 
 export interface FilePreviewModalProps {
@@ -49,6 +66,7 @@ export interface FilePreviewModalProps {
   rootResultId?: string;
   custUid?: string | null;
   urlParams?: Record<string, string>;
+  presentation?: FilePreviewPresentation;
 }
 
 
@@ -67,11 +85,12 @@ function FilePreviewModal(props: FilePreviewModalProps) {
     rootTemplateId,
     custUid,
     urlParams,
+    presentation = "modal",
   } = props;
   const iframeState = useIframeStore((state) => state);
   const { userId, bbk } = iframeState;
   const [copied, setCopied] = useState(false);
-  const [fullscreen, setFullscreen] = useState(true);
+  const [fullscreen, setFullscreen] = useState(presentation === "modal");
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [markdownContent, setMarkdownContent] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -650,8 +669,13 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   const reattachTrackersRef = useRef(reattachTrackers);
   reattachTrackersRef.current = reattachTrackers;
 
+  useEffect(() => {
+    if (presentation !== "drawer" || !open || fullscreen) return;
+    return acquireSplitPreviewLayout();
+  }, [fullscreen, open, presentation]);
 
-  const previewHeight = fullscreen ? "90vh" : "500px";
+  const previewHeight =
+    presentation === "drawer" ? "100%" : fullscreen ? "90vh" : "500px";
 
 
   const renderPreviewContent = useMemo(() => {
@@ -808,6 +832,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
             icon={<FullscreenOutlined />}
             onClick={handleFullscreen}
             bordered={false}
+            aria-label={fullscreen ? "退出全屏" : "全屏预览"}
           />
         </Tooltip>
       );
@@ -825,102 +850,153 @@ function FilePreviewModal(props: FilePreviewModalProps) {
   ]);
 
 
+  const previewBody = (
+    <>
+      {custUid && clawPlanLoading && (
+        <div className={styles.tabsLoadingWrapper}>
+          <Spin size="small" />
+        </div>
+      )}
+      {showClawPlanEmpty ? (
+        <div className={styles.emptyWrapper}>
+          <div className={styles.emptyIcon}>
+            <svg
+              className={styles.emptyIconSvg}
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+              <polyline points="7 10 12 15 17 10" />
+              <line x1="12" y1="15" x2="12" y2="3" />
+            </svg>
+          </div>
+          <div className={styles.emptyTitle}>未查询到个人报告数据</div>
+          <div className={styles.emptyDesc}>
+            当前暂无可用报告模板，请确认信息后重试
+          </div>
+        </div>
+      ) : (
+        renderPreviewContent
+      )}
+    </>
+  );
+
+  const templateTabs =
+    custUid && !clawPlanLoading && clawFilePlanList.length > 0 ? (
+      <div className={styles.tabsWrapper}>
+        <Tabs
+          activeKey={activeTemplate?.key}
+          onChange={(key) => {
+            const next = clawFilePlanList.find((item) => item.key === key);
+            if (next) setActiveTemplate(next);
+          }}
+          items={clawFilePlanList.map((item) => ({
+            key: item.key,
+            label: item.skillName,
+          }))}
+          size="small"
+        />
+      </div>
+    ) : null;
+
   return (
     <>
-      <Modal
-        open={open}
-        onCancel={onClose}
-        footer={null}
-        width={fullscreen ? 1368 : 800}
-        className={styles.previewModalWrapper}
-        centered
-        closeIcon={
-          <IconButton size="small" icon={<SparkFalseLine />} bordered={false} />
-        }
-        title={
+      {presentation === "drawer" ? (
+        <Drawer
+          open={open}
+          onClose={onClose}
+          width={
+            fullscreen
+              ? "100vw"
+              : "var(--copaw-file-preview-drawer-width, 42vw)"
+          }
+          rootClassName={styles.previewDrawerRoot}
+          placement="right"
+          mask={false}
+          push={false}
+          closable={false}
+          title={
+            <div className={styles.previewTitle} title={fileName}>
+              {fileName}
+            </div>
+          }
+          extra={
+            <div className={styles.headerActions}>
+              {headerActions}
+              <Tooltip title="关闭预览">
+                <IconButton
+                  size="small"
+                  icon={<SparkFalseLine />}
+                  bordered={false}
+                  onClick={onClose}
+                  aria-label="关闭预览"
+                />
+              </Tooltip>
+            </div>
+          }
+          styles={{
+            body: {
+              display: "flex",
+              flexDirection: "column",
+              minHeight: 0,
+              padding: 0,
+              overflow: "hidden",
+            },
+          }}
+        >
+          {templateTabs}
+          <div className={styles.previewContent}>{previewBody}</div>
+        </Drawer>
+      ) : (
+        <Modal
+          open={open}
+          onCancel={onClose}
+          footer={null}
+          width={fullscreen ? 1368 : 800}
+          className={styles.previewModalWrapper}
+          centered
+          closeIcon={
+            <IconButton
+              size="small"
+              icon={<SparkFalseLine />}
+              bordered={false}
+            />
+          }
+          title={
+            <div style={{ display: "flex", width: "100%", marginTop: "-6px" }}>
+              {templateTabs}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "12px",
+                  marginRight: "32px",
+                  marginLeft: "auto",
+                }}
+              >
+                {headerActions}
+              </div>
+            </div>
+          }
+          styles={{ content: { padding: "16px 24px" } }}
+        >
           <div
             style={{
               display: "flex",
-              width: "100%",
-              marginTop: "-6px",
+              alignItems: "center",
+              justifyContent: "center",
+              minHeight: fullscreen ? "90vh" : "200px",
+              flexDirection: "column",
             }}
           >
-            {custUid && !clawPlanLoading && clawFilePlanList.length > 0 && (
-              <div className={styles.tabsWrapper}>
-                <Tabs
-                  activeKey={activeTemplate?.key}
-                  onChange={(key) => {
-                    const next = clawFilePlanList.find(
-                      (item) => item.key === key
-                    );
-                    if (next) setActiveTemplate(next);
-                  }}
-                  items={clawFilePlanList.map((item) => ({
-                    key: item.key,
-                    label: item.skillName,
-                  }))}
-                  size="small"
-                />
-              </div>
-            )}
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "12px",
-                marginRight: "32px",
-                marginLeft: "auto",
-              }}
-            >
-              {headerActions}
-            </div>
+            {previewBody}
           </div>
-        }
-        styles={{
-          content: { padding: "16px 24px" },
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            minHeight: fullscreen ? "90vh" : "200px",
-            flexDirection: "column",
-          }}
-        >
-          {custUid && clawPlanLoading && (
-            <div className={styles.tabsLoadingWrapper}>
-              <Spin size="small" />
-            </div>
-          )}
-          {showClawPlanEmpty ? (
-            <div className={styles.emptyWrapper}>
-              <div className={styles.emptyIcon}>
-                <svg
-                  className={styles.emptyIconSvg}
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="1.5"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
-                  <polyline points="7 10 12 15 17 10" />
-                  <line x1="12" y1="15" x2="12" y2="3" />
-                </svg>
-              </div>
-              <div className={styles.emptyTitle}>未查询到个人报告数据</div>
-              <div className={styles.emptyDesc}>
-                当前暂无可用报告模板，请确认信息后重试
-              </div>
-            </div>
-          ) : (
-            renderPreviewContent
-          )}
-        </div>
-      </Modal>
+        </Modal>
+      )}
       {nestedPreview && (
         <FilePreviewModal
           open
@@ -939,6 +1015,7 @@ function FilePreviewModal(props: FilePreviewModalProps) {
               : undefined
           }
           rootResultId={effectiveResultId}
+          presentation={presentation}
         />
       )}
     </>

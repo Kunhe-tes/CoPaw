@@ -200,6 +200,7 @@ Visual priority for future chat work remains:
 
 - Preserve the existing conversation sidebar width until a later approved chat migration changes it.
 - Preserve its collapse behavior.
+- In ordinary chats, open generated-file and HTML previews in a non-modal right-side panel on desktop so the conversation remains visible and interactive. The panel may use a full-width overlay when the host is too narrow to keep both surfaces usable, and explicit full-screen preview remains available as a secondary action. Scheduled-task HTML results retain the existing centered modal presentation.
 - Future chat redesigns may reuse base accessibility and spacing roles while evolving its visual theme independently from management pages.
 - Future chat redesigns must work both with and without the global navigation.
 
