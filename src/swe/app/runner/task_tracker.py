@@ -30,6 +30,7 @@ class _RunState:
     """Transport state for one producer and its SSE subscribers."""
 
     task: asyncio.Task[None]
+    identity: TurnIdentity
     queues: list[asyncio.Queue] = field(default_factory=list)
     buffer: list[str] = field(default_factory=list)
     closed: bool = False
@@ -44,7 +45,7 @@ class TaskTracker:
             str,
             asyncio.Lock,
         ] = weakref.WeakValueDictionary()
-        self._runs: dict[TurnIdentity, _RunState] = {}
+        self._runs: dict[str, _RunState] = {}
         self._task_progress: dict[str, TaskProgressPayload] = {}
 
     @property
@@ -74,7 +75,7 @@ class TaskTracker:
             async with self._lock:
                 if any(
                     run_identity.chat_id == chat_id and not state.task.done()
-                    for run_identity, state in self._runs.items()
+                    for state in self._runs.values()
                 ):
                     return False, None
             operation = asyncio.create_task(asyncio.to_thread(callback))
@@ -97,8 +98,8 @@ class TaskTracker:
     async def list_active_tasks(self) -> list[str]:
         async with self._lock:
             return [
-                identity.chat_id
-                for identity, state in self._runs.items()
+                state.identity.chat_id
+                for state in self._runs.values()
                 if not state.task.done()
             ]
 
@@ -119,7 +120,7 @@ class TaskTracker:
             return self._attach_unlocked(identity)
 
     def _attach_unlocked(self, identity: TurnIdentity) -> asyncio.Queue | None:
-        state = self._runs.get(identity)
+        state = self._runs.get(identity.chat_id)
         if state is None or state.task.done() or state.closed:
             return None
         queue: asyncio.Queue = asyncio.Queue()
@@ -153,7 +154,7 @@ class TaskTracker:
         queue: asyncio.Queue,
     ) -> None:
         async with self._lock:
-            state = self._runs.get(identity)
+            state = self._runs.get(identity.chat_id)
             if state is None:
                 return
             try:
@@ -208,7 +209,7 @@ class TaskTracker:
                 if tracker is None:
                     return
                 async with tracker.lock:
-                    state = tracker._runs.get(identity)
+                    state = tracker._runs.get(identity.chat_id)
                     if state is None or state.closed:
                         return
                     state.buffer.append(sse)
@@ -239,21 +240,25 @@ class TaskTracker:
                 tracker = tracker_ref()
                 if tracker is not None:
                     async with tracker.lock:
-                        state = tracker._runs.get(identity)
+                        state = tracker._runs.get(identity.chat_id)
                         if state is not None:
                             for subscriber in state.queues:
                                 subscriber.put_nowait(_SENTINEL)
                             tracker._task_progress.pop(identity.chat_id, None)
-                            tracker._runs.pop(identity, None)
+                            tracker._runs.pop(identity.chat_id, None)
 
         task = asyncio.create_task(_producer())
-        self._runs[identity] = _RunState(task=task, queues=[queue])
+        self._runs[identity.chat_id] = _RunState(
+            task=task,
+            identity=identity,
+            queues=[queue],
+        )
         return queue, True
 
     async def close(self, identity: TurnIdentity) -> None:
         """End this identity's subscriber streams without cancelling its work."""
         async with self._lock:
-            state = self._runs.get(identity)
+            state = self._runs.get(identity.chat_id)
             if state is None or state.closed:
                 return
             state.closed = True

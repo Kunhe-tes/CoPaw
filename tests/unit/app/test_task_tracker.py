@@ -80,7 +80,7 @@ async def test_attach_replays_buffer_and_stream_detaches_on_consumer_close():
     stream = tracker.stream_from_queue(replay, identity)
     assert await anext(stream) == 'data: {"first": true}\n\n'
     await stream.aclose()
-    assert replay not in tracker._runs[identity].queues
+    assert replay not in tracker._runs[identity.chat_id].queues
 
     release.set()
     await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
