@@ -27,7 +27,10 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 from agentscope_runtime.engine.schemas.exception import AgentException
 from dotenv import load_dotenv
 
-from ..mcp.http_headers import build_mcp_http_headers
+from ..mcp.http_headers import (
+    _filter_passthrough_headers,
+    build_mcp_http_headers,
+)
 from ..mcp.lazy_client import LazyMCPClient, get_mcp_tool_discovery_cache
 from ..mcp.stateful_client import HttpStatefulClient, StdIOStatefulClient
 from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
@@ -1153,13 +1156,7 @@ def _build_lazy_mcp_clients(
         if not client_config.enabled:
             continue
 
-        effective_passthrough_headers = (
-            None
-            if str(getattr(client_config, "source", "") or "").startswith(
-                "marketplace:",
-            )
-            else passthrough_headers
-        )
+        effective_passthrough_headers = passthrough_headers
 
         config_payload = client_config.model_dump(mode="json")
         config_fingerprint = hashlib.sha256(
@@ -1172,7 +1169,11 @@ def _build_lazy_mcp_clients(
         request_scope_headers = {
             header_name.casefold(): header_value
             for header_name, header_value in (
-                effective_passthrough_headers or {}
+                _filter_passthrough_headers(
+                    effective_passthrough_headers,
+                    url=getattr(client_config, "url", None),
+                )
+                or {}
             ).items()
         }
         request_scope_fingerprint = hashlib.sha256(
@@ -3437,6 +3438,9 @@ class AgentRunner(Runner):
             "channel": channel,
             "chat_id": chat.id if chat is not None else "",
             "turn_id": turn_id,
+            "msgid": (getattr(request, "channel_meta", None) or {}).get(
+                "msgid",
+            ),
             "agent_id": self.agent_id,
             "tenant_id": self.tenant_id or "",
             "agent_role": "main",
@@ -3445,6 +3449,7 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "_task_tracker": self._task_tracker,
             "cron_execution_key": getattr(
                 request,
                 "cron_execution_key",
@@ -4531,17 +4536,42 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ) -> MergedHookResult | None:
         """执行 Stop completion gate，active guard 已设置时跳过递归触发。"""
+        logger.warning(
+            "[STOP-DEBUG] stop_entry trace_id=%s turn_id=%s response_len=%d "
+            "active=%s plan_boundary=%s tenant_enabled=%s agent_enabled=%s "
+            "overlay_ids=%s",
+            getattr(request, "trace_id", None),
+            (getattr(request, "channel_meta", None) or {}).get("turn_id"),
+            len(outcome.assistant_response or ""),
+            outcome.stop_hook_active,
+            outcome.plan_interaction_turn_boundary,
+            getattr(runtime.tenant_hooks, "enabled", None),
+            getattr(
+                getattr(runtime.agent_config, "hooks", None),
+                "enabled",
+                None,
+            ),
+            [entry.hook_id for entry in runtime.hook_overlay.entries],
+        )
         if outcome.stop_hook_active:
+            logger.warning("[STOP-DEBUG] skipped reason=stop_hook_active")
             return None
         if outcome.plan_interaction_turn_boundary:
+            logger.warning(
+                "[STOP-DEBUG] skipped reason=plan_interaction_turn_boundary",
+            )
             return None
         if not outcome.assistant_response:
+            logger.warning(
+                "[STOP-DEBUG] skipped reason=empty_assistant_response",
+            )
             return None
         if not _hook_config_enabled(
             runtime.tenant_hooks,
             runtime.agent_config,
             runtime.hook_overlay,
         ):
+            logger.warning("[STOP-DEBUG] skipped reason=hooks_disabled")
             return None
 
         outcome.stop_hook_active = True
@@ -4711,6 +4741,41 @@ class AgentRunner(Runner):
         if agent is not None:
             await agent.interrupt()
         raise AgentException("Task has been cancelled!") from exc
+
+    async def _settle_stopped_turn(
+        self,
+        *,
+        runtime: _QueryRuntime | None,
+        request: AgentRequest,
+        session_execution: Any,
+    ) -> None:
+        """Persist terminal Stop evidence without exposing persistence errors."""
+        if session_execution is None:
+            return
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        chat_id = channel_meta.get("chat_id")
+        msgid = channel_meta.get("msgid")
+        if not isinstance(chat_id, str) or not isinstance(msgid, str):
+            return
+        tracker = self._task_tracker
+        if tracker is None or await tracker.get_status(chat_id) != "stopping":
+            return
+        from .session_lifecycle import (
+            mark_stopped_agent_memory,
+            mark_stopped_turn_state,
+        )
+
+        try:
+            if runtime is not None:
+                mark_stopped_agent_memory(runtime.agent, msgid)
+            mark_stopped_turn_state(session_execution.state, msgid)
+            await session_execution.commit_state(session_execution.state)
+        except Exception:
+            logger.exception(
+                "Failed to persist stopped turn state chat_id=%s msgid=%s",
+                chat_id,
+                msgid,
+            )
 
     async def _handle_query_error(
         self,

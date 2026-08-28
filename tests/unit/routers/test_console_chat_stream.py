@@ -234,6 +234,52 @@ async def test_start_new_chat_propagates_created_chat_id_to_compaction_sse():
 
 
 @pytest.mark.asyncio
+async def test_start_new_chat_rejects_submission_while_chat_is_stopping():
+    class _ChatManager:
+        async def get_or_create_chat(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                id="chat-stopping",
+                channel="console",
+                meta={},
+            )
+
+    class _TaskTracker:
+        start_calls = 0
+
+        async def get_status(self, _chat_id):
+            return "stopping"
+
+        async def attach_or_start(self, *_args, **_kwargs):
+            self.start_calls += 1
+            return object(), True
+
+    tracker = _TaskTracker()
+    workspace = SimpleNamespace(
+        agent_id="agent-1",
+        chat_manager=_ChatManager(),
+    )
+    payload = {
+        "sender_id": "user-1",
+        "channel_id": "console",
+        "content_parts": [TextContent(type=ContentType.TEXT, text="hello")],
+        "meta": {"session_id": "session-1"},
+    }
+
+    with pytest.raises(console_router.HTTPException) as error:
+        await console_router._start_new_chat(
+            workspace,
+            tracker,
+            _FakeConsoleChannel(),
+            "session-1",
+            payload,
+        )
+
+    assert error.value.status_code == 409
+    assert error.value.detail == "Chat is stopping"
+    assert tracker.start_calls == 0
+
+
+@pytest.mark.asyncio
 async def test_start_new_chat_persists_first_submit_scenario_snapshot(
     monkeypatch,
 ):
@@ -1296,6 +1342,55 @@ def test_console_chat_stream_exposes_server_turn_identity(monkeypatch) -> None:
     assert response.headers["x-swe-chatid"] == "chat:session-1"
     assert response.headers["x-swe-msgid"]
     assert response.headers["x-swe-sessionid"] == "session-1"
+
+
+def test_console_chat_stream_reuses_the_active_turn_identity(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _AttachedRunTracker(_FakeTaskTracker):
+        async def attach_or_start(
+            self,
+            _run_key,
+            _payload,
+            _stream_fn,
+            *,
+            msgid=None,
+            **_kwargs,
+        ):
+            assert msgid is not None
+            return object(), False
+
+        async def get_run_identity(self, run_key: str):
+            assert run_key == "chat:session-1"
+            return run_key, "server-turn-1"
+
+    workspace = SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=_FakeChatManager(),
+        task_tracker=_AttachedRunTracker(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    response = TestClient(app).post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json=_console_chat_payload("user-1"),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["x-swe-chatid"] == "chat:session-1"
+    assert response.headers["x-swe-msgid"] == "server-turn-1"
 
 
 def test_console_chat_copies_b3_trace_id_to_native_meta(monkeypatch) -> None:

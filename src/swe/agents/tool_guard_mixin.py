@@ -2069,6 +2069,11 @@ class ToolGuardMixin:
         goal_id = str(self._request_context.get("goal_id") or "").strip()
         if goal_id:
             extra["goal_id"] = goal_id
+        chat_id = str(self._request_context.get("chat_id") or "").strip()
+        msgid = str(self._request_context.get("msgid") or "").strip()
+        if chat_id and msgid:
+            extra["chat_id"] = chat_id
+            extra["msgid"] = msgid
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
         if original_msg is not None:
@@ -2305,7 +2310,7 @@ class ToolGuardMixin:
             return None
 
         self._tool_guard_replay_done = None
-        selected_expert_follow_up = self._selected_expert_follow_up(
+        selected_expert_follow_up = await self._selected_expert_follow_up(
             replay_info,
         )
         if selected_expert_follow_up is not None:
@@ -2326,7 +2331,7 @@ class ToolGuardMixin:
             return None
         return await self._emit_next_replay_tool_call(remaining_queue)
 
-    def _selected_expert_follow_up(
+    async def _selected_expert_follow_up(
         self,
         replay_info: dict[str, Any],
     ) -> dict[str, Any] | None:
@@ -2339,6 +2344,14 @@ class ToolGuardMixin:
         """
         context = self._request_context
         if not context.get(_SELECTED_EXPERT_EXECUTION_KEY):
+            return None
+        tracker = context.get("_task_tracker")
+        is_turn_stopping = getattr(tracker, "is_turn_stopping", None)
+        if callable(is_turn_stopping) and await is_turn_stopping(
+            str(context.get("chat_id") or ""),
+            str(context.get("msgid") or ""),
+        ):
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
             return None
         tool_name = str(replay_info.get("tool_name") or "")
         run_id = str(context.get(_SELECTED_EXPERT_RUN_ID_KEY) or "").strip()

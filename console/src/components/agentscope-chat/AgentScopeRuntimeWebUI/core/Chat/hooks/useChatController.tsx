@@ -38,6 +38,11 @@ export default function useChatController() {
     ChatAnywhereInputContext,
     (v) => v.setLoading,
   );
+  const setStopping = useContextSelector(
+    ChatAnywhereInputContext,
+    (v) => v.setStopping,
+  );
+  const markStopping = setStopping ?? (() => {});
   const getLoading = useContextSelector(
     ChatAnywhereInputContext,
     (v) => v.getLoading,
@@ -76,7 +81,9 @@ export default function useChatController() {
       if (!currentQARef.current.response) return;
 
       currentQARef.current.response.msgStatus = status;
-      setLoading(false);
+      if (!currentQARef.current.stopPending) {
+        setLoading(false);
+      }
       ReactDOM.flushSync(() => {
         messageHandler.updateMessage(currentQARef.current.response);
       });
@@ -208,20 +215,40 @@ export default function useChatController() {
 
   const stopActiveRunInBackground = useCallback(async () => {
     const owner = currentQARef.current.activeRequestOwner;
-    await cancelActiveRequest();
+    currentQARef.current.stopPending = true;
+    markStopping(true, owner?.sessionId);
+    setLoading(true);
+    try {
+      await cancelActiveRequest();
 
-    if (currentQARef.current.response) {
-      currentQARef.current.response.msgStatus = "finished";
-      ReactDOM.flushSync(() => {
-        messageHandler.updateMessage(currentQARef.current.response!);
-      });
+      if (currentQARef.current.response) {
+        currentQARef.current.response.msgStatus = "finished";
+        ReactDOM.flushSync(() => {
+          messageHandler.updateMessage(currentQARef.current.response!);
+        });
+      }
+
+      await sessionHandler.syncSessionMessagesForSession(
+        owner?.sessionId,
+        messageHandler.getMessages(),
+      );
+    } finally {
+      currentQARef.current.stopPending = false;
+      markStopping(false, owner?.sessionId);
+      if (
+        !owner?.sessionId ||
+        owner.sessionId === sessionHandler.getCurrentSessionId()
+      ) {
+        setLoading(false);
+      }
     }
-
-    await sessionHandler.syncSessionMessagesForSession(
-      owner?.sessionId,
-      messageHandler.getMessages(),
-    );
-  }, [cancelActiveRequest, messageHandler, sessionHandler]);
+  }, [
+    cancelActiveRequest,
+    markStopping,
+    messageHandler,
+    sessionHandler,
+    setLoading,
+  ]);
 
   if (!followUpCoordinatorRef.current) {
     followUpCoordinatorRef.current = new FollowUpSubmitCoordinator({
@@ -331,9 +358,28 @@ export default function useChatController() {
    */
   const handleCancel = useCallback(async () => {
     const owner = currentQARef.current.activeRequestOwner;
-    await cancelActiveRequest();
-    finishResponse("interrupted", owner);
-  }, [cancelActiveRequest, finishResponse]);
+    currentQARef.current.stopPending = true;
+    markStopping(true, owner?.sessionId);
+    setLoading(true);
+    try {
+      await cancelActiveRequest();
+    } finally {
+      currentQARef.current.stopPending = false;
+      markStopping(false, owner?.sessionId);
+      if (
+        !owner?.sessionId ||
+        owner.sessionId === sessionHandler.getCurrentSessionId()
+      ) {
+        finishResponse("interrupted", owner);
+      }
+    }
+  }, [
+    cancelActiveRequest,
+    finishResponse,
+    markStopping,
+    sessionHandler,
+    setLoading,
+  ]);
 
   const handleSuggestionSubmit = useCallback(
     async (data: FollowUpSubmitData) => {

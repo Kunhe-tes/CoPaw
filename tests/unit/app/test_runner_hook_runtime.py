@@ -1359,7 +1359,7 @@ async def test_build_lazy_mcp_clients_defers_client_creation_until_discovery(
 
 
 @pytest.mark.asyncio
-async def test_build_lazy_mcp_clients_never_forwards_user_headers_to_marketplace(
+async def test_build_lazy_mcp_clients_forwards_all_user_headers_to_marketplace(
     monkeypatch,
 ) -> None:
     import swe.app.runner.runner as runner_module
@@ -1390,12 +1390,53 @@ async def test_build_lazy_mcp_clients_never_forwards_user_headers_to_marketplace
         ),
         tenant_id="tenant-a",
         user_id="user-a",
-        passthrough_headers={"Authorization": "Bearer user-token"},
+        passthrough_headers={
+            "Authorization": "Bearer user-token",
+            "cookie": "sid=abc",
+            "X-B3-Traceid": "trace-1",
+        },
     )
 
     await clients[0].list_tools()
 
-    assert create_client.await_args.args[1] is None
+    assert create_client.await_args.args[1] == {
+        "Authorization": "Bearer user-token",
+        "cookie": "sid=abc",
+        "X-B3-Traceid": "trace-1",
+    }
+
+
+def test_build_lazy_mcp_clients_ignores_filtered_sandbox_auth_in_discovery_key():
+    import swe.app.runner.runner as runner_module
+    from swe.config.config import MCPClientConfig, MCPConfig
+
+    def build_client(auth_header: str):
+        return runner_module._build_lazy_mcp_clients(
+            MCPConfig(
+                clients={
+                    "market": MCPClientConfig(
+                        name="market",
+                        transport="streamable_http",
+                        url=(
+                            "https://mcpmarket-sandbox.platform.cmbchina.cn"
+                            "/mcp"
+                        ),
+                        source="marketplace:mcp-1",
+                    ),
+                },
+            ),
+            tenant_id="tenant-a",
+            user_id="user-a",
+            passthrough_headers={
+                "Authorization": auth_header,
+                "cookie": "sid=abc",
+            },
+        )[0]
+
+    client_a = build_client("Bearer token-a")
+    client_b = build_client("Bearer token-b")
+
+    assert client_a._discovery_key == client_b._discovery_key
 
 
 @pytest.mark.asyncio

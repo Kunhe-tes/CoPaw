@@ -364,10 +364,18 @@ export const chatApi = {
       ),
   },
 
-  stopChat: (chatId: string) =>
-    request<void>(`/console/chat/stop?chat_id=${encodeURIComponent(chatId)}`, {
+  stopChat: (
+    chatId: string,
+    msgid?: string | null,
+    sessionId?: string | null,
+  ) => {
+    const params = new URLSearchParams({ chat_id: chatId });
+    if (msgid) params.set("msgid", msgid);
+    if (sessionId) params.set("session_id", sessionId);
+    return request<void>(`/console/chat/stop?${params.toString()}`, {
       method: "POST",
-    }),
+    });
+  },
 
   getSubAgentRuns: (chatId: string) =>
     request<SubAgentRunSnapshot>(
@@ -395,31 +403,60 @@ export const chatApi = {
     }),
 
   pauseGoal: (goalId: string, chatId: string) =>
-    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/pause?chat_id=${encodeURIComponent(chatId)}`, {
-      method: "POST",
-    }),
+    request<GoalSnapshot>(
+      `/goals/${encodeURIComponent(goalId)}/pause?chat_id=${encodeURIComponent(
+        chatId,
+      )}`,
+      {
+        method: "POST",
+      },
+    ),
 
   resumeGoal: (goalId: string, chatId: string) =>
-    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/resume?chat_id=${encodeURIComponent(chatId)}`, {
-      method: "POST",
-    }),
+    request<GoalSnapshot>(
+      `/goals/${encodeURIComponent(goalId)}/resume?chat_id=${encodeURIComponent(
+        chatId,
+      )}`,
+      {
+        method: "POST",
+      },
+    ),
 
   cancelGoal: (goalId: string, chatId: string) =>
-    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/cancel?chat_id=${encodeURIComponent(chatId)}`, {
-      method: "POST",
-    }),
+    request<GoalSnapshot>(
+      `/goals/${encodeURIComponent(goalId)}/cancel?chat_id=${encodeURIComponent(
+        chatId,
+      )}`,
+      {
+        method: "POST",
+      },
+    ),
 
-  editGoal: (goalId: string, chatId: string, contract: GoalSnapshot["contract"]) =>
-    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/edit?chat_id=${encodeURIComponent(chatId)}`, {
-      method: "POST",
-      body: JSON.stringify({ contract }),
-    }),
+  editGoal: (
+    goalId: string,
+    chatId: string,
+    contract: GoalSnapshot["contract"],
+  ) =>
+    request<GoalSnapshot>(
+      `/goals/${encodeURIComponent(goalId)}/edit?chat_id=${encodeURIComponent(
+        chatId,
+      )}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ contract }),
+      },
+    ),
 
   enqueueGoalSteering: (goalId: string, chatId: string, content: string) =>
-    request<GoalSnapshot>(`/goals/${encodeURIComponent(goalId)}/steering?chat_id=${encodeURIComponent(chatId)}`, {
-      method: "POST",
-      body: JSON.stringify({ content }),
-    }),
+    request<GoalSnapshot>(
+      `/goals/${encodeURIComponent(
+        goalId,
+      )}/steering?chat_id=${encodeURIComponent(chatId)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      },
+    ),
 };
 
 export const sessionApi = {

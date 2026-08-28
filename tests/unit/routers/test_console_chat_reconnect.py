@@ -324,3 +324,143 @@ def test_console_chat_stop_returns_turn_bound_claim(monkeypatch) -> None:
         "chat_id": "chat-1",
         "msgid": "msg-1",
     }
+
+
+def test_cancel_console_turn_subagents_does_not_cancel_goal_history() -> None:
+    cancelled_turns: list[tuple[str, str, str]] = []
+    cancelled_runs: list[str] = []
+
+    class _Supervisor:
+        async def cancel_turn_runs(self, scope, *, chat_id: str, msgid: str):
+            assert scope is not None
+            cancelled_turns.append(("scope", chat_id, msgid))
+
+        async def cancel(self, _scope, run_id: str):
+            cancelled_runs.append(run_id)
+
+    workspace = SimpleNamespace(
+        config=SimpleNamespace(),
+        tenant_id="tenant-1",
+        agent_id="agent-1",
+        subagent_supervisor=_Supervisor(),
+    )
+
+    asyncio.run(
+        console_router._cancel_console_turn_subagents(
+            workspace,
+            "chat-1",
+            "msg-current",
+        ),
+    )
+
+    assert cancelled_turns == [("scope", "chat-1", "msg-current")]
+    assert cancelled_runs == []
+
+
+def test_console_chat_stop_without_caller_identity_is_an_idle_noop(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _StopChatManager:
+        async def get_chat(self, _chat_id: str):
+            return SimpleNamespace(
+                id="chat-1",
+                user_id="user-1",
+                channel="console",
+            )
+
+    class _StopTracker:
+        async def claim_stop(self, *_args, **_kwargs):
+            raise AssertionError("unauthenticated Stop must not reach tracker")
+
+    workspace = SimpleNamespace(
+        chat_manager=_StopChatManager(),
+        task_tracker=_StopTracker(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    response = TestClient(app).post(
+        "/console/chat/stop",
+        params={"chat_id": "chat-1", "msgid": "msg-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "stopped": False,
+        "accepted": False,
+        "status": "idle",
+    }
+
+
+def test_console_chat_stop_session_fallback_rejects_ambiguous_active_turns(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    class _StopChatManager:
+        async def list_chats(self, user_id: str, channel: str):
+            assert (user_id, channel) == ("user-1", "console")
+            return [
+                SimpleNamespace(
+                    id="chat-1",
+                    session_id="session-early",
+                    user_id="user-1",
+                    channel="console",
+                ),
+                SimpleNamespace(
+                    id="chat-2",
+                    session_id="session-early",
+                    user_id="user-1",
+                    channel="console",
+                ),
+            ]
+
+        async def get_chat(self, _chat_id: str):
+            raise AssertionError(
+                "ambiguous early Stop must not resolve a chat",
+            )
+
+    class _StopTracker:
+        async def get_run_identity(self, chat_id: str):
+            return chat_id, f"turn-{chat_id}"
+
+        async def claim_stop(self, *_args, **_kwargs):
+            raise AssertionError("ambiguous early Stop must not reach tracker")
+
+    workspace = SimpleNamespace(
+        chat_manager=_StopChatManager(),
+        task_tracker=_StopTracker(),
+    )
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    response = TestClient(app).post(
+        "/console/chat/stop",
+        params={"session_id": "session-early"},
+        headers={"X-User-Id": "user-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "stopped": False,
+        "accepted": False,
+        "status": "idle",
+    }

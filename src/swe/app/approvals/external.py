@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """External approval submission helpers.
 
 These helpers let another channel approve or deny an existing console
@@ -55,6 +56,7 @@ class ExternalApprovalSubmission:
     submitted: bool = False
     reconnect: bool = False
     is_new_run: bool = False
+
 
 def _command_for_decision(
     decision: ExternalApprovalDecision,
@@ -524,6 +526,17 @@ async def submit_external_approval_decision(
     )
 
     await _wait_until_run_idle(workspace.task_tracker, chat.id)
+
+    current = await get_approval_service().get_request(pending.request_id)
+    if current is None or current.status != "pending":
+        return ExternalApprovalSubmission(
+            request_id=pending.request_id,
+            decision=decision,
+            status=current.status if current is not None else "superseded",
+            session_id=pending.session_id,
+            submitted=False,
+        )
+    pending = current
 
     payload = build_external_approval_payload(
         pending=pending,

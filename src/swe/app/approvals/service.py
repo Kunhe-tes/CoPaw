@@ -548,6 +548,43 @@ class ApprovalService:
             )
         return len(superseded)
 
+    async def supersede_pending_for_turn(
+        self,
+        chat_id: str,
+        msgid: str,
+    ) -> int:
+        """Invalidate pending approvals belonging to one stopped chat turn."""
+        if not chat_id or not msgid:
+            return 0
+        now = time.time()
+        superseded: list[PendingApproval] = []
+        async with self._lock:
+            for request_id, pending in list(self._pending.items()):
+                if (
+                    pending.status != "pending"
+                    or not self._matches_scope(pending)
+                    or pending.extra.get("chat_id") != chat_id
+                    or pending.extra.get("msgid") != msgid
+                ):
+                    continue
+                self._pending.pop(request_id)
+                pending.status = "superseded"
+                pending.resolved_at = now
+                if not pending.future.done():
+                    pending.future.set_result(ApprovalDecision.TIMEOUT)
+                self._completed[request_id] = pending
+                superseded.append(pending)
+            self._gc_completed_locked()
+        for pending in superseded:
+            await self._persist_request(pending)
+            await self.record_event(
+                pending,
+                "superseded",
+                status=pending.status,
+                details={"chat_id": chat_id, "msgid": msgid},
+            )
+        return len(superseded)
+
     async def consume_approval(
         self,
         session_id: str,

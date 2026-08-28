@@ -5,6 +5,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any, AsyncGenerator, Protocol
 
 from agentscope.message import Msg
@@ -12,6 +14,8 @@ from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.hook_runtime.models import HookDecision, MergedHookResult
+
+logger = logging.getLogger(__name__)
 
 
 class TurnLifecycleOwner(Protocol):
@@ -278,7 +282,10 @@ async def _begin_goal_turn(
                 role="assistant",
                 content="The requested Goal is not available in this chat.",
             )
-        return service, await service.begin_turn(goal_id)
+        msgid = str(
+            getattr(runtime.agent, "_request_context", {}).get("msgid") or "",
+        ).strip()
+        return service, await service.begin_turn(goal_id, msgid=msgid or None)
     except ValueError:
         state = getattr(getattr(current_goal, "state", None), "value", None)
         return Msg(
@@ -428,19 +435,26 @@ async def _stream_goal_completion_lifecycle(
         service, goal = started
         _prepare_goal_turn_context(owner, runtime=runtime, goal=goal)
         outcome.stop_hook_active = False
-        async for msg, _last in owner._stream_agent_turns(
-            runtime=runtime,
-            plan=plan,
-            outcome=outcome,
-        ):
-            observations = getattr(
-                runtime.agent,
-                "_request_context",
-                {},
-            ).get("_goal_turn_tool_observations")
-            if isinstance(observations, list):
-                owner._append_goal_tool_observations(observations, msg)
-            yield msg, False
+        try:
+            async for msg, _last in owner._stream_agent_turns(
+                runtime=runtime,
+                plan=plan,
+                outcome=outcome,
+            ):
+                observations = getattr(
+                    runtime.agent,
+                    "_request_context",
+                    {},
+                ).get("_goal_turn_tool_observations")
+                if isinstance(observations, list):
+                    owner._append_goal_tool_observations(observations, msg)
+                yield msg, False
+        except asyncio.CancelledError:
+            await service.abandon_turn(
+                goal_id,
+                "Goal turn stopped before settlement",
+            )
+            raise
         if outcome.pre_tool_terminal_stop:
             await service.abandon_turn(
                 goal_id,
@@ -465,14 +479,39 @@ async def _stream_goal_completion_lifecycle(
             )
             continue
         if settled.state.value == "WAITING":
-            settled = await _wait_for_goal_wake(
-                owner,
-                service=service,
-                reviewer=reviewer,
-                goal_id=goal_id,
-                plan=plan,
-                settled=settled,
-            )
+            try:
+                settled = await _wait_for_goal_wake(
+                    owner,
+                    service=service,
+                    reviewer=reviewer,
+                    goal_id=goal_id,
+                    plan=plan,
+                    settled=settled,
+                )
+            except asyncio.CancelledError:
+                msgid = str(
+                    getattr(runtime.agent, "_request_context", {}).get(
+                        "msgid",
+                    )
+                    or "",
+                ).strip()
+                interrupt = getattr(
+                    service,
+                    "interrupt_turn_if_matches",
+                    None,
+                )
+                if callable(interrupt) and msgid:
+                    await interrupt(
+                        goal_id,
+                        msgid,
+                        "Goal turn stopped while waiting for wake",
+                    )
+                else:
+                    await service.abandon_turn(
+                        goal_id,
+                        "Goal turn stopped while waiting for wake",
+                    )
+                raise
             if settled.state.value == "ACTIVE":
                 continue
         if settled.state.value == "INTERRUPTED":
@@ -552,7 +591,23 @@ async def _stream_standard_completion_lifecycle(
         ):
             yield msg, last
         if outcome.pre_tool_terminal_stop:
+            logger.warning(
+                "[STOP-DEBUG] skipped reason=pre_tool_terminal_stop "
+                "trace_id=%s turn_id=%s",
+                getattr(request, "trace_id", None),
+                (getattr(request, "channel_meta", None) or {}).get("turn_id"),
+            )
             return
+        logger.warning(
+            "[STOP-DEBUG] before_stop_gate trace_id=%s turn_id=%s "
+            "response_len=%d pre_tool_terminal_stop=%s "
+            "plan_interaction_turn_boundary=%s",
+            getattr(request, "trace_id", None),
+            (getattr(request, "channel_meta", None) or {}).get("turn_id"),
+            len(outcome.assistant_response or ""),
+            outcome.pre_tool_terminal_stop,
+            outcome.plan_interaction_turn_boundary,
+        )
         should_continue, incomplete_msg = await _resolve_stop_gate(
             owner,
             request=request,

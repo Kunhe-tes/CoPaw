@@ -75,6 +75,19 @@ class HookRuntime:
             if context.hook_event_name == HookEventName.STOP
             else resolver.resolve_event_plan(context)
         )
+        if context.hook_event_name == HookEventName.STOP:
+            logger.warning(
+                "[STOP-DEBUG] resolved trace_id=%s turn_id=%s handlers=%d "
+                "handler_ids=%s tenant_enabled=%s agent_enabled=%s "
+                "overlay_ids=%s",
+                context.trace_id,
+                context.turn_id,
+                len(plan.handlers),
+                [item.handler.id for item in plan.handlers],
+                self.tenant_config.enabled,
+                self.agent_config.enabled,
+                [entry.hook_id for entry in self.session_overlay.entries],
+            )
         if not plan.handlers:
             return merge_hook_results(plan, [])
         conversation_snapshot = await self._capture_conversation_snapshot(

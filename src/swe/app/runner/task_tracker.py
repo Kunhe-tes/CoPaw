@@ -71,6 +71,34 @@ class TaskTracker:
             return "idle"
         return state.status
 
+    async def is_turn_stopping(
+        self,
+        run_key: str,
+        msgid: str | None,
+    ) -> bool:
+        """Return whether the exact active answer turn has accepted Stop."""
+        if not run_key or not msgid:
+            return False
+        async with self._lock:
+            state = self._runs.get(run_key)
+            return bool(
+                state is not None
+                and not state.task.done()
+                and state.msgid == msgid
+                and state.status == "stopping",
+            )
+
+    async def get_run_identity(
+        self,
+        run_key: str,
+    ) -> tuple[str, str | None] | None:
+        """Return the active run's server-owned turn identity."""
+        async with self._lock:
+            state = self._runs.get(run_key)
+            if state is None or state.task.done():
+                return None
+            return run_key, state.msgid
+
     async def call_if_idle(
         self,
         run_key: str,
@@ -204,12 +232,14 @@ class TaskTracker:
         self,
         run_key: str,
         msgid: str | None = None,
+        *,
+        cooperative: bool = False,
     ) -> StopClaimResult:
         """Claim a run for stopping, optionally scoped to an answer turn.
 
-        The legacy Chat-ID-only form retains its immediate cancellation and
-        boolean return value. Turn-aware callers receive an immutable claim
-        result and a cooperative settlement window before cancellation.
+        Legacy callers keep immediate Chat-ID-only cancellation. Console
+        callers set ``cooperative`` so both turn-bound and legacy Chat-ID-only
+        requests receive the settlement window before hard cancellation.
         """
         async with self._lock:
             state = self._runs.get(run_key)
@@ -226,7 +256,7 @@ class TaskTracker:
                 )
             state.status = "stopping"
             state.stop_accepted = True
-            if msgid is None:
+            if msgid is None and not cooperative:
                 state.task.cancel()
                 return StopClaimResult(
                     True,

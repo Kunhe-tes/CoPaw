@@ -1283,6 +1283,10 @@ _Avoid_: runtime metadata, env/header info, credential, signed token
 The unique identifier for one Swe execution. Spans, Subtasks, execution records, feedback, and Runtime Invocation Claims correlate through this identifier even when several executions share one external distributed trace.
 _Avoid_: B3 trace ID, batch ID, request header trace ID
 
+**Agent Trace**:
+The observability trace for one user-message execution by the Main Agent. It starts at the request's Main Agent entry point, contains that execution's agent stages, model calls, tool calls, retries, and terminal outcome, and ends when the execution finishes; a later message in the same session starts a new Agent Trace.
+_Avoid_: session trace, conversation-wide trace, SubAgent Run trace
+
 **B3 Trace ID**:
 The external distributed-tracing identifier received through B3 transport metadata. It may be shared by multiple executions in one Dispatch Batch and therefore is not an execution identity.
 _Avoid_: execution trace ID, Subtask trace ID, unique run ID
@@ -1606,6 +1610,178 @@ _Avoid_: external channel message id, generated UI message id, response id
 **Answer Turn**:
 The ordered message group anchored by one **User Question Message ID**, including that user question and the messages that follow it until the next user-authored question in the same Logical Chat Session. An **Answer Turn** uses the same chat-history message shape as the full conversation view.
 _Avoid_: final answer text, assistant-only bubble, latest response, answer-only slice
+
+**Stopped Answer Turn**:
+An **Answer Turn** ended by an explicit user stop request before the Main Agent produced a completed response. It remains a queryable part of the **Chat Record**, preserving the anchor user question and any assistant output produced before stopping, and it does not imply that the response completed successfully.
+_Avoid_: discarded turn, completed answer, cancelled chat record, partial hidden state
+
+**Chat Stop Request**:
+An explicit user operation that asks the current **Answer Turn** to stop. A **Chat Stop Request** is idempotent: repeating it does not duplicate messages or overwrite a completed or already stopped turn.
+_Avoid_: stream disconnect, retry submission, session deletion, message cancellation
+
+**Chat Submission Protocol Compatibility**:
+The commitment that existing Chat submission clients continue using the established `/console/chat` request contract without a new required per-turn request identifier. A User Question Message ID remains server-issued and is conveyed through the existing response metadata path.
+_Avoid_: required client request ID, third-party Chat migration, breaking submission schema, client-issued message ID
+
+**Turn-bound Chat Stop Request**:
+A **Chat Stop Request** identified by the target **User Question Message ID** as well as its Chat. It may affect only the matching active **Answer Turn**; a stale request is an idempotent no-op and cannot stop a later turn in that Chat.
+_Avoid_: chat-wide stop, delayed-stop race, replacement-turn cancellation, inferred active turn
+
+**Early Chat Stop Exception**:
+The narrowly scoped form of a **Chat Stop Request** accepted before the client has received the server-issued **User Question Message ID**. It may stop only the uniquely identified, ownership-validated startup turn for that Chat; if no unique startup turn exists, it is an idempotent no-op.
+_Avoid_: unrestricted msgid-less stop, chat-wide cancellation, guessed current turn, delayed-stop override
+
+**Chat Startup Stop Locator**:
+The ownership-scoped logical-session locator used only when a Console client has not yet received the server-issued Chat ID and User Question Message ID. It may resolve exactly one startup Answer Turn for an early stop; after response metadata is available, turn-bound identity is required.
+_Avoid_: logical session as Chat ID, permanent session-based stop, ambiguous active-chat selection, delayed-stop lookup
+
+**Chat Stop Target Resolution Order**:
+The strict matching order for a Console Chat Stop Request: a Chat ID plus User Question Message ID identifies an exact turn; a Chat ID alone invokes constrained legacy matching of that Chat's unique current run; only a request without Chat ID may use the early logical-session locator. A Message ID without Chat ID, or no locator at all, is an idempotent no-op and never triggers fuzzy resolution.
+_Avoid_: msgid-only global lookup, session fallback after Chat identity, ambiguous mixed locator, guessed active turn
+
+**Stopped Turn Stream Closure**:
+The transport behavior after a **Chat Stop Request**: the stop endpoint acknowledges asynchronous stopping, the active Chat stream closes after bounded settlement, and no new public stopped or failed SSE status is emitted. Stopped content is recovered through Chat history reads.
+_Avoid_: stopped SSE status, failure SSE status, frontend stop prompt, stream-as-record
+
+**Stopped Turn Output Freeze Boundary**:
+The atomic acceptance point of a Chat Stop Request after which ordinary display output from its Answer Turn cannot enter the stream buffer or persisted history. Display events already accepted before that point remain visible and reconnectable; stopping then closes the stream after bounded settlement without adding later normal Agent output.
+_Avoid_: post-stop token leak, retroactive buffer deletion, hidden pre-stop output, stopping SSE status
+
+**Chat Stop Protocol Compatibility**:
+The incremental compatibility rule for Console Chat Stop: the existing Chat ID remains accepted, the User Question Message ID is optional, and the established `stopped` response field remains present alongside asynchronous stop details. New callers provide the turn identity for exact stopping; legacy Chat-ID-only callers may stop only the uniquely running turn currently associated with that Chat and cannot defend against a delayed request racing with a later turn.
+_Avoid_: stop endpoint replacement, required msgid migration, removed stopped field, unrestricted legacy chat-wide cancellation
+
+**Chat Stop Idempotent No-op Response**:
+The compatible response when a Chat Stop Request does not identify an active eligible Answer Turn, including an already settled turn, a stale turn identity, or an ambiguous legacy Chat-ID-only request. It returns successful transport status with `stopped: false` and `accepted: false`, without revealing whether the referenced turn exists or why it was ineligible.
+_Avoid_: stale-stop error, target-existence disclosure, ambiguous legacy cancellation, retry-only failure
+
+**Chat Stop Authorization No-op**:
+The security-preserving treatment of a Stop request whose Chat is outside the current tenant, user, or channel ownership scope. It uses the same `200` / `stopped: false` / `accepted: false` response as other ineligible targets, while emitting a server-side security audit record and never affecting the target Chat.
+_Avoid_: cross-tenant 403 distinction, Chat existence leak, partial unauthorized stop, silent security failure
+
+**Chat Stop Acceptance**:
+The server-side acknowledgement that a validated Chat Stop Request has claimed the target Answer Turn and durably or atomically entered its `stopping` phase. Acceptance does not mean the final `INTERRUPTED` outcome or stopped-turn persistence has completed; those are settled asynchronously within the graceful interruption window.
+_Avoid_: completed-stop acknowledgement, model-finished response, persistence-success claim, transport-only receipt
+
+**Chat Stop Re-acknowledgement**:
+The idempotent response to a repeated Stop for the same Answer Turn while it remains in `stopping`. It returns the same accepted stopping state (`stopped: true`, `accepted: true`, `status: "stopping"`) without issuing another cancellation or changing terminal precedence.
+_Avoid_: duplicate cancellation, accepted=false during stopping, repeated persistence, stop escalation
+
+**Chat Stop Response Status**:
+The coarse Chat control state returned by a Stop endpoint at request acknowledgement time: `stopping` when the target turn was accepted for bounded interruption, and `idle` for an idempotent no-op. It does not expose the eventual Answer Turn terminal outcome; stopped-turn history is authoritative after settlement.
+_Avoid_: `interrupted` response guarantee, persistence result status, SSE lifecycle status, model completion status
+
+**Accepted Chat Stop Identity Echo**:
+The response rule that Stop returns the server-validated Chat ID and User Question Message ID only when it accepts that exact stopping target. An idempotent no-op or ownership-rejected request returns no target identity, preventing the response from disclosing unverified Chat or turn existence.
+_Avoid_: unvalidated identity echo, authorization oracle, stale-turn confirmation, mandatory legacy message ID
+
+**Chat Stop Graceful Interruption Window**:
+The bounded five-second interval after a **Chat Stop Request** is accepted in which the Agent, tools, approvals, and workers may cooperatively settle and persist the stopped turn. Hard task cancellation is reserved for work that remains after this window; the window is not the Agent's general interrupt timeout.
+_Avoid_: immediate hard cancel, sixty-second stop grace, unbounded graceful stop, post-stop normal output
+
+**Stopped Turn Display Boundary**:
+The history visibility rule for a **Stopped Answer Turn**: already persisted displayable tool calls, tool results, assistant output, and approval cards remain visible under the existing Chat redaction rules. Stopping does not preserve streaming-only deltas or rewrite persisted tool content; superseded approval cards expose their existing status.
+_Avoid_: hidden stopped tools, raw delta history, stop-specific redaction, rewritten tool audit
+
+**Answer Turn Query Identity**:
+The precise identity of a queryable Answer Turn: its Chat ID and User Question Message ID. A legacy logical-session lookup may locate this pair only by searching all ownership-authorized candidate Chats, never by assuming the most recently updated Chat contains the turn.
+_Avoid_: newest-chat lookup, session-only turn identity, cross-chat message inference, stale-chat 404
+
+**Answer Turn Query Status**:
+The optional top-level status returned by the Answer Turn query endpoint to describe the queried turn independently of its message list. A stopped turn returns `turn_status: "stopped"`, including when the turn contains only its admitted User Question; when assistant output exists, the same status is normalised from the stopped message metadata without changing the existing message shape.
+_Avoid_: status inferred only from assistant output, missing no-output stop, frontend notification trigger, message-schema replacement
+
+**Stopping Answer Turn Query State**:
+The transient `status: "stopping"` returned by an Answer Turn query while accepted Stop settlement remains in progress. Once the stream has closed and settlement ends, the query returns `status: "idle"`; any persisted stopped outcome is then expressed separately by `turn_status: "stopped"`.
+_Avoid_: stopped-as-running, terminal status before settlement, public stopped SSE state, query-time persistence guarantee
+
+**Chat Stop Ownership Check**:
+The authorization check that binds a **Chat Stop Request** to the current tenant, the owning user, and the Chat's channel before its target turn can be inspected or stopped. An unauthorized request cannot affect a running Answer Turn.
+_Avoid_: chat-ID-only authorization, cross-user stop, cross-channel stop, tenant-only stop authorization
+
+**Answer Turn Terminal Precedence**:
+The single terminal outcome of an **Answer Turn** under a race between normal completion and a **Chat Stop Request**. The first operation to durably establish its terminal outcome wins; a later stop cannot replace a completed outcome, and a later completion cannot replace a stopped outcome.
+_Avoid_: terminal overwrite, stop-after-complete mutation, dual terminal state, last-writer-wins outcome
+
+**Chat Deletion Arbitration**:
+The rule that Chat deletion obtains final ownership of the Chat before removing its session state and archive resources. Any active or stopping Answer Turn must be prevented from writing after deletion, so a late stop settlement cannot recreate deleted history.
+_Avoid_: delete-mapping-only removal, late persistence resurrection, delete-while-running race, orphaned stopped turn
+
+**Stopped Turn Approval Supersession**:
+The invalidation of every pending human approval belonging to a **Stopped Answer Turn**. Superseded approvals retain their audit record and visible approval history, but a later approval or denial cannot resume that Answer Turn.
+_Avoid_: approval deletion, approval replay, resumed stopped turn, hidden approval cancellation
+
+**Stopping Answer Turn**:
+An **Answer Turn** after an accepted **Chat Stop Request** and before its durable stopped outcome is known. It remains active only to complete bounded interruption and persistence work; it cannot emit further normal Agent output.
+_Avoid_: stopped answer turn, completed answer, retryable submission, idle chat
+
+**Stopping Turn Submission Gate**:
+The temporary Chat admission boundary while an **Answer Turn** is stopping. It rejects a later user question for that Chat without consuming it, until the stopped outcome has been settled durably.
+_Avoid_: queued follow-up question, attach-to-old-stream submission, concurrent answer turn, discarded follow-up
+
+**Stopping Turn Composer Lock**:
+The Console interaction rule corresponding to the **Stopping Turn Submission Gate**: after Stop acceptance, the Composer submission control remains disabled until the original Chat stream closes and the stopping phase ends. The user's unsent input remains in the Composer and can be submitted after the lock clears; no stop-specific notice is required.
+_Avoid_: discarded draft, optimistic follow-up submission, permanent disabled Composer, stop error prompt
+
+**Stopping Turn Submission Race Handling**:
+The Console treatment of a `409` rejection caused by the **Stopping Turn Submission Gate**, such as a cross-tab or near-simultaneous submit race. It leaves the user input intact, adds no local Chat history, emits no stop-specific prompt, and permits explicit resubmission after the owning Chat stream closes.
+_Avoid_: discarded concurrent draft, local phantom User Question, stopping error toast, automatic retry
+
+**Stop-while-Stream-Open UI Rule**:
+The Console rule for a Stop request whose transport acknowledgement fails or is delayed: Composer submission remains disabled while the original Chat stream is still open, Stop controls do not trigger automatic retries or user-facing errors, and the controls unlock when that stream closes. A user may issue another explicit Stop while the stream remains active.
+_Avoid_: unlock-on-request-failure, silent follow-up admission, automatic stop retry, frontend persistence error state
+
+**Stopping Turn Reconnect Boundary**:
+The stream-reconnection rule for a **Stopping Answer Turn**: a `reconnect=true` request may attach while bounded stopping is still in progress, replay buffered display events, and wait for the stream's normal closure, but it cannot resume or produce new Agent output. After stopped settlement, stream attachment ends and the persisted **Stopped Answer Turn** is read from Chat history instead.
+_Avoid_: reconnect-triggered resume, post-settlement stream replay, new output after Stop, historyless stopped turn
+
+**Client Turn Identity Capture**:
+The Console requirement to persist the server-issued `chat_id`, User Question Message ID, and logical `session_id` as soon as the Chat stream response headers arrive. Stop and reconnect use this exact tuple first; compatibility fallbacks are limited to the early pre-header window or legacy session records.
+_Avoid_: session-only Stop, client-generated message identity, late identity capture, logical-session-as-chat fallback
+
+**Stopped Turn History Refresh Policy**:
+The Console policy after a stopped Chat stream closes: do not automatically refresh or rewrite the visible Chat timeline. The persisted stopped turn is read on the next user-initiated Chat load or refresh; no frontend cache, retry, or notification is added for this purpose.
+_Avoid_: automatic post-stop reload, local stopped-turn cache, stop completion toast, forced timeline mutation
+
+**Chat-scoped Stopping UI State**:
+The Console rule that stopping affects only the Chat owning the **Stopping Answer Turn**. The user may switch to and submit in other Chats; returning to the stopping Chat retains its Composer lock until that Chat's original stream closes.
+_Avoid_: application-wide Composer lock, cross-Chat submission rejection, hidden stopping Chat, early original-Chat unlock
+
+**Explicit Chat Stop Invocation**:
+The rule that the Console Stop endpoint is invoked only by a deliberate user Stop action. Transport aborts, network loss, Chat switching, and component disposal leave the server-side Answer Turn running and eligible for normal reconnection; they are not implicit Chat Stop Requests.
+_Avoid_: disconnect-as-stop, navigation cancellation, unmount cancellation, accidental stopped turn
+
+**Stopping Turn Control-Command Gate**:
+The application of the **Stopping Turn Submission Gate** to conversation control commands such as `/clear` and `/new`. Those commands cannot change memory or checkpoint state until the stopping Answer Turn has settled.
+_Avoid_: concurrent clear, concurrent new conversation, stop-command write race, early turn-state cleanup
+
+**Stopped Turn Worker Boundary**:
+The execution boundary for workers launched by a **Stopped Answer Turn**. Chat Stop best-effort cancels the synchronously selected worker and active Background SubAgent Runs owned by that turn; already completed results remain auditable, but no worker may write to, wake, or drive the stopped turn afterward.
+_Avoid_: orphan worker continuation, post-stop result merge, Goal wake-up after stop, external-effect rollback
+
+**Persisted User Question Admission**:
+The condition that a user question has been durably accepted as the anchor of an **Answer Turn** before Main Agent execution begins. A question that cannot reach this condition does not begin an Answer Turn.
+_Avoid_: best-effort prompt cache, started-but-unsaved question, model-first submission
+
+**Stopped Turn Persistence Failure**:
+The failure to durably record the stopped outcome or its newly produced displayable messages after a **Chat Stop Request**. It does not remove a previously admitted user question; the current policy records the server-side failure without automatic retry or frontend recovery storage.
+_Avoid_: frontend failure state, retried Agent execution, recoverable frontend draft
+
+**Interrupted Runtime Restart Boundary**:
+The restart behavior for an Answer Turn interrupted by process shutdown or failure. The system does not resume or replay its Agent execution; history reflects only state that was already durable, including the admitted user question, and unresolved stop persistence is not retried.
+_Avoid_: automatic Agent resumption, replayed stopped turn, stop-persistence retry, reconstructed partial output
+
+**Stopped Turn Archive Retention**:
+The retention of a **Stopped Answer Turn** when it moves from online memory into Chat history archives. Its stopped terminal metadata remains visible in the archive, while a no-output stopped marker remains in the Chat's session state until normal Chat cleanup.
+_Avoid_: completed-only archive, statusless archived partial answer, discarded stopped turn, archive-only no-output marker
+
+**Chat Stop External-Effect Boundary**:
+The limit of a **Chat Stop Request** when a tool has already begun an external operation. It requests best-effort interruption of remaining execution but does not promise rollback of completed or in-progress external side effects.
+_Avoid_: transactional external rollback, undo guarantee, side-effect-free cancellation
+
+**Chat Stream Disconnect**:
+The loss or closure of one client connection to an active Chat stream without an explicit **Chat Stop Request**. It does not stop the current **Answer Turn**; the run remains eligible for reconnection and normal completion.
+_Avoid_: stopped answer turn, user cancellation, request failure, session termination
 
 **Logical Chat Session**:
 The stable conversation identity used to continue chat context across turns. A **Logical Chat Session** is distinct from the persisted chat record used to load or display the conversation.
@@ -2533,6 +2709,10 @@ _Avoid_: immediate turn interruption, discarded turn result, concurrent transiti
 When more than one Goal Control Command is pending at a Main Agent turn's settlement boundary, the Goal Runtime applies only the highest-precedence command: `CANCEL`, then Direct Goal Edit, then `PAUSE`, then `RESUME`. Lower-precedence commands remain auditable as superseded and cause no intermediate state transition.
 _Avoid_: command race, sequential conflicting transition, last-write-wins control
 
+**Goal Stop Competition Rule**:
+The outcome when a Chat Stop Request races an explicit Goal Monitor control for the same active Goal turn. A Goal Monitor cancellation that first durably establishes `CANCELLED` prevails; otherwise Chat Stop ends the current Answer Turn as stopped and transitions the Goal to `INTERRUPTED`. Pause, Direct Goal Edit, and Resume do not replace the stopped interruption outcome, but remain subject to their normal later lifecycle rules.
+_Avoid_: stop-as-cancel, interrupted-then-cancelled overwrite, pause-over-stop, edit-over-stop
+
 **Goal Turn Settlement Boundary**:
 The point after a Main Agent naturally finishes its current reasoning loop and any tool call it has already begun, when the Goal Runtime persists its result and applies pending Goal Control Commands. The first phase does not preempt an executing tool or promise stronger cancellation than the ordinary runtime provides.
 _Avoid_: forced tool termination, immediate control transition, rollback guarantee
@@ -2604,6 +2784,70 @@ _Avoid_: legacy Proposed Plan mapping, inferred Contract, user-approved step lis
 **Goal Contract Draft**:
 The proposed pre-confirmation form of a Goal Contract, containing the objective, Completion Criteria with deterministic verification definitions, Constraints, and Autonomy Boundary. User confirmation makes it the active Contract for a new Goal or Goal Revision.
 _Avoid_: accepted execution plan, mutable task list, implicit Goal
+
+**Goal Contract Draft Execution Summary**:
+The read-only, immediately derived overview within an editable Goal Contract Draft. It summarizes the current objective, Completion Criteria count, Constraint counts, and Autonomy Boundary presence; it is not a Contract field and is never independently stored or confirmed.
+_Avoid_: editable summary, persisted proposal field, separate contract description
+
+**Goal Contract Draft Detail View**:
+The temporary expanded or collapsed presentation of an editable Goal Contract Draft. A newly received Draft starts expanded; validation failures keep it expanded so the invalid field remains actionable. Its visibility is not stored as Goal state or Contract data.
+_Avoid_: persisted user preference, contract lifecycle state, collapsed validation error
+
+**Goal Contract Draft Composer Card**:
+The compact, blocking Goal Contract Draft presentation that temporarily replaces the Chat Composer. It adopts the Draft's sectioned visual language without becoming an independent full-page workflow: its Detail View scrolls within a bounded height so the existing conversation remains visible.
+_Avoid_: standalone Draft page, timeline message, cloned page shell, full-height Composer replacement
+
+**Goal Contract Draft Detail Toggle**:
+The dedicated accessible button that controls the Draft Detail View. It is the only collapse/expand trigger, exposes `aria-expanded`, uses explicit expanded/collapsed labels, and supports Enter or Space keyboard activation.
+_Avoid_: clickable summary surface, hidden toggle semantics, pointer-only disclosure
+
+**Goal Contract Draft Local Edit**:
+An unconfirmed edit held only in the current Goal Contract Draft card. It does not create or alter a Goal and is discarded when the page or card is left; the Draft must disclose this before confirmation.
+_Avoid_: saved draft, server-side proposal revision, resumable pre-confirmation contract
+
+**Goal Contract Draft Exit**:
+The explicit return from a Draft card to ordinary message editing. It never creates a Goal; when Unconfirmed Changes exist, the user must confirm their discard before the card closes.
+_Avoid_: implicit confirmation, silent discard, Contract cancellation
+
+**Goal Contract Draft Navigation Loss**:
+The intentional loss of a Local Edit when the user refreshes, closes, or navigates away from a Draft outside its explicit Exit. The Console does not install a browser-level unsaved-change warning because the Draft has no durable save or restoration path.
+_Avoid_: browser-level draft confirmation, false recovery promise, persisted local edit
+
+**Goal Contract Draft Validation Feedback**:
+The pre-confirmation feedback for an invalid Goal Contract Draft. Confirmation validates every Contract field, keeps the Detail View expanded, focuses the first invalid field, and presents both that field's reason and an aggregate count of unresolved errors; invalid editing remains possible.
+_Avoid_: silent rejected confirmation, summary-only error, locked invalid Draft
+
+**Goal Contract Draft JSON Formatting**:
+The user-triggered readability action for the Completion Criteria editor. Valid JSON may be rewritten with stable two-space indentation; invalid JSON remains unchanged and reports its parse location, while semantic fields are not repaired automatically.
+_Avoid_: silent auto-fix, semantic normalization, criteria mutation by formatting
+
+**Goal Contract Draft Character Boundary**:
+The visible pre-confirmation character limit that matches the Goal Contract model: Objective and Autonomy Boundary each allow up to 4000 characters. The Completion Criteria editor is governed by its actual structured-field limits rather than a presentation-only short limit.
+_Avoid_: mockup character limit, client-only truncation, inconsistent Contract validation
+
+**Goal Contract Confirmation Handoff**:
+The transient state after a valid Draft is submitted: the Draft becomes non-editable while its Goal is created, then the user receives confirmation that execution is starting before the existing Goal runtime surface takes over.
+_Avoid_: editable submission, silent card disappearance, separate manual start step
+
+**Goal Contract Confirmation Success State**:
+The card-local success feedback in a Goal Contract Confirmation Handoff. It replaces the Draft actions briefly before the existing Goal runtime surface takes over and does not use a global notification.
+_Avoid_: global confirmation toast, disappearing confirmation, manually dismissed success state
+
+**Unconfirmed Goal Contract Draft Change**:
+A Local Edit whose current Draft differs from its received proposal. Its Execution Summary reflects the changed values immediately and identifies the Draft as unconfirmed even when its Detail View is collapsed.
+_Avoid_: stale summary, saved contract, hidden unconfirmed change
+
+**Goal Contract Draft Change Equivalence**:
+The normalization rule for determining whether a Draft has an Unconfirmed Change: Objective and Autonomy Boundary compare after trim, valid Completion Criteria JSON compares as structured content, and Constraint entries compare in their entered order after per-line trim. Reverting to an equivalent original Contract removes the change marker.
+_Avoid_: formatting-only change, whitespace-only change, unordered constraint equivalence
+
+**Goal Contract Draft Constraint Pair**:
+The paired editable presentation of a Draft's `must_preserve` and `must_not_do` Constraint lists. The pair is displayed side by side when space permits and stacks on narrow screens without changing either list's independent meaning.
+_Avoid_: merged constraint list, reordered constraint semantics, desktop-only layout
+
+**Empty Goal Contract Draft Constraint**:
+The visible optional state of either Constraint list in a Goal Contract Draft. The editable field remains available with an empty-state prompt, while the Execution Summary identifies the corresponding Constraint as not set.
+_Avoid_: omitted constraint field, required empty constraint, hidden optional state
 
 **Editable Goal Proposal**:
 The pre-creation Goal-ready Proposal state in which the user may directly edit every Goal Contract Draft field: objective, Completion Criteria and their verification definitions, Constraints, and Autonomy Boundary. Edits are revalidated and reconfirmed as one proposal; they do not create a Goal until confirmation succeeds. The Initial Execution Plan remains private to the Main Agent.
