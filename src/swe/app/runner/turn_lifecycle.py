@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any, AsyncGenerator, Protocol
 
 from agentscope.message import Msg
@@ -13,6 +14,8 @@ from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.hook_runtime.models import HookDecision, MergedHookResult
+
+logger = logging.getLogger(__name__)
 
 
 class TurnLifecycleOwner(Protocol):
@@ -588,7 +591,23 @@ async def _stream_standard_completion_lifecycle(
         ):
             yield msg, last
         if outcome.pre_tool_terminal_stop:
+            logger.warning(
+                "[STOP-DEBUG] skipped reason=pre_tool_terminal_stop "
+                "trace_id=%s turn_id=%s",
+                getattr(request, "trace_id", None),
+                (getattr(request, "channel_meta", None) or {}).get("turn_id"),
+            )
             return
+        logger.warning(
+            "[STOP-DEBUG] before_stop_gate trace_id=%s turn_id=%s "
+            "response_len=%d pre_tool_terminal_stop=%s "
+            "plan_interaction_turn_boundary=%s",
+            getattr(request, "trace_id", None),
+            (getattr(request, "channel_meta", None) or {}).get("turn_id"),
+            len(outcome.assistant_response or ""),
+            outcome.pre_tool_terminal_stop,
+            outcome.plan_interaction_turn_boundary,
+        )
         should_continue, incomplete_msg = await _resolve_stop_gate(
             owner,
             request=request,

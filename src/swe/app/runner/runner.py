@@ -4536,17 +4536,42 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ) -> MergedHookResult | None:
         """执行 Stop completion gate，active guard 已设置时跳过递归触发。"""
+        logger.warning(
+            "[STOP-DEBUG] stop_entry trace_id=%s turn_id=%s response_len=%d "
+            "active=%s plan_boundary=%s tenant_enabled=%s agent_enabled=%s "
+            "overlay_ids=%s",
+            getattr(request, "trace_id", None),
+            (getattr(request, "channel_meta", None) or {}).get("turn_id"),
+            len(outcome.assistant_response or ""),
+            outcome.stop_hook_active,
+            outcome.plan_interaction_turn_boundary,
+            getattr(runtime.tenant_hooks, "enabled", None),
+            getattr(
+                getattr(runtime.agent_config, "hooks", None),
+                "enabled",
+                None,
+            ),
+            [entry.hook_id for entry in runtime.hook_overlay.entries],
+        )
         if outcome.stop_hook_active:
+            logger.warning("[STOP-DEBUG] skipped reason=stop_hook_active")
             return None
         if outcome.plan_interaction_turn_boundary:
+            logger.warning(
+                "[STOP-DEBUG] skipped reason=plan_interaction_turn_boundary",
+            )
             return None
         if not outcome.assistant_response:
+            logger.warning(
+                "[STOP-DEBUG] skipped reason=empty_assistant_response",
+            )
             return None
         if not _hook_config_enabled(
             runtime.tenant_hooks,
             runtime.agent_config,
             runtime.hook_overlay,
         ):
+            logger.warning("[STOP-DEBUG] skipped reason=hooks_disabled")
             return None
 
         outcome.stop_hook_active = True
