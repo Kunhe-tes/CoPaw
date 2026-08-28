@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """Regression coverage for the root Experts API route."""
 
+import importlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,13 +32,19 @@ async def test_experts_repository_uses_active_agent_resolution(
             SimpleNamespace(),
         )
 
+    agent_context = importlib.import_module("swe.app.agent_context")
     monkeypatch.setattr(
-        "swe.app.agent_context.get_agent_and_config_for_request",
+        agent_context,
+        "get_agent_and_config_for_request",
         resolve_active_agent,
     )
     request = Request({"type": "http", "headers": []})
 
     repository = await _repository(request)
 
-    assert repository._root == tmp_path / "agents"  # pylint: disable=protected-access
-    assert repository._owner_scope == "tenant-1/active-agent"  # pylint: disable=protected-access
+    assert (
+        repository._root == tmp_path / "agents"
+    )  # pylint: disable=protected-access
+    assert (
+        repository._owner_scope == "tenant-1/active-agent"
+    )  # pylint: disable=protected-access

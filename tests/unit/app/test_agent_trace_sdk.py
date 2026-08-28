@@ -13,6 +13,7 @@ from trace_sdk._records import reset, spans
 from trace_sdk import TraceFields, global_tracer
 
 from swe.__version__ import __version__
+from swe.app.answer_turn.models import TurnIdentity
 from swe.app.runner.query_attempt import stream_query_after_preflight
 from swe.app.runner.query_contracts import _QueryPreflight
 from swe.app.runner.query_execution.admission import stream_admission
@@ -33,12 +34,13 @@ async def test_query_handler_creates_one_server_root_span(tmp_path) -> None:
     reset()
     runner = AgentRunner(agent_id="agent-1", workspace_dir=tmp_path)
     runner._query_execution = QueryExecution(_Adapter())
+    identity = TurnIdentity.create(chat_id="chat-1", msgid="msg-1")
     request = SimpleNamespace(
         session_id="session-1",
         user_id="user-1",
         source_id="source-request",
         channel="console",
-        channel_meta={},
+        channel_meta={"answer_turn_identity": identity},
     )
 
     frames = [
@@ -74,11 +76,15 @@ async def test_query_handler_uses_channel_meta_source_for_root_span(
     reset()
     runner = AgentRunner(agent_id="agent-1", workspace_dir=tmp_path)
     runner._query_execution = QueryExecution(_Adapter())
+    identity = TurnIdentity.create(chat_id="chat-1", msgid="msg-1")
     request = SimpleNamespace(
         session_id="session-1",
         user_id="user-1",
         channel="console",
-        channel_meta={"source_id": "source-meta"},
+        channel_meta={
+            "answer_turn_identity": identity,
+            "source_id": "source-meta",
+        },
     )
 
     frames = [
@@ -100,11 +106,12 @@ async def test_query_handler_uses_default_source_for_root_span(
     reset()
     runner = AgentRunner(agent_id="agent-1", workspace_dir=tmp_path)
     runner._query_execution = QueryExecution(_Adapter())
+    identity = TurnIdentity.create(chat_id="chat-1", msgid="msg-1")
     request = SimpleNamespace(
         session_id="session-1",
         user_id="user-1",
         channel="console",
-        channel_meta={},
+        channel_meta={"answer_turn_identity": identity},
     )
 
     frames = [

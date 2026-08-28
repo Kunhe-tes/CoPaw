@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.swe.app.routers import console as console_router
-from src.swe.app.runner.task_tracker import StopClaimResult
+from swe.app.answer_turn.models import StopClaim, TurnIdentity, TurnLease
 
 
 class _FakeConsoleChannel:
@@ -71,14 +71,50 @@ class _FakeTaskTracker:
     async def attach_or_start(self, run_key, payload, stream_fn):
         raise AssertionError("attach_or_start should not run during reconnect")
 
-    async def attach(self, run_key):
-        if run_key == "chat-existing":
+    async def attach(self, identity):
+        if identity.chat_id == "chat-existing":
             return object()
         return None
 
-    async def stream_from_queue(self, _queue, _run_key):
+    async def stream(self, _identity, _queue):
         await asyncio.sleep(0)
         yield 'data: {"done": true}\n\n'
+
+
+class _FakeCoordinator:
+    def __init__(self, tracker):
+        self.tracker = tracker
+        self.identity = TurnIdentity(
+            chat_id="chat-existing",
+            msgid="msg-1",
+            turn_id="turn-1",
+        )
+
+    async def attach(self, chat_id, *, msgid=None):
+        if chat_id != self.identity.chat_id:
+            return None
+        if msgid is not None and msgid != self.identity.msgid:
+            return None
+        queue = await self.tracker.attach(self.identity)
+        return TurnLease(self.identity, queue, False) if queue else None
+
+    async def current_identity(self, chat_id):
+        return self.identity if chat_id == self.identity.chat_id else None
+
+    async def claim_stop(self, identity, *, msgid=None, internal=False):
+        _ = internal
+        if msgid is not None and msgid != identity.msgid:
+            return StopClaim(False, identity=identity)
+        return StopClaim(True, identity=identity, status="stopping")
+
+
+def _workspace_with_tracker(chat_manager, tracker):
+    return SimpleNamespace(
+        channel_manager=_FakeChannelManager(),
+        chat_manager=chat_manager,
+        task_tracker=tracker,
+        answer_turn_coordinator=_FakeCoordinator(tracker),
+    )
 
 
 def test_console_chat_reconnect_waits_for_recently_started_run() -> None:
@@ -98,19 +134,36 @@ def test_console_chat_reconnect_waits_for_recently_started_run() -> None:
             return "chat-real-1"
 
     class _EventuallyAvailableTaskTracker:
-        async def attach(self, run_key: str):
-            if run_key == "chat-real-1":
+        async def attach(self, identity):
+            if identity.chat_id == "chat-real-1":
                 return object()
             return None
+
+    class _EventuallyCoordinator:
+        async def attach(self, chat_id, *, msgid=None):
+            _ = msgid
+            if chat_id != "chat-real-1":
+                return None
+            identity = TurnIdentity(
+                chat_id=chat_id,
+                msgid="msg-1",
+                turn_id="turn-1",
+            )
+            return TurnLease(identity, object(), False)
 
     async def _run() -> tuple[object, str, int]:
         chat_manager = _EventuallyAvailableChatManager()
         # pylint: disable=protected-access
-        queue, run_key = await console_router._attach_reconnect_queue(
-            SimpleNamespace(chat_manager=chat_manager),
-            _EventuallyAvailableTaskTracker(),
-            "1777001065201000",
-            "console",
+        queue, run_key, _identity = (
+            await console_router._attach_reconnect_queue(
+                SimpleNamespace(
+                    chat_manager=chat_manager,
+                    answer_turn_coordinator=_EventuallyCoordinator(),
+                ),
+                _EventuallyAvailableTaskTracker(),
+                "1777001065201000",
+                "console",
+            )
         )
         return queue, run_key, chat_manager.lookup_count
 
@@ -128,11 +181,7 @@ def test_console_chat_reconnect_accepts_chat_id_without_creating_new_chat(
     app.include_router(console_router.router)
 
     chat_manager = _FakeChatManager()
-    workspace = SimpleNamespace(
-        channel_manager=_FakeChannelManager(),
-        chat_manager=chat_manager,
-        task_tracker=_FakeTaskTracker(),
-    )
+    workspace = _workspace_with_tracker(chat_manager, _FakeTaskTracker())
 
     async def _fake_get_agent_for_request(_request):
         return workspace
@@ -175,11 +224,7 @@ def test_console_chat_reconnect_with_agent_request_shape_does_not_start_run(
     app.include_router(console_router.router)
 
     chat_manager = _FakeChatManager()
-    workspace = SimpleNamespace(
-        channel_manager=_FakeChannelManager(),
-        chat_manager=chat_manager,
-        task_tracker=_FakeTaskTracker(),
-    )
+    workspace = _workspace_with_tracker(chat_manager, _FakeTaskTracker())
 
     async def _fake_get_agent_for_request(_request):
         return workspace
@@ -228,11 +273,7 @@ def test_console_chat_reconnect_accepts_logical_session_id(
     app.include_router(console_router.router)
 
     chat_manager = _FakeChatManager()
-    workspace = SimpleNamespace(
-        channel_manager=_FakeChannelManager(),
-        chat_manager=chat_manager,
-        task_tracker=_FakeTaskTracker(),
-    )
+    workspace = _workspace_with_tracker(chat_manager, _FakeTaskTracker())
 
     async def _fake_get_agent_for_request(_request):
         return workspace
@@ -285,20 +326,24 @@ def test_console_chat_stop_returns_turn_bound_claim(monkeypatch) -> None:
                 )
             return None
 
-    class _StopTracker:
-        async def claim_stop(self, chat_id: str, msgid: str | None = None):
-            assert chat_id == "chat-1"
-            assert msgid == "msg-1"
-            return StopClaimResult(
-                True,
+    class _StopCoordinator:
+        async def current_identity(self, chat_id):
+            return TurnIdentity(
                 chat_id=chat_id,
-                msgid=msgid,
-                status="stopping",
+                msgid="msg-1",
+                turn_id="turn-1",
             )
+
+        async def claim_stop(self, identity, *, msgid=None, internal=False):
+            _ = internal
+            assert identity.chat_id == "chat-1"
+            assert msgid == "msg-1"
+            return StopClaim(True, identity=identity, status="stopping")
 
     workspace = SimpleNamespace(
         chat_manager=_StopChatManager(),
-        task_tracker=_StopTracker(),
+        task_tracker=SimpleNamespace(),
+        answer_turn_coordinator=_StopCoordinator(),
     )
 
     async def _fake_get_agent_for_request(_request):
@@ -371,13 +416,16 @@ def test_console_chat_stop_without_caller_identity_is_an_idle_noop(
                 channel="console",
             )
 
-    class _StopTracker:
-        async def claim_stop(self, *_args, **_kwargs):
-            raise AssertionError("unauthenticated Stop must not reach tracker")
+    class _StopCoordinator:
+        async def current_identity(self, *_args, **_kwargs):
+            raise AssertionError(
+                "unauthenticated Stop must not reach coordinator",
+            )
 
     workspace = SimpleNamespace(
         chat_manager=_StopChatManager(),
-        task_tracker=_StopTracker(),
+        task_tracker=SimpleNamespace(),
+        answer_turn_coordinator=_StopCoordinator(),
     )
 
     async def _fake_get_agent_for_request(_request):
@@ -431,16 +479,18 @@ def test_console_chat_stop_session_fallback_rejects_ambiguous_active_turns(
                 "ambiguous early Stop must not resolve a chat",
             )
 
-    class _StopTracker:
-        async def get_run_identity(self, chat_id: str):
-            return chat_id, f"turn-{chat_id}"
-
-        async def claim_stop(self, *_args, **_kwargs):
-            raise AssertionError("ambiguous early Stop must not reach tracker")
+    class _StopCoordinator:
+        async def current_identity(self, chat_id):
+            return TurnIdentity(
+                chat_id=chat_id,
+                msgid=f"msg-{chat_id}",
+                turn_id=f"turn-{chat_id}",
+            )
 
     workspace = SimpleNamespace(
         chat_manager=_StopChatManager(),
-        task_tracker=_StopTracker(),
+        task_tracker=SimpleNamespace(),
+        answer_turn_coordinator=_StopCoordinator(),
     )
 
     async def _fake_get_agent_for_request(_request):

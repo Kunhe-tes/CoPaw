@@ -63,7 +63,7 @@ from ..file_manager_execution import (
     run_file_manager_read,
 )
 from ..runner.context_references import MAX_CONTEXT_REFERENCES
-from ...config.context import resolve_request_effective_tenant_id
+from ..answer_turn.models import TurnIdentity, TurnStatus
 
 logger = logging.getLogger(__name__)
 
@@ -968,23 +968,26 @@ async def _attach_reconnect_queue(
     tracker,
     session_id: str,
     channel_id: str,
-) -> tuple[asyncio.Queue, str]:
+    msgid: str | None = None,
+) -> tuple[asyncio.Queue, str, TurnIdentity]:
     """Attach to a running chat by chat_id or logical session_id."""
     for attempt in range(_RECONNECT_ATTACH_ATTEMPTS):
         chat = await workspace.chat_manager.get_chat(session_id)
         if chat is not None:
-            queue = await tracker.attach(chat.id)
-            if queue is not None:
-                return queue, chat.id
+            coordinator = workspace.answer_turn_coordinator
+            lease = await coordinator.attach(chat.id, msgid=msgid)
+            if lease is not None:
+                return lease.queue, chat.id, lease.identity
 
         chat_id = await workspace.chat_manager.get_chat_id_by_session(
             session_id,
             channel_id,
         )
         if chat_id is not None:
-            queue = await tracker.attach(chat_id)
-            if queue is not None:
-                return queue, chat_id
+            coordinator = workspace.answer_turn_coordinator
+            lease = await coordinator.attach(chat_id, msgid=msgid)
+            if lease is not None:
+                return lease.queue, chat_id, lease.identity
 
         if attempt < _RECONNECT_ATTACH_ATTEMPTS - 1:
             await asyncio.sleep(_RECONNECT_ATTACH_RETRY_DELAY_SECONDS)
@@ -1014,7 +1017,7 @@ def _console_chat_stream_headers(
     return headers
 
 
-async def _start_new_chat(
+async def _start_new_chat(  # pylint: disable=too-many-statements
     workspace,
     tracker,
     console_channel,
@@ -1026,7 +1029,6 @@ async def _start_new_chat(
 ):
     """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
     msgid = str(uuid.uuid4())
-    native_payload["meta"]["msgid"] = msgid
     scenario_preset_id = native_payload["meta"].get("scenario_preset_id")
     chat_meta = (
         {"agent_id": workspace.agent_id}
@@ -1109,8 +1111,10 @@ async def _start_new_chat(
         native_payload["meta"]["scenario_preset_snapshot"] = snapshot
         native_payload["meta"]["scenario_preset_snapshot_source"] = "chat_meta"
     native_payload["meta"]["chat_id"] = chat.id
-    get_status = getattr(tracker, "get_status", None)
-    if callable(get_status) and await get_status(chat.id) == "stopping":
+    coordinator = workspace.answer_turn_coordinator
+    if coordinator is None:
+        raise RuntimeError("answer-turn coordinator is not configured")
+    if await coordinator.status(chat.id) == TurnStatus.STOPPING:
         raise HTTPException(status_code=409, detail="Chat is stopping")
     # Inject session_channel from chat record so downstream (e.g. session-end
     # push) can identify the session's original channel (e.g. zhaohu).
@@ -1118,19 +1122,17 @@ async def _start_new_chat(
         native_payload["meta"]["session_channel"] = chat.channel
     try:
         if before_start is None:
-            queue, is_new_run = await _attach_console_run(
-                tracker,
+            lease = await coordinator.start_or_attach(
                 chat.id,
                 native_payload,
-                console_channel.stream_one,
+                _console_turn_producer(console_channel),
                 msgid=msgid,
             )
         else:
-            queue, is_new_run = await _attach_console_run(
-                tracker,
+            lease = await coordinator.start_or_attach(
                 chat.id,
                 native_payload,
-                console_channel.stream_one,
+                _console_turn_producer(console_channel),
                 msgid=msgid,
                 before_start=before_start,
             )
@@ -1138,65 +1140,30 @@ async def _start_new_chat(
         if scenario_preset_id and created:
             await workspace.chat_manager.delete_chats([chat.id])
         raise
-    msgid = await _resolve_console_turn_identity(
-        tracker,
-        chat.id,
-        msgid,
-        is_new_run=is_new_run,
-    )
-    if msgid is not None:
-        native_payload["meta"]["msgid"] = msgid
+    queue = lease.queue
+    is_new_run = lease.is_new_run
+    msgid = lease.identity.msgid
+    native_payload["meta"]["msgid"] = msgid
+    native_payload["meta"]["answer_turn_identity"] = lease.identity
     if include_run_status:
         return queue, chat.id, msgid, is_new_run
     return queue, chat.id, msgid
 
 
-async def _attach_console_run(
-    tracker: Any,
-    run_key: str,
-    payload: dict[str, Any],
-    stream_fn: Callable[..., Coroutine],
-    *,
-    msgid: str,
-    before_start: Callable[[], None] | None = None,
-) -> tuple[asyncio.Queue, bool]:
-    """Start Console runs with turn identity while tolerating old adapters."""
-    kwargs = {"msgid": msgid}
-    if before_start is not None:
-        kwargs["before_start"] = before_start
-    try:
-        return await tracker.attach_or_start(
-            run_key,
-            payload,
-            stream_fn,
-            **kwargs,
-        )
-    except TypeError as exc:
-        if "msgid" not in str(exc):
-            raise
-        kwargs.pop("msgid", None)
-        return await tracker.attach_or_start(
-            run_key,
-            payload,
-            stream_fn,
-            **kwargs,
-        )
+def _console_turn_producer(console_channel: Any):
+    async def producer(identity: TurnIdentity, payload: dict[str, Any]):
+        bound = {
+            **payload,
+            "meta": {
+                **(payload.get("meta") or {}),
+                "answer_turn_identity": identity,
+                "msgid": identity.msgid,
+            },
+        }
+        async for event in console_channel.stream_one(bound):
+            yield event
 
-
-async def _resolve_console_turn_identity(
-    tracker: Any,
-    run_key: str,
-    proposed_msgid: str,
-    *,
-    is_new_run: bool,
-) -> str | None:
-    """Return an advertised turn ID only when it names the active run."""
-    get_run_identity = getattr(tracker, "get_run_identity", None)
-    if callable(get_run_identity):
-        identity = await get_run_identity(run_key)
-        if identity is not None and identity[0] == run_key:
-            return identity[1]
-    return proposed_msgid if is_new_run else None
+    return producer
 
 
 def _validate_console_chat_identity(
@@ -1737,13 +1704,16 @@ async def _dispatch_console_stream(
     """Execute the actual chat run and stream the response."""
     tracker = workspace.task_tracker
     msgid: str | None = None
+    stream_identity: TurnIdentity | None = None
 
     if is_reconnect:
-        queue, run_key = await _attach_reconnect_queue(
+        requested_msgid = native_payload.get("meta", {}).get("msgid")
+        queue, run_key, stream_identity = await _attach_reconnect_queue(
             workspace,
             tracker,
             session_id,
             native_payload["channel_id"],
+            requested_msgid if isinstance(requested_msgid, str) else None,
         )
         if queue is None:
             raise HTTPException(
@@ -1765,6 +1735,9 @@ async def _dispatch_console_stream(
                 before_start=before_start,
                 include_run_status=True,
             )
+            stream_identity = native_payload["meta"].get(
+                "answer_turn_identity",
+            )
         except Exception:
             _release_suppression_on_failure(suppression_ctx, native_payload)
             raise
@@ -1778,7 +1751,9 @@ async def _dispatch_console_stream(
         )
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        stream_it = tracker.stream_from_queue(queue, run_key)
+        if stream_identity is None:
+            raise RuntimeError("answer-turn identity is missing")
+        stream_it = tracker.stream(stream_identity, queue)
         yield ": keep-alive\n\n"
         try:
             try:
@@ -1817,35 +1792,24 @@ def _console_stop_request_identity(request: Request) -> tuple[str, str]:
 
 
 async def _claim_console_stop(
-    tracker: Any,
+    coordinator: Any,
     chat_id: str,
     msgid: str | None,
 ) -> tuple[bool, str | None, str | None, str]:
-    """Claim a cooperative Stop while tolerating pre-turn tracker adapters."""
-    claim_stop = getattr(tracker, "claim_stop", None)
-    if callable(claim_stop):
-        try:
-            claim = await claim_stop(
-                chat_id,
-                msgid=msgid,
-                cooperative=True,
-            )
-        except TypeError as exc:
-            if "cooperative" not in str(exc):
-                raise
-            claim = await claim_stop(chat_id, msgid=msgid)
-        return (
-            bool(claim.accepted),
-            claim.chat_id,
-            claim.msgid,
-            claim.status,
-        )
-
-    request_stop = getattr(tracker, "request_stop", None)
-    if not callable(request_stop):
+    identity = await coordinator.current_identity(chat_id)
+    if identity is None:
         return False, None, None, "idle"
-    accepted = bool(await request_stop(chat_id))
-    return accepted, chat_id if accepted else None, msgid, "stopping"
+    claim = await coordinator.claim_stop(identity, msgid=msgid)
+    return (
+        claim.accepted,
+        claim.identity.chat_id if claim.identity else None,
+        claim.identity.msgid if claim.identity else None,
+        (
+            getattr(claim.status, "value", claim.status)
+            if claim.status
+            else "idle"
+        ),
+    )
 
 
 async def _cancel_console_turn_subagents(
@@ -1935,7 +1899,12 @@ async def post_console_chat_stop(
 ) -> dict:
     """Stop one Console answer turn with legacy-compatible fallbacks."""
     workspace = await get_agent_for_request(request)
-    tracker = workspace.task_tracker
+    coordinator = workspace.answer_turn_coordinator
+    if coordinator is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Answer-turn coordinator not available",
+        )
     target_chat_id = chat_id
     if target_chat_id is None and msgid is not None:
         return {"stopped": False, "accepted": False, "status": "idle"}
@@ -1962,13 +1931,10 @@ async def post_console_chat_stop(
                 == request_source_id
             )
         ]
-        get_run_identity = getattr(tracker, "get_run_identity", None)
-        if not callable(get_run_identity):
-            return {"stopped": False, "accepted": False, "status": "idle"}
         active_matches = [
             chat
             for chat in matches
-            if await get_run_identity(chat.id) is not None
+            if await coordinator.current_identity(chat.id) is not None
         ]
         if len(active_matches) != 1:
             return {"stopped": False, "accepted": False, "status": "idle"}
@@ -1995,34 +1961,14 @@ async def post_console_chat_stop(
         )
         return {"stopped": False, "accepted": False, "status": "idle"}
     accepted, claimed_chat_id, claimed_msgid, status = (
-        await _claim_console_stop(tracker, target_chat_id, msgid)
+        await _claim_console_stop(
+            coordinator,
+            target_chat_id,
+            msgid,
+        )
     )
     if not accepted:
         return {"stopped": False, "accepted": False, "status": "idle"}
-    if isinstance(claimed_chat_id, str) and isinstance(claimed_msgid, str):
-        try:
-            from ..approvals import get_approval_service
-
-            await get_approval_service().supersede_pending_for_turn(
-                claimed_chat_id,
-                claimed_msgid,
-            )
-        except Exception:
-            logger.exception(
-                "Failed to supersede stopped-turn approvals chat_id=%s msgid=%s",
-                claimed_chat_id,
-                claimed_msgid,
-            )
-        await _interrupt_console_goal(
-            workspace,
-            claimed_chat_id,
-            claimed_msgid,
-        )
-        await _cancel_console_turn_subagents(
-            workspace,
-            claimed_chat_id,
-            claimed_msgid,
-        )
     return {
         "stopped": True,
         "accepted": True,

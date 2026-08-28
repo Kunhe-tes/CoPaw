@@ -68,7 +68,7 @@ export interface ActiveModelDistributionResponse {
   task_id: string;
   status: string;
   reused?: boolean;
-  source_active_llm?: ModelSlotConfig;
+  source_active_llm: ModelSlotConfig;
   results: ActiveModelDistributionTenantResult[];
 }
 

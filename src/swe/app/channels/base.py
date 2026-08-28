@@ -40,6 +40,7 @@ from ..tenant_context import bind_tenant_context
 from ...config.llm_workload import LLM_WORKLOAD_CHAT, bind_llm_workload
 from ...config.context import resolve_runtime_identity
 from ...config.utils import load_config
+from ..answer_turn.models import TurnIdentity
 
 # Optional callback to enqueue payload (set by manager)
 EnqueueCallback = Optional[Callable[[Any], None]]
@@ -431,17 +432,26 @@ class BaseChannel(ABC):
                 getattr(_sess, "save_dir", None) if _sess else None,
             )
 
-        queue, is_new = await self._workspace.task_tracker.attach_or_start(
+        coordinator = self._workspace.answer_turn_coordinator
+        if coordinator is None:
+            raise RuntimeError("answer-turn coordinator is not configured")
+        proposed_msgid = (
+            channel_meta.get("msgid")
+            if isinstance(channel_meta.get("msgid"), str)
+            else None
+        )
+        lease = await coordinator.start_or_attach(
             chat.id,
             payload,
             self._stream_with_tracker,
+            msgid=proposed_msgid,
         )
 
-        if is_new:
+        if lease.is_new_run:
             try:
-                async for _ in self._workspace.task_tracker.stream_from_queue(
-                    queue,
-                    chat.id,
+                async for _ in self._workspace.task_tracker.stream(
+                    lease.identity,
+                    lease.queue,
                 ):
                     pass
             except asyncio.CancelledError:
@@ -459,6 +469,7 @@ class BaseChannel(ABC):
 
     async def _stream_with_tracker(
         self,
+        identity: TurnIdentity,
         payload: Any,
     ) -> AsyncGenerator[str, None]:
         """Stream events through TaskTracker for task tracking.
@@ -474,6 +485,22 @@ class BaseChannel(ABC):
         """
         import json
 
+        if isinstance(payload, dict):
+            payload = {
+                **payload,
+                "meta": {
+                    **(payload.get("meta") or {}),
+                    "answer_turn_identity": identity,
+                    "msgid": identity.msgid,
+                },
+            }
+        else:
+            meta = dict(getattr(payload, "channel_meta", None) or {})
+            meta.update(
+                answer_turn_identity=identity,
+                msgid=identity.msgid,
+            )
+            setattr(payload, "channel_meta", meta)
         request = self._payload_to_request(payload)
 
         if isinstance(payload, dict):
