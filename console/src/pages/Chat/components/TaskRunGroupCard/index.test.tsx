@@ -2,6 +2,7 @@ import React from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import TaskRunGroupCard from ".";
+import { useFilePreviewPresentation } from "@/components/agentscope-chat/FilePreviewPresentationContext";
 import type { ChatTaskRunGroupCardData } from "../../messageMeta";
 
 type TaskRunMessage = ChatTaskRunGroupCardData["finalMessages"][number];
@@ -33,13 +34,14 @@ vi.mock("../RuntimeRequestCard", () => ({
 }));
 
 vi.mock("../RuntimeResponseCard", () => ({
-  default: ({
+  default: function MockRuntimeResponseCard({
     data,
     showFeedback,
   }: {
     data: MockResponseData;
     showFeedback?: boolean;
-  }) => {
+  }) {
+    const previewPresentation = useFilePreviewPresentation();
     const firstContent = data.output?.[0]?.content?.[0];
     const output = data.output || [];
     return (
@@ -48,6 +50,7 @@ vi.mock("../RuntimeResponseCard", () => ({
         data-output-count={output.length}
         data-output-ids={output.map((item) => item.id).join(",")}
         data-output-types={output.map((item) => item.type).join(",")}
+        data-preview-presentation={previewPresentation}
         data-show-feedback={String(showFeedback)}
         data-testid={`response-${data.id}`}
       >
@@ -55,11 +58,9 @@ vi.mock("../RuntimeResponseCard", () => ({
       </div>
     );
   },
-  RuntimeResponseFeedbackCard: ({
-    data,
-  }: {
-    data: MockResponseData;
-  }) => <div data-testid={`feedback-${data.id}`}>{data.id}</div>,
+  RuntimeResponseFeedbackCard: ({ data }: { data: MockResponseData }) => (
+    <div data-testid={`feedback-${data.id}`}>{data.id}</div>
+  ),
 }));
 
 vi.mock("../ApprovalActionCard", () => ({
@@ -399,6 +400,10 @@ describe("TaskRunGroupCard", () => {
     );
 
     expect(screen.getByTestId("response-preview-response")).toBeInTheDocument();
+    expect(screen.getByTestId("response-preview-response")).toHaveAttribute(
+      "data-preview-presentation",
+      "modal",
+    );
     expect(screen.queryByTestId("response-final-response")).toBeNull();
     expect(screen.queryByTestId("response-step-response")).toBeNull();
     expect(screen.queryByTestId("task-run-steps")).toBeNull();
