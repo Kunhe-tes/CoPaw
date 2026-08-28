@@ -397,15 +397,6 @@ class ErrorListResponse(BaseModel):
     page_size: int = Field(default=10, description="每页数量")
 
 
-class DepthSummary(BaseModel):
-    """使用深度汇总统计."""
-
-    avg_rounds: float = 0.0  # 单次会话平均轮数
-    multi_round_ratio: float = 0.0  # 多轮会话占比(>3轮)百分比
-    avg_duration_seconds: int = 0  # 平均对话时长（秒）
-    avg_sessions_per_user: float = 0.0  # 人均会话数
-
-
 class UserStats(BaseModel):
     """User-specific statistics."""
 
