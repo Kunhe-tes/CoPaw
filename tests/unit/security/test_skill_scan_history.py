@@ -92,7 +92,7 @@ async def test_store_round_trips_insert_and_bounded_page(mock_db):
     ]
 
     await store.insert(record)
-    page = await store.list_page(page=2, page_size=10)
+    page = await store.list_page(page=2, page_size=10, source_id="source-a")
 
     insert_query, insert_params = mock_db.execute.await_args_list[-1].args
     assert "INSERT INTO swe_skill_scan_history" in insert_query
@@ -113,7 +113,7 @@ async def test_store_round_trips_insert_and_bounded_page(mock_db):
     query, params = mock_db.fetch_all.await_args.args
     assert "ORDER BY blocked_at DESC, id DESC" in query
     assert "LIMIT %s OFFSET %s" in query
-    assert params == (10, 10)
+    assert params == ("source-a", 10, 10)
 
 
 @pytest.mark.asyncio
@@ -169,7 +169,11 @@ async def test_store_delete_clear_and_unavailable_behavior(mock_db):
 
     unavailable = SkillScanHistoryStore(None)
     with pytest.raises(SkillScanHistoryStoreUnavailable):
-        await unavailable.list_page(page=1, page_size=20)
+        await unavailable.list_page(
+            page=1,
+            page_size=20,
+            source_id="source-a",
+        )
 
 
 class _RecordingStore:

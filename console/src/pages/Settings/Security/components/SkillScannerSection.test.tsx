@@ -206,12 +206,12 @@ describe("SkillScannerSection history", () => {
     ).toBeDisabled();
   });
 
-  it("shows context columns and analyzer details for scan alerts", () => {
+  it("shows user and branch columns and analyzer details for scan alerts", () => {
     render(<SkillScannerSection />);
 
-    expect(screen.getAllByText("source-a").length).toBeGreaterThan(0);
     expect(screen.getAllByText("user-a").length).toBeGreaterThan(0);
     expect(screen.getAllByText("bbk-a").length).toBeGreaterThan(0);
+    expect(screen.queryByText("source-a")).not.toBeInTheDocument();
 
     fireEvent.click(
       screen.getAllByRole("button", {

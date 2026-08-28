@@ -123,16 +123,20 @@ class SkillScanHistoryStore:
         *,
         page: int,
         page_size: int,
+        source_id: str,
     ) -> SkillScanHistoryPage:
         """Return one newest-first page and the total record count."""
         self._require_available()
         try:
-            count_row = await self.db.fetch_one(_COUNT_RECORDS, ())
+            count_row = await self.db.fetch_one(
+                _COUNT_RECORDS_BY_SOURCE,
+                (source_id,),
+            )
             total = int(count_row.get("total", 0)) if count_row else 0
             offset = (page - 1) * page_size
             rows = await self.db.fetch_all(
-                _LIST_RECORDS,
-                (page_size, offset),
+                _LIST_RECORDS_BY_SOURCE,
+                (source_id, page_size, offset),
             )
         except Exception as exc:
             raise SkillScanHistoryStoreUnavailable(
@@ -439,7 +443,10 @@ _INSERT_RECORD = f"""
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
-_COUNT_RECORDS = f"SELECT COUNT(*) AS total FROM {_TABLE}"
+_COUNT_RECORDS_BY_SOURCE = f"""
+    SELECT COUNT(*) AS total FROM {_TABLE}
+    WHERE source_id = %s
+"""
 
 _GET_LATEST_WARNING = f"""
     SELECT
@@ -451,10 +458,11 @@ _GET_LATEST_WARNING = f"""
     LIMIT 1
 """
 
-_LIST_RECORDS = f"""
+_LIST_RECORDS_BY_SOURCE = f"""
     SELECT id, skill_name, blocked_at, max_severity,
            findings_json, content_hash, action, source_id, user_id, bbk_id
     FROM {_TABLE}
+    WHERE source_id = %s
     ORDER BY blocked_at DESC, id DESC
     LIMIT %s OFFSET %s
 """

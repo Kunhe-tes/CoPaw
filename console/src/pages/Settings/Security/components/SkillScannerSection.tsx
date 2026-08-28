@@ -227,13 +227,6 @@ export function SkillScannerSection() {
       width: 180,
     },
     {
-      title: t("security.skillScanner.scanAlerts.source"),
-      dataIndex: "source_id",
-      key: "source_id",
-      width: 120,
-      render: (value: string | undefined) => value || "-",
-    },
-    {
       title: t("security.skillScanner.scanAlerts.user"),
       dataIndex: "user_id",
       key: "user_id",
