@@ -70,6 +70,47 @@ async def test_start_or_attach_creates_one_identity_and_one_producer_per_chat():
 
 
 @pytest.mark.asyncio
+async def test_attach_and_before_start_are_bound_to_active_turn_identity():
+    coordinator, _adapters = _coordinator()
+    before_start_calls = 0
+
+    def before_start():
+        nonlocal before_start_calls
+        before_start_calls += 1
+
+    async def producer(_identity, _payload):
+        return None
+
+    first = await coordinator.start_or_attach(
+        "chat-1",
+        {"q": 1},
+        producer,
+        msgid="msg-1",
+        before_start=before_start,
+    )
+    second = await coordinator.start_or_attach(
+        "chat-1",
+        {"q": 2},
+        producer,
+        msgid="msg-2",
+        before_start=before_start,
+    )
+    attached = await coordinator.attach("chat-1", msgid="msg-1")
+    stale = await coordinator.attach("chat-1", msgid="msg-2")
+
+    assert before_start_calls == 1
+    assert first.is_new_run is True
+    assert second.is_new_run is False
+    assert second.identity == first.identity
+    assert attached is not None
+    assert attached.identity == first.identity
+    assert stale is None
+    assert await coordinator.current_identity("chat-1") == first.identity
+    await coordinator.settle(TurnOutcome.completed(first.identity))
+    assert await coordinator.attach("chat-1", msgid="msg-1") is None
+
+
+@pytest.mark.asyncio
 async def test_claim_stop_orders_effects_and_is_idempotent():
     coordinator, adapters = _coordinator(hard_cancel_delay=0.01)
 

@@ -297,11 +297,3 @@ class TaskTracker:
                 yield event
         finally:
             await self.detach_subscriber(identity, queue)
-
-    def stream_from_queue(
-        self,
-        queue: asyncio.Queue,
-        identity: TurnIdentity,
-    ) -> AsyncGenerator[str, None]:
-        """Compatibility spelling for transport consumers."""
-        return self.stream(identity, queue)

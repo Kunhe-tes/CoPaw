@@ -73,13 +73,17 @@ class AnswerTurnCoordinator:
         producer: Producer,
         *,
         msgid: str | None = None,
+        before_start: Any | None = None,
     ) -> TurnLease:
         lock = await self._chat_lock(chat_id)
         async with lock:
             state = self._turns.get(chat_id)
             if state is not None and state.status not in TERMINAL_STATUSES:
                 queue, _ = await self.stream.attach_or_start(
-                    state.identity, payload, producer,
+                    state.identity,
+                    payload,
+                    producer,
+                    before_start=before_start,
                 )
                 return TurnLease(state.identity, queue, False)
 
@@ -91,7 +95,10 @@ class AnswerTurnCoordinator:
             self._turns[chat_id] = new_state
             try:
                 queue, _ = await self.stream.attach_or_start(
-                    identity, payload, producer,
+                    identity,
+                    payload,
+                    producer,
+                    before_start=before_start,
                 )
             except BaseException:
                 self._turns.pop(chat_id, None)
@@ -99,6 +106,24 @@ class AnswerTurnCoordinator:
             if self._turns.get(chat_id) is new_state:
                 new_state.status = TurnStatus.RUNNING
             return TurnLease(identity, queue, True)
+
+    async def attach(
+        self,
+        chat_id: str,
+        *,
+        msgid: str | None = None,
+    ) -> TurnLease | None:
+        lock = await self._chat_lock(chat_id)
+        async with lock:
+            state = self._turns.get(chat_id)
+            if state is None or state.status in TERMINAL_STATUSES:
+                return None
+            if msgid is not None and state.identity.msgid != msgid:
+                return None
+            queue = await self.stream.attach(state.identity)
+            if queue is None:
+                return None
+            return TurnLease(state.identity, queue, False)
 
     async def status(
         self,
@@ -115,6 +140,17 @@ class AnswerTurnCoordinator:
             if state is None or state.identity != identity:
                 return None
             return state.status
+
+    async def current_identity(
+        self,
+        chat_id: str,
+    ) -> TurnIdentity | None:
+        lock = await self._chat_lock(chat_id)
+        async with lock:
+            state = self._turns.get(chat_id)
+            if state is None or state.status in TERMINAL_STATUSES:
+                return None
+            return state.identity
 
     async def claim_stop(
         self,

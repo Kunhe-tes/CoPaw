@@ -16,6 +16,8 @@ class TurnStreamPort(Protocol):
         identity: TurnIdentity,
         payload: Any,
         producer: Producer,
+        *,
+        before_start: Any | None = None,
     ) -> Any:
         pass
 
@@ -43,7 +45,11 @@ class TurnSessionPort(Protocol):
 
 
 class TurnGoalPort(Protocol):
-    async def interrupt_if_matches(self, identity: TurnIdentity, reason: str) -> None:
+    async def interrupt_if_matches(
+        self,
+        identity: TurnIdentity,
+        reason: str,
+    ) -> None:
         pass
 
 

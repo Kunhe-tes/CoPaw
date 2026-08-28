@@ -29,7 +29,10 @@ class TurnIdentity:
     turn_id: str
 
     def __post_init__(self) -> None:
-        if not all(isinstance(value, str) and value for value in (self.chat_id, self.msgid, self.turn_id)) or not self.turn_id.startswith("turn-"):
+        if not all(
+            isinstance(value, str) and value
+            for value in (self.chat_id, self.msgid, self.turn_id)
+        ) or not self.turn_id.startswith("turn-"):
             raise ValueError("chat_id, msgid, and turn_id are required")
 
     @classmethod
@@ -106,6 +109,3 @@ class StopClaim:
     accepted: bool
     identity: TurnIdentity | None = None
     status: TurnStatus | None = None
-
-
-StopClaimResult = StopClaim

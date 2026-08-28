@@ -112,6 +112,8 @@ class _CommandResult:
         self.rerun_of = rerun_of
         self.cancel_active_run = cancel_active_run
         self.runtime_payload = runtime_payload or {}
+
+
 _CHAT_IDLE_RETRY_AFTER_MS = 1000
 
 
@@ -187,7 +189,10 @@ def _parse_memory_decisions(
         raise WPlusCommandError("Memory decisions must be a complete list")
     decisions: dict[str, str] = {}
     for raw in raw_decisions:
-        if not isinstance(raw, dict) or set(raw) != {"candidate_id", "decision"}:
+        if not isinstance(raw, dict) or set(raw) != {
+            "candidate_id",
+            "decision",
+        }:
             raise WPlusCommandError("Invalid memory decision")
         candidate_id = raw.get("candidate_id")
         decision = raw.get("decision")
@@ -198,11 +203,7 @@ def _parse_memory_decisions(
         ):
             raise WPlusCommandError("Invalid memory decision")
         candidate = next(
-            (
-                item
-                for item in candidates
-                if item.candidate_id == candidate_id
-            ),
+            (item for item in candidates if item.candidate_id == candidate_id),
             None,
         )
         if (
@@ -221,7 +222,9 @@ def _parse_memory_decisions(
         in {MemoryCandidateStatus.PENDING, MemoryCandidateStatus.FAILED}
     }
     if set(decisions) != unresolved_ids:
-        raise WPlusCommandError("Memory decisions must cover every unresolved candidate")
+        raise WPlusCommandError(
+            "Memory decisions must cover every unresolved candidate",
+        )
     return decisions
 
 
@@ -237,7 +240,9 @@ def _memory_runtime_candidate(candidate: Any) -> dict[str, Any]:
         or candidate.target_scope is None
         or candidate.target_file is None
     ):
-        raise WPlusCommandError("Memory candidate is not ready for an approved run")
+        raise WPlusCommandError(
+            "Memory candidate is not ready for an approved run",
+        )
     return {
         "candidate_id": candidate.candidate_id,
         "type": candidate.memory_type,
@@ -264,7 +269,10 @@ def _apply_memory_batch_results(
         raise WPlusCommandError(
             "Memory batch result must cover every server-bound candidate",
         )
-    candidates = [candidate.model_copy(deep=True) for candidate in projection.memory_candidates]
+    candidates = [
+        candidate.model_copy(deep=True)
+        for candidate in projection.memory_candidates
+    ]
     for index, candidate in enumerate(candidates):
         result = results_by_id.get(candidate.candidate_id)
         if result is None:
@@ -305,7 +313,10 @@ def _apply_memory_batch_results(
             )
     target = (
         SessionState.MEMORY_REVIEW
-        if any(candidate.status is MemoryCandidateStatus.FAILED for candidate in candidates)
+        if any(
+            candidate.status is MemoryCandidateStatus.FAILED
+            for candidate in candidates
+        )
         else SessionState.COMPLETED
     )
     return candidates, target
@@ -453,7 +464,9 @@ def _validate_delivered_artifacts(
         try:
             local_file.relative_to(static_root)
         except ValueError as exc:
-            raise WPlusCommandError("artifact escaped workspace static") from exc
+            raise WPlusCommandError(
+                "artifact escaped workspace static",
+            ) from exc
         if not local_file.is_file():
             raise WPlusCommandError(
                 f"delivered artifact is missing: {artifact.artifact_id}",
@@ -467,8 +480,7 @@ def _validate_delivered_artifacts(
 
 def _result_preview(result: Any) -> dict[str, str | None]:
     artifacts_by_id = {
-        artifact.artifact_id: artifact
-        for artifact in result.artifacts
+        artifact.artifact_id: artifact for artifact in result.artifacts
     }
     markdown_artifact = artifacts_by_id.get("sop_render_md")
     html_artifact = artifacts_by_id.get("sop_render_html")
@@ -646,7 +658,8 @@ def _serialize_current_trial(
         failed,
     )
     trial = {
-        "run_id": run_id or (current_attempt.run_id if current_attempt else ""),
+        "run_id": run_id
+        or (current_attempt.run_id if current_attempt else ""),
         "attempt_id": current_attempt.attempt_id if current_attempt else None,
         "rerun_of_run_id": (
             current_attempt.rerun_of_run_id if current_attempt else None
@@ -733,9 +746,7 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
                     "json"
                     if artifact.name.endswith(".json")
                     else (
-                        "markdown"
-                        if artifact.name.endswith(".md")
-                        else "html"
+                        "markdown" if artifact.name.endswith(".md") else "html"
                     )
                 ),
                 "status": "validated",
@@ -840,12 +851,19 @@ class WPlusSopService:
         """Project transient owning-Chat availability without persisting it."""
 
         record = self._owned_record(sop_session_id)
-        task_tracker = getattr(self.workspace, "task_tracker", None)
-        get_status = getattr(task_tracker, "get_status", None)
-        if not callable(get_status):
-            tracker_status = "idle"
-        else:
-            tracker_status = await get_status(self.ownership.chat_id)
+        coordinator = getattr(
+            self.workspace,
+            "answer_turn_coordinator",
+            None,
+        )
+        turn_status = (
+            await coordinator.status(self.ownership.chat_id)
+            if coordinator is not None
+            else None
+        )
+        tracker_status = (
+            turn_status.value if turn_status is not None else "idle"
+        )
 
         if tracker_status == "idle":
             status = "ready"
@@ -868,9 +886,7 @@ class WPlusSopService:
             "status": status,
             "runtime_ready": runtime_ready,
             "blocking_run_id": (
-                None
-                if runtime_ready
-                else record.projection.current_run_id
+                None if runtime_ready else record.projection.current_run_id
             ),
         }
 
@@ -936,9 +952,7 @@ class WPlusSopService:
             attempt = current_candidates[0]
             payload = RecoverableFailurePayload(
                 error_code="orphaned_agent_run",
-                summary=(
-                    "后台 Agent 任务已丢失；可以从原生成步骤安全重试。"
-                ),
+                summary=("后台 Agent 任务已丢失；可以从原生成步骤安全重试。"),
                 failed_operation=attempt.command,
                 failed_run_id=attempt.run_id,
             )
@@ -1061,7 +1075,7 @@ class WPlusSopService:
             and str(getattr(chat, "id", "")) == self.ownership.chat_id
             and str(getattr(chat, "user_id", "")) == self.ownership.user_id
             and str(getattr(chat, "session_id", ""))
-            == self.ownership.logical_chat_session_id
+            == self.ownership.logical_chat_session_id,
         )
 
     @staticmethod
@@ -1091,13 +1105,19 @@ class WPlusSopService:
     async def _wait_for_owning_chat_idle(self) -> None:
         """Wait for the prior Agent producer to release the owning Chat."""
 
-        task_tracker = getattr(self.workspace, "task_tracker", None)
-        get_status = getattr(task_tracker, "get_status", None)
-        if not callable(get_status):
+        coordinator = getattr(
+            self.workspace,
+            "answer_turn_coordinator",
+            None,
+        )
+        if coordinator is None:
             return
         loop = asyncio.get_running_loop()
         deadline = loop.time() + _CHAT_IDLE_WAIT_TIMEOUT_SECONDS
-        while await get_status(self.ownership.chat_id) != "idle":
+        while (
+            await coordinator.current_identity(self.ownership.chat_id)
+            is not None
+        ):
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise WPlusOwningChatFinalizingError()
@@ -1535,9 +1555,11 @@ class WPlusSopService:
                 verified_chat=chat,
             )
         original_text = str(
-            (proposal.original_request or {}).get("text", "")
-            if isinstance(proposal.original_request, dict)
-            else "",
+            (
+                (proposal.original_request or {}).get("text", "")
+                if isinstance(proposal.original_request, dict)
+                else ""
+            ),
         )
         try:
             await start_wplus_chat_turn(
@@ -1613,9 +1635,12 @@ class WPlusSopService:
             self._owned_proposal(proposal_id)
         except WPlusOwnershipError:
             return False
-        digest = "sha256:" + hashlib.sha256(
-            original_text.encode("utf-8"),
-        ).hexdigest()
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                original_text.encode("utf-8"),
+            ).hexdigest()
+        )
         return self.store.suppression_matches(
             proposal_id,
             suppression_token=suppression_token,
@@ -1631,9 +1656,12 @@ class WPlusSopService:
         suppression_token: str,
         original_text: str,
     ) -> bool:
-        digest = "sha256:" + hashlib.sha256(
-            original_text.encode("utf-8"),
-        ).hexdigest()
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                original_text.encode("utf-8"),
+            ).hexdigest()
+        )
         return self.store.consume_suppression(
             proposal_id,
             claim_id=claim_id,
@@ -1649,9 +1677,12 @@ class WPlusSopService:
         suppression_token: str,
         original_text: str,
     ) -> str | None:
-        digest = "sha256:" + hashlib.sha256(
-            original_text.encode("utf-8"),
-        ).hexdigest()
+        digest = (
+            "sha256:"
+            + hashlib.sha256(
+                original_text.encode("utf-8"),
+            ).hexdigest()
+        )
         return self.store.claim_suppression(
             proposal_id,
             suppression_token=suppression_token,
@@ -1708,8 +1739,7 @@ class WPlusSopService:
                     failed_attempt_id,
                     RunStatus.FAILED,
                 )
-                if failed_run_id is not None
-                and failed_attempt_id is not None
+                if failed_run_id is not None and failed_attempt_id is not None
                 else None
             ),
         )
@@ -1901,9 +1931,10 @@ class WPlusSopService:
             for option in question.options
             if option.requires_custom_input
         }
-        if custom_option_ids.intersection(answer.selected_option_ids) and not (
-            answer.text or ""
-        ).strip():
+        if (
+            custom_option_ids.intersection(answer.selected_option_ids)
+            and not (answer.text or "").strip()
+        ):
             raise WPlusCommandError(
                 "selected option requires non-empty custom input text",
             )
@@ -1953,9 +1984,8 @@ class WPlusSopService:
         if handler is None:
             raise WPlusCommandError(f"Unsupported command: {command}")
         result = handler(self, record, payload, command)
-        # Preserve original behaviour: runtime_payload inherits from the
-        # request payload so downstream augmentation can spread it.
-        result.runtime_payload = {**payload, **result.runtime_payload}
+        if result.starts_run and not result.runtime_payload:
+            result.runtime_payload = dict(payload)
         self._augment_command_runtime_payload(projection, result)
         return await self._execute_command_run_lifecycle(
             sop_session_id=sop_session_id,
@@ -2143,7 +2173,10 @@ class WPlusSopService:
         if not isinstance(raw_answers, dict):
             raise WPlusCommandError("answers must be an object")
         replacement_answers = _build_revised_answers(
-            svc, record, previous, raw_answers,
+            svc,
+            record,
+            previous,
+            raw_answers,
         )
         replacement = AnswerBatch(
             batch_id=previous.batch_id,
@@ -2160,9 +2193,7 @@ class WPlusSopService:
             invalidated_event_ids=invalidated_event_ids,
             reason=str(payload.get("reason") or "user_revised_answer"),
         )
-        stages = [
-            stage.model_copy(deep=True) for stage in projection.stages
-        ]
+        stages = [stage.model_copy(deep=True) for stage in projection.stages]
         revised_stage_seen = False
         for stage in stages:
             if stage.stage_id == previous.stage_id:
@@ -2255,9 +2286,7 @@ class WPlusSopService:
             SessionState.PENDING_EXIT
             if generating
             else (
-                SessionState.TERMINATED
-                if terminate
-                else SessionState.PAUSED
+                SessionState.TERMINATED if terminate else SessionState.PAUSED
             )
         )
         kind = (
@@ -2346,7 +2375,9 @@ class WPlusSopService:
         projection = record.projection
         if projection.state is not SessionState.PAUSED:
             raise WPlusCommandError("Session is not paused")
-        target_state = projection.resume_state or SessionState.RECOVERABLE_FAILURE
+        target_state = (
+            projection.resume_state or SessionState.RECOVERABLE_FAILURE
+        )
         if target_state is SessionState.PENDING_EXIT:
             target_state = SessionState.RECOVERABLE_FAILURE
         starts_run = target_state in {
@@ -2461,7 +2492,10 @@ class WPlusSopService:
                 candidate.candidate_id: "reject"
                 for candidate in candidates
                 if candidate.status
-                in {MemoryCandidateStatus.PENDING, MemoryCandidateStatus.FAILED}
+                in {
+                    MemoryCandidateStatus.PENDING,
+                    MemoryCandidateStatus.FAILED,
+                }
             }
         else:
             decisions = _parse_memory_decisions(payload, candidates)
@@ -2502,9 +2536,7 @@ class WPlusSopService:
             },
             starts_run=starts_run,
             runtime_payload=(
-                {"candidates": approved_payloads}
-                if starts_run
-                else None
+                {"candidates": approved_payloads} if starts_run else None
             ),
         )
 
@@ -2548,8 +2580,7 @@ class WPlusSopService:
                         "Memory run has no server-bound candidates",
                     )
                 result.runtime_payload["candidates"] = [
-                    _memory_runtime_candidate(c)
-                    for c in active_candidates
+                    _memory_runtime_candidate(c) for c in active_candidates
                 ]
             return
         if result.target_state is SessionState.FINALIZING_OUTPUTS:
@@ -2579,6 +2610,7 @@ class WPlusSopService:
         """Build event/receipt, commit, cancel active runs, and start a turn."""
         if result.starts_run:
             await self._wait_for_owning_chat_idle()
+            await self._verified_owned_chat()
         run_id, attempt_id = self._init_command_run_ids(result)
         self._apply_command_run_tweaks(result, run_id)
 
@@ -2600,7 +2632,9 @@ class WPlusSopService:
 
         if result.cancel_active_run and projection.current_run_id:
             self._cancel_stored_active_run(
-                sop_session_id, record, projection,
+                sop_session_id,
+                record,
+                projection,
             )
 
         if mutation.duplicate or not result.starts_run:
@@ -2695,9 +2729,21 @@ class WPlusSopService:
 
     async def _cancel_active_chat_run(self) -> None:
         try:
-            await self.workspace.task_tracker.request_stop(
-                self.ownership.chat_id,
+            coordinator = getattr(
+                self.workspace,
+                "answer_turn_coordinator",
+                None,
             )
+            identity = (
+                await coordinator.current_identity(self.ownership.chat_id)
+                if coordinator is not None
+                else None
+            )
+            if coordinator is None or identity is None:
+                return
+            claim = await coordinator.claim_stop(identity, internal=True)
+            if not claim.accepted:
+                raise RuntimeError("active run is not stoppable")
         except Exception as exc:
             raise WPlusCommandError(
                 "The active run could not be cancelled",
@@ -2815,7 +2861,11 @@ class WPlusSopService:
         effective_state = _effective_agent_event_state(record.projection)
 
         idem_result = self._check_agent_event_idempotency(
-            record, event_kind, payload, effective_state, event_key,
+            record,
+            event_kind,
+            payload,
+            effective_state,
+            event_key,
         )
         if idem_result is not None:
             return idem_result
@@ -2823,7 +2873,12 @@ class WPlusSopService:
         _validate_agent_event_state(event_kind, effective_state, state)
 
         result = _AGENT_EVENT_HANDLERS[event_kind](
-            self, record, payload, trusted_run_id, effective_state, event_kind,
+            self,
+            record,
+            payload,
+            trusted_run_id,
+            effective_state,
+            event_kind,
         )
         _resolve_pending_exit_target(record, event_kind, result, state)
 
@@ -2962,8 +3017,7 @@ class WPlusSopService:
     ) -> _AgentEventResult:
         typed = StageProposalPayload.model_validate(payload)
         if any(
-            stage.status is not StageStatus.PENDING
-            for stage in typed.stages
+            stage.status is not StageStatus.PENDING for stage in typed.stages
         ):
             raise WPlusCommandError(
                 "stage_proposal stages must start as pending",
@@ -3030,7 +3084,7 @@ class WPlusSopService:
     ) -> _AgentEventResult:
         dummy = _passthrough_event_payload(
             record,
-            EventKind.TRIAL_EXECUTION_STARTED,
+            event_kind,
             payload,
         )
         return _AgentEventResult(
@@ -3157,7 +3211,8 @@ class WPlusSopService:
     ) -> _AgentEventResult:
         typed = MemoryWriteBatchResultPayload.model_validate(payload)
         candidates, target = _apply_memory_batch_results(
-            record.projection, typed,
+            record.projection,
+            typed,
         )
         return _AgentEventResult(
             target=target,
@@ -3188,7 +3243,11 @@ class WPlusSopService:
         if candidate.status is not MemoryCandidateStatus.WRITING:
             raise WPlusCommandError("Memory candidate is not being written")
         typed, target = _apply_single_memory_result(
-            record, payload, candidate, candidates, match_index,
+            record,
+            payload,
+            candidate,
+            candidates,
+            match_index,
             event_kind is EventKind.MEMORY_WRITE_COMPLETED,
         )
         return _AgentEventResult(
@@ -3247,6 +3306,7 @@ class WPlusSopService:
 # Module-level agent-event helpers
 # ---------------------------------------------------------------------------
 
+
 class _AgentEventResult:
     __slots__ = ("target", "typed_payload", "changes")
 
@@ -3262,7 +3322,9 @@ class _AgentEventResult:
         self.changes = changes or {}
 
 
-def _effective_agent_event_state(projection: SessionProjection) -> SessionState:
+def _effective_agent_event_state(
+    projection: SessionProjection,
+) -> SessionState:
     state = projection.state
     if state is SessionState.PENDING_EXIT:
         return projection.resume_state or state
@@ -3503,6 +3565,7 @@ _AGENT_EVENT_HANDLERS: dict[EventKind, Any] = {
 # ---------------------------------------------------------------------------
 # Module-level command dispatch helpers
 # ---------------------------------------------------------------------------
+
 
 def _adjust_command_event(
     event: StructuredInteractionEnvelope,

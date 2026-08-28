@@ -17,10 +17,19 @@ class InMemoryStream:
         self.close_calls: list[TurnIdentity] = []
         self._queues: dict[TurnIdentity, asyncio.Queue] = {}
 
-    async def attach_or_start(self, identity, payload, producer):
+    async def attach_or_start(
+        self,
+        identity,
+        payload,
+        producer,
+        *,
+        before_start=None,
+    ):
         existing = await self.attach(identity)
         if existing is not None:
             return existing, False
+        if before_start is not None:
+            before_start()
         self.start_calls.append(identity)
         self.producer_calls += 1
         queue = self._queues.setdefault(identity, asyncio.Queue())
