@@ -5,63 +5,12 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-import sys
-from dataclasses import dataclass
-from enum import Enum
 from types import SimpleNamespace
-from types import ModuleType
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock
 
 import pytest
 from agentscope.message import Msg
-
-
-class _NoopSpan:
-    async def __aenter__(self) -> "_NoopSpan":
-        return self
-
-    async def __aexit__(self, *_args: Any) -> None:
-        return None
-
-    def set_attribute(self, _key: str, _value: Any) -> None:
-        return None
-
-
-class _NoopTracer:
-    def start_as_current_span(self, *_args: Any, **_kwargs: Any) -> _NoopSpan:
-        return _NoopSpan()
-
-
-class _SpanKind(str, Enum):
-    SERVER = "SERVER"
-    INTERNAL = "INTERNAL"
-    CLIENT = "CLIENT"
-
-
-@dataclass(frozen=True)
-class _TraceFields:
-    task_id: str
-    user_id: str
-    session_id: str
-    agent_id: str
-    agent_version: str
-
-
-def _noop_trace_decorator(**_kwargs: Any):
-    def decorate(function: Any) -> Any:
-        return function
-
-    return decorate
-
-
-_TRACE_SDK_STUB = ModuleType("swe.tracing.agent_trace_sdk")
-_TRACE_SDK_STUB.global_tracer = _NoopTracer()
-_TRACE_SDK_STUB.SpanKind = _SpanKind
-_TRACE_SDK_STUB.TraceFields = _TraceFields
-_TRACE_SDK_STUB.chat_traced = _noop_trace_decorator
-_TRACE_SDK_STUB.execute_tool_traced = _noop_trace_decorator
-sys.modules.setdefault("swe.tracing.agent_trace_sdk", _TRACE_SDK_STUB)
 
 from swe.app.runner.query_attempt import stream_query_after_preflight
 from swe.app.runner.query_contracts import _QueryPreflight

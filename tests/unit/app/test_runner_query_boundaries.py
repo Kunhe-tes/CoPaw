@@ -102,6 +102,7 @@ async def test_query_boundary_facades_delegate_to_collaborators(
         user_id="user-1",
         query="hello",
         request=request,
+        session_execution=None,
     )
     prepare_runtime.assert_awaited_once_with(
         runner,
@@ -109,6 +110,7 @@ async def test_query_boundary_facades_delegate_to_collaborators(
         msgs=msgs,
         query="hello",
         preflight=preflight,
+        session_execution=None,
     )
 
 
@@ -180,6 +182,7 @@ async def test_query_attempt_and_turn_lifecycle_facades_delegate(
             "query": "hello",
             "session_id": "session-1",
             "preflight": _QueryPreflight(),
+            "session_execution": None,
         },
     ]
     assert turn_calls == [
