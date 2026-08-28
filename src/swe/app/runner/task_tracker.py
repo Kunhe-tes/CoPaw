@@ -121,7 +121,12 @@ class TaskTracker:
 
     def _attach_unlocked(self, identity: TurnIdentity) -> asyncio.Queue | None:
         state = self._runs.get(identity.chat_id)
-        if state is None or state.task.done() or state.closed:
+        if (
+            state is None
+            or state.identity != identity
+            or state.task.done()
+            or state.closed
+        ):
             return None
         queue: asyncio.Queue = asyncio.Queue()
         for sse in state.buffer:
@@ -181,7 +186,7 @@ class TaskTracker:
                 if queue is not None:
                     return queue, False
                 if self._has_live_run_unlocked(identity.chat_id):
-                    raise RuntimeError("live stream is closed for this chat")
+                    raise RuntimeError("live stream belongs to another turn")
             if before_start is not None:
                 operation = asyncio.create_task(
                     asyncio.to_thread(before_start),
@@ -199,7 +204,7 @@ class TaskTracker:
                 if queue is not None:
                     return queue, False
                 if self._has_live_run_unlocked(identity.chat_id):
-                    raise RuntimeError("live stream is closed for this chat")
+                    raise RuntimeError("live stream belongs to another turn")
                 return self._start_unlocked(identity, payload, producer)
 
     def _start_unlocked(
@@ -267,7 +272,7 @@ class TaskTracker:
         """End this identity's subscriber streams without cancelling its work."""
         async with self._lock:
             state = self._runs.get(identity.chat_id)
-            if state is None or state.closed:
+            if state is None or state.identity != identity or state.closed:
                 return
             state.closed = True
             subscribers = tuple(state.queues)
