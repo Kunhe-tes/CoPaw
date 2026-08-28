@@ -690,7 +690,13 @@ async def _build_chat_history(
         chat_spec.session_id,
         chat_spec.user_id,
     )
-    status = await workspace.task_tracker.get_status(chat_spec.id)
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+    turn_status = (
+        await coordinator.status(chat_spec.id)
+        if coordinator is not None
+        else None
+    )
+    status = turn_status.value if turn_status is not None else "idle"
     task_messages = _task_session_messages_from_state(state)
     model_call_failed_messages = _model_call_failed_messages_from_state(state)
     archive = await _archive_metadata(workspace, chat_spec.id)
@@ -888,7 +894,14 @@ async def list_chats(
             detail="page and page_size must be provided together",
         )
 
-    tracker = workspace.task_tracker
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+
+    async def runtime_status(chat_id: str) -> str:
+        if coordinator is None:
+            return "idle"
+        turn_status = await coordinator.status(chat_id)
+        return turn_status.value if turn_status is not None else "idle"
+
     if cursor_mode and page_size is not None:
         try:
             chat_page = await mgr.list_chats_cursor(
@@ -901,7 +914,7 @@ async def list_chats(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         items = []
         for spec in chat_page.items:
-            status = await tracker.get_status(spec.id)
+            status = await runtime_status(spec.id)
             items.append(spec.model_copy(update={"status": status}))
         return chat_page.model_copy(update={"items": items})
 
@@ -914,14 +927,14 @@ async def list_chats(
         )
         items = []
         for spec in chat_page.items:
-            status = await tracker.get_status(spec.id)
+            status = await runtime_status(spec.id)
             items.append(spec.model_copy(update={"status": status}))
         return chat_page.model_copy(update={"items": items})
 
     chats = await mgr.list_chats(user_id=user_id, channel=channel)
     result = []
     for spec in chats:
-        status = await tracker.get_status(spec.id)
+        status = await runtime_status(spec.id)
         result.append(spec.model_copy(update={"status": status}))
     return result
 

@@ -5,66 +5,17 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-import sys
-from dataclasses import dataclass
-from enum import Enum
 from types import SimpleNamespace
-from types import ModuleType
 from typing import Any, AsyncIterator
 from unittest.mock import AsyncMock
 
 import pytest
 from agentscope.message import Msg
 
-
-class _NoopSpan:
-    async def __aenter__(self) -> "_NoopSpan":
-        return self
-
-    async def __aexit__(self, *_args: Any) -> None:
-        return None
-
-    def set_attribute(self, _key: str, _value: Any) -> None:
-        return None
-
-
-class _NoopTracer:
-    def start_as_current_span(self, *_args: Any, **_kwargs: Any) -> _NoopSpan:
-        return _NoopSpan()
-
-
-class _SpanKind(str, Enum):
-    SERVER = "SERVER"
-    INTERNAL = "INTERNAL"
-    CLIENT = "CLIENT"
-
-
-@dataclass(frozen=True)
-class _TraceFields:
-    task_id: str
-    user_id: str
-    session_id: str
-    agent_id: str
-    agent_version: str
-
-
-def _noop_trace_decorator(**_kwargs: Any):
-    def decorate(function: Any) -> Any:
-        return function
-
-    return decorate
-
-
-_TRACE_SDK_STUB = ModuleType("swe.tracing.agent_trace_sdk")
-_TRACE_SDK_STUB.global_tracer = _NoopTracer()
-_TRACE_SDK_STUB.SpanKind = _SpanKind
-_TRACE_SDK_STUB.TraceFields = _TraceFields
-_TRACE_SDK_STUB.chat_traced = _noop_trace_decorator
-_TRACE_SDK_STUB.execute_tool_traced = _noop_trace_decorator
-sys.modules.setdefault("swe.tracing.agent_trace_sdk", _TRACE_SDK_STUB)
-
 from swe.app.runner.query_attempt import stream_query_after_preflight
 from swe.app.runner.query_contracts import _QueryPreflight
+from swe.app.answer_turn.models import TurnIdentity, TurnStatus
+from swe.app.runner.runner import AgentRunner
 
 
 class _RecordingExecution:
@@ -117,6 +68,15 @@ class _RecordingSession:
         finally:
             self.in_execution = False
             self.active_execution = None
+
+
+class _RecordingCoordinator:
+    def __init__(self) -> None:
+        self.outcomes: list[Any] = []
+
+    async def settle(self, outcome: Any) -> bool:
+        self.outcomes.append(outcome)
+        return True
 
 
 class _SnapshotAgent:
@@ -325,6 +285,41 @@ async def test_retry_uses_one_transaction_and_writes_only_final_state() -> (
     assert owner.session.execution_entries == 1
     assert owner.session.commit_count == 1
     assert owner.short_mutation_count == 0
+
+
+@pytest.mark.asyncio
+async def test_runner_reports_one_completed_outcome_with_coordinator_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator = _RecordingCoordinator()
+    identity = TurnIdentity.create(chat_id="chat-1", msgid="msg-1")
+    runner = AgentRunner(
+        agent_id="test-agent",
+        answer_turn_coordinator=coordinator,
+    )
+    runner._query_execution = None
+
+    async def stream_entry(*_args: Any, **_kwargs: Any):
+        yield Msg(name="Friday", role="assistant", content="answer"), True
+
+    monkeypatch.setattr(runner, "_stream_query_entry", stream_entry)
+    request = SimpleNamespace(
+        session_id="session-1",
+        user_id="user-1",
+        execution_origin="scheduled",
+        channel_meta={"answer_turn_identity": identity},
+    )
+
+    events = [
+        event async for event in runner.query_handler([], request=request)
+    ]
+
+    assert len(events) == 1
+    assert request.channel_meta["turn_id"] == identity.turn_id
+    assert [outcome.status for outcome in coordinator.outcomes] == [
+        TurnStatus.COMPLETED,
+    ]
+    assert coordinator.outcomes[0].identity is identity
 
 
 @pytest.mark.asyncio
@@ -609,7 +604,7 @@ def test_mark_stopped_turn_state_marks_last_displayable_assistant_message() -> (
 ):
     from swe.app.runner.session_lifecycle import mark_stopped_turn_state
 
-    state = {
+    state: dict[str, Any] = {
         "agent": {
             "memory": {
                 "content": [
