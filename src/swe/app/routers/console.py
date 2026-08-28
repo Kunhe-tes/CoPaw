@@ -16,6 +16,7 @@ from typing import (
     Any,
     AsyncGenerator,
     Callable,
+    Coroutine,
     Dict,
     Literal,
     Optional,
@@ -992,6 +993,7 @@ async def _attach_reconnect_queue(
 
 def _console_chat_stream_headers(
     *,
+    chat_id: str | None = None,
     session_id: str,
     msgid: str | None,
 ) -> dict[str, str]:
@@ -1000,6 +1002,8 @@ def _console_chat_stream_headers(
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
+    if chat_id:
+        headers["X-Swe-Chatid"] = chat_id
     if msgid:
         headers["X-Swe-Msgid"] = msgid
         headers["X-Swe-Sessionid"] = session_id
@@ -1104,16 +1108,20 @@ async def _start_new_chat(
         native_payload["meta"]["session_channel"] = chat.channel
     try:
         if before_start is None:
-            queue, is_new_run = await tracker.attach_or_start(
+            queue, is_new_run = await _attach_console_run(
+                tracker,
                 chat.id,
                 native_payload,
                 console_channel.stream_one,
+                msgid=msgid,
             )
         else:
-            queue, is_new_run = await tracker.attach_or_start(
+            queue, is_new_run = await _attach_console_run(
+                tracker,
                 chat.id,
                 native_payload,
                 console_channel.stream_one,
+                msgid=msgid,
                 before_start=before_start,
             )
     except BaseException:
@@ -1123,6 +1131,38 @@ async def _start_new_chat(
     if include_run_status:
         return queue, chat.id, msgid, is_new_run
     return queue, chat.id, msgid
+
+
+async def _attach_console_run(
+    tracker: Any,
+    run_key: str,
+    payload: dict[str, Any],
+    stream_fn: Callable[..., Coroutine],
+    *,
+    msgid: str,
+    before_start: Callable[[], None] | None = None,
+) -> tuple[asyncio.Queue, bool]:
+    """Start Console runs with turn identity while tolerating old adapters."""
+    kwargs = {"msgid": msgid}
+    if before_start is not None:
+        kwargs["before_start"] = before_start
+    try:
+        return await tracker.attach_or_start(
+            run_key,
+            payload,
+            stream_fn,
+            **kwargs,
+        )
+    except TypeError as exc:
+        if "msgid" not in str(exc):
+            raise
+        kwargs.pop("msgid", None)
+        return await tracker.attach_or_start(
+            run_key,
+            payload,
+            stream_fn,
+            **kwargs,
+        )
 
 
 def _validate_console_chat_identity(
@@ -1720,6 +1760,7 @@ async def _dispatch_console_stream(
         _stream_with_keepalive(event_generator()),
         media_type="text/event-stream",
         headers=_console_chat_stream_headers(
+            chat_id=run_key,
             session_id=session_id,
             msgid=msgid,
         ),
@@ -1733,12 +1774,53 @@ async def _dispatch_console_stream(
 )
 async def post_console_chat_stop(
     request: Request,
-    chat_id: str = Query(..., description="Chat id (ChatSpec.id) to stop"),
+    chat_id: str | None = Query(None, description="Chat id (ChatSpec.id)"),
+    msgid: str | None = Query(None, description="User question message id"),
+    session_id: str | None = Query(
+        None,
+        description="Early startup session id",
+    ),
 ) -> dict:
-    """Stop the running chat. Only stops when called."""
+    """Stop one Console answer turn with legacy-compatible fallbacks."""
     workspace = await get_agent_for_request(request)
-    stopped = await workspace.task_tracker.request_stop(chat_id)
-    return {"stopped": stopped}
+    tracker = workspace.task_tracker
+    target_chat_id = chat_id
+    if target_chat_id is None and msgid is not None:
+        return {"stopped": False, "accepted": False, "status": "idle"}
+    if target_chat_id is None and session_id:
+        target_chat_id = await workspace.chat_manager.get_chat_id_by_session(
+            session_id,
+            "console",
+        )
+    if target_chat_id is None:
+        return {"stopped": False, "accepted": False, "status": "idle"}
+    chat = await workspace.chat_manager.get_chat(target_chat_id)
+    if chat is None or getattr(chat, "channel", "console") != "console":
+        logger.warning(
+            "Rejected Console Stop target chat_id=%s",
+            target_chat_id,
+        )
+        return {"stopped": False, "accepted": False, "status": "idle"}
+    request_user_id = str(getattr(request.state, "user_id", "") or "")
+    if (
+        request_user_id
+        and str(getattr(chat, "user_id", "")) != request_user_id
+    ):
+        logger.warning(
+            "Rejected Console Stop ownership chat_id=%s",
+            target_chat_id,
+        )
+        return {"stopped": False, "accepted": False, "status": "idle"}
+    claim = await tracker.claim_stop(target_chat_id, msgid=msgid)
+    if not claim.accepted:
+        return {"stopped": False, "accepted": False, "status": "idle"}
+    return {
+        "stopped": True,
+        "accepted": True,
+        "status": claim.status,
+        "chat_id": claim.chat_id,
+        "msgid": claim.msgid,
+    }
 
 
 @router.post("/upload", response_model=dict, summary="Upload file for chat")
