@@ -22,14 +22,12 @@ vi.mock("echarts-for-react", () => ({
 
 const tracingApiMock = vi.hoisted(() => ({
   getOverview: vi.fn(),
-  getGrowthStats: vi.fn(),
   getHourlyTrend: vi.fn(),
   getDailyTrend: vi.fn(),
   getUsers: vi.fn(),
   getSkills: vi.fn(),
   getMCPSummary: vi.fn(),
   getTaskStatusSummary: vi.fn(),
-  getDepthSummary: vi.fn(),
   getErrorSummary: vi.fn(),
   getSources: vi.fn(),
 }));
@@ -101,18 +99,6 @@ describe("BusinessOverview trend chart", () => {
         customers: [{ bbk_id: "100", bbk_name: "总行", value: 30, percent: 100 }],
       },
     });
-    tracingApiMock.getGrowthStats.mockResolvedValue({
-      callsGrowth: 10,
-      tokensGrowth: 12,
-      sessionGrowth: 8,
-      userGrowth: 5,
-      cronGrowth: 2,
-      avgRoundsGrowth: 4,
-      multiRoundRatioGrowth: 1,
-      avgDurationGrowth: 6,
-      avgSessionsPerUserGrowth: 7,
-      planCustomersGrowth: 6,
-    });
     tracingApiMock.getHourlyTrend.mockResolvedValue({
       trendData: [
         {
@@ -152,12 +138,6 @@ describe("BusinessOverview trend chart", () => {
       failed: 0,
       cancelled: 0,
       read_count: 0,
-    });
-    tracingApiMock.getDepthSummary.mockResolvedValue({
-      avg_rounds: 2,
-      multi_round_ratio: 10,
-      avg_duration_seconds: 30,
-      avg_sessions_per_user: 1.5,
     });
     tracingApiMock.getErrorSummary.mockResolvedValue({
       total_errors: 0,
@@ -428,37 +408,27 @@ describe("BusinessOverview trend chart", () => {
   });
 
 
-  it("renders the report-view customer card with current annotations and growth", async () => {
+  it("renders the report-view customer card with current annotations", async () => {
     renderBusinessOverview();
 
     expect(await screen.findByText("查看报告客户数")).toBeInTheDocument();
     expect(screen.getByText("30")).toBeInTheDocument();
     expect(screen.getByText("去洞察客户数 20")).toBeInTheDocument();
     expect(screen.getByText("去电访客户数 10")).toBeInTheDocument();
-    expect(
-      screen.getByText(
-        (_, element) =>
-          typeof element?.className === "string" &&
-          element.className.includes("metricChangeUp") &&
-          (element.textContent || "").includes("环比+6.0%"),
-      ),
-    ).toBeInTheDocument();
   });
 
   it("shows unified loading placeholders for dashboard cards while summary requests are pending", async () => {
     const pending = new Promise<never>(() => {});
     tracingApiMock.getOverview.mockReturnValueOnce(pending);
-    tracingApiMock.getGrowthStats.mockReturnValueOnce(pending);
     tracingApiMock.getHourlyTrend.mockReturnValueOnce(pending);
     tracingApiMock.getTaskStatusSummary.mockReturnValueOnce(pending);
-    tracingApiMock.getDepthSummary.mockReturnValueOnce(pending);
 
     renderBusinessOverview();
 
     const loadingPlaceholders = await screen.findAllByTestId(
       "overview-panel-loading",
     );
-    expect(loadingPlaceholders.length).toBeGreaterThanOrEqual(7);
+    expect(loadingPlaceholders.length).toBeGreaterThanOrEqual(6);
     expect(screen.queryByText("调用量趋势加载中...")).not.toBeInTheDocument();
     expect(screen.queryByText("任务执行概览加载中...")).not.toBeInTheDocument();
   });
