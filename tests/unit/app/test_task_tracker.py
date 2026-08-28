@@ -117,6 +117,12 @@ async def test_close_unblocks_subscribers_without_cancelling_producer():
     await tracker.close(identity)
     assert [event async for event in tracker.stream(identity, queue)] == []
     assert await tracker.has_active_tasks() is True
+    with pytest.raises(RuntimeError, match="live stream is closed"):
+        await tracker.attach_or_start(
+            _identity(turn_id="turn-2"),
+            {},
+            producer,
+        )
 
     release.set()
     await asyncio.wait_for(tracker.wait_all_done(timeout=1), timeout=2)
@@ -233,3 +239,22 @@ def test_tracker_has_no_answer_turn_stop_or_status_api():
         "is_turn_stopping",
     ):
         assert not hasattr(tracker, name)
+
+
+@pytest.mark.asyncio
+async def test_different_identity_same_chat_cannot_start_second_producer():
+    tracker = TaskTracker()
+    release = asyncio.Event()
+
+    async def producer(_identity, _payload):
+        await release.wait()
+        yield "data: {}\n\n"
+
+    first = _identity(turn_id="turn-1")
+    second = _identity(turn_id="turn-2")
+    _, is_new = await tracker.attach_or_start(first, {}, producer)
+    _, is_new_second = await tracker.attach_or_start(second, {}, producer)
+    assert is_new is True
+    assert is_new_second is False
+    release.set()
+    await tracker.wait_all_done(timeout=1)

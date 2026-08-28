@@ -74,7 +74,7 @@ class TaskTracker:
         async with self._lifecycle_lock(chat_id):
             async with self._lock:
                 if any(
-                    run_identity.chat_id == chat_id and not state.task.done()
+                    state.identity.chat_id == chat_id and not state.task.done()
                     for state in self._runs.values()
                 ):
                     return False, None
@@ -129,6 +129,10 @@ class TaskTracker:
         state.queues.append(queue)
         return queue
 
+    def _has_live_run_unlocked(self, chat_id: str) -> bool:
+        state = self._runs.get(chat_id)
+        return state is not None and not state.task.done()
+
     async def update_task_progress(
         self,
         run_key: str,
@@ -176,6 +180,8 @@ class TaskTracker:
                 queue = self._attach_unlocked(identity)
                 if queue is not None:
                     return queue, False
+                if self._has_live_run_unlocked(identity.chat_id):
+                    raise RuntimeError("live stream is closed for this chat")
             if before_start is not None:
                 operation = asyncio.create_task(
                     asyncio.to_thread(before_start),
@@ -192,6 +198,8 @@ class TaskTracker:
                 queue = self._attach_unlocked(identity)
                 if queue is not None:
                     return queue, False
+                if self._has_live_run_unlocked(identity.chat_id):
+                    raise RuntimeError("live stream is closed for this chat")
                 return self._start_unlocked(identity, payload, producer)
 
     def _start_unlocked(
@@ -241,7 +249,7 @@ class TaskTracker:
                 if tracker is not None:
                     async with tracker.lock:
                         state = tracker._runs.get(identity.chat_id)
-                        if state is not None:
+                        if state is not None and state.identity == identity:
                             for subscriber in state.queues:
                                 subscriber.put_nowait(_SENTINEL)
                             tracker._task_progress.pop(identity.chat_id, None)
