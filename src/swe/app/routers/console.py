@@ -64,7 +64,6 @@ from ..file_manager_execution import (
 )
 from ..runner.context_references import MAX_CONTEXT_REFERENCES
 from ..answer_turn.models import TurnIdentity, TurnStatus
-from ...config.context import resolve_request_effective_tenant_id
 
 logger = logging.getLogger(__name__)
 
