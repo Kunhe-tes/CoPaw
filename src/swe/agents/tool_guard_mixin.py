@@ -27,6 +27,7 @@ from agentscope.message import Msg, ToolResultBlock
 from ..constant import AGENT_WATCHDOG_TIMEOUT, QUERY_TIMEOUT_SECONDS
 from ..tracing.agent_trace_sdk import execute_tool_traced
 from ..app.runner.tool_output_frames import tool_output_invocation
+from .agent_trace_output import ToolTraceOutcome, build_tool_output_arguments
 from .hook_runtime import HookRuntime
 from .hook_runtime.conversation_snapshot import capture_conversation_snapshot
 from .hook_runtime.models import (
@@ -390,12 +391,7 @@ class ToolGuardMixin:
         finally:
             await self.memory.add(tool_res_msg)
 
-    @execute_tool_traced(
-        tool_name_factory=lambda self, tool_call, tool_name, tool_input: tool_name,
-        input_arguments_factory=lambda self, tool_call, tool_name, tool_input: tool_input,
-        output_arguments_factory=lambda result: {},
-    )
-    async def _run_tool_call_with_hard_timeout(
+    async def _run_tool_call_with_hard_timeout_impl(
         self,
         tool_call: dict[str, Any],
         tool_name: str,
@@ -454,6 +450,48 @@ class ToolGuardMixin:
                         timeout_text,
                     )
                     return None
+
+    @execute_tool_traced(
+        tool_name_factory=lambda self, _call, tool_name, _input: tool_name,
+        input_arguments_factory=lambda self, _call, _tool_name, tool_input: tool_input,
+        output_arguments_factory=build_tool_output_arguments,
+    )
+    async def _run_tool_call_with_hard_timeout_traced(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> ToolTraceOutcome:
+        result = await self._run_tool_call_with_hard_timeout_impl(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
+        terminal_output = result
+        if terminal_output is None:
+            terminal_output = self._extract_current_tool_response(
+                str(tool_call.get("id") or ""),
+                include_structured_failure=True,
+            )
+        return ToolTraceOutcome(
+            business_result=result,
+            terminal_output=terminal_output,
+            tool_name=tool_name,
+            mcp_server=self._resolve_mcp_server(tool_name),
+        )
+
+    async def _run_tool_call_with_hard_timeout(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> dict | None:
+        outcome = await self._run_tool_call_with_hard_timeout_traced(
+            tool_call,
+            tool_name,
+            tool_input,
+        )
+        return outcome.business_result
 
     async def _persist_local_tool_timeout_result(
         self,
@@ -2004,24 +2042,7 @@ class ToolGuardMixin:
         await self.memory.add(tool_res_msg)
         return None
 
-    async def _acting_with_approval(
-        self,
-        tool_call: dict[str, Any],
-        tool_name: str,
-        guard_result,
-        *,
-        approval_kind: str = _APPROVAL_KIND_TOOL_GUARD,
-        hook_ask_handler_ids: list[str] | None = None,
-    ) -> dict | None:
-        """Deny the tool call and record a pending approval."""
-        from agentscope.message import ToolResultBlock
-        from swe.security.tool_guard.approval import (
-            format_findings_summary,
-        )
-
-        channel = str(self._request_context.get("channel") or "")
-
-        # Find the original assistant message and extract thinking blocks
+    def _mark_approval_source_message(self) -> Any:
         original_msg = None
         for msg, marks in reversed(self.memory.content):
             if msg.role == "assistant":
@@ -2029,30 +2050,35 @@ class ToolGuardMixin:
                     marks.append(TOOL_GUARD_DENIED_MARK)
                 original_msg = msg
                 break
+        return original_msg
 
+    def _build_approval_extra(
+        self,
+        tool_call: dict[str, Any],
+        approval_kind: str,
+        hook_ask_handler_ids: list[str] | None,
+        original_msg: Any,
+    ) -> dict[str, Any]:
         extra: dict[str, Any] = {
             "approval_kind": approval_kind,
             "tool_call": tool_call,
+            "agent_id": self._request_context.get("agent_id"),
+            "tenant_id": self._request_context.get("tenant_id"),
+            "source_id": self._request_context.get("source_id"),
         }
-        extra["agent_id"] = self._request_context.get("agent_id")
-        extra["tenant_id"] = self._request_context.get("tenant_id")
-        extra["source_id"] = self._request_context.get("source_id")
         goal_id = str(self._request_context.get("goal_id") or "").strip()
         if goal_id:
             extra["goal_id"] = goal_id
         if hook_ask_handler_ids:
             extra["hook_ask_handler_ids"] = list(hook_ask_handler_ids)
-
-        # Preserve thinking blocks from the original message
         if original_msg is not None:
             thinking_blocks = [
-                b
-                for b in original_msg.get_content_blocks()
-                if isinstance(b, dict) and b.get("type") == "thinking"
+                block
+                for block in original_msg.get_content_blocks()
+                if isinstance(block, dict) and block.get("type") == "thinking"
             ]
             if thinking_blocks:
                 extra["thinking_blocks"] = thinking_blocks
-
         replay_queue = getattr(self, "_tool_guard_replay_queue", None)
         if replay_queue is not None:
             extra["remaining_queue"] = list(replay_queue)
@@ -2061,36 +2087,25 @@ class ToolGuardMixin:
             siblings = self._extract_sibling_tool_calls()
             if siblings:
                 extra["sibling_tool_calls"] = siblings
+        return extra
 
-        session_id = str(
-            self._request_context.get("session_id") or "",
-        )
-        tool_call_id = tool_call.get("id", "")
+    async def _cancel_stale_approval_requests(
+        self,
+        session_id: str,
+        tool_call: dict[str, Any],
+        extra: dict[str, Any],
+    ) -> None:
+        if not session_id:
+            return
         svc = self._tool_guard_approval_service
-        if session_id:
-            if tool_call_id:
-                await svc.cancel_stale_pending_for_tool_call(
-                    session_id,
-                    tool_call_id,
-                )
-            for queued in extra.get("remaining_queue", []):
-                qid = queued.get("id", "")
-                if qid:
-                    await svc.cancel_stale_pending_for_tool_call(
-                        session_id,
-                        qid,
-                    )
+        tool_call_id = tool_call.get("id", "")
+        ids = [tool_call_id] + [
+            queued.get("id", "") for queued in extra.get("remaining_queue", [])
+        ]
+        for call_id in (value for value in ids if value):
+            await svc.cancel_stale_pending_for_tool_call(session_id, call_id)
 
-        pending_request = await svc.create_pending(
-            session_id=session_id,
-            user_id=str(
-                self._request_context.get("user_id") or "",
-            ),
-            channel=channel,
-            tool_name=tool_name,
-            result=guard_result,
-            extra=extra,
-        )
+    async def _notify_approval_pending(self, pending_request: Any) -> None:
         try:
             from swe.app.approvals import notify_cron_approval_pending
 
@@ -2103,17 +2118,15 @@ class ToolGuardMixin:
                 "Tool guard: failed to notify cron approval request",
             )
 
-        guardians = list(
-            {f.guardian for f in guard_result.findings if f.guardian},
-        )
-        self._tool_guard_pending_info = {
-            "request_id": pending_request.request_id,
-            "tool_name": tool_name,
-            "tool_input": tool_call.get("input", {}),
-            "guardians": guardians,
-        }
+    async def _emit_approval_required(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        guard_result: Any,
+    ) -> None:
+        from agentscope.message import ToolResultBlock
+        from swe.security.tool_guard.approval import format_findings_summary
 
-        findings_text = format_findings_summary(guard_result)
         denied_text = (
             f"⚠️ **Risk Detected / 检测到风险**\n\n"
             f"- Tool / 工具: `{tool_name}`\n"
@@ -2121,12 +2134,11 @@ class ToolGuardMixin:
             f"`{guard_result.max_severity.value}`\n"
             f"- Findings / 发现: "
             f"`{guard_result.findings_count}`\n\n"
-            f"{findings_text}\n\n"
+            f"{format_findings_summary(guard_result)}\n\n"
             f"Type `/approve` to approve, "
             f"`/deny` to deny, or send any message to deny.\n"
             f"输入 `/approve` 批准执行，或发送任意消息拒绝。"
         )
-
         tool_res_msg = Msg(
             "system",
             [
@@ -2141,12 +2153,59 @@ class ToolGuardMixin:
             ],
             "system",
         )
-
         await self.print(tool_res_msg, True)
-        await self.memory.add(
-            tool_res_msg,
-            marks=TOOL_GUARD_DENIED_MARK,
+        await self.memory.add(tool_res_msg, marks=TOOL_GUARD_DENIED_MARK)
+
+    async def _acting_with_approval(
+        self,
+        tool_call: dict[str, Any],
+        tool_name: str,
+        guard_result,
+        *,
+        approval_kind: str = _APPROVAL_KIND_TOOL_GUARD,
+        hook_ask_handler_ids: list[str] | None = None,
+    ) -> dict | None:
+        """Deny the tool call and record a pending approval."""
+        channel = str(self._request_context.get("channel") or "")
+        original_msg = self._mark_approval_source_message()
+        extra = self._build_approval_extra(
+            tool_call,
+            approval_kind,
+            hook_ask_handler_ids,
+            original_msg,
         )
+        session_id = str(
+            self._request_context.get("session_id") or "",
+        )
+        svc = self._tool_guard_approval_service
+        await self._cancel_stale_approval_requests(
+            session_id,
+            tool_call,
+            extra,
+        )
+        pending_request = await svc.create_pending(
+            session_id=session_id,
+            user_id=str(
+                self._request_context.get("user_id") or "",
+            ),
+            channel=channel,
+            tool_name=tool_name,
+            result=guard_result,
+            extra=extra,
+        )
+        await self._notify_approval_pending(pending_request)
+
+        guardians = list(
+            {f.guardian for f in guard_result.findings if f.guardian},
+        )
+        self._tool_guard_pending_info = {
+            "request_id": pending_request.request_id,
+            "tool_name": tool_name,
+            "tool_input": tool_call.get("input", {}),
+            "guardians": guardians,
+        }
+
+        await self._emit_approval_required(tool_call, tool_name, guard_result)
         return None
 
     # ------------------------------------------------------------------

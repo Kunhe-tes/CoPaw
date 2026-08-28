@@ -29,7 +29,6 @@ RESULT_INDEX_REQUIRED_FIELDS = (
     "skill_id",
     "job_id",
     "result_type",
-    "template_id",
     "result_id",
 )
 
@@ -1074,7 +1073,9 @@ class QueryService:
         return [
             {"custUid": row["custuid"], "bbkId": row["bbk_org_id"]}
             for row in rows
-            if row.get("custuid") and row.get("bbk_org_id")
+            if row.get("custuid")
+            and row.get("bbk_org_id")
+            and row.get("tenant_id") in ["01100129", "01100816", "01238694"]
         ]
 
     async def _index_success_execution_results(

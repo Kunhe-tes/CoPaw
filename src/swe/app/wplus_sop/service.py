@@ -10,6 +10,7 @@ import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, urlencode
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from .models import (
@@ -17,6 +18,9 @@ from .models import (
     AnswerBatch,
     ChatProjectionOutboxItem,
     CommandReceipt,
+    ConfirmedStageSnapshot,
+    CumulativePreview,
+    CumulativeRefreshedPayload,
     EntryDetectionMode,
     EntryProposalStatus,
     EventKind,
@@ -45,6 +49,9 @@ from .models import (
     StageProposalPayload,
     StageQueue,
     StageQueueConfirmedPayload,
+    StageReport,
+    StageReportGeneratedPayload,
+    StageReportGenerationFailedPayload,
     StageStatus,
     StructuredInteractionEnvelope,
     TerminationSummaryPayload,
@@ -373,6 +380,15 @@ _RUN_EVENT_STATES: dict[EventKind, frozenset[SessionState]] = {
         },
     ),
     EventKind.SOP_RESULT: frozenset({SessionState.FINALIZING_OUTPUTS}),
+    EventKind.STAGE_REPORT_GENERATED: frozenset(
+        {SessionState.GENERATING_STAGE_REPORT},
+    ),
+    EventKind.STAGE_REPORT_GENERATION_FAILED: frozenset(
+        {SessionState.GENERATING_STAGE_REPORT},
+    ),
+    EventKind.CUMULATIVE_REFRESHED: frozenset(
+        {SessionState.REFRESHING_CUMULATIVE},
+    ),
     EventKind.MEMORY_CANDIDATES: frozenset(
         {SessionState.FINALIZING_OUTPUTS},
     ),
@@ -391,6 +407,8 @@ _RUN_EVENT_STATES: dict[EventKind, frozenset[SessionState]] = {
             SessionState.GENERATING_QUESTIONS,
             SessionState.GENERATING_TRIAL,
             SessionState.EXECUTING_TRIAL,
+            SessionState.GENERATING_STAGE_REPORT,
+            SessionState.REFRESHING_CUMULATIVE,
             SessionState.FINALIZING_OUTPUTS,
             SessionState.WRITING_MEMORY,
         },
@@ -401,6 +419,8 @@ _RUN_EVENT_STATES: dict[EventKind, frozenset[SessionState]] = {
             SessionState.GENERATING_QUESTIONS,
             SessionState.GENERATING_TRIAL,
             SessionState.EXECUTING_TRIAL,
+            SessionState.GENERATING_STAGE_REPORT,
+            SessionState.REFRESHING_CUMULATIVE,
             SessionState.FINALIZING_OUTPUTS,
             SessionState.WRITING_MEMORY,
         },
@@ -413,6 +433,9 @@ _PENDING_EXIT_BOUNDARIES = frozenset(
         EventKind.QUESTION_BATCH,
         EventKind.TRIAL_EXECUTION_COMPLETED,
         EventKind.TRIAL_EXECUTION_FAILED,
+        EventKind.STAGE_REPORT_GENERATED,
+        EventKind.STAGE_REPORT_GENERATION_FAILED,
+        EventKind.CUMULATIVE_REFRESHED,
         EventKind.MEMORY_CANDIDATES,
         EventKind.MEMORY_WRITE_COMPLETED,
         EventKind.MEMORY_WRITE_FAILED,
@@ -427,6 +450,8 @@ _ORPHAN_RECOVERY_STATES = frozenset(
         SessionState.GENERATING_QUESTIONS,
         SessionState.GENERATING_TRIAL,
         SessionState.EXECUTING_TRIAL,
+        SessionState.GENERATING_STAGE_REPORT,
+        SessionState.REFRESHING_CUMULATIVE,
         SessionState.FINALIZING_OUTPUTS,
         SessionState.WRITING_MEMORY,
     },
@@ -465,7 +490,65 @@ def _validate_delivered_artifacts(
             )
 
 
-def _result_preview(result: Any) -> dict[str, str | None]:
+def _artifact_path_segment(value: Any) -> str:
+    return quote(str(value), safe="")
+
+
+def _artifact_url(path: str, query: dict[str, Any]) -> str:
+    return f"{path}?{urlencode(query)}"
+
+
+def _final_artifact_download_url(
+    sop_session_id: str,
+    artifact_id: str,
+) -> str:
+    return _artifact_url(
+        "/api/wplus-sop/sessions/"
+        f"{_artifact_path_segment(sop_session_id)}/artifacts/"
+        f"{_artifact_path_segment(artifact_id)}",
+        {"download": "true"},
+    )
+
+
+def _stage_report_artifact_download_url(
+    sop_session_id: str,
+    report: StageReport,
+    artifact_id: str,
+) -> str:
+    return _artifact_url(
+        "/api/wplus-sop/sessions/"
+        f"{_artifact_path_segment(sop_session_id)}/stage-report-artifacts/"
+        f"{_artifact_path_segment(artifact_id)}",
+        {
+            "stage_id": report.stage_id,
+            "revision": report.revision,
+            "report_no": report.report_no,
+            "download": "true",
+        },
+    )
+
+
+def _cumulative_artifact_download_url(
+    sop_session_id: str,
+    preview: CumulativePreview,
+    artifact_id: str,
+) -> str:
+    return _artifact_url(
+        "/api/wplus-sop/sessions/"
+        f"{_artifact_path_segment(sop_session_id)}/cumulative-artifacts/"
+        f"{_artifact_path_segment(artifact_id)}",
+        {
+            "preview_version": preview.preview_version,
+            "download": "true",
+        },
+    )
+
+
+def _result_preview(
+    result: Any,
+    *,
+    sop_session_id: str,
+) -> dict[str, str | None]:
     artifacts_by_id = {
         artifact.artifact_id: artifact
         for artifact in result.artifacts
@@ -476,9 +559,21 @@ def _result_preview(result: Any) -> dict[str, str | None]:
         "markdown": result.readable_sop,
         "html": result.html,
         "markdown_url": (
-            markdown_artifact.static_url if markdown_artifact else None
+            _final_artifact_download_url(
+                sop_session_id,
+                markdown_artifact.artifact_id,
+            )
+            if markdown_artifact
+            else None
         ),
-        "html_url": html_artifact.static_url if html_artifact else None,
+        "html_url": (
+            _final_artifact_download_url(
+                sop_session_id,
+                html_artifact.artifact_id,
+            )
+            if html_artifact
+            else None
+        ),
         "markdown_sha256": (
             markdown_artifact.sha256 if markdown_artifact else None
         ),
@@ -668,6 +763,57 @@ def _serialize_current_trial(
     return trial, capabilities
 
 
+def _serialize_artifact(
+    artifact: Any,
+    *,
+    download_url: str,
+) -> dict[str, Any]:
+    return {
+        "artifact_id": artifact.artifact_id,
+        "name": artifact.name,
+        "format": (
+            "json"
+            if artifact.name.endswith(".json")
+            else (
+                "markdown"
+                if artifact.name.endswith(".md")
+                else "html"
+            )
+        ),
+        "status": "validated",
+        "download_url": download_url,
+        "sha256": artifact.sha256,
+        "copied_by": artifact.copied_by,
+    }
+
+
+def _serialize_cumulative_preview(
+    preview: CumulativePreview,
+    *,
+    sop_session_id: str,
+) -> dict[str, Any]:
+    return {
+        "preview_version": preview.preview_version,
+        "stage_order": preview.stage_order,
+        "snapshots": [
+            snapshot.model_dump(mode="json")
+            for snapshot in preview.snapshots
+        ],
+        "artifacts": [
+            _serialize_artifact(
+                artifact,
+                download_url=_cumulative_artifact_download_url(
+                    sop_session_id,
+                    preview,
+                    artifact.artifact_id,
+                ),
+            )
+            for artifact in preview.artifacts
+        ],
+        "rendered_sha256": preview.rendered_sha256,
+    }
+
+
 def serialize_session(record: SessionRecord) -> dict[str, Any]:
     """Project the persisted domain model into the frontend contract."""
     projection = record.projection
@@ -726,23 +872,13 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
         "unknowns": projection.unknowns,
         "capabilities": capabilities,
         "artifacts": [
-            {
-                "artifact_id": artifact.artifact_id,
-                "name": artifact.name,
-                "format": (
-                    "json"
-                    if artifact.name.endswith(".json")
-                    else (
-                        "markdown"
-                        if artifact.name.endswith(".md")
-                        else "html"
-                    )
+            _serialize_artifact(
+                artifact,
+                download_url=_final_artifact_download_url(
+                    projection.sop_session_id,
+                    artifact.artifact_id,
                 ),
-                "status": "validated",
-                "download_url": artifact.static_url,
-                "sha256": artifact.sha256,
-                "copied_by": artifact.copied_by,
-            }
+            )
             for artifact in (
                 projection.final_result.artifacts
                 if projection.final_result is not None
@@ -750,8 +886,40 @@ def serialize_session(record: SessionRecord) -> dict[str, Any]:
             )
         ],
         "result_preview": (
-            _result_preview(projection.final_result)
+            _result_preview(
+                projection.final_result,
+                sop_session_id=projection.sop_session_id,
+            )
             if projection.final_result is not None
+            else None
+        ),
+        "stage_reports": [
+            {
+                "stage_id": report.stage_id,
+                "report_no": report.report_no,
+                "revision": report.revision,
+                "superseded_by": report.superseded_by,
+                "created_at": report.created_at.isoformat(),
+                "artifacts": [
+                    _serialize_artifact(
+                        artifact,
+                        download_url=_stage_report_artifact_download_url(
+                            projection.sop_session_id,
+                            report,
+                            artifact.artifact_id,
+                        ),
+                    )
+                    for artifact in report.artifacts
+                ],
+            }
+            for report in projection.stage_reports
+        ],
+        "cumulative_preview": (
+            _serialize_cumulative_preview(
+                projection.cumulative_preview,
+                sop_session_id=projection.sop_session_id,
+            )
+            if projection.cumulative_preview is not None
             else None
         ),
         "memory_candidates": [
@@ -2025,7 +2193,10 @@ class WPlusSopService:
         command: str,
     ) -> _CommandResult:
         projection = record.projection
-        if projection.state is not SessionState.AWAITING_TRIAL_FEEDBACK:
+        if projection.state not in {
+            SessionState.AWAITING_TRIAL_FEEDBACK,
+            SessionState.AWAITING_STAGE_CONFIRMATION,
+        }:
             raise WPlusCommandError("Session is not awaiting trial feedback")
         feedback = str(payload.get("feedback", "")).strip()
         rerun_of = str(
@@ -2062,12 +2233,13 @@ class WPlusSopService:
         if not projection.current_stage_id:
             raise WPlusCommandError("Current stage is missing")
         return _CommandResult(
-            target_state=SessionState.AWAITING_STAGE_CONFIRMATION,
+            target_state=SessionState.GENERATING_STAGE_REPORT,
             kind=EventKind.STAGE_CONFIRMATION_REQUIRED,
             typed_payload=StageConfirmationRequiredPayload(
                 stage_id=projection.current_stage_id,
-                summary="用户接受当前预跑结果，等待环节确认。",
+                summary="用户接受当前预跑结果，生成环节报告，等待环节确认。",
             ),
+            starts_run=True,
         )
 
     @staticmethod
@@ -2094,27 +2266,55 @@ class WPlusSopService:
         )
         if current_index < 0:
             raise WPlusCommandError("Current stage is not in the queue")
+        candidates = [
+            report
+            for report in projection.stage_reports
+            if (
+                report.stage_id == current_id
+                and report.revision == projection.revision
+                and report.superseded_by is None
+            )
+        ]
+        if not candidates:
+            raise WPlusCommandError(
+                "Current stage has no acceptable report to confirm",
+            )
+        latest = max(candidates, key=lambda report: report.report_no)
+        json_artifact = next(
+            artifact
+            for artifact in latest.artifacts
+            if artifact.artifact_id == "stage_sop_json"
+        )
         stages[current_index].status = StageStatus.CONFIRMED
         is_final = current_index == len(stages) - 1
         next_stage_id = None
-        if is_final:
-            target_state = SessionState.FINALIZING_OUTPUTS
-        else:
+        if not is_final:
             stages[current_index + 1].status = StageStatus.CLARIFYING
             next_stage_id = stages[current_index + 1].stage_id
-            target_state = SessionState.GENERATING_QUESTIONS
+        snapshots = [
+            *projection.confirmed_snapshots,
+            ConfirmedStageSnapshot(
+                stage_id=current_id,
+                report_no=latest.report_no,
+                revision=latest.revision,
+                artifact_sha256=json_artifact.sha256,
+            ),
+        ]
         return _CommandResult(
-            target_state=target_state,
+            target_state=SessionState.REFRESHING_CUMULATIVE,
             kind=EventKind.STAGE_CONFIRMED,
             typed_payload=StageConfirmedPayload(
                 stage_id=current_id,
                 next_stage_id=next_stage_id,
                 is_final_stage=is_final,
+                confirmed_report_no=latest.report_no,
             ),
             changes={
                 "stages": stages,
                 "current_stage_id": next_stage_id or current_id,
                 "current_question_batch": None,
+                "confirmed_snapshots": snapshots,
+                "cumulative_preview": None,
             },
             starts_run=True,
         )
@@ -2530,6 +2730,17 @@ class WPlusSopService:
                     "Question generation requires a current_stage_id",
                 )
             result.runtime_payload["current_stage_id"] = current_stage_id
+            return
+        if result.target_state is SessionState.REFRESHING_CUMULATIVE:
+            current_stage_id = result.changes.get(
+                "current_stage_id",
+                projection.current_stage_id,
+            )
+            result.runtime_payload["current_stage_id"] = current_stage_id
+            result.runtime_payload["confirmed_snapshots"] = [
+                snapshot.model_dump(mode="json")
+                for snapshot in result.changes.get("confirmed_snapshots", [])
+            ]
             return
         if result.target_state is SessionState.WRITING_MEMORY:
             if "candidates" not in result.runtime_payload:
@@ -3111,6 +3322,115 @@ class WPlusSopService:
         )
 
     @staticmethod
+    def _handle_stage_report_generated_agent_event(
+        svc: WPlusSopService,
+        record: SessionRecord,
+        payload: dict[str, Any],
+        trusted_run_id: str | None,
+        effective_state: SessionState,
+        event_kind: EventKind,
+    ) -> _AgentEventResult:
+        typed = StageReportGeneratedPayload.model_validate(payload)
+        projection = record.projection
+        report = typed.report
+        if report.stage_id != projection.current_stage_id:
+            raise WPlusCommandError(
+                "stage report must belong to the current stage",
+            )
+        if report.revision != projection.revision:
+            raise WPlusCommandError(
+                "stage report revision must match the session revision",
+            )
+        existing = [
+            prior
+            for prior in projection.stage_reports
+            if (
+                prior.stage_id == report.stage_id
+                and prior.revision == report.revision
+            )
+        ]
+        if any(prior.report_no == report.report_no for prior in existing):
+            raise WPlusCommandError("stage report version already exists")
+        max_report_no = max(
+            (prior.report_no for prior in existing),
+            default=0,
+        )
+        if report.report_no != max_report_no + 1:
+            raise WPlusCommandError(
+                "stage report version must increment by one",
+            )
+        reports = [
+            prior.model_copy(update={"superseded_by": report.report_no})
+            if (
+                prior.stage_id == report.stage_id
+                and prior.revision == report.revision
+                and prior.superseded_by is None
+            )
+            else prior
+            for prior in projection.stage_reports
+        ]
+        reports.append(report)
+        return _AgentEventResult(
+            target=SessionState.AWAITING_STAGE_CONFIRMATION,
+            typed_payload=typed,
+            changes={"stage_reports": reports},
+        )
+
+    @staticmethod
+    def _handle_stage_report_generation_failed_agent_event(
+        svc: WPlusSopService,
+        record: SessionRecord,
+        payload: dict[str, Any],
+        trusted_run_id: str | None,
+        effective_state: SessionState,
+        event_kind: EventKind,
+    ) -> _AgentEventResult:
+        typed = StageReportGenerationFailedPayload.model_validate(payload)
+        return _AgentEventResult(
+            target=SessionState.RECOVERABLE_FAILURE,
+            typed_payload=typed,
+            changes={
+                "last_error": RecoverableFailurePayload(
+                    error_code=typed.error_code,
+                    summary=typed.summary,
+                    failed_operation="stage_report_generation",
+                ),
+                "resume_state": effective_state,
+            },
+        )
+
+    @staticmethod
+    def _handle_cumulative_refreshed_agent_event(
+        svc: WPlusSopService,
+        record: SessionRecord,
+        payload: dict[str, Any],
+        trusted_run_id: str | None,
+        effective_state: SessionState,
+        event_kind: EventKind,
+    ) -> _AgentEventResult:
+        typed = CumulativeRefreshedPayload.model_validate(payload)
+        projection = record.projection
+        preview = typed.preview
+        if preview.stage_order != [
+            snapshot.stage_id for snapshot in projection.confirmed_snapshots
+        ]:
+            raise WPlusCommandError(
+                "cumulative preview does not match confirmed snapshots",
+            )
+        is_all_confirmed = (
+            len(projection.confirmed_snapshots) == len(projection.stages)
+        )
+        return _AgentEventResult(
+            target=(
+                SessionState.FINALIZING_OUTPUTS
+                if is_all_confirmed
+                else SessionState.GENERATING_QUESTIONS
+            ),
+            typed_payload=typed,
+            changes={"cumulative_preview": preview},
+        )
+
+    @staticmethod
     def _handle_memory_candidates_agent_event(
         svc: WPlusSopService,
         record: SessionRecord,
@@ -3492,6 +3812,9 @@ _AGENT_EVENT_HANDLERS: dict[EventKind, Any] = {
     EventKind.TRIAL_EXECUTION_COMPLETED: WPlusSopService._handle_trial_execution_completed_agent_event,
     EventKind.TRIAL_EXECUTION_FAILED: WPlusSopService._handle_trial_execution_failed_agent_event,
     EventKind.SOP_RESULT: WPlusSopService._handle_sop_result_agent_event,
+    EventKind.STAGE_REPORT_GENERATED: WPlusSopService._handle_stage_report_generated_agent_event,
+    EventKind.STAGE_REPORT_GENERATION_FAILED: WPlusSopService._handle_stage_report_generation_failed_agent_event,
+    EventKind.CUMULATIVE_REFRESHED: WPlusSopService._handle_cumulative_refreshed_agent_event,
     EventKind.MEMORY_CANDIDATES: WPlusSopService._handle_memory_candidates_agent_event,
     EventKind.MEMORY_WRITE_BATCH_RESULT: WPlusSopService._handle_memory_write_batch_result_agent_event,
     EventKind.MEMORY_WRITE_COMPLETED: WPlusSopService._handle_memory_write_single_agent_event,

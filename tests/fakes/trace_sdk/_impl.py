@@ -9,6 +9,7 @@ import uuid
 import contextvars
 from dataclasses import asdict, dataclass
 from enum import Enum
+import json
 from typing import Any, Callable
 
 from . import _records
@@ -79,10 +80,21 @@ def decorator(name: str, **config: Any) -> Callable:
     def decorate(func: Callable) -> Callable:
         @functools.wraps(func)
         async def wrapped(*args: Any, **kwargs: Any):
-            async with global_tracer.start_as_current_span(name):
+            async with global_tracer.start_as_current_span(name) as span:
                 result = func(*args, **kwargs)
                 if inspect.isawaitable(result):
-                    return await result
+                    result = await result
+                output_factory = config.get("output_arguments_factory")
+                if output_factory is not None:
+                    output = output_factory(result)
+                    span.set_attribute(
+                        "cmb.output.arguments",
+                        json.dumps(
+                            output,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    )
                 return result
 
         wrapped._trace_sdk_config = config
