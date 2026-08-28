@@ -120,6 +120,7 @@ from ...config.context import (
     get_current_passthrough_headers,
 )
 from ...runtime_invocation_claims import runtime_invocation_claims_context
+from ..answer_turn.models import TurnIdentity, TurnOutcome, TurnStatus
 from ..source_system_config import is_chat_task_progress_enabled
 from ..source_system_config.runtime import get_current_source_system_config
 
@@ -2724,6 +2725,7 @@ class AgentRunner(Runner):
         workspace_dir: Path | None = None,
         task_tracker: Any | None = None,
         tenant_id: str | None = None,
+        answer_turn_coordinator: Any | None = None,
     ) -> None:
         from ...config.context import resolve_runtime_tenant_id
 
@@ -2742,11 +2744,83 @@ class AgentRunner(Runner):
         self._workspace: Any = None  # Workspace instance for control commands
         self.memory_manager: BaseMemoryManager | None = None
         self._task_tracker = task_tracker  # Task tracker for background tasks
+        self._answer_turn_coordinator = answer_turn_coordinator
+        self._answer_turn_tasks: dict[TurnIdentity, asyncio.Task[Any]] = {}
+        self._answer_turn_runtimes: dict[
+            TurnIdentity,
+            tuple[_QueryRuntime | None, Any],
+        ] = {}
         self._query_background_tasks: set[asyncio.Task[None]] = set()
         self.session: Any | None = None
         self._query_execution = QueryExecution(
             LegacyQueryExecutionAdapter(self),
         )
+
+    def set_answer_turn_coordinator(self, coordinator: Any) -> None:
+        """Attach the workspace-owned answer-turn coordinator."""
+        self._answer_turn_coordinator = coordinator
+
+    @staticmethod
+    def _answer_turn_identity(request: Any) -> TurnIdentity | None:
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        identity = channel_meta.get("answer_turn_identity")
+        return identity if isinstance(identity, TurnIdentity) else None
+
+    async def request_cooperative_stop(self, identity: TurnIdentity) -> None:
+        """Ask the active agent to stop without terminating its task."""
+        runtime, _ = self._answer_turn_runtimes.get(identity, (None, None))
+        if runtime is not None:
+            await runtime.agent.interrupt()
+
+    async def hard_cancel(self, identity: TurnIdentity) -> None:
+        """Cancel the execution task that still owns *identity*."""
+        task = self._answer_turn_tasks.get(identity)
+        if task is not None and not task.done():
+            task.cancel()
+
+    async def persist_outcome(self, outcome: TurnOutcome) -> None:
+        """Persist the accepted Stop outcome through the session adapter."""
+        runtime, session_execution = self._answer_turn_runtimes.get(
+            outcome.identity,
+            (None, None),
+        )
+        if (
+            outcome.status != TurnStatus.CANCELLED
+            or session_execution is None
+            or not hasattr(session_execution, "state")
+        ):
+            return
+        from .session_lifecycle import (
+            mark_stopped_agent_memory,
+            mark_stopped_turn_state,
+        )
+
+        try:
+            if runtime is not None:
+                mark_stopped_agent_memory(
+                    runtime.agent,
+                    outcome.identity.msgid,
+                )
+            mark_stopped_turn_state(
+                session_execution.state,
+                outcome.identity.msgid,
+            )
+            await session_execution.commit_state(session_execution.state)
+        except Exception:
+            logger.exception(
+                "Failed to persist stopped answer turn chat_id=%s msgid=%s",
+                outcome.identity.chat_id,
+                outcome.identity.msgid,
+            )
+
+    async def _report_answer_turn_outcome(
+        self,
+        identity: TurnIdentity | None,
+        outcome: TurnOutcome,
+    ) -> None:
+        if identity is None or self._answer_turn_coordinator is None:
+            return
+        await self._answer_turn_coordinator.settle(outcome)
 
     def set_chat_manager(self, chat_manager):
         """Set chat manager for auto-registration.
@@ -4270,9 +4344,6 @@ class AgentRunner(Runner):
         """Connect request resources and run the session-start hook."""
         channel_meta = getattr(request, "channel_meta", None) or {}
         turn_id = str(channel_meta.get("turn_id") or "")
-        if not turn_id:
-            turn_id = f"turn-{uuid4().hex}"
-            request.channel_meta = {**channel_meta, "turn_id": turn_id}
         chat = await self._get_or_create_chat(
             session_id=inputs.session_id,
             user_id=inputs.user_id,
@@ -4609,6 +4680,12 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ):
         """Coordinate the extracted Goal and Stop turn lifecycle."""
+        identity = self._answer_turn_identity(request)
+        if identity is not None:
+            self._answer_turn_runtimes[identity] = (
+                runtime,
+                runtime.session_execution,
+            )
         async for item in turn_lifecycle.stream_completion_lifecycle(
             self,
             request=request,
@@ -4723,33 +4800,15 @@ class AgentRunner(Runner):
         request: AgentRequest,
         session_execution: Any,
     ) -> None:
-        """Persist terminal Stop evidence without exposing persistence errors."""
-        if session_execution is None:
+        """Report a stopped execution for coordinator-owned settlement."""
+        identity = self._answer_turn_identity(request)
+        coordinator = self._answer_turn_coordinator
+        if identity is None or coordinator is None:
             return
-        channel_meta = getattr(request, "channel_meta", None) or {}
-        chat_id = channel_meta.get("chat_id")
-        msgid = channel_meta.get("msgid")
-        if not isinstance(chat_id, str) or not isinstance(msgid, str):
+        if await coordinator.status(identity) != TurnStatus.STOPPING:
             return
-        tracker = self._task_tracker
-        if tracker is None or await tracker.get_status(chat_id) != "stopping":
-            return
-        from .session_lifecycle import (
-            mark_stopped_agent_memory,
-            mark_stopped_turn_state,
-        )
-
-        try:
-            if runtime is not None:
-                mark_stopped_agent_memory(runtime.agent, msgid)
-            mark_stopped_turn_state(session_execution.state, msgid)
-            await session_execution.commit_state(session_execution.state)
-        except Exception:
-            logger.exception(
-                "Failed to persist stopped turn state chat_id=%s msgid=%s",
-                chat_id,
-                msgid,
-            )
+        self._answer_turn_runtimes[identity] = (runtime, session_execution)
+        await coordinator.settle(TurnOutcome.cancelled(identity))
 
     async def _handle_query_error(
         self,
@@ -5322,10 +5381,14 @@ class AgentRunner(Runner):
         session_id = getattr(request, "session_id", "") or ""
         user_id = getattr(request, "user_id", "") or ""
         channel_meta = getattr(request, "channel_meta", None) or {}
-        turn_id = ""
-        if request is not None:
-            turn_id = f"turn-{uuid4().hex}"
-            request.channel_meta = {**channel_meta, "turn_id": turn_id}
+        identity = self._answer_turn_identity(request)
+        turn_id = identity.turn_id if identity is not None else ""
+        if identity is not None:
+            request.channel_meta = {
+                **channel_meta,
+                "turn_id": identity.turn_id,
+                "msgid": identity.msgid,
+            }
         is_scheduled = (
             getattr(request, "execution_origin", None) == "scheduled"
         )
@@ -5350,30 +5413,60 @@ class AgentRunner(Runner):
                 ),
             )
 
-        async with trace_scope as span:
-            if span is not None:
-                span.set_attribute("agent.user_message", query or "")
+        task = asyncio.current_task()
+        if identity is not None and task is not None:
+            self._answer_turn_tasks[identity] = task
+        try:
+            async with trace_scope as span:
+                if span is not None:
+                    span.set_attribute("agent.user_message", query or "")
 
-            query_execution = getattr(self, "_query_execution", None)
-            if query_execution is not None:
-                async for frame in query_execution.stream(
-                    QueryInvocation(request=request, msgs=tuple(msgs)),
-                ):
-                    trace_id = getattr(request, "trace_id", None)
-                    msg = self._attach_trace_id_to_msg(frame.message, trace_id)
-                    yield msg, frame.last
-                return
-
-            async for msg, last in self._stream_query_entry(
-                msgs,
-                request=request,
-                query=query,
-                session_id=session_id,
-                user_id=user_id,
-            ):
-                trace_id = getattr(request, "trace_id", None)
-                msg = self._attach_trace_id_to_msg(msg, trace_id)
-                yield msg, last
+                query_execution = getattr(self, "_query_execution", None)
+                if query_execution is not None:
+                    async for frame in query_execution.stream(
+                        QueryInvocation(request=request, msgs=tuple(msgs)),
+                    ):
+                        trace_id = getattr(request, "trace_id", None)
+                        msg = self._attach_trace_id_to_msg(
+                            frame.message,
+                            trace_id,
+                        )
+                        yield msg, frame.last
+                else:
+                    async for msg, last in self._stream_query_entry(
+                        msgs,
+                        request=request,
+                        query=query,
+                        session_id=session_id,
+                        user_id=user_id,
+                    ):
+                        trace_id = getattr(request, "trace_id", None)
+                        msg = self._attach_trace_id_to_msg(msg, trace_id)
+                        yield msg, last
+        except asyncio.CancelledError:
+            if identity is not None:
+                await self._report_answer_turn_outcome(
+                    identity,
+                    TurnOutcome.cancelled(identity),
+                )
+            raise
+        except Exception as exc:
+            if identity is not None:
+                await self._report_answer_turn_outcome(
+                    identity,
+                    TurnOutcome.failed(identity, exc),
+                )
+            raise
+        else:
+            if identity is not None:
+                await self._report_answer_turn_outcome(
+                    identity,
+                    TurnOutcome.completed(identity),
+                )
+        finally:
+            if identity is not None:
+                self._answer_turn_tasks.pop(identity, None)
+                self._answer_turn_runtimes.pop(identity, None)
 
     async def get_state_loaded(
         self,
