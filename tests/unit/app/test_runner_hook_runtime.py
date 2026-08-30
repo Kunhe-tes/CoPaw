@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -1898,6 +1898,27 @@ def test_stop_transformer_handles_text_block_assistant_response() -> None:
     assert msg.content == [{"type": "text", "text": "final block text"}]
 
 
+def test_stop_transformer_projects_thinking_and_text_response() -> None:
+    agent = _FakeAgent()
+    msg = Msg(
+        name="Friday",
+        role="assistant",
+        content=[
+            {"type": "thinking", "thinking": "hidden"},
+            {"type": "text", "text": "visible"},
+        ],
+    )
+    agent.memory.content.append((msg, []))
+
+    assert _is_bufferable_assistant_text(msg) is True
+    assert _extract_assistant_response(agent) == "visible"
+    assert _replace_assistant_response(agent, "final") is True
+    assert msg.content == [
+        {"type": "thinking", "thinking": "hidden"},
+        {"type": "text", "text": "final"},
+    ]
+
+
 def test_stop_transformer_extract_ignores_live_assistant_events() -> None:
     agent = _FakeAgent()
     candidate = Msg(name="Friday", role="assistant", content="final candidate")
@@ -1926,7 +1947,8 @@ def test_stop_transformer_keeps_live_assistant_events_unbuffered(
     assert _is_bufferable_assistant_text(msg) is False
 
 
-def test_stop_transformer_keeps_mixed_media_message_unbuffered() -> None:
+def test_stop_transformer_projects_text_with_passive_media() -> None:
+    agent = _FakeAgent()
     msg = Msg(
         name="Friday",
         role="assistant",
@@ -1935,8 +1957,33 @@ def test_stop_transformer_keeps_mixed_media_message_unbuffered() -> None:
             {"type": "image", "url": "https://example.com/image.png"},
         ],
     )
+    agent.memory.content.append((msg, []))
+
+    assert _is_bufferable_assistant_text(msg) is True
+    assert _extract_assistant_response(agent) == "caption"
+    assert _replace_assistant_response(agent, "final caption") is True
+    assert msg.content == [
+        {"type": "text", "text": "final caption"},
+        {"type": "image", "url": "https://example.com/image.png"},
+    ]
+
+
+def test_stop_transformer_rejects_tool_use_message() -> None:
+    agent = _FakeAgent()
+    msg = Msg(
+        name="Friday",
+        role="assistant",
+        content=[
+            {"type": "thinking", "thinking": "hidden"},
+            {"type": "text", "text": "will use a tool"},
+            {"type": "tool_use", "name": "read_file", "input": {}},
+        ],
+    )
+    agent.memory.content.append((msg, []))
 
     assert _is_bufferable_assistant_text(msg) is False
+    assert _extract_assistant_response(agent) == ""
+    assert _replace_assistant_response(agent, "final") is False
 
 
 @pytest.mark.asyncio
@@ -2627,6 +2674,48 @@ async def test_emit_stop_hook_respects_active_guard(
 
     assert result is None
     emit_hook.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_stop_skip_emits_hook_telemetry_without_response_plaintext(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    messages: list[str] = []
+    monkeypatch.setattr(
+        "swe.agents.hook_runtime.runtime.logger.info",
+        lambda message, *args: messages.append(message % args),
+    )
+    result = await runner._emit_stop_hook_if_needed(
+        request=SimpleNamespace(
+            trace_id="trace-1",
+            channel_meta={"turn_id": "turn-1"},
+        ),
+        runtime=SimpleNamespace(
+            tenant_hooks=HookConfig(),
+            agent_config=_agent_config(),
+            hook_overlay=HookSessionOverlay(),
+        ),
+        plan=SimpleNamespace(original_user_message="hello"),
+        outcome=_QueryTurnOutcome(),
+    )
+
+    assert result is None
+    messages = [
+        message
+        for message in messages
+        if message.startswith("HOOK_TELEMETRY ")
+    ]
+    assert len(messages) == 1
+    payload = json.loads(messages[0].removeprefix("HOOK_TELEMETRY "))
+    assert payload["schema"] == "hook_telemetry.v1"
+    assert payload["hook_event_name"] == "Stop"
+    assert payload["execution_state"] == "skipped"
+    assert payload["skipped_reason"] == "empty_assistant_response"
+    assert payload["handler_count"] == 0
+    assert payload["handlers"] == []
+    assert "hello" not in json.dumps(payload)
 
 
 @pytest.mark.asyncio

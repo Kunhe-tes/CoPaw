@@ -477,6 +477,7 @@ def _log_hook_telemetry(
     payload = {
         "schema": _TELEMETRY_SCHEMA,
         "hook_event_name": _event_name_value(plan.event_name),
+        "execution_state": "executed",
         "trace_id": context_payload.get("trace_id"),
         "tenant_id": context_payload.get("tenant_id"),
         "effective_tenant_id": context_payload.get("effective_tenant_id"),
@@ -502,6 +503,56 @@ def _log_hook_telemetry(
         "system_message_handler_ids": system_message_handler_ids,
         "permission_decisions": _permission_decisions_payload(merged),
         "handlers": _handlers_payload(plan, results, handler_durations),
+    }
+    logger.info(
+        "%s%s",
+        _TELEMETRY_PREFIX,
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+    )
+
+
+def log_stop_skipped_telemetry(
+    context: HookContext,
+    *,
+    skipped_reason: str,
+) -> None:
+    """Emit a schema-compatible Stop gate skip without handler execution."""
+    context_payload = context.to_handler_payload()
+    payload = {
+        "schema": _TELEMETRY_SCHEMA,
+        "hook_event_name": _event_name_value(HookEventName.STOP),
+        "execution_state": "skipped",
+        "skipped_reason": skipped_reason,
+        "trace_id": context_payload.get("trace_id"),
+        "tenant_id": context_payload.get("tenant_id"),
+        "effective_tenant_id": context_payload.get("effective_tenant_id"),
+        "source_id": context_payload.get("source_id"),
+        "user_id": context_payload.get("user_id"),
+        "session_id": context_payload.get("session_id"),
+        "chat_id": context_payload.get("chat_id"),
+        "turn_id": context_payload.get("turn_id"),
+        "agent_id": context_payload.get("agent_id"),
+        "channel": context_payload.get("channel"),
+        "tool_name": None,
+        "tool_use_id": None,
+        "handler_count": 0,
+        "duration_ms": 0,
+        "decision": _event_name_value(HookDecision.NONE),
+        "blocked": False,
+        "reason_preview": "",
+        "candidate": {
+            "assistant_response_length": len(
+                context.assistant_response or "",
+            ),
+        },
+        "has_updated_input": False,
+        "updated_input_handler_ids": [],
+        "has_additional_context": False,
+        "additional_context_handler_ids": [],
+        "has_system_messages": False,
+        "system_message_handler_ids": [],
+        "permission_decisions": [],
+        "handlers": [],
     }
     logger.info(
         "%s%s",
