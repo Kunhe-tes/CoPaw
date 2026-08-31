@@ -12,6 +12,10 @@ from typing import Any, AsyncGenerator, Protocol
 from agentscope.message import Msg
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
 
+from .assistant_response import (
+    project_candidate_assistant_response,
+    replace_candidate_assistant_response,
+)
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
 from ...agents.hook_runtime.models import HookDecision, MergedHookResult
 
@@ -203,6 +207,7 @@ async def stream_completion_lifecycle(
     if goal_id:
         async for event in _stream_goal_completion_lifecycle(
             owner,
+            request=request,
             goal_id=goal_id,
             runtime=runtime,
             plan=plan,
@@ -416,6 +421,7 @@ async def _wait_for_goal_wake(
 async def _stream_goal_completion_lifecycle(
     owner: TurnLifecycleOwner,
     *,
+    request: AgentRequest,
     goal_id: str,
     runtime: Any,
     plan: Any,
@@ -516,15 +522,101 @@ async def _stream_goal_completion_lifecycle(
                 continue
         if settled.state.value == "INTERRUPTED":
             return
-        async for (
-            finalization_msg,
-            last,
-        ) in owner._stream_goal_finalization_turn(
-            runtime=runtime,
-            goal=settled,
-        ):
-            yield finalization_msg, last
-        return
+        outcome.stop_follow_up_turns = 0
+        outcome.max_stop_turns = owner._resolve_max_stop_turns(
+            getattr(runtime, "agent_config", None),
+        )
+        while True:
+            outcome.goal_finalization_fallback = False
+            outcome.assistant_memory_start = len(
+                getattr(getattr(runtime.agent, "memory", None), "content", []),
+            )
+            finalization_msg: Msg | None = None
+            async for msg, last in owner._stream_goal_finalization_turn(
+                runtime=runtime,
+                goal=settled,
+            ):
+                if last:
+                    finalization_msg = msg
+                else:
+                    yield msg, False
+            if finalization_msg is None:
+                return
+            metadata = getattr(finalization_msg, "metadata", None)
+            outcome.goal_finalization_fallback = bool(
+                isinstance(metadata, dict)
+                and metadata.get("goal_finalization_fallback"),
+            )
+            outcome.assistant_response = (
+                project_candidate_assistant_response(finalization_msg) or ""
+            )
+            outcome.stop_output_buffer_required = (
+                owner._requires_stop_output_buffer(
+                    request=request,
+                    runtime=runtime,
+                    plan=plan,
+                )
+            )
+            retry_finalization, incomplete_msg = (
+                await _resolve_goal_finalization_stop_gate(
+                    owner,
+                    request=request,
+                    runtime=runtime,
+                    plan=plan,
+                    outcome=outcome,
+                )
+            )
+            if retry_finalization:
+                continue
+            if incomplete_msg is not None:
+                yield incomplete_msg, True
+            else:
+                _replace_buffered_assistant_text(
+                    finalization_msg,
+                    outcome.assistant_response,
+                )
+                yield finalization_msg, True
+            return
+
+
+async def _resolve_goal_finalization_stop_gate(
+    owner: TurnLifecycleOwner,
+    *,
+    request: AgentRequest,
+    runtime: Any,
+    plan: Any,
+    outcome: Any,
+) -> tuple[bool, Msg | None]:
+    """Apply Stop to formal Goal delivery without reopening Goal execution."""
+    stop_result = await owner._emit_stop_hook_if_needed(
+        request=request,
+        runtime=runtime,
+        plan=plan,
+        outcome=outcome,
+    )
+    if stop_result is None or stop_result.decision != HookDecision.BLOCK:
+        outcome.stop_hook_active = False
+        return False, None
+    reason = (
+        stop_result.blocking_failure_reason
+        if stop_result.has_blocking_failure
+        else stop_result.reason
+    ) or "Stop blocked completion"
+    if (
+        not stop_result.has_blocking_failure
+        and outcome.stop_follow_up_turns < outcome.max_stop_turns
+    ):
+        outcome.stop_follow_up_turns += 1
+        outcome.stop_hook_active = False
+        return True, None
+    outcome.task_completed = False
+    outcome.completion_blocked = True
+    outcome.completion_block_reason = reason
+    outcome.completion_marked_incomplete = True
+    outcome.stop_hook_active = False
+    incomplete_msg = owner._build_stop_incomplete_msg(reason)
+    await runtime.agent.memory.add(incomplete_msg)
+    return False, incomplete_msg
 
 
 async def _resolve_stop_gate(
@@ -632,48 +724,8 @@ async def _stream_standard_completion_lifecycle(
 
 
 def _is_bufferable_assistant_text(msg: Msg) -> bool:
-    if msg.role != "assistant" or _is_live_assistant_event(msg):
-        return False
-    if isinstance(msg.content, str):
-        return True
-    if not isinstance(msg.content, list):
-        return False
-    return bool(msg.content) and all(
-        _content_block_has_text(block) for block in msg.content
-    )
-
-
-def _is_live_assistant_event(msg: Msg) -> bool:
-    metadata = getattr(msg, "metadata", None)
-    if not isinstance(metadata, dict):
-        return False
-    values = " ".join(
-        str(metadata.get(key, ""))
-        for key in ("event_type", "message_type", "kind", "type")
-    ).lower()
-    return any(token in values for token in ("progress", "tool", "approval"))
-
-
-def _content_block_has_text(block: Any) -> bool:
-    if isinstance(block, dict):
-        return block.get("type") == "text" and isinstance(
-            block.get("text"),
-            str,
-        )
-    return getattr(block, "type", None) == "text" and isinstance(
-        getattr(block, "text", None),
-        str,
-    )
+    return project_candidate_assistant_response(msg) is not None
 
 
 def _replace_buffered_assistant_text(msg: Msg, response: str) -> None:
-    if isinstance(msg.content, str):
-        msg.content = response
-        return
-    if not isinstance(msg.content, list):
-        return
-    for index, block in enumerate(msg.content):
-        if isinstance(block, dict):
-            block["text"] = response if index == 0 else ""
-        else:
-            block.text = response if index == 0 else ""
+    replace_candidate_assistant_response(msg, response)

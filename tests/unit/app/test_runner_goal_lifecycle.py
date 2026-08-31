@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 from agentscope.message import Msg
 
+from swe.agents.hook_runtime.models import HookDecision, MergedHookResult
 from swe.agents.react_agent import SWEAgent as RealSWEAgent
 from swe.app.goals.models import (
     CompletionCriterion,
@@ -194,6 +195,22 @@ async def test_goal_stream_keeps_intermediate_turns_open_and_wakes_from_wait(
         "_stream_goal_finalization_turn",
         fake_finalization_turn,
     )
+    stop_calls: list[dict[str, Any]] = []
+
+    async def fake_emit_stop_hook_if_needed(**kwargs):
+        stop_calls.append(kwargs)
+        return MergedHookResult(decision=HookDecision.ALLOW)
+
+    monkeypatch.setattr(
+        runner,
+        "_emit_stop_hook_if_needed",
+        fake_emit_stop_hook_if_needed,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_requires_stop_output_buffer",
+        lambda **_kwargs: False,
+    )
 
     async def fake_completion_review(**_kwargs):
         return {"criterion-1": (True, "passed")}
@@ -219,6 +236,10 @@ async def test_goal_stream_keeps_intermediate_turns_open_and_wakes_from_wait(
     assert (
         events[-1][0].content
         == "Formal completion delivery from the Main Agent."
+    )
+    assert len(stop_calls) == 1
+    assert stop_calls[0]["outcome"].assistant_response == (
+        "Formal completion delivery from the Main Agent."
     )
 
 

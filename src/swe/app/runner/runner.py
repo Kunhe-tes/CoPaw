@@ -37,6 +37,10 @@ from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
     _get_last_user_text,
 )
+from .assistant_response import (
+    project_candidate_assistant_response,
+    replace_candidate_assistant_response,
+)
 from .hidden_context_injection import (
     append_hidden_context_to_user_message,
 )
@@ -82,6 +86,7 @@ from ...agents.skills_manager import (
     resolve_effective_skill_dir,
 )
 from ...agents.hook_runtime import HookRuntime
+from ...agents.hook_runtime.runtime import log_stop_skipped_telemetry
 from ...agents.hook_runtime.conversation_snapshot import (
     capture_conversation_snapshot,
 )
@@ -254,6 +259,7 @@ class _QueryTurnOutcome:
     stop_output_buffer_required: bool = False
     buffered_assistant_messages: list[Msg] = field(default_factory=list)
     assistant_memory_start: int = 0
+    goal_finalization_fallback: bool = False
 
 
 def _match_command_with_optional_id(
@@ -912,6 +918,29 @@ async def _emit_runner_hook(
     )
 
 
+def _emit_runner_stop_skip_telemetry(
+    *,
+    request: Any,
+    runner: "AgentRunner",
+    prompt: str | None,
+    assistant_response: str | None,
+    skipped_reason: str,
+) -> None:
+    try:
+        log_stop_skipped_telemetry(
+            _build_runner_hook_context(
+                HookEventName.STOP,
+                request=request,
+                runner=runner,
+                prompt=prompt,
+                assistant_response=assistant_response,
+            ),
+            skipped_reason=skipped_reason,
+        )
+    except Exception as exc:
+        logger.warning("Failed to emit skipped Stop telemetry: %s", exc)
+
+
 def _build_stop_hook_runtime(
     *,
     tenant_hooks: HookConfig,
@@ -1338,17 +1367,6 @@ async def _cleanup_mcp_clients(clients: list[Any]) -> None:
     await query_cleanup.cleanup_mcp_clients(clients)
 
 
-def _extract_text_from_blocks(blocks: list) -> str:
-    """从 content blocks 中提取文本."""
-    texts = []
-    for block in blocks:
-        if hasattr(block, "text"):
-            texts.append(block.text)
-        elif isinstance(block, dict) and "text" in block:
-            texts.append(block["text"])
-    return "\n".join(texts) if texts else ""
-
-
 def _extract_assistant_response(
     agent: SWEAgent,
     *,
@@ -1416,23 +1434,8 @@ def _extract_assistant_response(
                 )
                 candidates.append(summary)
                 continue
-            # content 可能是 list of blocks 或 string
-            if isinstance(msg.content, str):
-                summary["text_len"] = len(msg.content)
-                summary["reason"] = "accepted"
-                logger.warning(
-                    "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
-                    "selected=%s candidates=%s",
-                    memory_total,
-                    start,
-                    summary,
-                    candidates,
-                )
-                return msg.content
-            if isinstance(msg.content, list) and _has_only_text_blocks(
-                msg.content,
-            ):
-                response = _extract_text_from_blocks(msg.content)
+            response = project_candidate_assistant_response(msg)
+            if response is not None:
                 summary["text_len"] = len(response)
                 summary["reason"] = "accepted"
                 logger.warning(
@@ -1475,44 +1478,11 @@ def _replace_assistant_response(
         for msg, _marks in reversed(memory[max(memory_start, 0) :]):
             if msg.role != "assistant" or _is_live_assistant_event(msg):
                 continue
-            if isinstance(msg.content, str):
-                msg.content = response
-                return True
-            if isinstance(msg.content, list) and _has_only_text_blocks(
-                msg.content,
-            ):
-                text_blocks = [
-                    block
-                    for block in msg.content
-                    if _content_block_has_text(block)
-                ]
-                if not text_blocks:
-                    continue
-                _replace_content_block_text(text_blocks[0], response)
-                for block in text_blocks[1:]:
-                    _replace_content_block_text(block, "")
+            if replace_candidate_assistant_response(msg, response):
                 return True
     except Exception as exc:
         logger.debug("Failed to replace assistant response: %s", exc)
     return False
-
-
-def _content_block_has_text(block: Any) -> bool:
-    if isinstance(block, dict):
-        return block.get("type") == "text" and isinstance(
-            block.get("text"),
-            str,
-        )
-    return getattr(block, "type", None) == "text" and isinstance(
-        getattr(block, "text", None),
-        str,
-    )
-
-
-def _has_only_text_blocks(blocks: list[Any]) -> bool:
-    return bool(blocks) and all(
-        _content_block_has_text(block) for block in blocks
-    )
 
 
 def _is_live_assistant_event(msg: Any) -> bool:
@@ -1524,13 +1494,6 @@ def _is_live_assistant_event(msg: Any) -> bool:
         for key in ("event_type", "message_type", "kind", "type")
     ).lower()
     return any(token in values for token in ("progress", "tool", "approval"))
-
-
-def _replace_content_block_text(block: Any, response: str) -> None:
-    if isinstance(block, dict):
-        block["text"] = response
-    else:
-        block.text = response
 
 
 def _build_internal_follow_up_msg(follow_up_prompt: str) -> Msg:
@@ -4102,10 +4065,16 @@ class AgentRunner(Runner):
                 "Goal Finalization Turn failed; emitting fallback goal_id=%s",
                 getattr(goal, "goal_id", ""),
             )
+        finalization_fallback = previous_msg is None
         final_msg = previous_msg or _build_goal_finalization_msg(
             state,
             goal.state_reason,
         )
+        if finalization_fallback:
+            final_msg.metadata = {
+                **(final_msg.metadata or {}),
+                "goal_finalization_fallback": True,
+            }
         memory = getattr(runtime.agent, "memory", None)
         add_to_memory = getattr(memory, "add", None)
         if callable(add_to_memory):
@@ -4613,18 +4582,21 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
         plan: _TurnPlan,
     ) -> bool:
+        tenant_hooks = getattr(runtime, "tenant_hooks", HookConfig())
+        agent_config = getattr(runtime, "agent_config", None)
+        hook_overlay = getattr(runtime, "hook_overlay", HookSessionOverlay())
         if not _hook_config_enabled(
-            runtime.tenant_hooks,
-            runtime.agent_config,
-            runtime.hook_overlay,
+            tenant_hooks,
+            agent_config,
+            hook_overlay,
         ):
             return False
         return _requires_stop_output_buffer(
             request=request,
             runner=self,
-            tenant_hooks=runtime.tenant_hooks,
-            agent_config=runtime.agent_config,
-            overlay=runtime.hook_overlay,
+            tenant_hooks=tenant_hooks,
+            agent_config=agent_config,
+            overlay=hook_overlay,
             prompt=plan.original_user_message,
         )
 
@@ -4688,6 +4660,9 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ) -> MergedHookResult | None:
         """执行 Stop completion gate，active guard 已设置时跳过递归触发。"""
+        tenant_hooks = getattr(runtime, "tenant_hooks", HookConfig())
+        agent_config = getattr(runtime, "agent_config", None)
+        hook_overlay = getattr(runtime, "hook_overlay", HookSessionOverlay())
         logger.warning(
             "[STOP-DEBUG] stop_entry trace_id=%s turn_id=%s response_len=%d "
             "active=%s plan_boundary=%s tenant_enabled=%s agent_enabled=%s "
@@ -4697,33 +4672,70 @@ class AgentRunner(Runner):
             len(outcome.assistant_response or ""),
             outcome.stop_hook_active,
             outcome.plan_interaction_turn_boundary,
-            getattr(runtime.tenant_hooks, "enabled", None),
+            getattr(tenant_hooks, "enabled", None),
             getattr(
-                getattr(runtime.agent_config, "hooks", None),
+                getattr(agent_config, "hooks", None),
                 "enabled",
                 None,
             ),
-            [entry.hook_id for entry in runtime.hook_overlay.entries],
+            [entry.hook_id for entry in hook_overlay.entries],
         )
         if outcome.stop_hook_active:
             logger.warning("[STOP-DEBUG] skipped reason=stop_hook_active")
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="stop_hook_active",
+            )
+            return None
+        if outcome.goal_finalization_fallback:
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="finalization_fallback",
+            )
             return None
         if outcome.plan_interaction_turn_boundary:
             logger.warning(
                 "[STOP-DEBUG] skipped reason=plan_interaction_turn_boundary",
+            )
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="plan_interaction_turn_boundary",
             )
             return None
         if not outcome.assistant_response:
             logger.warning(
                 "[STOP-DEBUG] skipped reason=empty_assistant_response",
             )
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="empty_assistant_response",
+            )
             return None
         if not _hook_config_enabled(
-            runtime.tenant_hooks,
-            runtime.agent_config,
-            runtime.hook_overlay,
+            tenant_hooks,
+            agent_config,
+            hook_overlay,
         ):
             logger.warning("[STOP-DEBUG] skipped reason=hooks_disabled")
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="hooks_disabled",
+            )
             return None
 
         outcome.stop_hook_active = True
@@ -4731,15 +4743,15 @@ class AgentRunner(Runner):
             finalization = await _emit_runner_stop_finalization(
                 request=request,
                 runner=self,
-                tenant_hooks=runtime.tenant_hooks,
-                agent_config=runtime.agent_config,
-                overlay=runtime.hook_overlay,
+                tenant_hooks=tenant_hooks,
+                agent_config=agent_config,
+                overlay=hook_overlay,
                 prompt=plan.original_user_message,
                 assistant_response=outcome.assistant_response,
                 agent=runtime.agent,
                 max_transform_seconds=(
                     self._resolve_max_stop_transform_seconds(
-                        runtime.agent_config,
+                        agent_config,
                     )
                 ),
             )
@@ -4770,9 +4782,9 @@ class AgentRunner(Runner):
             HookEventName.STOP,
             request=request,
             runner=self,
-            tenant_hooks=runtime.tenant_hooks,
-            agent_config=runtime.agent_config,
-            overlay=runtime.hook_overlay,
+            tenant_hooks=tenant_hooks,
+            agent_config=agent_config,
+            overlay=hook_overlay,
             prompt=plan.original_user_message,
             assistant_response=outcome.assistant_response,
             agent=runtime.agent,
