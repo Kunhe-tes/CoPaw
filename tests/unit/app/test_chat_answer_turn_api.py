@@ -116,6 +116,7 @@ def _client(
     *,
     include_user_identity: bool = True,
     chats: list[ChatSpec] | None = None,
+    session: _FakeSession | None = None,
 ) -> TestClient:
     from src.swe.app.runner import api as chat_api_module
 
@@ -135,7 +136,7 @@ def _client(
             ],
         ),
     )
-    session = _FakeSession()
+    session = session or _FakeSession()
     workspace = SimpleNamespace(
         chat_manager=manager,
         task_tracker=_FakeTaskTracker(),
@@ -187,6 +188,34 @@ def test_answer_turn_returns_anchor_question_and_following_messages(
         "assistant-msg-1",
         "tool-msg-1",
     ]
+
+
+def test_answer_turn_reads_persisted_snapshot_without_waiting_for_execution(
+    monkeypatch,
+) -> None:
+    class _PersistedSnapshotSession(_FakeSession):
+        async def get_session_state_dict(self, *_args, **_kwargs) -> dict:
+            raise AssertionError(
+                "history must not wait for the execution lock",
+            )
+
+        async def get_persisted_session_state_dict(
+            self,
+            session_id: str,
+            user_id: str,
+        ) -> dict:
+            assert (session_id, user_id) == ("session-1", "user-1")
+            return {"agent": {"memory": {"content": ["stored"]}}}
+
+    response = _client(
+        monkeypatch,
+        session=_PersistedSnapshotSession(),
+    ).get(
+        "/chats/answer-turn",
+        params={"sessionid": "session-1", "msgid": "user-msg-1"},
+    )
+
+    assert response.status_code == 200
 
 
 def test_answer_turn_returns_404_when_msgid_is_not_user_message(

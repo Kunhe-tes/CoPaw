@@ -680,13 +680,26 @@ async def get_session(
     return workspace.runner.session
 
 
+async def _read_history_state(
+    session: SafeJSONSession,
+    session_id: str,
+    user_id: str,
+) -> dict:
+    """Read the durable history snapshot without delaying on an active turn."""
+    read_snapshot = getattr(session, "get_persisted_session_state_dict", None)
+    if read_snapshot is not None:
+        return await read_snapshot(session_id, user_id)
+    return await session.get_session_state_dict(session_id, user_id)
+
+
 async def _build_chat_history(
     chat_spec: ChatSpec,
     *,
     session: SafeJSONSession,
     workspace,
 ) -> ChatHistory:
-    state = await session.get_session_state_dict(
+    state = await _read_history_state(
+        session,
         chat_spec.session_id,
         chat_spec.user_id,
     )
@@ -1049,7 +1062,8 @@ async def get_answer_turn(
                 _authorize_chat(request, candidate, workspace)
             except HTTPException:
                 continue
-            state = await session.get_session_state_dict(
+            state = await _read_history_state(
+                session,
                 candidate.session_id,
                 candidate.user_id,
             )
@@ -1081,7 +1095,8 @@ async def get_answer_turn(
             status_code=404,
             detail="Answer turn not found",
         )
-    state = await session.get_session_state_dict(
+    state = await _read_history_state(
+        session,
         chat_spec.session_id,
         chat_spec.user_id,
     )
