@@ -1865,6 +1865,37 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     }
   }
 
+  applyChatSnapshot(
+    sessionId: string,
+    history: unknown,
+  ): IAgentScopeRuntimeWebUIMessage[] | undefined {
+    const snapshot = history as Partial<ChatHistory> | null;
+    if (!snapshot || !Array.isArray(snapshot.messages)) {
+      return undefined;
+    }
+    const session = this.sessionList.find((item) => item.id === sessionId) as
+      | ExtendedSession
+      | undefined;
+    const messages = withArchiveBoundaries(
+      convertMessagesForSession(
+        snapshot.messages,
+        session?.meta,
+        session?.name,
+      ),
+      snapshot.archive?.boundaries,
+    ).map((message) => ({ ...message, history: true }));
+    if (session) {
+      session.messages = messages;
+      session.generating = false;
+      session.status = "idle";
+      this.patchLastUserMessage(messages, false, session.realId || session.id, [
+        session.id,
+        session.sessionId,
+      ]);
+    }
+    return messages;
+  }
+
   private async getResolvedLocalTimestampSession(
     sessionId: string,
     fromList: ExtendedSession,

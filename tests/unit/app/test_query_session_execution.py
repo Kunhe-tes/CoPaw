@@ -697,6 +697,58 @@ async def test_runner_persists_completed_turn_outcome_after_execution() -> (
     )
 
 
+@pytest.mark.asyncio
+async def test_runner_persists_stopped_outcome_through_active_execution() -> (
+    None
+):
+    from swe.app.answer_turn.models import TurnIdentity, TurnOutcome
+
+    class _Execution:
+        is_active = True
+
+        def __init__(self) -> None:
+            self.state = {
+                "turn_states": {
+                    "msg-1": {"status": "stopping", "chat_id": "chat-1"},
+                },
+            }
+            self.commit_calls = 0
+
+        async def commit_state(self, state: dict[str, Any]) -> None:
+            self.commit_calls += 1
+            assert state is self.state
+
+    class _Session:
+        async def mutate_session_state(
+            self,
+            *_args: Any,
+            **_kwargs: Any,
+        ) -> None:
+            raise AssertionError(
+                "active execution must not use short-lock mutation",
+            )
+
+    identity = TurnIdentity("chat-1", "msg-1", "turn-1")
+    execution = _Execution()
+    runner = object.__new__(AgentRunner)
+    runner.session = _Session()
+    runner._answer_turn_runtimes = {
+        identity: (
+            SimpleNamespace(
+                session_id="session-1",
+                user_id="user-1",
+                agent=SimpleNamespace(memory=SimpleNamespace(content=[])),
+            ),
+            execution,
+        ),
+    }
+
+    await runner.persist_outcome(TurnOutcome.cancelled(identity))
+
+    assert execution.commit_calls == 1
+    assert execution.state["turn_states"]["msg-1"]["status"] == "stopped"
+
+
 def test_mark_stopped_agent_memory_marks_last_assistant_message() -> None:
     from swe.app.runner.session_lifecycle import mark_stopped_agent_memory
 

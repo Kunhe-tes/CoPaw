@@ -68,6 +68,7 @@ from ..file_manager_execution import (
     run_file_manager_read,
 )
 from ..runner.context_references import MAX_CONTEXT_REFERENCES
+from ..answer_turn.coordinator import TurnSettlementPendingError
 from ..answer_turn.models import TurnIdentity, TurnStatus
 
 logger = logging.getLogger(__name__)
@@ -1104,6 +1105,30 @@ async def _current_recovery_terminal_snapshot(
         status = turn_state.get("status")
         if not isinstance(status, str):
             continue
+        if status == "admitted":
+
+            orphan_msgid = msgid
+
+            def reconcile_orphaned_turn(
+                state: dict[str, Any],
+                orphan_msgid: str = orphan_msgid,
+            ) -> dict[str, Any]:
+                states = state.get("turn_states")
+                if isinstance(states, dict) and isinstance(
+                    states.get(orphan_msgid),
+                    dict,
+                ):
+                    states[orphan_msgid]["status"] = "failed"
+                return state
+
+            await session.mutate_session_state(
+                chat.session_id,
+                reconcile_orphaned_turn,
+                user_id=chat.user_id,
+            )
+            status = "failed"
+        if status not in {"completed", "stopped", "failed"}:
+            continue
         return (
             history.model_dump(mode="json"),
             msgid if isinstance(msgid, str) and msgid else None,
@@ -1838,8 +1863,8 @@ async def _terminal_recovery_response(
         terminal_event_generator(),
         media_type="text/event-stream",
         headers=_console_chat_stream_headers(
-            chat_id=chat.id,
-            session_id=chat.session_id,
+            chat_id=chat.id if msgid else None,
+            session_id=chat.session_id if msgid else "",
             msgid=msgid,
         ),
     )
@@ -1865,7 +1890,35 @@ async def _resolve_current_reconnect_target(
         raise HTTPException(status_code=404, detail="Chat not found")
     lease = await workspace.answer_turn_coordinator.attach(chat.id)
     if lease is None:
+        status_reader = getattr(
+            workspace.answer_turn_coordinator,
+            "status",
+            None,
+        )
+        coordinator_status = (
+            await status_reader(chat.id) if status_reader is not None else None
+        )
+        if coordinator_status is not None:
+            raise HTTPException(
+                status_code=503,
+                detail="Chat settlement is pending",
+                headers={"Retry-After": "1"},
+            )
+        settlement_pending = getattr(
+            workspace.answer_turn_coordinator,
+            "settlement_pending",
+            None,
+        )
+        if settlement_pending is not None and await settlement_pending(
+            chat.id,
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Chat settlement is pending",
+                headers={"Retry-After": "1"},
+            )
         return await _terminal_recovery_response(workspace, chat)
+    native_payload["meta"]["resolved_session_id"] = chat.session_id
     return lease.queue, chat.id, lease.identity, lease.identity.msgid
 
 
@@ -1893,6 +1946,13 @@ async def _start_console_stream_target(
             before_start=before_start,
             include_run_status=True,
         )
+    except TurnSettlementPendingError as exc:
+        _release_suppression_on_failure(suppression_ctx, native_payload)
+        raise HTTPException(
+            status_code=503,
+            detail="Chat settlement is pending",
+            headers={"Retry-After": "1"},
+        ) from exc
     except Exception:
         _release_suppression_on_failure(suppression_ctx, native_payload)
         raise
@@ -1982,7 +2042,10 @@ async def _dispatch_console_stream(
         media_type="text/event-stream",
         headers=_console_chat_stream_headers(
             chat_id=run_key,
-            session_id=session_id,
+            session_id=(
+                native_payload.get("meta", {}).get("resolved_session_id")
+                or session_id
+            ),
             msgid=(
                 stream_identity.msgid
                 if is_current_reconnect and stream_identity is not None

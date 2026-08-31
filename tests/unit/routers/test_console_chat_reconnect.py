@@ -254,7 +254,7 @@ def test_current_reconnect_returns_server_owned_turn_headers(
             "reconnect": True,
             "reconnect_mode": "current",
             "chat_id": "chat-existing",
-            "session_id": "session-existing",
+            "session_id": "chat-existing",
             "user_id": "user-1",
             "channel": "console",
         },

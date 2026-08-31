@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any
 from uuid import uuid4
@@ -26,6 +27,12 @@ from .ports import (
     TurnSubAgentPort,
 )
 
+logger = logging.getLogger(__name__)
+
+
+class TurnSettlementPendingError(RuntimeError):
+    """A terminal turn is waiting for its durable outcome to be retried."""
+
 
 @dataclass
 class _TurnState:
@@ -35,6 +42,7 @@ class _TurnState:
     stop_effects_started: bool = False
     hard_cancel_watcher_started: bool = False
     settlement_started: bool = False
+    transport_ended: bool = False
 
 
 class AnswerTurnCoordinator:
@@ -60,6 +68,7 @@ class AnswerTurnCoordinator:
         self.hard_cancel_delay = hard_cancel_delay
         self._turns: dict[str, _TurnState] = {}
         self._locks: dict[str, asyncio.Lock] = {}
+        self._settlement_retry_tasks: dict[str, asyncio.Task[Any]] = {}
         self._global_lock = asyncio.Lock()
 
     async def _chat_lock(self, chat_id: str) -> asyncio.Lock:
@@ -78,13 +87,17 @@ class AnswerTurnCoordinator:
         lock = await self._chat_lock(chat_id)
         async with lock:
             state = self._turns.get(chat_id)
-            if state is not None and state.status not in TERMINAL_STATUSES:
-                queue, _ = await self.stream.attach_or_start(
-                    state.identity,
-                    payload,
-                    producer,
-                    before_start=before_start,
+            if state is not None and state.settlement_started:
+                raise TurnSettlementPendingError(
+                    f"settlement pending for chat {chat_id}",
                 )
+            if state is not None and state.status not in TERMINAL_STATUSES:
+                queue = await self.stream.attach(state.identity)
+                if queue is None:
+                    state.transport_ended = True
+                    raise TurnSettlementPendingError(
+                        f"transport ended before settlement for chat {chat_id}",
+                    )
                 return TurnLease(state.identity, queue, False)
 
             identity = TurnIdentity.create(
@@ -100,7 +113,10 @@ class AnswerTurnCoordinator:
                     producer,
                     before_start=before_start,
                 )
-            except BaseException:
+            except asyncio.CancelledError:
+                self._turns.pop(chat_id, None)
+                raise
+            except Exception:
                 self._turns.pop(chat_id, None)
                 raise
             if self._turns.get(chat_id) is new_state:
@@ -116,14 +132,29 @@ class AnswerTurnCoordinator:
         lock = await self._chat_lock(chat_id)
         async with lock:
             state = self._turns.get(chat_id)
-            if state is None or state.status in TERMINAL_STATUSES:
+            if (
+                state is None
+                or state.settlement_started
+                or state.status in TERMINAL_STATUSES
+            ):
                 return None
             if msgid is not None and state.identity.msgid != msgid:
                 return None
             queue = await self.stream.attach(state.identity)
             if queue is None:
+                state.transport_ended = True
                 return None
             return TurnLease(state.identity, queue, False)
+
+    async def settlement_pending(self, chat_id: str) -> bool:
+        """Return whether a terminal outcome is not durable yet."""
+        lock = await self._chat_lock(chat_id)
+        async with lock:
+            state = self._turns.get(chat_id)
+            return bool(
+                state is not None
+                and (state.settlement_started or state.transport_ended),
+            )
 
     async def status(
         self,
@@ -230,6 +261,7 @@ class AnswerTurnCoordinator:
         if outcome.identity != identity:
             raise ValueError("outcome identity must match settled turn")
         lock = await self._chat_lock(identity.chat_id)
+        retry_needed = False
         async with lock:
             state = self._turns.get(identity.chat_id)
             if state is None or state.identity != identity:
@@ -242,9 +274,79 @@ class AnswerTurnCoordinator:
             # The coordinator lock is the turn linearization point.  Keep it
             # through the short durable outcome transaction so a following
             # submission can never start between terminal state and persistence.
-            await self.session.persist_outcome(outcome)
-            await self.stream.close(identity)
-            state = self._turns.get(identity.chat_id)
-            if state is not None and state.identity == identity:
-                self._turns.pop(identity.chat_id, None)
+            try:
+                await self.session.persist_outcome(outcome)
+            except asyncio.CancelledError:
+                retry_needed = True
+                logger.warning(
+                    "Cancelled while persisting answer turn outcome; retrying "
+                    "chat_id=%s msgid=%s",
+                    identity.chat_id,
+                    identity.msgid,
+                )
+            except Exception:
+                retry_needed = True
+                logger.exception(
+                    "Failed to persist answer turn outcome; retrying "
+                    "chat_id=%s msgid=%s",
+                    identity.chat_id,
+                    identity.msgid,
+                )
+            else:
+                await self.stream.close(identity)
+                release = getattr(self.session, "release_outcome", None)
+                if release is not None:
+                    await release(identity)
+                state = self._turns.get(identity.chat_id)
+                if state is not None and state.identity == identity:
+                    self._turns.pop(identity.chat_id, None)
+        if retry_needed:
+            self._schedule_settlement_retry(identity)
+            return False
         return True
+
+    def _schedule_settlement_retry(self, identity: TurnIdentity) -> None:
+        if identity.chat_id in self._settlement_retry_tasks:
+            return
+        task = asyncio.create_task(self._retry_settlement(identity))
+        self._settlement_retry_tasks[identity.chat_id] = task
+
+    async def _retry_settlement(self, identity: TurnIdentity) -> None:
+        delay = 0.05
+        try:
+            while True:
+                await asyncio.sleep(delay)
+                lock = await self._chat_lock(identity.chat_id)
+                async with lock:
+                    state = self._turns.get(identity.chat_id)
+                    if (
+                        state is None
+                        or state.identity != identity
+                        or state.outcome is None
+                    ):
+                        return
+                    try:
+                        await self.session.persist_outcome(state.outcome)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        logger.exception(
+                            "Retry failed for answer turn outcome "
+                            "chat_id=%s msgid=%s",
+                            identity.chat_id,
+                            identity.msgid,
+                        )
+                    else:
+                        await self.stream.close(identity)
+                        release = getattr(
+                            self.session,
+                            "release_outcome",
+                            None,
+                        )
+                        if release is not None:
+                            await release(identity)
+                        self._turns.pop(identity.chat_id, None)
+                        return
+                delay = min(delay * 2, 1.0)
+        finally:
+            self._settlement_retry_tasks.pop(identity.chat_id, None)

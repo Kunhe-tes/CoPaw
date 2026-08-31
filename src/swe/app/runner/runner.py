@@ -2838,15 +2838,15 @@ class AgentRunner(Runner):
             task.cancel()
 
     async def persist_outcome(self, outcome: TurnOutcome) -> None:
-        """Persist a terminal answer-turn outcome after query cleanup."""
-        runtime, _ = self._answer_turn_runtimes.get(
+        """Persist a terminal answer-turn outcome in the owning session."""
+        runtime, session_execution = self._answer_turn_runtimes.get(
             outcome.identity,
             (None, None),
         )
-        session_id = str(getattr(runtime, "session_id", "") or "")
-        user_id = str(getattr(runtime, "user_id", "") or "")
-        if not session_id or self.session is None:
-            return
+        if runtime is None and session_execution is None:
+            raise RuntimeError(
+                "answer turn persistence context is unavailable",
+            )
         from .session_lifecycle import (
             mark_stopped_agent_memory,
             mark_terminal_turn_state,
@@ -2863,6 +2863,24 @@ class AgentRunner(Runner):
                 outcome.identity.msgid,
             )
 
+        if session_execution is not None and getattr(
+            session_execution,
+            "is_active",
+            True,
+        ):
+            mark_terminal_turn_state(
+                session_execution.state,
+                outcome.identity.msgid,
+                terminal_status,
+            )
+            await session_execution.commit_state(session_execution.state)
+            return
+
+        session_id = str(getattr(runtime, "session_id", "") or "")
+        user_id = str(getattr(runtime, "user_id", "") or "")
+        if not session_id or self.session is None:
+            raise RuntimeError("answer turn persistence target is unavailable")
+
         def mark_outcome(state: dict[str, Any]) -> dict[str, Any]:
             mark_terminal_turn_state(
                 state,
@@ -2876,6 +2894,10 @@ class AgentRunner(Runner):
             mark_outcome,
             user_id=user_id,
         )
+
+    async def release_outcome(self, identity: TurnIdentity) -> None:
+        """Release the execution context after durable settlement succeeds."""
+        self._answer_turn_runtimes.pop(identity, None)
 
     async def _report_answer_turn_outcome(
         self,
@@ -5632,7 +5654,6 @@ class AgentRunner(Runner):
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)
-                self._answer_turn_runtimes.pop(identity, None)
 
     async def get_state_loaded(
         self,

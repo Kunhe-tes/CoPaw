@@ -35,6 +35,11 @@ interface UseChatRequestOptions {
   hasMessage?: (id: string) => boolean;
   getCurrentSessionId: () => string;
   onFinish: (owner: ChatRequestOwner) => void;
+  applyRecoverySnapshot?: (
+    history: unknown,
+    owner: ChatRequestOwner,
+  ) => void | Promise<void>;
+  recoverAfterNotFound?: (owner: ChatRequestOwner) => void | Promise<void>;
 }
 
 function isTaskCancellationMessage(message: unknown) {
@@ -121,6 +126,26 @@ function getConversationCompaction(data: unknown) {
   return { chat_id: frame.chat_id, boundary: frame.boundary };
 }
 
+function getChatSnapshot(data: unknown) {
+  if (!data || typeof data !== "object") return undefined;
+  const frame = data as {
+    object?: unknown;
+    chat_id?: unknown;
+    msgid?: unknown;
+    history?: unknown;
+  };
+  if (
+    frame.object !== "chat_snapshot" ||
+    typeof frame.chat_id !== "string" ||
+    !frame.chat_id ||
+    !frame.history ||
+    typeof frame.history !== "object"
+  ) {
+    return undefined;
+  }
+  return frame;
+}
+
 /**
  * 处理 API 请求和流式响应的 Hook
  */
@@ -131,6 +156,8 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     hasMessage = () => true,
     getCurrentSessionId,
     onFinish,
+    applyRecoverySnapshot,
+    recoverAfterNotFound,
   } = options;
   const apiOptions = useChatAnywhereOptions((v) => v.api);
 
@@ -315,6 +342,10 @@ export default function useChatRequest(options: UseChatRequestOptions) {
       const agentScopeRuntimeResponseBuilder = buildResponseCard();
 
       if (!response.ok) {
+        if (response.status === 404 && owner.kind === "reconnect") {
+          await recoverAfterNotFound?.(owner);
+          return;
+        }
         response.json().then((data) => {
           const res = agentScopeRuntimeResponseBuilder.handle({
             object: "message",
@@ -401,6 +432,32 @@ export default function useChatRequest(options: UseChatRequestOptions) {
         for await (const chunk of Stream({
           readableStream: response.body,
         })) {
+          if (chunk.event === "chat.snapshot" && chunk.data) {
+            const responseParser =
+              apiOptionsRef.current.responseParser || JSON.parse;
+            const snapshot = getChatSnapshot(responseParser(chunk.data));
+            if (
+              snapshot &&
+              isOwnerActive() &&
+              (!owner.chatId || snapshot.chat_id === owner.chatId)
+            ) {
+              if (typeof snapshot.msgid === "string") {
+                owner.msgid = snapshot.msgid;
+              }
+              await applyRecoverySnapshot?.(snapshot.history, owner);
+              return;
+            }
+            if (isOwnerActive()) {
+              failActiveResponse(
+                owner,
+                new Error("Invalid chat recovery snapshot"),
+              );
+            }
+            if (!isOwnerActive()) {
+              return;
+            }
+            return;
+          }
           if (!chunk.data) {
             continue;
           }
@@ -560,11 +617,13 @@ export default function useChatRequest(options: UseChatRequestOptions) {
     },
     [
       currentQARef,
+      applyRecoverySnapshot,
       failActiveResponse,
       getCurrentSessionId,
       getResponseHeaderTimestamp,
       hasMessage,
       onFinish,
+      recoverAfterNotFound,
       updateMessage,
     ],
   );
