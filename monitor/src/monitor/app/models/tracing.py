@@ -288,6 +288,7 @@ class OverviewStats(BaseModel):
     top_mcp_tools: list[MCPToolUsage] = Field(default_factory=list)
     mcp_servers: list[MCPServerUsage] = Field(default_factory=list)
     daily_trend: list[DailyStats] = Field(default_factory=list)
+    growth_stats: dict[str, float | None] = Field(default_factory=dict)
     branch_breakdown: "OverviewBranchBreakdown" = Field(
         default_factory=lambda: OverviewBranchBreakdown(),  # pylint: disable=unnecessary-lambda
     )

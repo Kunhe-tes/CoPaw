@@ -75,6 +75,35 @@ describe("BusinessOverview trend chart", () => {
     cleanup();
   });
 
+  it("renders metric card growth from the overview response", async () => {
+    tracingApiMock.getOverview.mockResolvedValueOnce({
+      total_users: 1,
+      total_sessions: 1,
+      total_tokens: 1,
+      total_skill_calls: 0,
+      total_conversations: 1,
+      it_users: 0,
+      business_users: 1,
+      plan_customers: 0,
+      insight_customers: 0,
+      phone_customers: 0,
+      growth_stats: {
+        userGrowth: 5,
+        sessionGrowth: 0,
+        cronGrowth: 0,
+        tokensGrowth: 0,
+        planCustomersGrowth: 0,
+      },
+      branch_breakdown: {
+        users: [], sessions: [], tokens: [], skills: [], cron_tasks: [], customers: [],
+      },
+    });
+
+    renderBusinessOverview();
+
+    expect(await screen.findByText("环比+5.0%")).toBeInTheDocument();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     iframeStoreMock.source = "CMSJY";

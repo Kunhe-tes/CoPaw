@@ -296,6 +296,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         end_date: Optional[datetime] = None,
         bbk_ids: Optional[str] = None,
         include_resource_breakdown: bool = True,
+        time_range: str = "day",
     ) -> OverviewStats:
         """获取运营概览统计."""
         with MethodTimer(
@@ -327,7 +328,23 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     end_date,
                     bbk_ids,
                 )
+                growth_stats = {}
             else:
+                (summary_data, growth_stats) = await asyncio.gather(
+                    self._fetch_overview_summary_data(
+                        source_id,
+                        start_date,
+                        end_date,
+                        bbk_ids,
+                    ),
+                    self._get_growth_stats(
+                        source_id,
+                        start_date,
+                        end_date,
+                        time_range,
+                        bbk_ids,
+                    ),
+                )
                 (
                     (total_users, it_users, business_users),
                     (online_users, online_user_ids),
@@ -335,12 +352,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                     branch_breakdown,
                     total_skill_calls,
                     customer_click_stats,
-                ) = await self._fetch_overview_summary_data(
-                    source_id,
-                    start_date,
-                    end_date,
-                    bbk_ids,
-                )
+                ) = summary_data
                 model_distribution = []
                 top_tools = []
                 top_skills = []
@@ -362,6 +374,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 branch_breakdown=branch_breakdown,
                 total_skill_calls=total_skill_calls,
                 customer_click_stats=customer_click_stats,
+                growth_stats=growth_stats,
             )
 
     async def _fetch_overview_data(
@@ -453,6 +466,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         branch_breakdown: Any,
         total_skill_calls: int = 0,
         customer_click_stats: Optional[dict[str, int]] = None,
+        growth_stats: Optional[dict[str, float | None]] = None,
     ) -> OverviewStats:
         """构建运营概览统计对象."""
         if customer_click_stats is None:
@@ -483,6 +497,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             top_mcp_tools=top_mcp_tools,
             mcp_servers=mcp_servers,
             daily_trend=[],
+            growth_stats=growth_stats or {},
             branch_breakdown=branch_breakdown,
         )
 

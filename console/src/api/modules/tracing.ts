@@ -27,6 +27,14 @@ export interface OverviewStats {
   top_mcp_tools: MCPToolUsage[];
   mcp_servers: MCPServerUsage[];
   daily_trend: DailyStats[];
+  growth_stats?: {
+    callsGrowth?: number | null;
+    tokensGrowth?: number | null;
+    sessionGrowth?: number | null;
+    userGrowth?: number | null;
+    cronGrowth?: number | null;
+    planCustomersGrowth?: number | null;
+  };
   branch_breakdown: OverviewBranchBreakdown;
 }
 
@@ -407,6 +415,7 @@ export const tracingApi = {
     bbkIds?: string,
     options?: {
       detail?: "full" | "summary";
+      timeRange?: "day" | "week" | "month" | "custom";
     },
   ): Promise<OverviewStats> => {
     const params = new URLSearchParams();
@@ -414,6 +423,7 @@ export const tracingApi = {
     if (endDate) params.append("end_date", endDate);
     if (bbkIds) params.append("bbk_ids", bbkIds);
     if (options?.detail) params.append("detail", options.detail);
+    if (options?.timeRange) params.append("time_range", options.timeRange);
     return request(`/monitor/tracing/overview?${params.toString()}`);
   },
 
