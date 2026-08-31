@@ -70,8 +70,8 @@ async function initializeApp(): Promise<void> {
   await runAccessControlledInitialization({
     decision,
     initializeAllowedApp: () => initializeAllowedApp(root),
-    renderAccessDenied: (deniedDecision) => {
-      root.render(<AccessDeniedPage decision={deniedDecision} />);
+    renderAccessDenied: () => {
+      root.render(<AccessDeniedPage />);
     },
   });
 }
