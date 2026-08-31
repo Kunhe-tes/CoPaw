@@ -19,21 +19,26 @@ class TurnStreamPort(Protocol):
         *,
         before_start: Any | None = None,
     ) -> Any:
-        pass
+        # Protocol declaration; the coordinator supplies the concrete stream.
+        ...
 
     async def stream(self, identity: TurnIdentity, queue: Any):
-        pass
+        # Protocol declaration; implementations yield events from the queue.
+        ...
 
     async def close(self, identity: TurnIdentity) -> None:
-        pass
+        # Protocol declaration; the concrete stream owner performs cleanup.
+        ...
 
 
 class TurnExecutionPort(Protocol):
     async def request_cooperative_stop(self, identity: TurnIdentity) -> None:
-        pass
+        # Protocol declaration; Runner implements cooperative cancellation.
+        ...
 
     async def hard_cancel(self, identity: TurnIdentity) -> None:
-        pass
+        # Protocol declaration; Runner implements task-level cancellation.
+        ...
 
 
 class TurnSessionPort(Protocol):
@@ -41,7 +46,8 @@ class TurnSessionPort(Protocol):
         self,
         outcome: TurnOutcome,
     ) -> None:
-        pass
+        # Protocol declaration; the session adapter persists the outcome.
+        ...
 
 
 class TurnGoalPort(Protocol):
@@ -50,17 +56,20 @@ class TurnGoalPort(Protocol):
         identity: TurnIdentity,
         reason: str,
     ) -> None:
-        pass
+        # Protocol declaration; Goal service owns matching-turn interruption.
+        ...
 
 
 class TurnSubAgentPort(Protocol):
     async def cancel_for_turn(self, identity: TurnIdentity) -> None:
-        pass
+        # Protocol declaration; SubAgent manager cancels matching workers.
+        ...
 
 
 class TurnApprovalPort(Protocol):
     async def supersede_for_turn(self, identity: TurnIdentity) -> None:
-        pass
+        # Protocol declaration; approval service supersedes matching requests.
+        ...
 
 
 StreamPort = TurnStreamPort

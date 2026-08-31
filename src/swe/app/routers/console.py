@@ -994,6 +994,124 @@ async def _attach_reconnect_queue(
     )
 
 
+def _current_recovery_chat_is_authorized(
+    chat: Any,
+    *,
+    sender_id: str,
+    channel_id: str,
+    identity: dict[str, str],
+) -> bool:
+    """Check a recovery target before revealing whether it has a live turn."""
+    if (
+        getattr(chat, "user_id", None) != sender_id
+        or getattr(chat, "channel", None) != channel_id
+    ):
+        return False
+    chat_meta = getattr(chat, "meta", None) or {}
+    for key in ("source_id", "agent_id"):
+        expected = identity.get(key)
+        if expected and chat_meta.get(key) != expected:
+            return False
+    return True
+
+
+async def _get_authorized_recovery_chat(
+    manager: Any,
+    candidate_id: object,
+    *,
+    sender_id: str,
+    channel_id: str,
+    identity: dict[str, str],
+) -> Any | None:
+    """Load a candidate chat and hide unauthorized candidates."""
+    if not isinstance(candidate_id, str) or not candidate_id:
+        return None
+    chat = await manager.get_chat(candidate_id)
+    if chat is None or not _current_recovery_chat_is_authorized(
+        chat,
+        sender_id=sender_id,
+        channel_id=channel_id,
+        identity=identity,
+    ):
+        return None
+    return chat
+
+
+async def _resolve_current_recovery_chat(
+    workspace: Any,
+    *,
+    requested_chat_id: object,
+    session_id: str,
+    sender_id: str,
+    channel_id: str,
+    identity: dict[str, str],
+) -> Any | None:
+    """Resolve a recovery target without trusting an optional chat id."""
+    manager = workspace.chat_manager
+
+    for candidate_id in (requested_chat_id, session_id):
+        chat = await _get_authorized_recovery_chat(
+            manager,
+            candidate_id,
+            sender_id=sender_id,
+            channel_id=channel_id,
+            identity=identity,
+        )
+        if chat is not None:
+            return chat
+
+    chat = await manager.get_chat_by_session(
+        session_id,
+        channel_id,
+        sender_id,
+    )
+    if chat is not None and _current_recovery_chat_is_authorized(
+        chat,
+        sender_id=sender_id,
+        channel_id=channel_id,
+        identity=identity,
+    ):
+        return chat
+    return None
+
+
+async def _current_recovery_terminal_snapshot(
+    workspace: Any,
+    chat: Any,
+) -> tuple[dict[str, Any], str | None, str | None]:
+    """Build the durable terminal recovery payload for one selected Chat."""
+    from ..runner.api import _build_chat_history, _read_history_state
+
+    session = workspace.runner.session
+    history = await _build_chat_history(
+        chat,
+        session=session,
+        workspace=workspace,
+    )
+    state = await _read_history_state(
+        session,
+        chat.session_id,
+        chat.user_id,
+    )
+    turn_states = state.get("turn_states")
+    if not isinstance(turn_states, dict):
+        return history.model_dump(mode="json"), None, None
+    for msgid, turn_state in reversed(tuple(turn_states.items())):
+        if not isinstance(turn_state, dict):
+            continue
+        if turn_state.get("chat_id") not in (None, chat.id):
+            continue
+        status = turn_state.get("status")
+        if not isinstance(status, str):
+            continue
+        return (
+            history.model_dump(mode="json"),
+            msgid if isinstance(msgid, str) and msgid else None,
+            "stopped" if status == "cancelled" else status,
+        )
+    return history.model_dump(mode="json"), None, None
+
+
 def _console_chat_stream_headers(
     *,
     chat_id: str | None = None,
@@ -1237,6 +1355,8 @@ async def post_console_chat(
         else request_data.model_dump()
     )
     is_reconnect = request_mapping.get("reconnect") is True
+    is_current_reconnect = request_mapping.get("reconnect_mode") == "current"
+    is_reconnect = is_reconnect or is_current_reconnect
 
     if not is_reconnect:
         wplus_result, suppression_ctx = await _try_wplus_entry_intercept(
@@ -1259,6 +1379,7 @@ async def post_console_chat(
         identity=identity,
         request_mapping=request_mapping,
         is_reconnect=is_reconnect,
+        is_current_reconnect=is_current_reconnect,
         suppression_ctx=suppression_ctx,
     )
 
@@ -1690,6 +1811,107 @@ async def _try_wplus_entry_intercept(
     )
 
 
+async def _terminal_recovery_response(
+    workspace: Any,
+    chat: Any,
+) -> StreamingResponse:
+    """Build the SSE response used when a recovered turn already ended."""
+    history, msgid, turn_status = await _current_recovery_terminal_snapshot(
+        workspace,
+        chat,
+    )
+    snapshot = {
+        "object": "chat_snapshot",
+        "chat_id": chat.id,
+        "msgid": msgid,
+        "turn_status": turn_status,
+        "history": history,
+    }
+
+    async def terminal_event_generator() -> AsyncGenerator[str, None]:
+        yield (
+            "event: chat.snapshot\n"
+            f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+        )
+
+    return StreamingResponse(
+        terminal_event_generator(),
+        media_type="text/event-stream",
+        headers=_console_chat_stream_headers(
+            chat_id=chat.id,
+            session_id=chat.session_id,
+            msgid=msgid,
+        ),
+    )
+
+
+async def _resolve_current_reconnect_target(
+    *,
+    workspace: Any,
+    native_payload: dict[str, Any],
+    session_id: str,
+    identity: dict[str, str],
+) -> tuple[asyncio.Queue, str, TurnIdentity, str] | StreamingResponse:
+    """Resolve a current reconnect to a live lease or terminal snapshot."""
+    chat = await _resolve_current_recovery_chat(
+        workspace,
+        requested_chat_id=native_payload.get("chat_id"),
+        session_id=session_id,
+        sender_id=native_payload["sender_id"],
+        channel_id=native_payload["channel_id"],
+        identity=identity,
+    )
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    lease = await workspace.answer_turn_coordinator.attach(chat.id)
+    if lease is None:
+        return await _terminal_recovery_response(workspace, chat)
+    return lease.queue, chat.id, lease.identity, lease.identity.msgid
+
+
+async def _start_console_stream_target(
+    *,
+    workspace: Any,
+    tracker: Any,
+    console_channel: Any,
+    session_id: str,
+    native_payload: dict[str, Any],
+    suppression_ctx: _SuppressionContext | None,
+) -> tuple[asyncio.Queue, str, TurnIdentity | None, str | None]:
+    """Start a new chat and apply suppression bookkeeping."""
+    before_start = _build_suppression_before_start(
+        suppression_ctx,
+        native_payload,
+    )
+    try:
+        queue, run_key, msgid, is_new_run = await _start_new_chat(
+            workspace,
+            tracker,
+            console_channel,
+            session_id,
+            native_payload,
+            before_start=before_start,
+            include_run_status=True,
+        )
+    except Exception:
+        _release_suppression_on_failure(suppression_ctx, native_payload)
+        raise
+    _validate_suppression_new_run(
+        suppression_ctx,
+        tracker,
+        run_key,
+        queue,
+        is_new_run,
+        native_payload,
+    )
+    return (
+        queue,
+        run_key,
+        native_payload["meta"].get("answer_turn_identity"),
+        msgid,
+    )
+
+
 async def _dispatch_console_stream(
     *,
     workspace: Any,
@@ -1699,14 +1921,27 @@ async def _dispatch_console_stream(
     identity: dict[str, str],
     request_mapping: dict[str, Any],
     is_reconnect: bool,
+    is_current_reconnect: bool = False,
     suppression_ctx: _SuppressionContext | None = None,
 ) -> StreamingResponse:
     """Execute the actual chat run and stream the response."""
     tracker = workspace.task_tracker
     msgid: str | None = None
-    stream_identity: TurnIdentity | None = None
 
-    if is_reconnect:
+    if is_current_reconnect:
+        current_target = await _resolve_current_reconnect_target(
+            workspace=workspace,
+            native_payload={
+                **native_payload,
+                "chat_id": request_mapping.get("chat_id"),
+            },
+            session_id=session_id,
+            identity=identity,
+        )
+        if isinstance(current_target, StreamingResponse):
+            return current_target
+        queue, run_key, stream_identity, msgid = current_target
+    elif is_reconnect:
         requested_msgid = native_payload.get("meta", {}).get("msgid")
         queue, run_key, stream_identity = await _attach_reconnect_queue(
             workspace,
@@ -1715,39 +1950,16 @@ async def _dispatch_console_stream(
             native_payload["channel_id"],
             requested_msgid if isinstance(requested_msgid, str) else None,
         )
-        if queue is None:
-            raise HTTPException(
-                status_code=404,
-                detail="No running chat for this session",
-            )
     else:
-        before_start = _build_suppression_before_start(
-            suppression_ctx,
-            native_payload,
-        )
-        try:
-            queue, run_key, msgid, is_new_run = await _start_new_chat(
-                workspace,
-                tracker,
-                console_channel,
-                session_id,
-                native_payload,
-                before_start=before_start,
-                include_run_status=True,
+        queue, run_key, stream_identity, msgid = (
+            await _start_console_stream_target(
+                workspace=workspace,
+                tracker=tracker,
+                console_channel=console_channel,
+                session_id=session_id,
+                native_payload=native_payload,
+                suppression_ctx=suppression_ctx,
             )
-            stream_identity = native_payload["meta"].get(
-                "answer_turn_identity",
-            )
-        except Exception:
-            _release_suppression_on_failure(suppression_ctx, native_payload)
-            raise
-        _validate_suppression_new_run(
-            suppression_ctx,
-            tracker,
-            run_key,
-            queue,
-            is_new_run,
-            native_payload,
         )
 
     async def event_generator() -> AsyncGenerator[str, None]:
@@ -1771,7 +1983,11 @@ async def _dispatch_console_stream(
         headers=_console_chat_stream_headers(
             chat_id=run_key,
             session_id=session_id,
-            msgid=msgid,
+            msgid=(
+                stream_identity.msgid
+                if is_current_reconnect and stream_identity is not None
+                else msgid
+            ),
         ),
     )
 

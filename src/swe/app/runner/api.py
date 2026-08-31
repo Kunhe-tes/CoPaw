@@ -254,6 +254,47 @@ async def _messages_from_memory_state(
     )
 
 
+def _turn_state_to_message(
+    turn_id: object,
+    turn_state: object,
+    *,
+    chat_id: str | None,
+) -> ChatMessage | None:
+    """Convert one durable turn state into a public user message."""
+    if not isinstance(turn_state, dict):
+        return None
+    stored_chat_id = turn_state.get("chat_id")
+    if (
+        chat_id is not None
+        and isinstance(stored_chat_id, str)
+        and stored_chat_id
+        and stored_chat_id != chat_id
+    ):
+        return None
+    raw = turn_state.get("message")
+    if not isinstance(raw, dict) or raw.get("role") != "user":
+        return None
+    content = raw.get("content")
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content}]
+    if not isinstance(content, list):
+        return None
+    turn_key = str(turn_id)
+    return ChatMessage.model_validate(
+        {
+            "id": raw.get("id") or turn_key,
+            "type": raw.get("type") or "message",
+            "role": "user",
+            "content": content,
+            "metadata": {
+                **(raw.get("metadata") or {}),
+                "original_id": raw.get("id") or turn_key,
+            },
+            "timestamp": raw.get("timestamp"),
+        },
+    )
+
+
 def _turn_state_messages_from_state(
     state: dict,
     *,
@@ -266,39 +307,13 @@ def _turn_state_messages_from_state(
         return []
     messages: list[ChatMessage] = []
     for turn_id, turn_state in turn_states.items():
-        if not isinstance(turn_state, dict):
-            continue
-        stored_chat_id = turn_state.get("chat_id")
-        if (
-            chat_id is not None
-            and isinstance(stored_chat_id, str)
-            and stored_chat_id
-            and stored_chat_id != chat_id
-        ):
-            continue
-        raw = turn_state.get("message")
-        if not isinstance(raw, dict) or raw.get("role") != "user":
-            continue
-        content = raw.get("content")
-        if isinstance(content, str):
-            content = [{"type": "text", "text": content}]
-        if not isinstance(content, list):
-            continue
-        messages.append(
-            ChatMessage.model_validate(
-                {
-                    "id": raw.get("id") or str(turn_id),
-                    "type": raw.get("type") or "message",
-                    "role": "user",
-                    "content": content,
-                    "metadata": {
-                        **(raw.get("metadata") or {}),
-                        "original_id": raw.get("id") or str(turn_id),
-                    },
-                    "timestamp": raw.get("timestamp"),
-                },
-            ),
+        message = _turn_state_to_message(
+            turn_id,
+            turn_state,
+            chat_id=chat_id,
         )
+        if message is not None:
+            messages.append(message)
     return messages
 
 

@@ -239,10 +239,11 @@ class AnswerTurnCoordinator:
             state.settlement_started = True
             state.status = outcome.status
             state.outcome = outcome
-        await self.session.persist_outcome(outcome)
-        await self.stream.close(identity)
-        lock = await self._chat_lock(identity.chat_id)
-        async with lock:
+            # The coordinator lock is the turn linearization point.  Keep it
+            # through the short durable outcome transaction so a following
+            # submission can never start between terminal state and persistence.
+            await self.session.persist_outcome(outcome)
+            await self.stream.close(identity)
             state = self._turns.get(identity.chat_id)
             if state is not None and state.identity == identity:
                 self._turns.pop(identity.chat_id, None)

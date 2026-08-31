@@ -1387,59 +1387,17 @@ def _extract_assistant_response(
         return ""
 
     try:
-        # memory.content 是 list of (Msg, marks) tuples
         memory = agent.memory.content
         start = max(memory_start, 0)
         memory_total = len(memory) if isinstance(memory, list) else None
         candidates: list[dict[str, Any]] = []
-        for index, entry in reversed(
-            (
-                list(enumerate(memory[start:], start))
-                if isinstance(memory, list)
-                else []
-            ),
-        ):
-            if not isinstance(entry, (tuple, list)) or not entry:
-                candidates.append(
-                    {"index": index, "reason": "invalid_memory_entry"},
-                )
-                continue
-            msg = entry[0]
-            role = getattr(msg, "role", None)
-            content = getattr(msg, "content", None)
-            metadata = getattr(msg, "metadata", None)
-            summary: dict[str, Any] = {
-                "index": index,
-                "role": role,
-                "content_type": type(content).__name__,
-                "metadata_fields": [
-                    key
-                    for key in ("event_type", "message_type", "kind", "type")
-                    if isinstance(metadata, dict) and key in metadata
-                ],
-            }
-            if isinstance(content, list):
-                summary["block_types"] = [
-                    (
-                        block.get("type")
-                        if isinstance(block, dict)
-                        else getattr(block, "type", None)
-                    )
-                    for block in content
-                ]
-            if (
-                role != "assistant"
-                or not hasattr(msg, "content")
-                or _is_live_assistant_event(msg)
-            ):
-                summary["reason"] = (
-                    "role_or_missing_content"
-                    if role != "assistant" or not hasattr(msg, "content")
-                    else "live_assistant_event"
-                )
-                candidates.append(summary)
-                continue
-            response = project_candidate_assistant_response(msg)
+        entries = (
+            reversed(list(enumerate(memory[start:], start)))
+            if isinstance(memory, list)
+            else ()
+        )
+        for index, entry in entries:
+            response, summary = _inspect_assistant_memory_entry(index, entry)
             if response is not None:
                 summary["text_len"] = len(response)
                 summary["reason"] = "accepted"
@@ -1452,7 +1410,6 @@ def _extract_assistant_response(
                     candidates,
                 )
                 return response
-            summary["reason"] = "unsupported_content"
             candidates.append(summary)
         logger.warning(
             "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
@@ -1468,6 +1425,48 @@ def _extract_assistant_response(
         )
 
     return ""
+
+
+def _inspect_assistant_memory_entry(
+    index: int,
+    entry: Any,
+) -> tuple[str | None, dict[str, Any]]:
+    """Inspect one memory entry and return its response and diagnostics."""
+    if not isinstance(entry, (tuple, list)) or not entry:
+        return None, {"index": index, "reason": "invalid_memory_entry"}
+    msg = entry[0]
+    role = getattr(msg, "role", None)
+    content = getattr(msg, "content", None)
+    metadata = getattr(msg, "metadata", None)
+    summary: dict[str, Any] = {
+        "index": index,
+        "role": role,
+        "content_type": type(content).__name__,
+        "metadata_fields": [
+            key
+            for key in ("event_type", "message_type", "kind", "type")
+            if isinstance(metadata, dict) and key in metadata
+        ],
+    }
+    if isinstance(content, list):
+        summary["block_types"] = [
+            (
+                block.get("type")
+                if isinstance(block, dict)
+                else getattr(block, "type", None)
+            )
+            for block in content
+        ]
+    if role != "assistant" or not hasattr(msg, "content"):
+        summary["reason"] = "role_or_missing_content"
+        return None, summary
+    if _is_live_assistant_event(msg):
+        summary["reason"] = "live_assistant_event"
+        return None, summary
+    response = project_candidate_assistant_response(msg)
+    if response is None:
+        summary["reason"] = "unsupported_content"
+    return response, summary
 
 
 def _replace_assistant_response(
@@ -2839,39 +2838,44 @@ class AgentRunner(Runner):
             task.cancel()
 
     async def persist_outcome(self, outcome: TurnOutcome) -> None:
-        """Persist the accepted Stop outcome through the session adapter."""
-        runtime, session_execution = self._answer_turn_runtimes.get(
+        """Persist a terminal answer-turn outcome after query cleanup."""
+        runtime, _ = self._answer_turn_runtimes.get(
             outcome.identity,
             (None, None),
         )
-        if (
-            outcome.status != TurnStatus.CANCELLED
-            or session_execution is None
-            or not hasattr(session_execution, "state")
-        ):
+        session_id = str(getattr(runtime, "session_id", "") or "")
+        user_id = str(getattr(runtime, "user_id", "") or "")
+        if not session_id or self.session is None:
             return
         from .session_lifecycle import (
             mark_stopped_agent_memory,
-            mark_stopped_turn_state,
+            mark_terminal_turn_state,
         )
 
-        try:
-            if runtime is not None:
-                mark_stopped_agent_memory(
-                    runtime.agent,
-                    outcome.identity.msgid,
-                )
-            mark_stopped_turn_state(
-                session_execution.state,
+        terminal_status = (
+            "stopped"
+            if outcome.status == TurnStatus.CANCELLED
+            else outcome.status.value
+        )
+        if outcome.status == TurnStatus.CANCELLED and runtime is not None:
+            mark_stopped_agent_memory(
+                runtime.agent,
                 outcome.identity.msgid,
             )
-            await session_execution.commit_state(session_execution.state)
-        except Exception:
-            logger.exception(
-                "Failed to persist stopped answer turn chat_id=%s msgid=%s",
-                outcome.identity.chat_id,
+
+        def mark_outcome(state: dict[str, Any]) -> dict[str, Any]:
+            mark_terminal_turn_state(
+                state,
                 outcome.identity.msgid,
+                terminal_status,
             )
+            return state
+
+        await self.session.mutate_session_state(
+            session_id,
+            mark_outcome,
+            user_id=user_id,
+        )
 
     async def _report_answer_turn_outcome(
         self,
@@ -5502,6 +5506,38 @@ class AgentRunner(Runner):
         ):
             yield msg, last
 
+    async def _stream_query_frames(
+        self,
+        msgs,
+        *,
+        request: AgentRequest,
+        query: str | None,
+        session_id: str,
+        user_id: str,
+    ):
+        """Yield query frames from the configured execution adapter."""
+        query_execution = getattr(self, "_query_execution", None)
+        if query_execution is not None:
+            async for frame in query_execution.stream(
+                QueryInvocation(request=request, msgs=tuple(msgs)),
+            ):
+                yield self._attach_trace_id_to_msg(
+                    frame.message,
+                    getattr(request, "trace_id", None),
+                ), frame.last
+            return
+        async for msg, last in self._stream_query_entry(
+            msgs,
+            request=request,
+            query=query,
+            session_id=session_id,
+            user_id=user_id,
+        ):
+            yield self._attach_trace_id_to_msg(
+                msg,
+                getattr(request, "trace_id", None),
+            ), last
+
     async def query_handler(
         self,
         msgs,
@@ -5525,9 +5561,17 @@ class AgentRunner(Runner):
                 "turn_id": identity.turn_id,
                 "msgid": identity.msgid,
             }
-        is_scheduled = getattr(request, "execution_origin", None) == "scheduled"
+        is_scheduled = (
+            getattr(request, "execution_origin", None) == "scheduled"
+        )
         trace_fields = None
-        if not is_scheduled and user_id and session_id and turn_id and self.agent_id:
+        if (
+            not is_scheduled
+            and user_id
+            and session_id
+            and turn_id
+            and self.agent_id
+        ):
             trace_fields = TraceFields(
                 task_id=session_id,
                 user_id=user_id,
@@ -5557,28 +5601,14 @@ class AgentRunner(Runner):
                     if span is not None:
                         span.set_attribute("agent.user_message", query or "")
 
-                    query_execution = getattr(self, "_query_execution", None)
-                    if query_execution is not None:
-                        async for frame in query_execution.stream(
-                            QueryInvocation(request=request, msgs=tuple(msgs)),
-                        ):
-                            trace_id = getattr(request, "trace_id", None)
-                            msg = self._attach_trace_id_to_msg(
-                                frame.message,
-                                trace_id,
-                            )
-                            yield msg, frame.last
-                    else:
-                        async for msg, last in self._stream_query_entry(
-                            msgs,
-                            request=request,
-                            query=query,
-                            session_id=session_id,
-                            user_id=user_id,
-                        ):
-                            trace_id = getattr(request, "trace_id", None)
-                            msg = self._attach_trace_id_to_msg(msg, trace_id)
-                            yield msg, last
+                    async for msg, last in self._stream_query_frames(
+                        msgs,
+                        request=request,
+                        query=query,
+                        session_id=session_id,
+                        user_id=user_id,
+                    ):
+                        yield msg, last
         except asyncio.CancelledError:
             if identity is not None:
                 await self._report_answer_turn_outcome(

@@ -2331,6 +2331,48 @@ class ToolGuardMixin:
             return None
         return await self._emit_next_replay_tool_call(remaining_queue)
 
+    def _selected_expert_start_follow_up(
+        self,
+        context: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Process the forced ``start_subagent`` replay result."""
+        run_id = str(response.get("run_id") or "").strip()
+        if not response.get("accepted") or not run_id:
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            context["selected_expert_execution_error"] = (
+                "The selected expert could not be started. "
+                "It was not replaced by the Main Agent."
+            )
+            return None
+        context[_SELECTED_EXPERT_RUN_ID_KEY] = run_id
+        return self._selected_expert_wait_tool_call()
+
+    def _selected_expert_get_follow_up(
+        self,
+        context: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Process a forced ``get_subagent`` replay result."""
+        if self._selected_expert_record_is_terminal(response):
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            return None
+        return self._selected_expert_wait_tool_call()
+
+    def _selected_expert_wait_follow_up(
+        self,
+        context: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Process a forced ``wait_subagent`` replay result."""
+        run_id = str(context.get(_SELECTED_EXPERT_RUN_ID_KEY) or "").strip()
+        if not run_id or self._selected_expert_is_terminal(response, run_id):
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            return None
+        if not self._selected_expert_is_active(response, run_id):
+            return self._selected_expert_get_tool_call(run_id)
+        return self._selected_expert_wait_tool_call()
+
     async def _selected_expert_follow_up(
         self,
         replay_info: dict[str, Any],
@@ -2354,32 +2396,14 @@ class ToolGuardMixin:
             context[_SELECTED_EXPERT_EXECUTION_KEY] = False
             return None
         tool_name = str(replay_info.get("tool_name") or "")
-        run_id = str(context.get(_SELECTED_EXPERT_RUN_ID_KEY) or "").strip()
         response = self._selected_expert_tool_response(replay_info)
         if tool_name == "start_subagent":
-            run_id = str(response.get("run_id") or "").strip()
-            if not response.get("accepted") or not run_id:
-                context[_SELECTED_EXPERT_EXECUTION_KEY] = False
-                context["selected_expert_execution_error"] = (
-                    "The selected expert could not be started. "
-                    "It was not replaced by the Main Agent."
-                )
-                return None
-            context[_SELECTED_EXPERT_RUN_ID_KEY] = run_id
-            return self._selected_expert_wait_tool_call()
+            return self._selected_expert_start_follow_up(context, response)
         if tool_name == "get_subagent":
-            if self._selected_expert_record_is_terminal(response):
-                context[_SELECTED_EXPERT_EXECUTION_KEY] = False
-                return None
-            return self._selected_expert_wait_tool_call()
+            return self._selected_expert_get_follow_up(context, response)
         if tool_name != "wait_subagent":
             return None
-        if not run_id or self._selected_expert_is_terminal(response, run_id):
-            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
-            return None
-        if not self._selected_expert_is_active(response, run_id):
-            return self._selected_expert_get_tool_call(run_id)
-        return self._selected_expert_wait_tool_call()
+        return self._selected_expert_wait_follow_up(context, response)
 
     def _selected_expert_tool_response(
         self,

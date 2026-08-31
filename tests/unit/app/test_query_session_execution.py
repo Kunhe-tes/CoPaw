@@ -638,6 +638,65 @@ def test_mark_stopped_turn_state_marks_last_displayable_assistant_message() -> (
     )
 
 
+def test_mark_terminal_turn_state_records_public_terminal_outcome() -> None:
+    from swe.app.runner.session_lifecycle import mark_terminal_turn_state
+
+    state: dict[str, Any] = {
+        "turn_states": {
+            "turn-1": {"status": "admitted", "chat_id": "chat-1"},
+        },
+    }
+
+    mark_terminal_turn_state(state, "turn-1", "completed")
+
+    assert state["turn_states"]["turn-1"] == {
+        "status": "completed",
+        "chat_id": "chat-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_runner_persists_completed_turn_outcome_after_execution() -> (
+    None
+):
+    from swe.app.answer_turn.models import TurnIdentity, TurnOutcome
+
+    class _Session:
+        def __init__(self) -> None:
+            self.state = {
+                "turn_states": {
+                    "msg-1": {"status": "admitted", "chat_id": "chat-1"},
+                },
+            }
+
+        async def mutate_session_state(
+            self,
+            session_id: str,
+            mutator,
+            *,
+            user_id: str,
+        ) -> dict:
+            assert (session_id, user_id) == ("session-1", "user-1")
+            self.state = mutator(self.state)
+            return self.state
+
+    identity = TurnIdentity("chat-1", "msg-1", "turn-1")
+    runner = object.__new__(AgentRunner)
+    runner.session = _Session()
+    runner._answer_turn_runtimes = {
+        identity: (
+            SimpleNamespace(session_id="session-1", user_id="user-1"),
+            None,
+        ),
+    }
+
+    await runner.persist_outcome(TurnOutcome.completed(identity))
+
+    assert (
+        runner.session.state["turn_states"]["msg-1"]["status"] == "completed"
+    )
+
+
 def test_mark_stopped_agent_memory_marks_last_assistant_message() -> None:
     from swe.app.runner.session_lifecycle import mark_stopped_agent_memory
 
