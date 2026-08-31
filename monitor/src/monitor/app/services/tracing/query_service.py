@@ -377,6 +377,118 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
                 growth_stats=growth_stats,
             )
 
+    async def _get_growth_stats(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        time_range: str = "day",
+        bbk_ids: Optional[str] = None,
+    ) -> dict[str, float | None]:
+        """获取概览卡片的环比数据（内部聚合，不提供独立 HTTP 接口）。"""
+        period_days = {
+            "day": 1,
+            "week": 7,
+            "month": 30,
+        }.get(time_range, max((end_date - start_date).days, 1))
+        previous_start = start_date - timedelta(days=period_days)
+
+        trace_filter, trace_params = build_bbk_in_filter(bbk_ids)
+        if source_id == "all":
+            source_clause = "source_id NOT IN (%s)"
+            source_values = tuple(EXCLUDED_SOURCE_IDS)
+        else:
+            source_clause = "source_id = %s"
+            source_values = (source_id,)
+
+        async def trace_stats(period_start: datetime, period_end: datetime) -> dict:
+            query = f"""
+                SELECT COUNT(*) AS calls,
+                       COALESCE(SUM(total_tokens), 0) AS tokens,
+                       COUNT(DISTINCT session_id) AS sessions,
+                       COUNT(DISTINCT user_id) AS users
+                FROM swe_tracing_traces
+                WHERE {source_clause}
+                  AND start_time >= %s AND start_time < %s
+                  AND user_id != 'default'{trace_filter}
+            """
+            row = await self._db.fetch_one(
+                query,
+                (*source_values, period_start, period_end, *trace_params),
+            )
+            row = row or {}
+            return {
+                "calls": int(row.get("calls") or 0),
+                "tokens": float(row.get("tokens") or 0),
+                "sessions": int(row.get("sessions") or 0),
+                "users": int(row.get("users") or 0),
+            }
+
+        async def cron_count(period_start: datetime, period_end: datetime) -> int:
+            cron_filter, cron_params = build_cron_bbk_in_filter(bbk_ids)
+            query = f"""
+                SELECT COUNT(*) AS total
+                FROM swe_cron_executions e
+                INNER JOIN swe_cron_jobs j ON e.job_id = j.id
+                WHERE e.actual_time >= %s AND e.actual_time < %s
+                  AND j.status != 'deleted' AND j.deleted_at IS NULL
+                  AND j.tenant_id != 'default'
+                  AND {('j.source_id NOT IN (%s)' if source_id == 'all' else 'j.source_id = %s')}
+                  {cron_filter}
+            """
+            row = await self._db.fetch_one(
+                query,
+                (period_start, period_end, *source_values, *cron_params),
+            )
+            return int((row or {}).get("total") or 0)
+
+        async def customer_count(
+            period_start: datetime,
+            period_end: datetime,
+        ) -> int:
+            query = f"""
+                SELECT COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|',
+                    COALESCE(customer_id, ''))) AS total
+                FROM swe_html_preview_click_events
+                WHERE {source_clause}
+                  AND clicked_at >= %s AND clicked_at < %s
+                  AND button_type = 'plan'
+                  AND cron_task_id IS NOT NULL AND customer_id IS NOT NULL
+                  {trace_filter}
+            """
+            row = await self._db.fetch_one(
+                query,
+                (*source_values, period_start, period_end, *trace_params),
+            )
+            return int((row or {}).get("total") or 0)
+
+        current_end = end_date
+        previous_end = start_date
+        current, previous, current_cron, previous_cron, current_customers, previous_customers = await asyncio.gather(
+            trace_stats(start_date, current_end),
+            trace_stats(previous_start, previous_end),
+            cron_count(start_date, current_end),
+            cron_count(previous_start, previous_end),
+            customer_count(start_date, current_end),
+            customer_count(previous_start, previous_end),
+        )
+
+        def growth(current_value: float, previous_value: float) -> float | None:
+            if previous_value == 0:
+                return 100.0 if current_value > 0 else 0.0
+            if current_value == 0:
+                return None
+            return round((current_value - previous_value) / previous_value * 100, 1)
+
+        return {
+            "callsGrowth": growth(current["calls"], previous["calls"]),
+            "tokensGrowth": growth(current["tokens"], previous["tokens"]),
+            "sessionGrowth": growth(current["sessions"], previous["sessions"]),
+            "userGrowth": growth(current["users"], previous["users"]),
+            "cronGrowth": growth(current_cron, previous_cron),
+            "planCustomersGrowth": growth(current_customers, previous_customers),
+        }
+
     async def _fetch_overview_data(
         self,
         source_id: str,
