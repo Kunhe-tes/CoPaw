@@ -9,6 +9,9 @@ import {
 import AgentScopeRuntimeResponseBuilder from "./Builder";
 import Message from "./Message";
 import Tool from "./Tool";
+import OperationGroup from "./OperationGroup";
+import { groupOperationMessages } from "./operationGrouping";
+import type { OperationGroupedItem } from "./operationGrouping";
 import Reasoning from "./Reasoning";
 import Error from "./Error";
 import { Bubble, Markdown } from "@/components/agentscope-chat";
@@ -275,10 +278,15 @@ export default function AgentScopeRuntimeResponseCard(props: {
       : findLastVisibleAnswerMessageIndex(messages);
     const hasAnswer = Boolean(reasoningFallbackText || finalAnswerIndex >= 0);
 
+    // Operation groups are explicit (agent-declared) and always render as
+    // their own default-collapsed entries; they never fold into the
+    // process disclosure and never merge with messages outside the group.
+    const { items } = groupOperationMessages(messages);
+
     if (!canCollapseProcess || !hasAnswer) {
       return {
         process: [] as IAgentScopeRuntimeMessage[],
-        direct: messages,
+        direct: items,
         failedProcessCount: 0,
         processStepCount: 0,
         toolCallCount: 0,
@@ -286,16 +294,23 @@ export default function AgentScopeRuntimeResponseCard(props: {
     }
 
     const process: IAgentScopeRuntimeMessage[] = [];
-    const direct: IAgentScopeRuntimeMessage[] = [];
+    const direct: OperationGroupedItem[] = [];
 
-    messages.forEach((message) => {
+    items.forEach((item) => {
+      if (item.kind === "group") {
+        direct.push(item);
+        return;
+      }
+      const message = item.message;
       if (finalAnswerIndex >= 0 && message === messages[finalAnswerIndex]) {
-        direct.push(message);
+        direct.push({ kind: "message", message });
         return;
       }
 
       if (shouldFoldIntoProcessDisclosure(message)) {
         process.push(message);
+      } else {
+        direct.push({ kind: "message", message });
       }
     });
 
@@ -348,7 +363,13 @@ export default function AgentScopeRuntimeResponseCard(props: {
           {groupedMessages.process.map(renderResponseItem)}
         </ProcessDisclosure>
       )}
-      {groupedMessages.direct.map(renderResponseItem)}
+      {groupedMessages.direct.map((item) =>
+        item.kind === "group" ? (
+          <OperationGroup key={item.key} entry={item} />
+        ) : (
+          renderResponseItem(item.message)
+        ),
+      )}
       {reasoningFallbackText && <Markdown content={reasoningFallbackText} />}
       {props.data.error && <Error data={props.data.error} />}
       {props.beforeActions}

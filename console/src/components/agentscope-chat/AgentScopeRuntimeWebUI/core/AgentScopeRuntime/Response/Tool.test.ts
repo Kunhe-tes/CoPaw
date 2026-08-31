@@ -32,7 +32,8 @@ vi.mock("@/components/agentscope-chat", () => ({
     React.createElement("div", {
       "data-loading": String(loading),
       "data-msg-status": msgStatus,
-      "data-output": typeof output === "string" ? output : JSON.stringify(output),
+      "data-output":
+        typeof output === "string" ? output : JSON.stringify(output),
       "data-testid": "tool-call",
     }),
 }));
@@ -51,10 +52,12 @@ vi.mock("./Approval", () => ({
 function toolMessage({
   toolName = "execute_shell_command",
   toolStatus,
+  governance,
   liveOutput,
 }: {
   toolName?: string;
   toolStatus?: "running" | "success" | "failed";
+  governance?: "pending" | "rejected" | "blocked";
   liveOutput?: string;
 }): IAgentScopeRuntimeMessage {
   return {
@@ -84,6 +87,7 @@ function toolMessage({
           output_summary: "输出摘要",
           tool_error: toolStatus === "failed" ? "Tool error" : null,
           tool_status: toolStatus,
+          tool_governance: governance,
         },
       },
     ],
@@ -233,6 +237,40 @@ describe("tool call title", () => {
     expect(screen.getByTestId("tool-call")).toHaveAttribute(
       "data-msg-status",
       AgentScopeRuntimeRunStatus.Failed,
+    );
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-loading",
+      "false",
+    );
+  });
+
+  it("uses governance without treating pending approval as failed", () => {
+    render(
+      React.createElement(Tool, {
+        data: toolMessage({ governance: "pending" }),
+      }),
+    );
+
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-msg-status",
+      AgentScopeRuntimeRunStatus.InProgress,
+    );
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-loading",
+      "true",
+    );
+  });
+
+  it("renders a rejected governance decision distinctly", () => {
+    render(
+      React.createElement(Tool, {
+        data: toolMessage({ governance: "rejected" }),
+      }),
+    );
+
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-msg-status",
+      AgentScopeRuntimeRunStatus.Rejected,
     );
     expect(screen.getByTestId("tool-call")).toHaveAttribute(
       "data-loading",

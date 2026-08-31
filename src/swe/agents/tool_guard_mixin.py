@@ -1604,6 +1604,15 @@ class ToolGuardMixin:
             )
         return tool_call, tool_input, False, None
 
+    @staticmethod
+    def _strip_operation_group_arguments(
+        tool_call: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Remove the display-only operation_group key before execution."""
+        from ..app.runner.operation_group import clean_tool_call_operation_group
+
+        return clean_tool_call_operation_group(tool_call)
+
     async def _acting_impl(self, tool_call) -> dict | None:
         """Intercept sensitive tool calls before execution.
 
@@ -1622,6 +1631,10 @@ class ToolGuardMixin:
         true parallelism.
         """
         self._ensure_tool_guard()
+
+        # The operation_group argument is display-only metadata; it must
+        # never reach a tool function, the guard engine or the hooks.
+        tool_call = self._strip_operation_group_arguments(tool_call)
 
         tool_name = str(tool_call.get("name", ""))
         tool_input = tool_call.get("input", {})
@@ -1881,10 +1894,14 @@ class ToolGuardMixin:
         tool_input: dict[str, Any],
     ) -> dict | None:
         """Execute a preapproved action or the ordinary tool-call path."""
+        from ..app.runner.operation_group import OPERATION_GROUP_INTERNAL_FIELD
+
+        executable_tool_call = dict(tool_call)
+        executable_tool_call.pop(OPERATION_GROUP_INTERNAL_FIELD, None)
         if action is not None:
-            return await self._execute_guard_action(action, tool_call)
+            return await self._execute_guard_action(action, executable_tool_call)
         return await self._run_tool_call_with_hard_timeout(
-            tool_call,
+            executable_tool_call,
             tool_name,
             tool_input,
         )
@@ -1994,6 +2011,7 @@ class ToolGuardMixin:
                         tool_name=tool_name,
                         error_type="tool_guard_denied",
                         detail=denied_text,
+                        governance_status="blocked",
                     ),
                 ),
             ],
@@ -2030,10 +2048,19 @@ class ToolGuardMixin:
                 original_msg = msg
                 break
 
+        from ..app.runner.operation_group import OPERATION_GROUP_INTERNAL_FIELD
+
+        stored_tool_call = dict(tool_call)
+        operation_group = stored_tool_call.pop(
+            OPERATION_GROUP_INTERNAL_FIELD,
+            None,
+        )
         extra: dict[str, Any] = {
             "approval_kind": approval_kind,
-            "tool_call": tool_call,
+            "tool_call": stored_tool_call,
         }
+        if operation_group is not None:
+            extra["operation_group"] = operation_group
         extra["agent_id"] = self._request_context.get("agent_id")
         extra["tenant_id"] = self._request_context.get("tenant_id")
         extra["source_id"] = self._request_context.get("source_id")
@@ -2136,6 +2163,7 @@ class ToolGuardMixin:
                         tool_name=tool_name,
                         error_type="approval_required",
                         detail=denied_text,
+                        governance_status="pending",
                     ),
                 ),
             ],

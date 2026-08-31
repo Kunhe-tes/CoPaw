@@ -625,7 +625,53 @@ def _approved_tool_call_from_record(record) -> dict[str, Any] | None:
     replay_metadata = _approval_replay_metadata(record)
     if replay_metadata is not None:
         approved_tool_call["_approval_replay"] = replay_metadata
-    return approved_tool_call
+    from .operation_group import restore_operation_group_argument
+
+    return restore_operation_group_argument(
+        approved_tool_call,
+        record.extra.get("operation_group"),
+    )
+
+
+def _build_denial_response_msg(pending: Any, text: str) -> Msg:
+    """Build the denial message, optionally marking the pending tool call.
+
+    When the pending record still carries the original tool call, the
+    message embeds a structured tool_result with error_type
+    "approval_rejected" so the Console can turn the never-executed
+    sub-step into "已拒绝" instead of an execution failure.  The text
+    block keeps the existing user-visible denial message.
+    """
+    blocks: list[Any] = []
+    extra = getattr(pending, "extra", None)
+    if isinstance(extra, dict):
+        from ...agents.tool_failure import TOOL_GOVERNANCE_BLOCK_FIELD
+
+        tool_call = extra.get("tool_call")
+        if isinstance(tool_call, dict) and tool_call.get("id"):
+            result_block = {
+                "type": "tool_result",
+                "id": tool_call.get("id", ""),
+                "name": tool_call.get("name")
+                or getattr(pending, "tool_name", ""),
+                TOOL_GOVERNANCE_BLOCK_FIELD: "rejected",
+                "output": {
+                    "isError": True,
+                    "error_type": "approval_rejected",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "该工具调用已被拒绝，未执行。",
+                        },
+                    ],
+                },
+            }
+            operation_group = extra.get("operation_group")
+            if isinstance(operation_group, dict):
+                result_block["operation_group"] = operation_group
+            blocks.append(result_block)
+    blocks.append(TextBlock(type="text", text=text))
+    return Msg(name="Friday", role="assistant", content=blocks)
 
 
 def _copy_list_extra(
@@ -2807,20 +2853,12 @@ class AgentRunner(Runner):
                 ApprovalDecision.TIMEOUT,
             )
             return (
-                Msg(
-                    name="Friday",
-                    role="assistant",
-                    content=[
-                        TextBlock(
-                            type="text",
-                            text=(
-                                f"⏰ Tool `{pending.tool_name}` approval "
-                                f"timed out ({int(elapsed)}s) — denied.\n"
-                                f"工具 `{pending.tool_name}` 审批超时"
-                                f"（{int(elapsed)}s），已拒绝执行。"
-                            ),
-                        ),
-                    ],
+                _build_denial_response_msg(
+                    pending,
+                    f"⏰ Tool `{pending.tool_name}` approval "
+                    f"timed out ({int(elapsed)}s) — denied.\n"
+                    f"工具 `{pending.tool_name}` 审批超时"
+                    f"（{int(elapsed)}s），已拒绝执行。",
                 ),
                 True,
                 None,
@@ -2886,18 +2924,10 @@ class AgentRunner(Runner):
             request,
         )
         return (
-            Msg(
-                name="Friday",
-                role="assistant",
-                content=[
-                    TextBlock(
-                        type="text",
-                        text=(
-                            f"❌ Tool `{pending.tool_name}` denied.\n"
-                            f"工具 `{pending.tool_name}` 已拒绝执行。"
-                        ),
-                    ),
-                ],
+            _build_denial_response_msg(
+                pending,
+                f"❌ Tool `{pending.tool_name}` denied.\n"
+                f"工具 `{pending.tool_name}` 已拒绝执行。",
             ),
             True,
             None,

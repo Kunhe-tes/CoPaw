@@ -9,7 +9,11 @@ import logging
 import pytest
 
 from swe.app.approvals.service import ApprovalService
-from swe.app.runner.runner import AgentRunner
+from swe.app.runner.runner import (
+    AgentRunner,
+    _approved_tool_call_from_record,
+    _build_denial_response_msg,
+)
 from swe.config.context import tenant_context
 from swe.security.tool_guard.approval import ApprovalDecision
 
@@ -43,6 +47,52 @@ class _ChannelManager:
         if name == "zhaohu":
             return self.zhaohu
         return None
+
+
+def test_approved_replay_restores_operation_group_argument() -> None:
+    from swe.app.runner.operation_group import OPERATION_GROUP_ARG_KEY
+
+    record = SimpleNamespace(
+        extra={
+            "tool_call": {
+                "id": "tool-1",
+                "name": "execute_shell_command",
+                "input": {"command": "echo ok"},
+            },
+            "operation_group": {"id": "inspect", "title": "检查图片"},
+        },
+    )
+
+    restored = _approved_tool_call_from_record(record)
+
+    assert restored is not None
+    assert restored["input"][OPERATION_GROUP_ARG_KEY] == {
+        "id": "inspect",
+        "name": "检查图片",
+    }
+
+
+def test_denial_response_carries_trusted_governance_and_group() -> None:
+    pending = SimpleNamespace(
+        tool_name="execute_shell_command",
+        extra={
+            "tool_call": {
+                "id": "tool-1",
+                "name": "execute_shell_command",
+                "input": {"command": "echo ok"},
+            },
+            "operation_group": {"id": "inspect", "title": "检查图片"},
+        },
+    )
+
+    response = _build_denial_response_msg(pending, "denied")
+    result = response.content[0]
+
+    assert result["_swe_tool_governance"] == "rejected"
+    assert result["operation_group"] == {
+        "id": "inspect",
+        "title": "检查图片",
+    }
 
 
 @pytest.mark.asyncio
