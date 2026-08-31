@@ -37,6 +37,11 @@ from pydantic import BaseModel, Field
 from starlette.responses import Response, StreamingResponse
 
 from ...config.context import resolve_request_effective_tenant_id
+from ..b3_headers import (
+    B3_CONTEXT_META_KEY,
+    B3_TRACE_ID_HEADER,
+    extract_b3_context,
+)
 from ..agent_context import (
     get_agent_and_config_for_request,
     get_agent_for_request,
@@ -115,7 +120,6 @@ DENIED_CHAT_ATTACHMENT_EXECUTABLE_EXTENSIONS = frozenset(
 _RECONNECT_ATTACH_ATTEMPTS = 10
 _RECONNECT_ATTACH_RETRY_DELAY_SECONDS = 0.1
 _CONSOLE_SSE_HEARTBEAT_SECONDS = 15
-_B3_TRACE_ID_HEADER = "X-B3-Traceid"
 _CHAT_FILE_LIST_LIMIT = 500
 _TEXT_SNIFF_BYTES = 4096
 _TEXT_PREVIEW_MIME_PREFIX = "text/"
@@ -955,14 +959,6 @@ def _derive_chat_name(native_payload: dict) -> str:
     return "Media Message"
 
 
-def _extract_b3_trace_id(request: Request) -> str | None:
-    trace_id = request.headers.get(_B3_TRACE_ID_HEADER)
-    if trace_id is None:
-        return None
-    trace_id = trace_id.strip()
-    return trace_id or None
-
-
 async def _attach_reconnect_queue(
     workspace,
     tracker,
@@ -1301,9 +1297,13 @@ def _inject_request_metadata(
     request: Request,
     native_payload: dict[str, Any],
 ) -> None:
-    b3_trace_id = _extract_b3_trace_id(request)
-    if b3_trace_id:
-        native_payload["meta"]["b3_trace_id"] = b3_trace_id
+    try:
+        b3_context = extract_b3_context(request.headers)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if b3_context:
+        native_payload["meta"][B3_CONTEXT_META_KEY] = b3_context
+        native_payload["meta"]["b3_trace_id"] = b3_context[B3_TRACE_ID_HEADER]
     source_id = getattr(
         request.state,
         "source_id",

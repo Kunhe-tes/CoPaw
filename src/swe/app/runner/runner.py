@@ -122,7 +122,12 @@ from ...tracing import (
     has_trace_manager,
     get_trace_manager,
 )
-from ...tracing.agent_trace_sdk import SpanKind, TraceFields, global_tracer
+from ...tracing.agent_trace_sdk import (
+    SpanKind,
+    TraceFields,
+    global_tracer,
+    use_b3_trace_context,
+)
 from ...tracing.models import TraceStatus
 from ...config.context import (
     get_current_passthrough_headers,
@@ -1639,12 +1644,22 @@ def _build_goal_finalization_input(
     goal: Any,
     state: str,
     reason: str | None,
+    stop_rejection_reason: str | None = None,
 ) -> Msg:
     """Build bounded internal input for a tool-free Goal Finalization Turn."""
+    stop_feedback = (
+        ""
+        if not stop_rejection_reason
+        else (
+            "\nStop rejected the previous delivery. Revise the final response "
+            f"to address this feedback: {stop_rejection_reason}\n"
+        )
+    )
     return _build_internal_follow_up_msg(
         "Authoritative Goal finalization context:\n"
         f"Goal state: {state}\n"
         f"State reason: {reason or 'No additional reason was recorded.'}\n"
+        + stop_feedback
         + _build_goal_contract_context(goal),
     )
 
@@ -4025,6 +4040,7 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
         goal: Any,
+        stop_rejection_reason: str | None = None,
     ):
         """Stream a no-budget Goal Finalization Turn or its fixed fallback."""
         state = goal.state.value
@@ -4043,6 +4059,7 @@ class AgentRunner(Runner):
                                 goal,
                                 state,
                                 goal.state_reason,
+                                stop_rejection_reason,
                             ),
                         ],
                     ),
@@ -5508,60 +5525,60 @@ class AgentRunner(Runner):
                 "turn_id": identity.turn_id,
                 "msgid": identity.msgid,
             }
-        is_scheduled = (
-            getattr(request, "execution_origin", None) == "scheduled"
-        )
-        trace_scope = nullcontext(None)
-        if (
-            not is_scheduled
-            and user_id
-            and session_id
-            and turn_id
-            and self.agent_id
-        ):
-            trace_scope = global_tracer.start_as_current_span(
-                "agent.run",
-                kind=SpanKind.SERVER,
-                trace_fields=TraceFields(
-                    task_id=session_id,
-                    user_id=user_id,
-                    session_id=turn_id,
-                    agent_id=self.agent_id,
-                    agent_version=__version__,
-                    source_id=_request_source_id(request),
-                ),
+        is_scheduled = getattr(request, "execution_origin", None) == "scheduled"
+        trace_fields = None
+        if not is_scheduled and user_id and session_id and turn_id and self.agent_id:
+            trace_fields = TraceFields(
+                task_id=session_id,
+                user_id=user_id,
+                session_id=turn_id,
+                agent_id=self.agent_id,
+                agent_version=__version__,
+                source_id=_request_source_id(request),
             )
-
         task = asyncio.current_task()
         if identity is not None and task is not None:
             self._answer_turn_tasks[identity] = task
         try:
-            async with trace_scope as span:
-                if span is not None:
-                    span.set_attribute("agent.user_message", query or "")
+            with use_b3_trace_context(
+                getattr(request, "b3_context", None),
+                trace_fields,
+            ):
+                trace_scope = (
+                    global_tracer.start_as_current_span(
+                        "agent.run",
+                        kind=SpanKind.SERVER,
+                        trace_fields=trace_fields,
+                    )
+                    if trace_fields is not None
+                    else nullcontext(None)
+                )
+                async with trace_scope as span:
+                    if span is not None:
+                        span.set_attribute("agent.user_message", query or "")
 
-                query_execution = getattr(self, "_query_execution", None)
-                if query_execution is not None:
-                    async for frame in query_execution.stream(
-                        QueryInvocation(request=request, msgs=tuple(msgs)),
-                    ):
-                        trace_id = getattr(request, "trace_id", None)
-                        msg = self._attach_trace_id_to_msg(
-                            frame.message,
-                            trace_id,
-                        )
-                        yield msg, frame.last
-                else:
-                    async for msg, last in self._stream_query_entry(
-                        msgs,
-                        request=request,
-                        query=query,
-                        session_id=session_id,
-                        user_id=user_id,
-                    ):
-                        trace_id = getattr(request, "trace_id", None)
-                        msg = self._attach_trace_id_to_msg(msg, trace_id)
-                        yield msg, last
+                    query_execution = getattr(self, "_query_execution", None)
+                    if query_execution is not None:
+                        async for frame in query_execution.stream(
+                            QueryInvocation(request=request, msgs=tuple(msgs)),
+                        ):
+                            trace_id = getattr(request, "trace_id", None)
+                            msg = self._attach_trace_id_to_msg(
+                                frame.message,
+                                trace_id,
+                            )
+                            yield msg, frame.last
+                    else:
+                        async for msg, last in self._stream_query_entry(
+                            msgs,
+                            request=request,
+                            query=query,
+                            session_id=session_id,
+                            user_id=user_id,
+                        ):
+                            trace_id = getattr(request, "trace_id", None)
+                            msg = self._attach_trace_id_to_msg(msg, trace_id)
+                            yield msg, last
         except asyncio.CancelledError:
             if identity is not None:
                 await self._report_answer_turn_outcome(

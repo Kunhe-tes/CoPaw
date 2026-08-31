@@ -7,10 +7,12 @@ import functools
 import inspect
 import uuid
 import contextvars
+import contextlib
 from dataclasses import asdict, dataclass
 from enum import Enum
 import json
-from typing import Any, Callable
+from types import SimpleNamespace
+from typing import Any, Callable, Mapping
 
 from . import _records
 
@@ -44,6 +46,8 @@ class Span:
             "kind": kind.value,
             "span_id": uuid.uuid4().hex,
             "parent_span_id": parent["span_id"] if parent else None,
+            "trace_id": parent["trace_id"] if parent else uuid.uuid4().hex,
+            "sampled": parent["sampled"] if parent else True,
             "trace_fields": asdict(trace_fields) if trace_fields else None,
             "attributes": {},
         }
@@ -74,6 +78,36 @@ class GlobalTracer:
 
 
 global_tracer = GlobalTracer()
+
+
+def extract_trace_context(
+    headers: Mapping[str, str],
+    *,
+    trace_fields_resolver: Callable[[Mapping[str, str]], TraceFields],
+):
+    return SimpleNamespace(
+        span_context={
+            "trace_id": headers["X-B3-Traceid"],
+            "span_id": headers["X-B3-Spanid"],
+            "sampled": headers["X-B3-Sampled"].lower() in {"1", "true"},
+        },
+        trace_fields=trace_fields_resolver(headers),
+    )
+
+
+@contextlib.contextmanager
+def use_trace_context(span_context, _trace_fields):
+    token = _records.current_span.set(
+        {
+            "trace_id": span_context["trace_id"],
+            "span_id": span_context["span_id"],
+            "sampled": span_context["sampled"],
+        },
+    )
+    try:
+        yield
+    finally:
+        _records.current_span.reset(token)
 
 
 def decorator(name: str, **config: Any) -> Callable:
