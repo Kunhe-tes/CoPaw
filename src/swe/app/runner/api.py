@@ -713,11 +713,19 @@ async def _build_chat_history(
     session: SafeJSONSession,
     workspace,
     status_override: str | None = None,
+    non_blocking: bool = False,
 ) -> ChatHistory:
-    state = await _read_history_state(
-        session,
-        chat_spec.session_id,
-        chat_spec.user_id,
+    state = (
+        await _read_history_state(
+            session,
+            chat_spec.session_id,
+            chat_spec.user_id,
+        )
+        if non_blocking
+        else await session.get_session_state_dict(
+            chat_spec.session_id,
+            chat_spec.user_id,
+        )
     )
     if status_override is not None:
         status = status_override
@@ -1081,8 +1089,7 @@ async def get_answer_turn(
                 _authorize_chat(request, candidate, workspace)
             except HTTPException:
                 continue
-            state = await _read_history_state(
-                session,
+            state = await session.get_session_state_dict(
                 candidate.session_id,
                 candidate.user_id,
             )
@@ -1093,6 +1100,7 @@ async def get_answer_turn(
                 candidate,
                 session=session,
                 workspace=workspace,
+                non_blocking=False,
             )
             if _slice_answer_turn(history.messages, msgid=msgid) is not None:
                 chat_spec = candidate
@@ -1107,6 +1115,7 @@ async def get_answer_turn(
         chat_spec,
         session=session,
         workspace=workspace,
+        non_blocking=False,
     )
     messages = _slice_answer_turn(history.messages, msgid=msgid)
     if messages is None:
@@ -1197,6 +1206,7 @@ async def get_chat(
         chat_spec,
         session=session,
         workspace=workspace,
+        non_blocking=True,
     )
 
 

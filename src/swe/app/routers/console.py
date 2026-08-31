@@ -1090,6 +1090,7 @@ async def _current_recovery_terminal_snapshot(
         session=session,
         workspace=workspace,
         status_override="idle",
+        non_blocking=True,
     )
     state = await _read_history_state(
         session,

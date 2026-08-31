@@ -190,7 +190,7 @@ def test_answer_turn_returns_anchor_question_and_following_messages(
     ]
 
 
-def test_answer_turn_reads_persisted_snapshot_without_waiting_for_execution(
+def test_chat_detail_reads_persisted_snapshot_without_waiting_for_execution(
     monkeypatch,
 ) -> None:
     class _PersistedSnapshotSession(_FakeSession):
@@ -210,10 +210,7 @@ def test_answer_turn_reads_persisted_snapshot_without_waiting_for_execution(
     response = _client(
         monkeypatch,
         session=_PersistedSnapshotSession(),
-    ).get(
-        "/chats/answer-turn",
-        params={"sessionid": "session-1", "msgid": "user-msg-1"},
-    )
+    ).get("/chats/chat-1")
 
     assert response.status_code == 200
 
