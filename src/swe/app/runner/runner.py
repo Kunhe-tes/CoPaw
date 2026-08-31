@@ -1639,12 +1639,22 @@ def _build_goal_finalization_input(
     goal: Any,
     state: str,
     reason: str | None,
+    stop_rejection_reason: str | None = None,
 ) -> Msg:
     """Build bounded internal input for a tool-free Goal Finalization Turn."""
+    stop_feedback = (
+        ""
+        if not stop_rejection_reason
+        else (
+            "\nStop rejected the previous delivery. Revise the final response "
+            f"to address this feedback: {stop_rejection_reason}\n"
+        )
+    )
     return _build_internal_follow_up_msg(
         "Authoritative Goal finalization context:\n"
         f"Goal state: {state}\n"
         f"State reason: {reason or 'No additional reason was recorded.'}\n"
+        + stop_feedback
         + _build_goal_contract_context(goal),
     )
 
@@ -4025,6 +4035,7 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
         goal: Any,
+        stop_rejection_reason: str | None = None,
     ):
         """Stream a no-budget Goal Finalization Turn or its fixed fallback."""
         state = goal.state.value
@@ -4043,6 +4054,7 @@ class AgentRunner(Runner):
                                 goal,
                                 state,
                                 goal.state_reason,
+                                stop_rejection_reason,
                             ),
                         ],
                     ),
