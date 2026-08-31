@@ -712,19 +712,23 @@ async def _build_chat_history(
     *,
     session: SafeJSONSession,
     workspace,
+    status_override: str | None = None,
 ) -> ChatHistory:
     state = await _read_history_state(
         session,
         chat_spec.session_id,
         chat_spec.user_id,
     )
-    coordinator = getattr(workspace, "answer_turn_coordinator", None)
-    turn_status = (
-        await coordinator.status(chat_spec.id)
-        if coordinator is not None
-        else None
-    )
-    status = turn_status.value if turn_status is not None else "idle"
+    if status_override is not None:
+        status = status_override
+    else:
+        coordinator = getattr(workspace, "answer_turn_coordinator", None)
+        turn_status = (
+            await coordinator.status(chat_spec.id)
+            if coordinator is not None
+            else None
+        )
+        status = turn_status.value if turn_status is not None else "idle"
     task_messages = _task_session_messages_from_state(state)
     model_call_failed_messages = _model_call_failed_messages_from_state(state)
     archive = await _archive_metadata(workspace, chat_spec.id)

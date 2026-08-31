@@ -30,10 +30,6 @@ class TurnStreamPort(Protocol):
         # Protocol declaration; the concrete stream owner performs cleanup.
         ...
 
-    async def cancel(self, identity: TurnIdentity) -> None:
-        ...
-
-
 class TurnExecutionPort(Protocol):
     async def request_cooperative_stop(self, identity: TurnIdentity) -> None:
         # Protocol declaration; Runner implements cooperative cancellation.

@@ -280,16 +280,6 @@ class TaskTracker:
         for subscriber in subscribers:
             subscriber.put_nowait(_SENTINEL)
 
-    async def cancel(self, identity: TurnIdentity) -> None:
-        """Cancel a producer that was started speculatively during a race."""
-        async with self._lock:
-            state = self._runs.get(identity.chat_id)
-            if state is None or state.identity != identity:
-                return
-            task = state.task
-        if not task.done():
-            task.cancel()
-
     async def stream(
         self,
         identity: TurnIdentity,

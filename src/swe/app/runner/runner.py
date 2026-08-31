@@ -2809,6 +2809,7 @@ class AgentRunner(Runner):
             TurnIdentity,
             tuple[_QueryRuntime | None, Any],
         ] = {}
+        self._answer_turn_locations: dict[TurnIdentity, tuple[str, str]] = {}
         self._query_background_tasks: set[asyncio.Task[None]] = set()
         self.session: Any | None = None
         self._query_execution = QueryExecution(
@@ -2843,7 +2844,9 @@ class AgentRunner(Runner):
             outcome.identity,
             (None, None),
         )
-        if runtime is None and session_execution is None:
+        locations = getattr(self, "_answer_turn_locations", {})
+        location = locations.get(outcome.identity)
+        if runtime is None and session_execution is None and location is None:
             raise RuntimeError(
                 "answer turn persistence context is unavailable",
             )
@@ -2876,8 +2879,12 @@ class AgentRunner(Runner):
             await session_execution.commit_state(session_execution.state)
             return
 
-        session_id = str(getattr(runtime, "session_id", "") or "")
-        user_id = str(getattr(runtime, "user_id", "") or "")
+        session_id = str(
+            getattr(runtime, "session_id", "") or (location or ("", ""))[0]
+        )
+        user_id = str(
+            getattr(runtime, "user_id", "") or (location or ("", ""))[1]
+        )
         if not session_id or self.session is None:
             raise RuntimeError("answer turn persistence target is unavailable")
 
@@ -2898,6 +2905,7 @@ class AgentRunner(Runner):
     async def release_outcome(self, identity: TurnIdentity) -> None:
         """Release the execution context after durable settlement succeeds."""
         self._answer_turn_runtimes.pop(identity, None)
+        getattr(self, "_answer_turn_locations", {}).pop(identity, None)
 
     async def _report_answer_turn_outcome(
         self,
@@ -5577,6 +5585,8 @@ class AgentRunner(Runner):
         channel_meta = getattr(request, "channel_meta", None) or {}
         identity = self._answer_turn_identity(request)
         turn_id = identity.turn_id if identity is not None else ""
+        if identity is not None:
+            self._answer_turn_locations[identity] = (str(session_id), str(user_id))
         if identity is not None:
             request.channel_meta = {
                 **channel_meta,

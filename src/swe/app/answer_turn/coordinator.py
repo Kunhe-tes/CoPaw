@@ -146,6 +146,29 @@ class AnswerTurnCoordinator:
                 return None
             return TurnLease(state.identity, queue, False)
 
+    async def recover_current(
+        self,
+        chat_id: str,
+        terminal_snapshot: Any,
+    ) -> Any:
+        """Select an active stream or terminal snapshot atomically per Chat."""
+        lock = await self._chat_lock(chat_id)
+        async with lock:
+            state = self._turns.get(chat_id)
+            if state is not None and state.settlement_started:
+                raise TurnSettlementPendingError(
+                    f"settlement pending for chat {chat_id}",
+                )
+            if state is not None and state.status not in TERMINAL_STATUSES:
+                queue = await self.stream.attach(state.identity)
+                if queue is None:
+                    state.transport_ended = True
+                    raise TurnSettlementPendingError(
+                        f"transport ended before settlement for chat {chat_id}",
+                    )
+                return TurnLease(state.identity, queue, False)
+            return await terminal_snapshot()
+
     async def settlement_pending(self, chat_id: str) -> bool:
         """Return whether a terminal outcome is not durable yet."""
         lock = await self._chat_lock(chat_id)

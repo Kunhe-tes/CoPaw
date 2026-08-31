@@ -1011,7 +1011,8 @@ def _current_recovery_chat_is_authorized(
     chat_meta = getattr(chat, "meta", None) or {}
     for key in ("source_id", "agent_id"):
         expected = identity.get(key)
-        if expected and chat_meta.get(key) != expected:
+        stored = chat_meta.get(key)
+        if expected and stored and stored != expected:
             return False
     return True
 
@@ -1088,6 +1089,7 @@ async def _current_recovery_terminal_snapshot(
         chat,
         session=session,
         workspace=workspace,
+        status_override="idle",
     )
     state = await _read_history_state(
         session,
@@ -1127,7 +1129,7 @@ async def _current_recovery_terminal_snapshot(
                 user_id=chat.user_id,
             )
             status = "failed"
-        if status not in {"completed", "stopped", "failed"}:
+        if status not in {"completed", "stopped", "cancelled", "failed"}:
             continue
         return (
             history.model_dump(mode="json"),
@@ -1888,13 +1890,27 @@ async def _resolve_current_reconnect_target(
     )
     if chat is None:
         raise HTTPException(status_code=404, detail="Chat not found")
-    lease = await workspace.answer_turn_coordinator.attach(chat.id)
+    coordinator = workspace.answer_turn_coordinator
+    recover_current = getattr(coordinator, "recover_current", None)
+    if recover_current is not None:
+        try:
+            selected = await recover_current(
+                chat.id,
+                lambda: _terminal_recovery_response(workspace, chat),
+            )
+        except TurnSettlementPendingError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Chat settlement is pending",
+                headers={"Retry-After": "1"},
+            ) from exc
+        if isinstance(selected, StreamingResponse):
+            return selected
+        lease = selected
+    else:
+        lease = await coordinator.attach(chat.id)
     if lease is None:
-        status_reader = getattr(
-            workspace.answer_turn_coordinator,
-            "status",
-            None,
-        )
+        status_reader = getattr(coordinator, "status", None)
         coordinator_status = (
             await status_reader(chat.id) if status_reader is not None else None
         )
@@ -1904,11 +1920,7 @@ async def _resolve_current_reconnect_target(
                 detail="Chat settlement is pending",
                 headers={"Retry-After": "1"},
             )
-        settlement_pending = getattr(
-            workspace.answer_turn_coordinator,
-            "settlement_pending",
-            None,
-        )
+        settlement_pending = getattr(coordinator, "settlement_pending", None)
         if settlement_pending is not None and await settlement_pending(
             chat.id,
         ):

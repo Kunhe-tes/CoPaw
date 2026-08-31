@@ -346,18 +346,22 @@ export default function useChatRequest(options: UseChatRequestOptions) {
           await recoverAfterNotFound?.(owner);
           return;
         }
-        response.json().then((data) => {
-          const res = agentScopeRuntimeResponseBuilder.handle({
-            object: "message",
-            type: AgentScopeRuntimeMessageType.ERROR,
-            content: [],
-            id: "error",
-            role: "assistant",
-            status: AgentScopeRuntimeRunStatus.Failed,
-            code: String(response.status),
-            message: JSON.stringify(data),
-          });
+        const data = await response.json().catch(() => ({}));
+        if (!isOwnerActive()) {
+          return;
+        }
+        const res = agentScopeRuntimeResponseBuilder.handle({
+          object: "message",
+          type: AgentScopeRuntimeMessageType.ERROR,
+          content: [],
+          id: "error",
+          role: "assistant",
+          status: AgentScopeRuntimeRunStatus.Failed,
+          code: String(response.status),
+          message: JSON.stringify(data),
+        });
 
+        if (currentQARef.current.response) {
           currentQARef.current.response.cards = [
             {
               code: "AgentScopeRuntimeResponseCard",
@@ -365,7 +369,7 @@ export default function useChatRequest(options: UseChatRequestOptions) {
             },
           ];
           onFinish(owner);
-        });
+        }
         return;
       }
 
@@ -702,24 +706,43 @@ export default function useChatRequest(options: UseChatRequestOptions) {
 
       const abortSignal = currentQARef.current.abortController?.signal;
       let response: Response | undefined;
-      try {
-        response = await currentApiOptions.reconnect({
-          session_id: sessionId,
-          signal: abortSignal,
-          logical_session_id: requestOwner.logicalSessionId,
-          chat_id: requestOwner.chatId,
-        });
-      } catch (error) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          response = await currentApiOptions.reconnect({
+            session_id: sessionId,
+            signal: abortSignal,
+            logical_session_id: requestOwner.logicalSessionId,
+            chat_id: requestOwner.chatId,
+          });
+        } catch (error) {
+          if (
+            !isAbortLikeError(error) &&
+            isActiveChatRequestOwner(
+              currentQARef.current.activeRequestOwner,
+              requestOwner,
+            )
+          ) {
+            failActiveResponse(requestOwner, error);
+          }
+          return;
+        }
         if (
-          !isAbortLikeError(error) &&
-          isActiveChatRequestOwner(
+          response.status !== 503 ||
+          attempt === 2 ||
+          !isActiveChatRequestOwner(
             currentQARef.current.activeRequestOwner,
             requestOwner,
           )
         ) {
-          failActiveResponse(requestOwner, error);
+          break;
         }
-        return;
+        await response.body?.cancel?.().catch(() => undefined);
+        const retryAfter = Number(response.headers.get("Retry-After"));
+        await sleep(
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? Math.min(retryAfter * 1000, 2000)
+            : 250,
+        );
       }
 
       if (response && response.body) {

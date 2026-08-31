@@ -585,6 +585,46 @@ describe("useChatRequest", () => {
     );
   });
 
+  it("retries transient settlement responses before applying legacy errors", async () => {
+    const recoverAfterNotFound = vi.fn();
+    mocks.reconnect
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 503,
+        body: {},
+        headers: new Headers({ "Retry-After": "0" }),
+      } as unknown as Response)
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 404,
+        body: {},
+        headers: new Headers(),
+        json: vi.fn(async () => ({ detail: "missing" })),
+      } as unknown as Response);
+    const currentQARef = {
+      current: {
+        response: { id: "ui-response-a", msgStatus: "generating", cards: [] },
+        activeRequestOwner: createOwner({ kind: "reconnect" }),
+      },
+    } as CurrentQARef;
+
+    render(
+      <Harness
+        currentQARef={currentQARef}
+        updateMessage={vi.fn()}
+        onFinish={vi.fn()}
+        recoverAfterNotFound={recoverAfterNotFound}
+      />,
+    );
+
+    await act(async () => {
+      await hookApi.reconnect("chat-a", createOwner({ kind: "reconnect" }));
+    });
+
+    expect(mocks.reconnect).toHaveBeenCalledTimes(2);
+    expect(recoverAfterNotFound).toHaveBeenCalledOnce();
+  });
+
   it("cancels the active backend run with the owning chat identifiers", async () => {
     const abortController = new AbortController();
     const currentQARef = {

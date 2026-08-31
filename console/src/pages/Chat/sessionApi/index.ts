@@ -1470,7 +1470,14 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
       return "";
     }
 
-    const session = this.findSessionByIdentity(sessionId);
+    const session = this.sessionList.find((item) => {
+      const extended = item as ExtendedSession;
+      return (
+        extended.id === sessionId ||
+        extended.realId === sessionId ||
+        extended.sessionId === sessionId
+      );
+    }) as ExtendedSession | undefined;
     return session?.sessionId || sessionId;
   }
 
@@ -1873,9 +1880,7 @@ export class SessionApi implements IAgentScopeRuntimeWebUISessionAPI {
     if (!snapshot || !Array.isArray(snapshot.messages)) {
       return undefined;
     }
-    const session = this.sessionList.find((item) => item.id === sessionId) as
-      | ExtendedSession
-      | undefined;
+    const session = this.findSessionByIdentity(sessionId);
     const messages = withArchiveBoundaries(
       convertMessagesForSession(
         snapshot.messages,
