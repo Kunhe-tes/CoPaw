@@ -325,20 +325,22 @@ def _scan_with_slot_release(
     try:
         return scanner.scan_skill(resolved, skill_name=skill_name)
     finally:
-        logger.debug(
-            "skill_scan_queue_ms=%.1f skill_scan_ms=%.1f skill_name=%s",
-            (
-                max(
-                    0.0,
-                    (scan_started_at - queued_at) * 1000,
-                )
-                if queued_at is not None
-                else 0.0
-            ),
-            (time.monotonic() - scan_started_at) * 1000,
-            skill_name or resolved.name,
-        )
-        slot.release()
+        try:
+            logger.debug(
+                "skill_scan_queue_ms=%.1f skill_scan_ms=%.1f skill_name=%s",
+                (
+                    max(
+                        0.0,
+                        (scan_started_at - queued_at) * 1000,
+                    )
+                    if queued_at is not None
+                    else 0.0
+                ),
+                (time.monotonic() - scan_started_at) * 1000,
+                skill_name or resolved.name,
+            )
+        finally:
+            slot.release()
 
 
 # ---------------------------------------------------------------------------
