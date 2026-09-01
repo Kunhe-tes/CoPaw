@@ -1877,6 +1877,7 @@ async def test_runtime_logs_hook_telemetry_for_executed_handlers(
     assert payload["hook_event_name"] == "PreToolUse"
     assert payload["trace_id"] == "trace-1"
     assert payload["source_id"] == "source-a"
+    assert payload["execution_state"] == "executed"
     assert payload["handler_count"] == 2
     assert payload["decision"] == "ask"
     assert payload["blocked"] is False

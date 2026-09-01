@@ -37,6 +37,10 @@ from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
     _get_last_user_text,
 )
+from .assistant_response import (
+    project_candidate_assistant_response,
+    replace_candidate_assistant_response,
+)
 from .hidden_context_injection import (
     append_hidden_context_to_user_message,
 )
@@ -82,6 +86,7 @@ from ...agents.skills_manager import (
     resolve_effective_skill_dir,
 )
 from ...agents.hook_runtime import HookRuntime
+from ...agents.hook_runtime.runtime import log_stop_skipped_telemetry
 from ...agents.hook_runtime.conversation_snapshot import (
     capture_conversation_snapshot,
 )
@@ -117,7 +122,12 @@ from ...tracing import (
     has_trace_manager,
     get_trace_manager,
 )
-from ...tracing.agent_trace_sdk import SpanKind, TraceFields, global_tracer
+from ...tracing.agent_trace_sdk import (
+    SpanKind,
+    TraceFields,
+    global_tracer,
+    use_b3_trace_context,
+)
 from ...tracing.models import TraceStatus
 from ...config.context import (
     get_current_passthrough_headers,
@@ -254,6 +264,7 @@ class _QueryTurnOutcome:
     stop_output_buffer_required: bool = False
     buffered_assistant_messages: list[Msg] = field(default_factory=list)
     assistant_memory_start: int = 0
+    goal_finalization_fallback: bool = False
 
 
 def _match_command_with_optional_id(
@@ -912,6 +923,29 @@ async def _emit_runner_hook(
     )
 
 
+def _emit_runner_stop_skip_telemetry(
+    *,
+    request: Any,
+    runner: "AgentRunner",
+    prompt: str | None,
+    assistant_response: str | None,
+    skipped_reason: str,
+) -> None:
+    try:
+        log_stop_skipped_telemetry(
+            _build_runner_hook_context(
+                HookEventName.STOP,
+                request=request,
+                runner=runner,
+                prompt=prompt,
+                assistant_response=assistant_response,
+            ),
+            skipped_reason=skipped_reason,
+        )
+    except Exception as exc:
+        logger.warning("Failed to emit skipped Stop telemetry: %s", exc)
+
+
 def _build_stop_hook_runtime(
     *,
     tenant_hooks: HookConfig,
@@ -1338,17 +1372,6 @@ async def _cleanup_mcp_clients(clients: list[Any]) -> None:
     await query_cleanup.cleanup_mcp_clients(clients)
 
 
-def _extract_text_from_blocks(blocks: list) -> str:
-    """从 content blocks 中提取文本."""
-    texts = []
-    for block in blocks:
-        if hasattr(block, "text"):
-            texts.append(block.text)
-        elif isinstance(block, dict) and "text" in block:
-            texts.append(block["text"])
-    return "\n".join(texts) if texts else ""
-
-
 def _extract_assistant_response(
     agent: SWEAgent,
     *,
@@ -1364,75 +1387,18 @@ def _extract_assistant_response(
         return ""
 
     try:
-        # memory.content 是 list of (Msg, marks) tuples
         memory = agent.memory.content
         start = max(memory_start, 0)
         memory_total = len(memory) if isinstance(memory, list) else None
         candidates: list[dict[str, Any]] = []
-        for index, entry in reversed(
-            (
-                list(enumerate(memory[start:], start))
-                if isinstance(memory, list)
-                else []
-            ),
-        ):
-            if not isinstance(entry, (tuple, list)) or not entry:
-                candidates.append(
-                    {"index": index, "reason": "invalid_memory_entry"},
-                )
-                continue
-            msg = entry[0]
-            role = getattr(msg, "role", None)
-            content = getattr(msg, "content", None)
-            metadata = getattr(msg, "metadata", None)
-            summary: dict[str, Any] = {
-                "index": index,
-                "role": role,
-                "content_type": type(content).__name__,
-                "metadata_fields": [
-                    key
-                    for key in ("event_type", "message_type", "kind", "type")
-                    if isinstance(metadata, dict) and key in metadata
-                ],
-            }
-            if isinstance(content, list):
-                summary["block_types"] = [
-                    (
-                        block.get("type")
-                        if isinstance(block, dict)
-                        else getattr(block, "type", None)
-                    )
-                    for block in content
-                ]
-            if (
-                role != "assistant"
-                or not hasattr(msg, "content")
-                or _is_live_assistant_event(msg)
-            ):
-                summary["reason"] = (
-                    "role_or_missing_content"
-                    if role != "assistant" or not hasattr(msg, "content")
-                    else "live_assistant_event"
-                )
-                candidates.append(summary)
-                continue
-            # content 可能是 list of blocks 或 string
-            if isinstance(msg.content, str):
-                summary["text_len"] = len(msg.content)
-                summary["reason"] = "accepted"
-                logger.warning(
-                    "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
-                    "selected=%s candidates=%s",
-                    memory_total,
-                    start,
-                    summary,
-                    candidates,
-                )
-                return msg.content
-            if isinstance(msg.content, list) and _has_only_text_blocks(
-                msg.content,
-            ):
-                response = _extract_text_from_blocks(msg.content)
+        entries = (
+            reversed(list(enumerate(memory[start:], start)))
+            if isinstance(memory, list)
+            else ()
+        )
+        for index, entry in entries:
+            response, summary = _inspect_assistant_memory_entry(index, entry)
+            if response is not None:
                 summary["text_len"] = len(response)
                 summary["reason"] = "accepted"
                 logger.warning(
@@ -1444,7 +1410,6 @@ def _extract_assistant_response(
                     candidates,
                 )
                 return response
-            summary["reason"] = "unsupported_content"
             candidates.append(summary)
         logger.warning(
             "[STOP-DEBUG] extract memory_total=%s memory_start=%d "
@@ -1462,6 +1427,48 @@ def _extract_assistant_response(
     return ""
 
 
+def _inspect_assistant_memory_entry(
+    index: int,
+    entry: Any,
+) -> tuple[str | None, dict[str, Any]]:
+    """Inspect one memory entry and return its response and diagnostics."""
+    if not isinstance(entry, (tuple, list)) or not entry:
+        return None, {"index": index, "reason": "invalid_memory_entry"}
+    msg = entry[0]
+    role = getattr(msg, "role", None)
+    content = getattr(msg, "content", None)
+    metadata = getattr(msg, "metadata", None)
+    summary: dict[str, Any] = {
+        "index": index,
+        "role": role,
+        "content_type": type(content).__name__,
+        "metadata_fields": [
+            key
+            for key in ("event_type", "message_type", "kind", "type")
+            if isinstance(metadata, dict) and key in metadata
+        ],
+    }
+    if isinstance(content, list):
+        summary["block_types"] = [
+            (
+                block.get("type")
+                if isinstance(block, dict)
+                else getattr(block, "type", None)
+            )
+            for block in content
+        ]
+    if role != "assistant" or not hasattr(msg, "content"):
+        summary["reason"] = "role_or_missing_content"
+        return None, summary
+    if _is_live_assistant_event(msg):
+        summary["reason"] = "live_assistant_event"
+        return None, summary
+    response = project_candidate_assistant_response(msg)
+    if response is None:
+        summary["reason"] = "unsupported_content"
+    return response, summary
+
+
 def _replace_assistant_response(
     agent: SWEAgent,
     response: str,
@@ -1475,44 +1482,11 @@ def _replace_assistant_response(
         for msg, _marks in reversed(memory[max(memory_start, 0) :]):
             if msg.role != "assistant" or _is_live_assistant_event(msg):
                 continue
-            if isinstance(msg.content, str):
-                msg.content = response
-                return True
-            if isinstance(msg.content, list) and _has_only_text_blocks(
-                msg.content,
-            ):
-                text_blocks = [
-                    block
-                    for block in msg.content
-                    if _content_block_has_text(block)
-                ]
-                if not text_blocks:
-                    continue
-                _replace_content_block_text(text_blocks[0], response)
-                for block in text_blocks[1:]:
-                    _replace_content_block_text(block, "")
+            if replace_candidate_assistant_response(msg, response):
                 return True
     except Exception as exc:
         logger.debug("Failed to replace assistant response: %s", exc)
     return False
-
-
-def _content_block_has_text(block: Any) -> bool:
-    if isinstance(block, dict):
-        return block.get("type") == "text" and isinstance(
-            block.get("text"),
-            str,
-        )
-    return getattr(block, "type", None) == "text" and isinstance(
-        getattr(block, "text", None),
-        str,
-    )
-
-
-def _has_only_text_blocks(blocks: list[Any]) -> bool:
-    return bool(blocks) and all(
-        _content_block_has_text(block) for block in blocks
-    )
 
 
 def _is_live_assistant_event(msg: Any) -> bool:
@@ -1524,13 +1498,6 @@ def _is_live_assistant_event(msg: Any) -> bool:
         for key in ("event_type", "message_type", "kind", "type")
     ).lower()
     return any(token in values for token in ("progress", "tool", "approval"))
-
-
-def _replace_content_block_text(block: Any, response: str) -> None:
-    if isinstance(block, dict):
-        block["text"] = response
-    else:
-        block.text = response
 
 
 def _build_internal_follow_up_msg(follow_up_prompt: str) -> Msg:
@@ -1676,12 +1643,22 @@ def _build_goal_finalization_input(
     goal: Any,
     state: str,
     reason: str | None,
+    stop_rejection_reason: str | None = None,
 ) -> Msg:
     """Build bounded internal input for a tool-free Goal Finalization Turn."""
+    stop_feedback = (
+        ""
+        if not stop_rejection_reason
+        else (
+            "\nStop rejected the previous delivery. Revise the final response "
+            f"to address this feedback: {stop_rejection_reason}\n"
+        )
+    )
     return _build_internal_follow_up_msg(
         "Authoritative Goal finalization context:\n"
         f"Goal state: {state}\n"
         f"State reason: {reason or 'No additional reason was recorded.'}\n"
+        + stop_feedback
         + _build_goal_contract_context(goal),
     )
 
@@ -2832,6 +2809,7 @@ class AgentRunner(Runner):
             TurnIdentity,
             tuple[_QueryRuntime | None, Any],
         ] = {}
+        self._answer_turn_locations: dict[TurnIdentity, tuple[str, str]] = {}
         self._query_background_tasks: set[asyncio.Task[None]] = set()
         self.session: Any | None = None
         self._query_execution = QueryExecution(
@@ -2861,39 +2839,73 @@ class AgentRunner(Runner):
             task.cancel()
 
     async def persist_outcome(self, outcome: TurnOutcome) -> None:
-        """Persist the accepted Stop outcome through the session adapter."""
+        """Persist a terminal answer-turn outcome in the owning session."""
         runtime, session_execution = self._answer_turn_runtimes.get(
             outcome.identity,
             (None, None),
         )
-        if (
-            outcome.status != TurnStatus.CANCELLED
-            or session_execution is None
-            or not hasattr(session_execution, "state")
-        ):
-            return
+        locations = getattr(self, "_answer_turn_locations", {})
+        location = locations.get(outcome.identity)
+        if runtime is None and session_execution is None and location is None:
+            raise RuntimeError(
+                "answer turn persistence context is unavailable",
+            )
         from .session_lifecycle import (
             mark_stopped_agent_memory,
-            mark_stopped_turn_state,
+            mark_terminal_turn_state,
         )
 
-        try:
-            if runtime is not None:
-                mark_stopped_agent_memory(
-                    runtime.agent,
-                    outcome.identity.msgid,
-                )
-            mark_stopped_turn_state(
+        terminal_status = (
+            "stopped"
+            if outcome.status == TurnStatus.CANCELLED
+            else outcome.status.value
+        )
+        if outcome.status == TurnStatus.CANCELLED and runtime is not None:
+            mark_stopped_agent_memory(
+                runtime.agent,
+                outcome.identity.msgid,
+            )
+
+        if session_execution is not None and getattr(
+            session_execution,
+            "is_active",
+            True,
+        ):
+            mark_terminal_turn_state(
                 session_execution.state,
                 outcome.identity.msgid,
+                terminal_status,
             )
             await session_execution.commit_state(session_execution.state)
-        except Exception:
-            logger.exception(
-                "Failed to persist stopped answer turn chat_id=%s msgid=%s",
-                outcome.identity.chat_id,
+            return
+
+        session_id = str(
+            getattr(runtime, "session_id", "") or (location or ("", ""))[0]
+        )
+        user_id = str(
+            getattr(runtime, "user_id", "") or (location or ("", ""))[1]
+        )
+        if not session_id or self.session is None:
+            raise RuntimeError("answer turn persistence target is unavailable")
+
+        def mark_outcome(state: dict[str, Any]) -> dict[str, Any]:
+            mark_terminal_turn_state(
+                state,
                 outcome.identity.msgid,
+                terminal_status,
             )
+            return state
+
+        await self.session.mutate_session_state(
+            session_id,
+            mark_outcome,
+            user_id=user_id,
+        )
+
+    async def release_outcome(self, identity: TurnIdentity) -> None:
+        """Release the execution context after durable settlement succeeds."""
+        self._answer_turn_runtimes.pop(identity, None)
+        getattr(self, "_answer_turn_locations", {}).pop(identity, None)
 
     async def _report_answer_turn_outcome(
         self,
@@ -4062,6 +4074,7 @@ class AgentRunner(Runner):
         *,
         runtime: _QueryRuntime,
         goal: Any,
+        stop_rejection_reason: str | None = None,
     ):
         """Stream a no-budget Goal Finalization Turn or its fixed fallback."""
         state = goal.state.value
@@ -4080,6 +4093,7 @@ class AgentRunner(Runner):
                                 goal,
                                 state,
                                 goal.state_reason,
+                                stop_rejection_reason,
                             ),
                         ],
                     ),
@@ -4102,10 +4116,16 @@ class AgentRunner(Runner):
                 "Goal Finalization Turn failed; emitting fallback goal_id=%s",
                 getattr(goal, "goal_id", ""),
             )
+        finalization_fallback = previous_msg is None
         final_msg = previous_msg or _build_goal_finalization_msg(
             state,
             goal.state_reason,
         )
+        if finalization_fallback:
+            final_msg.metadata = {
+                **(final_msg.metadata or {}),
+                "goal_finalization_fallback": True,
+            }
         memory = getattr(runtime.agent, "memory", None)
         add_to_memory = getattr(memory, "add", None)
         if callable(add_to_memory):
@@ -4613,18 +4633,21 @@ class AgentRunner(Runner):
         runtime: _QueryRuntime,
         plan: _TurnPlan,
     ) -> bool:
+        tenant_hooks = getattr(runtime, "tenant_hooks", HookConfig())
+        agent_config = getattr(runtime, "agent_config", None)
+        hook_overlay = getattr(runtime, "hook_overlay", HookSessionOverlay())
         if not _hook_config_enabled(
-            runtime.tenant_hooks,
-            runtime.agent_config,
-            runtime.hook_overlay,
+            tenant_hooks,
+            agent_config,
+            hook_overlay,
         ):
             return False
         return _requires_stop_output_buffer(
             request=request,
             runner=self,
-            tenant_hooks=runtime.tenant_hooks,
-            agent_config=runtime.agent_config,
-            overlay=runtime.hook_overlay,
+            tenant_hooks=tenant_hooks,
+            agent_config=agent_config,
+            overlay=hook_overlay,
             prompt=plan.original_user_message,
         )
 
@@ -4688,6 +4711,9 @@ class AgentRunner(Runner):
         outcome: _QueryTurnOutcome,
     ) -> MergedHookResult | None:
         """执行 Stop completion gate，active guard 已设置时跳过递归触发。"""
+        tenant_hooks = getattr(runtime, "tenant_hooks", HookConfig())
+        agent_config = getattr(runtime, "agent_config", None)
+        hook_overlay = getattr(runtime, "hook_overlay", HookSessionOverlay())
         logger.warning(
             "[STOP-DEBUG] stop_entry trace_id=%s turn_id=%s response_len=%d "
             "active=%s plan_boundary=%s tenant_enabled=%s agent_enabled=%s "
@@ -4697,33 +4723,70 @@ class AgentRunner(Runner):
             len(outcome.assistant_response or ""),
             outcome.stop_hook_active,
             outcome.plan_interaction_turn_boundary,
-            getattr(runtime.tenant_hooks, "enabled", None),
+            getattr(tenant_hooks, "enabled", None),
             getattr(
-                getattr(runtime.agent_config, "hooks", None),
+                getattr(agent_config, "hooks", None),
                 "enabled",
                 None,
             ),
-            [entry.hook_id for entry in runtime.hook_overlay.entries],
+            [entry.hook_id for entry in hook_overlay.entries],
         )
         if outcome.stop_hook_active:
             logger.warning("[STOP-DEBUG] skipped reason=stop_hook_active")
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="stop_hook_active",
+            )
+            return None
+        if outcome.goal_finalization_fallback:
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="finalization_fallback",
+            )
             return None
         if outcome.plan_interaction_turn_boundary:
             logger.warning(
                 "[STOP-DEBUG] skipped reason=plan_interaction_turn_boundary",
+            )
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="plan_interaction_turn_boundary",
             )
             return None
         if not outcome.assistant_response:
             logger.warning(
                 "[STOP-DEBUG] skipped reason=empty_assistant_response",
             )
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="empty_assistant_response",
+            )
             return None
         if not _hook_config_enabled(
-            runtime.tenant_hooks,
-            runtime.agent_config,
-            runtime.hook_overlay,
+            tenant_hooks,
+            agent_config,
+            hook_overlay,
         ):
             logger.warning("[STOP-DEBUG] skipped reason=hooks_disabled")
+            _emit_runner_stop_skip_telemetry(
+                request=request,
+                runner=self,
+                prompt=plan.original_user_message,
+                assistant_response=outcome.assistant_response,
+                skipped_reason="hooks_disabled",
+            )
             return None
 
         outcome.stop_hook_active = True
@@ -4731,15 +4794,15 @@ class AgentRunner(Runner):
             finalization = await _emit_runner_stop_finalization(
                 request=request,
                 runner=self,
-                tenant_hooks=runtime.tenant_hooks,
-                agent_config=runtime.agent_config,
-                overlay=runtime.hook_overlay,
+                tenant_hooks=tenant_hooks,
+                agent_config=agent_config,
+                overlay=hook_overlay,
                 prompt=plan.original_user_message,
                 assistant_response=outcome.assistant_response,
                 agent=runtime.agent,
                 max_transform_seconds=(
                     self._resolve_max_stop_transform_seconds(
-                        runtime.agent_config,
+                        agent_config,
                     )
                 ),
             )
@@ -4770,9 +4833,9 @@ class AgentRunner(Runner):
             HookEventName.STOP,
             request=request,
             runner=self,
-            tenant_hooks=runtime.tenant_hooks,
-            agent_config=runtime.agent_config,
-            overlay=runtime.hook_overlay,
+            tenant_hooks=tenant_hooks,
+            agent_config=agent_config,
+            overlay=hook_overlay,
             prompt=plan.original_user_message,
             assistant_response=outcome.assistant_response,
             agent=runtime.agent,
@@ -5473,6 +5536,38 @@ class AgentRunner(Runner):
         ):
             yield msg, last
 
+    async def _stream_query_frames(
+        self,
+        msgs,
+        *,
+        request: AgentRequest,
+        query: str | None,
+        session_id: str,
+        user_id: str,
+    ):
+        """Yield query frames from the configured execution adapter."""
+        query_execution = getattr(self, "_query_execution", None)
+        if query_execution is not None:
+            async for frame in query_execution.stream(
+                QueryInvocation(request=request, msgs=tuple(msgs)),
+            ):
+                yield self._attach_trace_id_to_msg(
+                    frame.message,
+                    getattr(request, "trace_id", None),
+                ), frame.last
+            return
+        async for msg, last in self._stream_query_entry(
+            msgs,
+            request=request,
+            query=query,
+            session_id=session_id,
+            user_id=user_id,
+        ):
+            yield self._attach_trace_id_to_msg(
+                msg,
+                getattr(request, "trace_id", None),
+            ), last
+
     async def query_handler(
         self,
         msgs,
@@ -5491,6 +5586,8 @@ class AgentRunner(Runner):
         identity = self._answer_turn_identity(request)
         turn_id = identity.turn_id if identity is not None else ""
         if identity is not None:
+            self._answer_turn_locations[identity] = (str(session_id), str(user_id))
+        if identity is not None:
             request.channel_meta = {
                 **channel_meta,
                 "turn_id": identity.turn_id,
@@ -5499,7 +5596,7 @@ class AgentRunner(Runner):
         is_scheduled = (
             getattr(request, "execution_origin", None) == "scheduled"
         )
-        trace_scope = nullcontext(None)
+        trace_fields = None
         if (
             not is_scheduled
             and user_id
@@ -5507,48 +5604,42 @@ class AgentRunner(Runner):
             and turn_id
             and self.agent_id
         ):
-            trace_scope = global_tracer.start_as_current_span(
-                "agent.run",
-                kind=SpanKind.SERVER,
-                trace_fields=TraceFields(
-                    task_id=session_id,
-                    user_id=user_id,
-                    session_id=turn_id,
-                    agent_id=self.agent_id,
-                    agent_version=__version__,
-                    source_id=_request_source_id(request),
-                ),
+            trace_fields = TraceFields(
+                task_id=session_id,
+                user_id=user_id,
+                session_id=turn_id,
+                agent_id=self.agent_id,
+                agent_version=__version__,
+                source_id=_request_source_id(request),
             )
-
         task = asyncio.current_task()
         if identity is not None and task is not None:
             self._answer_turn_tasks[identity] = task
         try:
-            async with trace_scope as span:
-                if span is not None:
-                    span.set_attribute("agent.user_message", query or "")
+            with use_b3_trace_context(
+                getattr(request, "b3_context", None),
+                trace_fields,
+            ):
+                trace_scope = (
+                    global_tracer.start_as_current_span(
+                        "agent.run",
+                        kind=SpanKind.SERVER,
+                        trace_fields=trace_fields,
+                    )
+                    if trace_fields is not None
+                    else nullcontext(None)
+                )
+                async with trace_scope as span:
+                    if span is not None:
+                        span.set_attribute("agent.user_message", query or "")
 
-                query_execution = getattr(self, "_query_execution", None)
-                if query_execution is not None:
-                    async for frame in query_execution.stream(
-                        QueryInvocation(request=request, msgs=tuple(msgs)),
-                    ):
-                        trace_id = getattr(request, "trace_id", None)
-                        msg = self._attach_trace_id_to_msg(
-                            frame.message,
-                            trace_id,
-                        )
-                        yield msg, frame.last
-                else:
-                    async for msg, last in self._stream_query_entry(
+                    async for msg, last in self._stream_query_frames(
                         msgs,
                         request=request,
                         query=query,
                         session_id=session_id,
                         user_id=user_id,
                     ):
-                        trace_id = getattr(request, "trace_id", None)
-                        msg = self._attach_trace_id_to_msg(msg, trace_id)
                         yield msg, last
         except asyncio.CancelledError:
             if identity is not None:
@@ -5573,7 +5664,6 @@ class AgentRunner(Runner):
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)
-                self._answer_turn_runtimes.pop(identity, None)
 
     async def get_state_loaded(
         self,

@@ -4,6 +4,83 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 
 ## Language
 
+**Chat History Snapshot**:
+The externally returned point-in-time representation of one Chat's persisted conversation and turn state. It is a read result, not a promise to wait for an active Answer Turn to finish.
+_Avoid_: live stream, wait-for-completion read, session-file view
+
+**Stream Attachability**:
+The condition in which an active Answer Turn still accepts an additional stream subscriber for its exact turn identity. It is distinct from a previously observed Chat History Snapshot status.
+_Avoid_: historical `running` status, reconnect hint, durable completion state
+
+**Compatible Chat API Evolution**:
+The rule for externally consumed Chat APIs: established paths, request fields, response fields, status values, successful SSE framing, and documented error meanings remain valid; new recovery capability is additive and optional.
+_Avoid_: breaking reconnect migration, Console-only protocol, silent contract replacement
+
+**Atomic Chat Recovery**:
+One recovery request for a Chat that either attaches to its exact active Answer Turn or yields that turn's terminal Chat History Snapshot. A natural completion between observation and recovery is a successful terminal result, not a missing Chat error.
+_Avoid_: GET-then-POST reconnect, stale-running retry, completion-as-404
+
+**Recovery Event Stream**:
+The single SSE response form of an Atomic Chat Recovery. It carries either the active turn's replay and live events, or one explicit terminal Chat History Snapshot event followed by normal stream completion.
+_Avoid_: JSON-or-SSE response switching, terminal recovery error, second history fetch
+
+**Terminal Chat Snapshot Event**:
+The `chat.snapshot` SSE event emitted by a Compatible Current-Recovery Mode when no active Answer Turn is selected. It contains the resolved Chat ID, selected User Question Message ID when present, and the complete terminal Chat History Snapshot, after which the stream closes normally.
+_Avoid_: empty assistant placeholder, terminal 404, second client history read
+
+**Recoverable Turn Terminal Status**:
+The durable public terminal status of the Answer Turn selected by a Terminal Chat Snapshot Event: `completed`, `stopped`, `failed`, or `null` when no turn exists. It is a business result within a successful recovery response, not an HTTP recovery error.
+_Avoid_: internal `cancelled` exposure, completion-only persistence, terminal transport failure
+
+**Answer Turn Settlement Barrier**:
+The per-Chat admission boundary from terminal-outcome selection until that outcome is durably persisted. Current recovery and a later user submission wait behind this barrier; recovery then sees the complete terminal snapshot and only afterward may a new Answer Turn begin.
+_Avoid_: pre-persistence next turn, terminal-status race, user-visible settlement conflict
+
+**Pending Settlement Recovery**:
+The failure-closed state of an Answer Turn whose terminal snapshot has not yet been durably written. The Chat retries that same write without rerunning the model and rejects recovery and new submission with retryable service unavailability; after process restart, a persisted admitted turn with no local active turn is reconciled as `failed` before the Chat resumes.
+_Avoid_: unbounded silent inconsistency, rerun-on-persist-failure, orphaned-running turn, next-turn overwrite
+
+**Current Chat Recovery**:
+The default Atomic Chat Recovery scoped by Chat ID. It selects the Chat's current active Answer Turn when one exists, otherwise its latest terminal Chat History Snapshot; the server returns the selected User Question Message ID as correlation metadata rather than requiring it as recovery input.
+_Avoid_: client-known-turn-only recovery, logical-session-only recovery, client-guessed current turn
+
+**Current Chat Recovery Linearization**:
+The point at which a Current Chat Recovery selects its result, shared with Answer Turn admission through one per-Chat coordinator lock. A recovery returns one coherent selected active turn or terminal snapshot; a concurrent later submission belongs wholly before or after that selection.
+_Avoid_: mixed-turn snapshot, post-selection implicit refresh, independently locked recovery and submission
+
+**Compatible Current-Recovery Mode**:
+The opt-in `reconnect_mode: "current"` behavior of the established Console Chat POST. It provides Current Chat Recovery while callers that omit the mode retain the established reconnect result and error semantics.
+_Avoid_: replacement recovery endpoint, changed legacy 404, implicit protocol upgrade
+
+**Recovery Mode Selection**:
+The Console Chat POST selects Compatible Current-Recovery Mode whenever `reconnect_mode` is `"current"`, with or without legacy `reconnect: true`; a request without that mode follows its established reconnect or new-submission path.
+_Avoid_: required paired flags, breaking mode migration, mode-without-reconnect rejection
+
+**Unknown Recovery Mode Tolerance**:
+Any missing, non-string, or unrecognized `reconnect_mode` is treated as absent and follows the established Console Chat POST path. Only the exact value `"current"` changes behavior.
+_Avoid_: unknown-mode validation error, third-party passthrough breakage, accidental protocol activation
+
+**Console Recovery Compatibility Fallback**:
+The Console sends both the established reconnect flag and Compatible Current-Recovery Mode, then treats a reconnect 404 as one prompt Chat history refresh rather than a failed assistant response. A returned history is applied as terminal state; only a second Chat-not-found result is presented as absence.
+_Avoid_: legacy-backend error bubble, repeated reconnect retries, 404-as-assistant-output
+
+**Compatible Recovery Locator**:
+The optional Chat ID and established session locator accepted by Compatible Current-Recovery Mode. A caller may continue to identify its current Chat through the existing session-shaped request format; an explicit Chat ID only narrows that resolution and is never a required migration field.
+When an optional Chat ID cannot be resolved or authorized, the established session locator remains eligible to resolve the caller's own Chat.
+_Avoid_: mandatory Chat-ID migration, session-locator removal, optional-ID validation failure, client-generated turn identity
+
+**Compatible Recovery Target Resolution**:
+The ordered resolution of a Compatible Recovery Locator: an authorized optional Chat ID, then an existing session-shaped value that directly identifies a Chat, then a Chat uniquely selected by logical session ID, current user, and channel. An unresolved or unauthorized optional Chat ID does not prevent session resolution; the final resolved Chat is always ownership-authorized before recovery.
+_Avoid_: mandatory locator precedence, session-only cross-user lookup, locator ambiguity, authorization-after-attach
+
+**Recovery Target Concealment**:
+The compatible recovery response rule that a missing Chat, an unresolvable locator, and an unauthorized resolved Chat are indistinguishable as `404 Chat not found`. Recovery never attaches or reveals turn state before Chat ownership authorization succeeds.
+_Avoid_: cross-user Chat oracle, attach-before-authorize, unauthorized-state disclosure
+
+**Non-blocking Chat History Read**:
+The established Chat detail read returns the latest durably committed Chat History Snapshot immediately, including `running` when an Answer Turn remains active. It does not wait for the turn or claim to contain uncommitted live stream output.
+_Avoid_: completion-waiting GET, live-token history read, stream replacement
+
 **Tenant Bootstrap**:
 The creation or repair of one tenant scope's minimum runnable directory state, including its default Agent Profile and required workspace assets. A Tenant Bootstrap completes only when that scope can load its Default Agent Profile.
 _Avoid_: directory creation, partial initialization, workspace startup
@@ -1412,7 +1489,7 @@ A failure that prevents an enabled MCP client from becoming usable by an Agent, 
 _Avoid_: MCP tool failure, optional MCP skip, successful connection log
 
 **Hook Telemetry Event**:
-A structured observability record for one Hook Runtime boundary, used to analyze hook behavior without changing the hook's runtime decision semantics. A **Hook Telemetry Event** includes the boundary-level outcome and the handler-level details that explain it, and is emitted in a log-collection-friendly shape rather than persisted as a Trace Span.
+A structured observability record for one Hook Runtime boundary, used to analyze hook behavior without changing the hook's runtime decision semantics. A **Hook Telemetry Event** includes the boundary-level outcome and the handler-level details that explain it, and is emitted in a log-collection-friendly shape rather than persisted as a Trace Span. For Stop, it also records a skipped completion gate with no handler execution.
 _Avoid_: debug log, audit record, raw hook payload, trace span
 
 **Hook Telemetry Log Message**:
@@ -1420,15 +1497,15 @@ A single-line structured application log message with a stable hook telemetry pr
 _Avoid_: global JSON logging, unstructured hook log, trace span, warning log
 
 **Hook Telemetry Emission Boundary**:
-The rule that a **Hook Telemetry Log Message** is emitted only when at least one hook handler actually runs for a Hook Runtime boundary.
-_Avoid_: unmatched hook boundary log, resolver miss telemetry
+The rule that a **Hook Telemetry Log Message** is emitted when at least one hook handler actually runs for a Hook Runtime boundary. Stop additionally emits it when its completion gate is skipped, with `handler_count: 0`, `handlers: []`, `execution_state: "skipped"`, and a stable `skipped_reason`; an executed Stop event records `execution_state: "executed"`.
+_Avoid_: untyped Stop skip log, resolver miss hidden as handler failure, raw candidate response telemetry
 
 **Hook Telemetry Correlation**:
 The relationship between a **Hook Telemetry Log Message** and the request or trace that caused it. **Hook Telemetry Correlation** should include a trace identifier when one is available, but a missing trace identifier does not make the telemetry event invalid.
 _Avoid_: mandatory trace span linkage, uncorrelated hook log
 
 **Hook Telemetry Schema**:
-The versioned JSON shape inside a **Hook Telemetry Log Message**. The schema records correlation fields, boundary-level outcome fields, and handler-level details while excluding raw hook payloads by default.
+The versioned JSON shape inside a **Hook Telemetry Log Message**. The schema records correlation fields, boundary-level outcome fields, and handler-level details while excluding raw hook payloads by default. `hook_telemetry.v1` records the Stop `execution_state` and, when skipped, the stable `skipped_reason` and safe candidate summary.
 _Avoid_: ad-hoc log fields, raw payload schema, trace span schema
 
 **Application Log Output Pipeline**:
@@ -2347,6 +2424,10 @@ _Avoid_: unbounded directory index, whole-directory search at request time, sour
 The single completion lifecycle event for every candidate Assistant Response. Each configured handler runs once and may perform its own attempt-recording or notification work. Its merged decision approves or blocks completion.
 _Avoid_: BeforeStop hook, observation-only stop hook
 
+**Candidate Assistant Response**:
+A newly recorded `assistant` message in the current turn with a non-empty **Assistant Response Text Projection** and no `tool_use` block. Reasoning and passive media blocks do not disqualify it, but are excluded from the Hook input. Normal completion and **Goal Finalization Candidate Assistant Response** use this same selection rule.
+_Avoid_: tool request, reasoning-inclusive Hook input, pure-text-only message requirement, earlier-turn message
+
 **Stop Decision**:
 The only valid completion decision from a Stop Hook: `allow` approves the candidate Assistant Response and `block` rejects that completion attempt. An explicit `block` may schedule a bounded automatic follow-up Agent turn; if any matched handler blocks, the merged decision blocks.
 _Avoid_: deny, stop, implicit retry
@@ -2360,8 +2441,8 @@ The non-compatible removal of the `BeforeStop` event. Configuration must use `St
 _Avoid_: BeforeStop compatibility alias, automatic event translation
 
 **Stop Trigger**:
-The boundary at which a normal candidate Assistant Response is about to complete a request. Tool-hook terminal-stop paths and turns without a candidate Assistant Response skip Stop.
-_Avoid_: tool termination audit, no-output completion hook
+The boundary at which a **Candidate Assistant Response** is about to complete a request. A Goal invokes it once for each Goal Finalization candidate; its internal execution turns never invoke it. Tool-hook terminal-stop paths, Finalization Fallback, and turns without a candidate Assistant Response skip Stop.
+_Avoid_: tool termination audit, per-turn Goal hook, fallback completion hook
 
 ## New-session capability language
 
@@ -2937,9 +3018,21 @@ _Avoid_: final answer, Agent-declared completion, unverified success message
 The final short, read-only and tool-free Main Agent turn started after every required Verification Run passes, or when a Goal request must close in a non-active state. It produces the formal Chat response and ends the Goal Chat Stream; it neither advances the Goal nor consumes the Goal Turn Budget.
 _Avoid_: pre-verification final answer, Goal Runtime-authored delivery, budgeted execution turn, failed-verification completion
 
+**Goal Finalization Candidate Assistant Response**:
+The visible text produced by a **Goal Finalization Turn** for formal Chat delivery. It is one **Candidate Assistant Response** and is evaluated by the **Stop Hook** exactly once before the Goal Chat Stream closes; internal Goal turns are not Candidate Assistant Responses. A Stop block may request only a tool-free Finalization retry. Those retries consume the existing `max_stop_turns` limit in their own Finalization-local counter, never reopen Goal execution or verification, and never consume the Goal Turn Budget.
+_Avoid_: per-turn Goal Stop, Goal Runtime status message, Goal-budgeted retry, execution-turn retry
+
+**Assistant Response Text Projection**:
+The ordered visible text extracted from a Candidate Assistant Response for a Stop Hook. It excludes reasoning and media content while allowing a message that also contains passive media to remain a Candidate Assistant Response.
+_Avoid_: reasoning-inclusive response, media payload, pure-text-only message requirement
+
+**Text-preserving Stop Transformation**:
+A Stop output transformation that replaces only an **Assistant Response Text Projection** while preserving every non-text block of its Candidate Assistant Response. The complete replacement is written into the first `text` block, later `text` blocks are emptied, and non-text blocks retain their original content and order. The transformer cannot inspect, replace, suppress, or reorder reasoning or passive media content.
+_Avoid_: media transformation, whole-message replacement, transformer-visible reasoning, inferred multi-block replacement mapping
+
 **Finalization Fallback**:
-The fixed minimal system response emitted when a Goal Finalization Turn cannot produce text because of a model or infrastructure failure. The Goal Runtime closes the current request without retrying or changing the persisted Goal state; the user can inspect the authoritative Goal Monitor Summary.
-_Avoid_: fabricated Agent conclusion, finalization retry loop, implicit Goal transition
+The fixed minimal system response emitted when a Goal Finalization Turn cannot produce text because of a model or infrastructure failure. It is not a **Goal Finalization Candidate Assistant Response** and does not invoke a Stop Hook; the runtime records the gate skip as `finalization_fallback`, closes the current request without retrying or changing the persisted Goal state, and directs the user to the authoritative Goal Monitor Summary.
+_Avoid_: fabricated Agent conclusion, fallback Stop transformation, finalization retry loop, implicit Goal transition
 
 **Goal Mode Exclusivity**:
 The Composer and runtime rule that Goal Mode cannot coexist with Plan Mode or Explicit Expert Selection. Entering Goal Mode clears those selections; a non-terminal Goal prevents switching to them until the Goal is released, while Goal-owned Background SubAgent delegation remains available under existing rules.

@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from starlette.requests import Request
 
 from swe.app.agent_context import FileManagerSourceScopeLocation
 from swe.app.answer_turn.models import (
@@ -1522,7 +1523,7 @@ def test_console_chat_stream_reuses_the_active_turn_identity(
     assert response.headers["x-swe-msgid"] == "server-turn-1"
 
 
-def test_console_chat_copies_b3_trace_id_to_native_meta(monkeypatch) -> None:
+def test_console_chat_copies_complete_b3_context_to_native_meta(monkeypatch) -> None:
     app = FastAPI()
     app.include_router(console_router.router)
 
@@ -1579,6 +1580,8 @@ def test_console_chat_copies_b3_trace_id_to_native_meta(monkeypatch) -> None:
         headers={
             "X-Source-Id": "src-a",
             "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+            "X-B3-Spanid": "32befd146889a61a",
+            "X-B3-Sampled": "1",
         },
         json=payload,
     ) as response:
@@ -1589,6 +1592,30 @@ def test_console_chat_copies_b3_trace_id_to_native_meta(monkeypatch) -> None:
     assert tracker.payload["meta"]["b3_trace_id"] == (
         "8267fd70bacf497704fec30eaa353979"
     )
+    assert tracker.payload["meta"]["b3_context"] == {
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+        "X-B3-Sampled": "1",
+    }
+
+
+def test_console_chat_rejects_partial_b3_context() -> None:
+    request = Request(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/console/chat",
+            "headers": [
+                (b"x-source-id", b"src-a"),
+                (b"x-b3-traceid", b"8267fd70bacf497704fec30eaa353979"),
+            ],
+        },
+    )
+
+    with pytest.raises(console_router.HTTPException) as exc_info:
+        console_router._inject_request_metadata(request, {"meta": {}})
+
+    assert exc_info.value.status_code == 400
 
 
 def test_console_chat_copies_structured_context_references_to_native_meta(
