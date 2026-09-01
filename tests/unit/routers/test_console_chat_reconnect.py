@@ -8,6 +8,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.swe.app.routers import console as console_router
+
+
+def test_console_stop_idle_response_is_a_fresh_legacy_payload() -> None:
+    first = console_router._console_stop_idle_response()
+    second = console_router._console_stop_idle_response()
+
+    assert first == {"stopped": False, "accepted": False, "status": "idle"}
+    assert first is not second
+
+
 from swe.app.answer_turn.models import StopClaim, TurnIdentity, TurnLease
 
 

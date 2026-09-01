@@ -1159,7 +1159,132 @@ def _console_chat_stream_headers(
     return headers
 
 
-async def _start_new_chat(  # pylint: disable=too-many-statements
+def _build_console_chat_meta(
+    workspace: Any,
+    native_payload: dict[str, Any],
+) -> dict[str, Any]:
+    meta = (
+        {"agent_id": workspace.agent_id}
+        if getattr(workspace, "agent_id", None)
+        else {}
+    )
+    source_id = native_payload["meta"].get("source_id")
+    if source_id:
+        meta["source_id"] = source_id
+    return meta
+
+
+async def _get_or_create_console_chat(
+    workspace: Any,
+    session_id: str,
+    native_payload: dict[str, Any],
+) -> tuple[Any, str | None, bool]:
+    scenario_preset_id = native_payload["meta"].get("scenario_preset_id")
+    chat_meta = _build_console_chat_meta(workspace, native_payload)
+    if not scenario_preset_id:
+        chat = await workspace.chat_manager.get_or_create_chat(
+            session_id,
+            native_payload["sender_id"],
+            native_payload["channel_id"],
+            name=_derive_chat_name(native_payload),
+            meta=chat_meta or None,
+        )
+        return chat, None, False
+
+    from ..scenario_preset.router import get_service as get_scenario_service
+    from ..scenario_preset.runtime import initialize_scenario_snapshot
+
+    async def snapshot_factory(chat):
+        workspace_dir = getattr(workspace, "workspace_dir", None)
+        resource_root = (
+            Path(workspace_dir) / ".scenario_sessions" / chat.id
+            if workspace_dir is not None
+            else None
+        )
+        return await initialize_scenario_snapshot(
+            service=get_scenario_service(),
+            source_id=native_payload["meta"]["source_id"],
+            scenario_id=scenario_preset_id,
+            agent_id=getattr(workspace, "agent_id", None),
+            workspace_dir=workspace_dir,
+            agent_config=getattr(workspace, "config", None),
+            bbk_id=native_payload["meta"].get("bbk_id"),
+            session_resource_root=resource_root,
+        )
+
+    try:
+        chat, created = (
+            await workspace.chat_manager.get_or_create_scenario_chat(
+                session_id,
+                native_payload["sender_id"],
+                native_payload["channel_id"],
+                _derive_chat_name(native_payload),
+                chat_meta,
+                snapshot_factory,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Scenario preset is no longer available",
+        ) from exc
+    return chat, scenario_preset_id, created
+
+
+def _validate_and_attach_scenario_snapshot(
+    workspace: Any,
+    chat: Any,
+    scenario_preset_id: str | None,
+    native_payload: dict[str, Any],
+) -> None:
+    if not scenario_preset_id:
+        return
+    from ..scenario_preset.runtime import get_scenario_snapshot
+
+    snapshot = get_scenario_snapshot(chat.meta)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Scenario selection is only available for a new chat",
+        )
+    if snapshot.get("scenario_id") != scenario_preset_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Scenario selection is locked for this chat",
+        )
+    if snapshot.get("agent_id") not in (None, workspace.agent_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Scenario chat is bound to another Agent",
+        )
+    native_payload["meta"]["scenario_preset_snapshot"] = snapshot
+    native_payload["meta"]["scenario_preset_snapshot_source"] = "chat_meta"
+
+
+async def _start_or_attach_console_turn(
+    coordinator: Any,
+    chat: Any,
+    native_payload: dict[str, Any],
+    console_channel: Any,
+    msgid: str,
+    before_start: Callable[[], None] | None,
+) -> Any:
+    if await coordinator.status(chat.id) == TurnStatus.STOPPING:
+        raise HTTPException(status_code=409, detail="Chat is stopping")
+    if chat.channel and chat.channel != "console":
+        native_payload["meta"]["session_channel"] = chat.channel
+    kwargs = {"msgid": msgid}
+    if before_start is not None:
+        kwargs["before_start"] = before_start
+    return await coordinator.start_or_attach(
+        chat.id,
+        native_payload,
+        _console_turn_producer(console_channel),
+        **kwargs,
+    )
+
+
+async def _start_new_chat(
     workspace,
     tracker,
     console_channel,
@@ -1171,113 +1296,30 @@ async def _start_new_chat(  # pylint: disable=too-many-statements
 ):
     """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
     msgid = str(uuid.uuid4())
-    scenario_preset_id = native_payload["meta"].get("scenario_preset_id")
-    chat_meta = (
-        {"agent_id": workspace.agent_id}
-        if getattr(workspace, "agent_id", None)
-        else {}
+    chat, scenario_preset_id, created = await _get_or_create_console_chat(
+        workspace,
+        session_id,
+        native_payload,
     )
-    source_id = native_payload["meta"].get("source_id")
-    if source_id:
-        chat_meta["source_id"] = source_id
-    created = False
-    if scenario_preset_id:
-        from ..scenario_preset.router import (
-            get_service as get_scenario_service,
-        )
-        from ..scenario_preset.runtime import initialize_scenario_snapshot
-
-        async def snapshot_factory(chat):
-            workspace_dir = getattr(workspace, "workspace_dir", None)
-            resource_root = (
-                Path(workspace_dir) / ".scenario_sessions" / chat.id
-                if workspace_dir is not None
-                else None
-            )
-            return await initialize_scenario_snapshot(
-                service=get_scenario_service(),
-                source_id=native_payload["meta"]["source_id"],
-                scenario_id=scenario_preset_id,
-                agent_id=getattr(workspace, "agent_id", None),
-                workspace_dir=workspace_dir,
-                agent_config=getattr(workspace, "config", None),
-                bbk_id=native_payload["meta"].get("bbk_id"),
-                session_resource_root=resource_root,
-            )
-
-        try:
-            chat, created = (
-                await workspace.chat_manager.get_or_create_scenario_chat(
-                    session_id,
-                    native_payload["sender_id"],
-                    native_payload["channel_id"],
-                    _derive_chat_name(native_payload),
-                    chat_meta,
-                    snapshot_factory,
-                )
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail="Scenario preset is no longer available",
-            ) from exc
-    else:
-        chat = await workspace.chat_manager.get_or_create_chat(
-            session_id,
-            native_payload["sender_id"],
-            native_payload["channel_id"],
-            name=_derive_chat_name(native_payload),
-            meta=chat_meta or None,
-        )
-    if scenario_preset_id:
-        from ..scenario_preset.runtime import (
-            get_scenario_snapshot,
-        )
-
-        snapshot = get_scenario_snapshot(chat.meta)
-        if snapshot is None:
-            raise HTTPException(
-                status_code=409,
-                detail="Scenario selection is only available for a new chat",
-            )
-        if snapshot.get("scenario_id") != scenario_preset_id:
-            raise HTTPException(
-                status_code=409,
-                detail="Scenario selection is locked for this chat",
-            )
-        if snapshot.get("agent_id") not in (None, workspace.agent_id):
-            raise HTTPException(
-                status_code=409,
-                detail="Scenario chat is bound to another Agent",
-            )
-        native_payload["meta"]["scenario_preset_snapshot"] = snapshot
-        native_payload["meta"]["scenario_preset_snapshot_source"] = "chat_meta"
+    _validate_and_attach_scenario_snapshot(
+        workspace,
+        chat,
+        scenario_preset_id,
+        native_payload,
+    )
     native_payload["meta"]["chat_id"] = chat.id
     coordinator = workspace.answer_turn_coordinator
     if coordinator is None:
         raise RuntimeError("answer-turn coordinator is not configured")
-    if await coordinator.status(chat.id) == TurnStatus.STOPPING:
-        raise HTTPException(status_code=409, detail="Chat is stopping")
-    # Inject session_channel from chat record so downstream (e.g. session-end
-    # push) can identify the session's original channel (e.g. zhaohu).
-    if chat.channel and chat.channel != "console":
-        native_payload["meta"]["session_channel"] = chat.channel
     try:
-        if before_start is None:
-            lease = await coordinator.start_or_attach(
-                chat.id,
-                native_payload,
-                _console_turn_producer(console_channel),
-                msgid=msgid,
-            )
-        else:
-            lease = await coordinator.start_or_attach(
-                chat.id,
-                native_payload,
-                _console_turn_producer(console_channel),
-                msgid=msgid,
-                before_start=before_start,
-            )
+        lease = await _start_or_attach_console_turn(
+            coordinator,
+            chat,
+            native_payload,
+            console_channel,
+            msgid,
+            before_start,
+        )
     except BaseException:
         if scenario_preset_id and created:
             await workspace.chat_manager.delete_chats([chat.id])
@@ -2175,6 +2217,61 @@ async def _interrupt_console_goal(
         )
 
 
+def _console_stop_idle_response() -> dict[str, Any]:
+    return {"stopped": False, "accepted": False, "status": "idle"}
+
+
+async def _resolve_console_stop_chat_id(
+    workspace: Any,
+    coordinator: Any,
+    *,
+    requested_chat_id: str | None,
+    session_id: str | None,
+    user_id: str,
+    source_id: str,
+) -> str | None:
+    if requested_chat_id is not None or not session_id:
+        return requested_chat_id
+    candidates = await workspace.chat_manager.list_chats(
+        user_id=user_id,
+        channel="console",
+    )
+    matches = [
+        chat
+        for chat in candidates
+        if chat.session_id == session_id
+        and (
+            not source_id
+            or str(
+                (getattr(chat, "meta", None) or {}).get("source_id") or "",
+            )
+            == source_id
+        )
+    ]
+    active_matches = [
+        chat
+        for chat in matches
+        if await coordinator.current_identity(chat.id) is not None
+    ]
+    return active_matches[0].id if len(active_matches) == 1 else None
+
+
+def _is_authorized_console_stop_chat(
+    chat: Any,
+    *,
+    user_id: str,
+    source_id: str,
+) -> bool:
+    if chat is None or getattr(chat, "channel", "console") != "console":
+        return False
+    chat_source_id = str(
+        (getattr(chat, "meta", None) or {}).get("source_id") or "",
+    ).strip()
+    return str(getattr(chat, "user_id", "")) == user_id and (
+        not chat_source_id or chat_source_id == source_id
+    )
+
+
 @router.post(
     "/chat/stop",
     status_code=200,
@@ -2199,59 +2296,34 @@ async def post_console_chat_stop(
         )
     target_chat_id = chat_id
     if target_chat_id is None and msgid is not None:
-        return {"stopped": False, "accepted": False, "status": "idle"}
+        return _console_stop_idle_response()
     request_user_id, request_source_id = _console_stop_request_identity(
         request,
     )
     if not request_user_id:
         logger.warning("Rejected Console Stop without caller identity")
-        return {"stopped": False, "accepted": False, "status": "idle"}
-    if target_chat_id is None and session_id:
-        candidates = await workspace.chat_manager.list_chats(
-            user_id=request_user_id,
-            channel="console",
-        )
-        matches = [
-            chat
-            for chat in candidates
-            if chat.session_id == session_id
-            and (
-                not request_source_id
-                or str(
-                    (getattr(chat, "meta", None) or {}).get("source_id") or "",
-                )
-                == request_source_id
-            )
-        ]
-        active_matches = [
-            chat
-            for chat in matches
-            if await coordinator.current_identity(chat.id) is not None
-        ]
-        if len(active_matches) != 1:
-            return {"stopped": False, "accepted": False, "status": "idle"}
-        target_chat_id = active_matches[0].id
+        return _console_stop_idle_response()
+    target_chat_id = await _resolve_console_stop_chat_id(
+        workspace,
+        coordinator,
+        requested_chat_id=target_chat_id,
+        session_id=session_id,
+        user_id=request_user_id,
+        source_id=request_source_id,
+    )
     if target_chat_id is None:
-        return {"stopped": False, "accepted": False, "status": "idle"}
+        return _console_stop_idle_response()
     chat = await workspace.chat_manager.get_chat(target_chat_id)
-    if chat is None or getattr(chat, "channel", "console") != "console":
+    if not _is_authorized_console_stop_chat(
+        chat,
+        user_id=request_user_id,
+        source_id=request_source_id,
+    ):
         logger.warning(
             "Rejected Console Stop target chat_id=%s",
             target_chat_id,
         )
-        return {"stopped": False, "accepted": False, "status": "idle"}
-    chat_meta = getattr(chat, "meta", None) or {}
-    chat_source_id = str(chat_meta.get("source_id") or "").strip()
-    if (
-        not request_user_id
-        or str(getattr(chat, "user_id", "")) != request_user_id
-        or (chat_source_id and chat_source_id != request_source_id)
-    ):
-        logger.warning(
-            "Rejected Console Stop ownership chat_id=%s",
-            target_chat_id,
-        )
-        return {"stopped": False, "accepted": False, "status": "idle"}
+        return _console_stop_idle_response()
     accepted, claimed_chat_id, claimed_msgid, status = (
         await _claim_console_stop(
             coordinator,
@@ -2260,7 +2332,7 @@ async def post_console_chat_stop(
         )
     )
     if not accepted:
-        return {"stopped": False, "accepted": False, "status": "idle"}
+        return _console_stop_idle_response()
     return {
         "stopped": True,
         "accepted": True,
