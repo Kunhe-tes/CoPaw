@@ -2204,8 +2204,16 @@ class WPlusSopService:
         )
         if not feedback or not rerun_of:
             raise WPlusCommandError("feedback and prior run are required")
+        next_action = str(payload.get("next_action") or "rerun").strip()
+        if next_action not in {"clarify", "rerun"}:
+            raise WPlusCommandError("Unsupported trial feedback next_action")
+        target_state = (
+            SessionState.GENERATING_QUESTIONS
+            if next_action == "clarify"
+            else SessionState.GENERATING_TRIAL
+        )
         return _CommandResult(
-            target_state=SessionState.GENERATING_TRIAL,
+            target_state=target_state,
             kind=EventKind.TRIAL_FEEDBACK_ACCEPTED,
             typed_payload=TrialFeedbackAcceptedPayload(
                 feedback=feedback,
@@ -2216,7 +2224,7 @@ class WPlusSopService:
                 "trial_feedback": [*projection.trial_feedback, feedback],
                 "trial_result_lists": [],
             },
-            rerun_of=rerun_of,
+            rerun_of=rerun_of if next_action == "rerun" else None,
             starts_run=True,
         )
 
@@ -2339,6 +2347,22 @@ class WPlusSopService:
         if revised_round < 1 or revised_round > len(projection.answers):
             raise WPlusCommandError("Invalid revised_round")
         previous = projection.answers[revised_round - 1]
+        current_stage = next(
+            (
+                stage
+                for stage in projection.stages
+                if stage.stage_id == projection.current_stage_id
+            ),
+            None,
+        )
+        if (
+            previous.stage_id != projection.current_stage_id
+            or current_stage is None
+            or current_stage.status is StageStatus.CONFIRMED
+        ):
+            raise WPlusCommandError(
+                "Answers can only be revised for the current unconfirmed stage",
+            )
         raw_answers = payload.get("answers")
         if not isinstance(raw_answers, dict):
             raise WPlusCommandError("answers must be an object")

@@ -857,7 +857,7 @@ An append-only correction to an earlier answer in the current clarification hist
 _Avoid_: edited Chat message, deleted audit history, branching valid answers
 
 **W+ SOP Workspace**:
-The W+-specific CoPaw interface for conducting and reviewing one W+ SOP Clarification Session. It is a specialized view of the owning Chat, not a separate conversation or a generic interface for all skills. It is the sole answer-submission surface while the session is active. The owning Chat renders each current question batch as a read-only audit card with session status and a Return to SOP Workspace action; it must not duplicate active answer controls. Navigating away from the workspace does not pause or otherwise mutate the session: the owning Chat remains locked until the user explicitly saves and exits, completes, or terminates the session.
+The W+-specific CoPaw interface for conducting and reviewing one W+ SOP Clarification Session. It is a specialized view of the owning Chat, not a separate conversation or a generic interface for all skills. It is the sole answer-submission surface while the session is active. The owning Chat renders each current question batch as a read-only audit card with session status and a Return to SOP Workspace action; it must not duplicate active answer controls. Navigating away does not pause or mutate the session, and the normal workspace header does not expose Save and Exit; the owning Chat remains locked until the session completes or terminates.
 _Avoid_: Plan Mode, standalone chat, generic skill workspace
 
 **W+ SOP Session Control Card**:

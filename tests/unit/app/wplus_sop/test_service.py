@@ -28,6 +28,7 @@ from swe.app.wplus_sop.models import (
     SessionProjection,
     SessionState,
     Stage,
+    StageStatus,
 )
 from swe.app.wplus_sop.runtime import WPlusChatRunBusyError
 from swe.app.wplus_sop.service import (
@@ -3179,7 +3180,7 @@ async def test_revise_answer_invalidates_downstream_and_starts_new_run(
     )
 
     projection = revised.record.projection
-    assert projection.state is SessionState.GENERATING_TRIAL
+    assert projection.state is SessionState.GENERATING_QUESTIONS
     assert projection.revision == 2
     assert projection.round == 1
     assert projection.answers[0].answers[0].selected_option_ids == ["no"]
@@ -4061,6 +4062,55 @@ async def test_ae2_rerun_supersedes_report_versions_and_locks_latest(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("next_action", "expected_state"),
+    [
+        ("clarify", SessionState.GENERATING_QUESTIONS),
+        ("rerun", SessionState.GENERATING_TRIAL),
+    ],
+)
+async def test_stage_report_feedback_routes_to_clarification_or_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    next_action: str,
+    expected_state: SessionState,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, f"feedback-{next_action}")
+    await _advance_to_stage_report(
+        service,
+        session_id,
+        "stage-1",
+        f"feedback-{next_action}",
+    )
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key=f"feedback-{next_action}-report",
+    )
+    record = service.get_session(session_id)
+
+    mutation = await _send(
+        service,
+        session_id,
+        "submit_trial_feedback",
+        {
+            "feedback": "根据阶段 SOP 补充规则后继续",
+            "rerun_of_run_id": record.projection.current_run_id,
+            "next_action": next_action,
+        },
+        request_id=f"feedback-{next_action}-command",
+    )
+
+    assert mutation.record.projection.state is expected_state
+    assert mutation.record.projection.current_stage_id == "stage-1"
+
+
+@pytest.mark.asyncio
 async def test_ae3_confirmed_stage_cannot_be_reopened_or_confirm_twice(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4094,6 +4144,63 @@ async def test_ae3_confirmed_stage_cannot_be_reopened_or_confirm_twice(
             "confirm_stage",
             request_id="ae3-confirm-again",
         )
+
+
+@pytest.mark.asyncio
+async def test_confirmed_stage_answers_cannot_be_revised_from_next_stage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_start(**kwargs):
+        return SimpleNamespace(run_id=kwargs["run_id"])
+
+    monkeypatch.setattr(service_module, "start_wplus_chat_turn", fake_start)
+    service = _service(tmp_path)
+    session_id = await _new_two_stage_session(service, "locked-revision")
+    await _advance_to_stage_report(
+        service,
+        session_id,
+        "stage-1",
+        "locked-revision",
+    )
+    service.append_agent_event(
+        kind="stage_report_generated",
+        payload=_stage_report_payload("stage-1", 1),
+        event_key="locked-revision-report",
+    )
+    await _send(
+        service,
+        session_id,
+        "confirm_stage",
+        request_id="locked-revision-confirm",
+    )
+    service.append_agent_event(
+        kind="cumulative_refreshed",
+        payload=_cumulative_refreshed_payload(service.get_session(session_id)),
+        event_key="locked-revision-cumulative",
+    )
+    service.append_agent_event(
+        kind="question_batch",
+        payload=_question_payload("stage-2", "locked-revision-stage-2"),
+        event_key="locked-revision-stage-2-questions",
+    )
+
+    with pytest.raises(WPlusCommandError, match="current unconfirmed stage"):
+        await _send(
+            service,
+            session_id,
+            "revise_answer",
+            {
+                "revised_round": 1,
+                "answers": {"q-locked-revision": "no"},
+                "reason": "尝试修改已确认环节",
+            },
+            request_id="locked-revision-attempt",
+        )
+
+    projection = service.get_session(session_id).projection
+    assert projection.current_stage_id == "stage-2"
+    assert projection.stages[0].status is StageStatus.CONFIRMED
 
 
 @pytest.mark.asyncio
