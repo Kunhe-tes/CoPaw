@@ -596,7 +596,6 @@ async def scan_skill_directory_async(
         block=block,
         timeout=timeout,
         _direct=True,
-        _cache_result=False,
     )
     wrapped = asyncio.wrap_future(future, loop=loop)
     try:
@@ -604,8 +603,6 @@ async def scan_skill_directory_async(
             wrapped,
             timeout=timeout if timeout is not None else _scan_timeout(),
         )
-        if result is not None:
-            _store_cached_result(Path(skill_dir).resolve(), result)
         return result
     except asyncio.CancelledError:
         future.cancel()
