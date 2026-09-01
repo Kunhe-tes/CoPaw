@@ -113,11 +113,14 @@ def _is_created_workspace_skill_write_target(
     target: Path,
     workspace_dir: Path,
 ) -> bool:
-    try:
-        relative_path = target.relative_to(workspace_dir / "skills")
-    except ValueError:
-        return False
-    if not relative_path.parts:
+    relative_path = None
+    for root_name in ("skills", ".disabled_skills"):
+        try:
+            relative_path = target.relative_to(workspace_dir / root_name)
+            break
+        except ValueError:
+            continue
+    if relative_path is None or not relative_path.parts:
         return False
 
     manifest_path = workspace_dir / "skill.json"
@@ -130,6 +133,45 @@ def _is_created_workspace_skill_write_target(
     return isinstance(entry, dict) and entry.get("source") == "customized"
 
 
+def _is_safe_workspace_skill_name(skill_name: str) -> bool:
+    if "\x00" in skill_name or "/" in skill_name or "\\" in skill_name:
+        return False
+    return skill_name not in {".", ".."}
+
+
+def is_created_workspace_skill_write_target(
+    target: Path,
+    workspace_dir: Path,
+) -> bool:
+    return _is_created_workspace_skill_write_target(
+        target.resolve(strict=False),
+        workspace_dir.resolve(strict=False),
+    )
+
+
+def collect_created_workspace_skill_names(
+    workspace_dir: Path,
+) -> tuple[str, ...]:
+    manifest_path = workspace_dir.resolve(strict=False) / "skill.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+
+    skills = manifest.get("skills", {})
+    if not isinstance(skills, dict):
+        return ()
+
+    return tuple(
+        skill_name
+        for skill_name, entry in skills.items()
+        if isinstance(skill_name, str)
+        and _is_safe_workspace_skill_name(skill_name)
+        and isinstance(entry, dict)
+        and entry.get("source") == "customized"
+    )
+
+
 def _raise_if_protected_skill_write_target(
     target: Path,
     workspace_dir: Path,
@@ -140,7 +182,7 @@ def _raise_if_protected_skill_write_target(
         resolved_workspace / "skills",
         resolved_workspace / ".disabled_skills",
     )
-    if _is_created_workspace_skill_write_target(
+    if is_created_workspace_skill_write_target(
         resolved_target,
         resolved_workspace,
     ):

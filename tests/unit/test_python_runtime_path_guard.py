@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -238,12 +239,16 @@ def test_runtime_guard_denies_direct_workspace_skill_write(
     workspace_dir = tenant_root / "workspaces" / "agent_a"
     workspace_dir.mkdir(parents=True)
 
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"uploaded": {"source": "marketplace:demo"}}}),
+        encoding="utf-8",
+    )
+
     env = os.environ.copy()
     guard_dir = prepare_python_runtime_path_guard_env(
         env,
         tenant_root=tenant_root,
         base_dir=workspace_dir,
-        active_skill="uploaded",
     )
 
     with guard_dir:
@@ -270,19 +275,24 @@ def test_runtime_guard_denies_direct_workspace_skill_write(
     assert not (workspace_dir / "skills" / "uploaded" / "SKILL.md").exists()
 
 
-def test_runtime_guard_allows_writes_to_other_workspace_skill(
+def test_runtime_guard_allows_writes_to_created_workspace_skill(
     tmp_path: Path,
 ) -> None:
     tenant_root = tmp_path / "tenant"
     workspace_dir = tenant_root / "workspaces" / "agent_a"
     workspace_dir.mkdir(parents=True)
+    skill_dir = workspace_dir / "skills" / "uploaded"
+    skill_dir.mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"uploaded": {"source": "customized"}}}),
+        encoding="utf-8",
+    )
 
     env = os.environ.copy()
     guard_dir = prepare_python_runtime_path_guard_env(
         env,
         tenant_root=tenant_root,
         base_dir=workspace_dir,
-        active_skill="edited",
     )
 
     with guard_dir:
@@ -305,7 +315,171 @@ def test_runtime_guard_allows_writes_to_other_workspace_skill(
         )
 
     assert result.returncode == 0, result.stderr
-    assert (workspace_dir / "skills" / "uploaded" / "SKILL.md").exists()
+    assert (skill_dir / "SKILL.md").exists()
+
+
+def test_runtime_guard_allows_read_only_os_open_for_created_workspace_skill(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+    skill_dir = workspace_dir / "skills" / "uploaded"
+    skill_dir.mkdir(parents=True)
+    target = skill_dir / "SKILL.md"
+    target.write_text("# Uploaded\n", encoding="utf-8")
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"uploaded": {"source": "customized"}}}),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os; "
+                    "fd = os.open('skills/uploaded/SKILL.md', os.O_RDONLY); "
+                    "os.close(fd)"
+                ),
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert target.exists()
+
+
+def test_runtime_guard_denies_skill_directory_removal(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+    skill_dir = workspace_dir / "skills" / "uploaded"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text("# Uploaded\n", encoding="utf-8")
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"uploaded": {"source": "customized"}}}),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import shutil; shutil.rmtree('skills')",
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "workspace skill directory" in result.stderr
+    assert (skill_dir / "SKILL.md").exists()
+
+
+def test_runtime_guard_denies_skill_root_creation(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"uploaded": {"source": "customized"}}}),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "from pathlib import Path; Path('skills').mkdir(exist_ok=True)",
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "workspace skill directory" in result.stderr
+    assert not (workspace_dir / "skills").exists()
+
+
+def test_runtime_guard_denies_skill_directory_metadata_mutation(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+    skill_dir = workspace_dir / "skills" / "uploaded"
+    skill_dir.mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"uploaded": {"source": "customized"}}}),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import os; os.chmod('skills', 0o700)",
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "workspace skill directory" in result.stderr
+    assert skill_dir.exists()
 
 
 def test_runtime_guard_keeps_active_skill_protection_after_env_mutation(
@@ -314,13 +488,16 @@ def test_runtime_guard_keeps_active_skill_protection_after_env_mutation(
     tenant_root = tmp_path / "tenant"
     workspace_dir = tenant_root / "workspaces" / "agent_a"
     workspace_dir.mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"edited": {"source": "customized"}}}),
+        encoding="utf-8",
+    )
 
     env = os.environ.copy()
     guard_dir = prepare_python_runtime_path_guard_env(
         env,
         tenant_root=tenant_root,
         base_dir=workspace_dir,
-        active_skill="edited",
     )
 
     with guard_dir:
@@ -331,7 +508,6 @@ def test_runtime_guard_keeps_active_skill_protection_after_env_mutation(
                 (
                     "import os; "
                     "from pathlib import Path; "
-                    "os.environ.pop('SWE_TENANT_PATH_GUARD_ACTIVE_SKILL', None); "
                     "Path('skills/edited/SKILL.md').parent.mkdir(parents=True, exist_ok=True); "
                     "Path('skills/edited/SKILL.md').write_text('# Edited\\n')"
                 ),
@@ -344,9 +520,8 @@ def test_runtime_guard_keeps_active_skill_protection_after_env_mutation(
             check=False,
         )
 
-    assert result.returncode != 0
-    assert "workspace skill directory" in result.stderr
-    assert not (workspace_dir / "skills" / "edited" / "SKILL.md").exists()
+    assert result.returncode == 0, result.stderr
+    assert (workspace_dir / "skills" / "edited" / "SKILL.md").exists()
 
 
 def test_runtime_guard_preserves_active_skill_protection_in_child_python(
@@ -355,13 +530,16 @@ def test_runtime_guard_preserves_active_skill_protection_in_child_python(
     tenant_root = tmp_path / "tenant"
     workspace_dir = tenant_root / "workspaces" / "agent_a"
     workspace_dir.mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"edited": {"source": "customized"}}}),
+        encoding="utf-8",
+    )
 
     env = os.environ.copy()
     guard_dir = prepare_python_runtime_path_guard_env(
         env,
         tenant_root=tenant_root,
         base_dir=workspace_dir,
-        active_skill="edited",
     )
 
     with guard_dir:
@@ -370,8 +548,7 @@ def test_runtime_guard_preserves_active_skill_protection_in_child_python(
                 sys.executable,
                 "-c",
                 (
-                    "import os, subprocess, sys; "
-                    "os.environ.pop('SWE_TENANT_PATH_GUARD_ACTIVE_SKILL', None); "
+                    "import subprocess, sys; "
                     "subprocess.run([sys.executable, '-c', "
                     '"from pathlib import Path; "'
                     "\"Path('skills/edited/SKILL.md').parent.mkdir(parents=True, exist_ok=True); \""
@@ -386,46 +563,67 @@ def test_runtime_guard_preserves_active_skill_protection_in_child_python(
             check=False,
         )
 
-    assert result.returncode != 0
-    assert "workspace skill directory" in result.stderr
-    assert not (workspace_dir / "skills" / "edited" / "SKILL.md").exists()
+    assert result.returncode == 0, result.stderr
+    assert (workspace_dir / "skills" / "edited" / "SKILL.md").exists()
 
 
-def test_runtime_guard_rejects_unsafe_active_skill_name(
+def test_runtime_guard_denies_unlisted_workspace_skill_write(
     tmp_path: Path,
 ) -> None:
     tenant_root = tmp_path / "tenant"
-    tenant_root.mkdir()
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"edited": {"source": "marketplace:demo"}}}),
+        encoding="utf-8",
+    )
     env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+    )
 
-    try:
-        prepare_python_runtime_path_guard_env(
-            env,
-            tenant_root=tenant_root,
-            base_dir=tenant_root,
-            active_skill="../edited",
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "Path('skills/edited/SKILL.md').parent.mkdir(parents=True, exist_ok=True); "
+                    "Path('skills/edited/SKILL.md').write_text('x')"
+                ),
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
         )
-    except ValueError as exc:
-        assert "Unsafe active skill name" in str(exc)
-    else:
-        raise AssertionError("unsafe active skill name was accepted")
+
+    assert result.returncode != 0
+    assert "workspace skill directory" in result.stderr
 
 
-def test_runtime_guard_denies_active_skill_write_when_cwd_is_subdir(
+def test_runtime_guard_allows_created_workspace_skill_write_when_cwd_is_subdir(
     tmp_path: Path,
 ) -> None:
     tenant_root = tmp_path / "tenant"
     workspace_dir = tenant_root / "workspaces" / "agent_a"
     subdir = workspace_dir / "subdir"
     subdir.mkdir(parents=True)
+    (workspace_dir / "skill.json").write_text(
+        json.dumps({"skills": {"edited": {"source": "customized"}}}),
+        encoding="utf-8",
+    )
 
     env = os.environ.copy()
     guard_dir = prepare_python_runtime_path_guard_env(
         env,
         tenant_root=tenant_root,
         base_dir=subdir,
-        active_skill="edited",
-        active_skill_base_dir=workspace_dir,
     )
 
     with guard_dir:
@@ -447,6 +645,5 @@ def test_runtime_guard_denies_active_skill_write_when_cwd_is_subdir(
             check=False,
         )
 
-    assert result.returncode != 0
-    assert "workspace skill directory" in result.stderr
-    assert not (workspace_dir / "skills" / "edited" / "SKILL.md").exists()
+    assert result.returncode == 0, result.stderr
+    assert (workspace_dir / "skills" / "edited" / "SKILL.md").exists()

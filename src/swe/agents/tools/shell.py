@@ -39,14 +39,16 @@ from ...security.tenant_path_boundary import (
     TenantPathBoundaryError,
 )
 from ...security.python_runtime_path_guard import (
-    is_safe_active_skill_name,
     prepare_python_runtime_path_guard_env,
 )
 from ...security.process_limits import (
     CurrentProcessLimitPolicy,
     resolve_current_process_limit_policy,
 )
-from ..skill_context_manager import get_skill_context_manager
+from .file_io import (
+    collect_created_workspace_skill_names,
+    is_created_workspace_skill_write_target,
+)
 
 _SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
     {
@@ -594,27 +596,6 @@ def _resolve_shell_path_token(token: str, base_dir: Path) -> Path:
     return path_obj.resolve(strict=False)
 
 
-def _active_workspace_skill_write_root(base_dir: Path) -> Path | None:
-    current_skill = get_skill_context_manager().current_skill
-    if not current_skill:
-        return None
-    if not is_safe_active_skill_name(current_skill):
-        workspace_dir = get_current_tool_base_dir().resolve(strict=False)
-        try:
-            workspace_dir.relative_to(get_current_tenant_root().resolve())
-        except ValueError:
-            workspace_dir = base_dir.resolve(strict=False)
-        return workspace_dir / "skills"
-
-    workspace_dir = get_current_tool_base_dir().resolve(strict=False)
-    try:
-        workspace_dir.relative_to(get_current_tenant_root().resolve())
-    except ValueError:
-        workspace_dir = base_dir.resolve(strict=False)
-
-    return workspace_dir / "skills" / current_skill
-
-
 def _append_shell_redirect_targets(
     tokens: list[str],
     destinations: list[str],
@@ -670,6 +651,27 @@ def _append_multi_target_destinations(
     )
 
 
+def _append_paths_after_first_operand(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    seen_first_operand = False
+    for token in tokens[1:]:
+        if not token or token.startswith("-"):
+            continue
+        if not seen_first_operand:
+            seen_first_operand = True
+            continue
+        destinations.append(token)
+
+
+def _append_remove_destinations(
+    tokens: list[str],
+    destinations: list[str],
+) -> None:
+    _append_multi_target_destinations(tokens, destinations)
+
+
 def _extract_shell_write_destinations(command: str) -> list[str]:
     try:
         tokens = shlex.split(command)
@@ -683,9 +685,16 @@ def _extract_shell_write_destinations(command: str) -> list[str]:
     if command_name == "unzip":
         _append_unzip_destinations(tokens, destinations)
     elif command_name in {"cp", "mv", "install"}:
-        _append_copy_move_destinations(tokens, destinations)
+        if command_name == "mv":
+            _append_multi_target_destinations(tokens, destinations)
+        else:
+            _append_copy_move_destinations(tokens, destinations)
+    elif command_name in {"chmod", "chown", "lchown"}:
+        _append_paths_after_first_operand(tokens, destinations)
     elif command_name in {"mkdir", "touch"}:
         _append_multi_target_destinations(tokens, destinations)
+    elif command_name in {"rm", "rmdir"}:
+        _append_remove_destinations(tokens, destinations)
     elif command_name in _SHELL_WRITE_DESTINATION_COMMANDS:
         _append_copy_move_destinations(tokens, destinations)
     _append_shell_redirect_targets(tokens, destinations)
@@ -696,17 +705,38 @@ def _validate_workspace_skill_write_targets(
     command: str,
     base_dir: Path,
 ) -> Optional[str]:
-    active_skill_root = _active_workspace_skill_write_root(base_dir)
-    if active_skill_root is None:
-        return None
+    workspace_dir = get_current_tool_base_dir().resolve(strict=False)
+    try:
+        workspace_dir.relative_to(get_current_tenant_root().resolve())
+    except ValueError:
+        workspace_dir = base_dir.resolve(strict=False)
 
+    created_skill_names = set(
+        collect_created_workspace_skill_names(workspace_dir),
+    )
     for destination in _extract_shell_write_destinations(command):
         if not destination or destination in {".", ".."}:
             continue
         resolved = _resolve_shell_path_token(destination, base_dir)
-        if resolved == active_skill_root or resolved.is_relative_to(
-            active_skill_root,
+        if not any(
+            resolved == workspace_dir / root_name
+            or resolved.is_relative_to(workspace_dir / root_name)
+            for root_name in ("skills", ".disabled_skills")
         ):
+            continue
+        if is_created_workspace_skill_write_target(resolved, workspace_dir):
+            continue
+        for skill_name in created_skill_names:
+            for root_name in ("skills", ".disabled_skills"):
+                skill_root = workspace_dir / root_name / skill_name
+                if resolved == skill_root or resolved.is_relative_to(
+                    skill_root,
+                ):
+                    break
+            else:
+                continue
+            break
+        else:
             return (
                 "Error: Shell command writes directly into the workspace "
                 "skill directory. Use the skill import or edit APIs so "
@@ -1198,7 +1228,6 @@ def prepare_shell_command(
         env,
         tenant_root=get_current_tenant_root(),
         base_dir=working_dir,
-        active_skill=get_skill_context_manager().current_skill,
         active_skill_base_dir=get_current_tool_base_dir(),
     )
 

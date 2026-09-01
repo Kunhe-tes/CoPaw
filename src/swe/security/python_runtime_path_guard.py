@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import builtins
 import functools
+import inspect
 import io
 import os
 import pathlib
@@ -90,6 +91,7 @@ _TRUSTED_ALLOWED_PATHS = ()
 _TRUSTED_ENTRYPOINT_ROOTS = ()
 _TRUSTED_ENTRYPOINT_PATH = None
 _TRUSTED_SWE_ENTRYPOINT = False
+_CREATED_SKILL_ROOTS = ()
 _CHECKING_PATH = False
 
 
@@ -102,19 +104,39 @@ def _is_safe_active_skill_name(skill_name):
 
 
 def _protected_skill_roots():
-    if _ACTIVE_SKILL_BASE_DIR is None:
+    workspace_dir = _ACTIVE_SKILL_BASE_DIR or _BASE_DIR
+    if workspace_dir is None:
         return ()
-    if _ACTIVE_SKILL_INVALID:
-        return (
-            _ACTIVE_SKILL_BASE_DIR / "skills",
-            _ACTIVE_SKILL_BASE_DIR / ".disabled_skills",
-        )
-    if not _ACTIVE_SKILL:
-        return ()
-    return (
-        _ACTIVE_SKILL_BASE_DIR / "skills" / _ACTIVE_SKILL,
-        _ACTIVE_SKILL_BASE_DIR / ".disabled_skills" / _ACTIVE_SKILL,
+    return (workspace_dir / "skills", workspace_dir / ".disabled_skills")
+
+
+def _is_created_skill_write_path(resolved):
+    return any(
+        resolved == root
+        or _is_relative_to(resolved, root)
+        for root in _CREATED_SKILL_ROOTS
     )
+
+
+def _is_recursive_skill_parent_creation_path(resolved):
+    for frame_info in inspect.stack()[2:]:
+        if frame_info.function != "mkdir":
+            continue
+        candidate = frame_info.frame.f_locals.get("self")
+        if not isinstance(candidate, pathlib.Path):
+            continue
+        try:
+            candidate_resolved = _resolve_without_guard(candidate, strict=False)
+        except (OSError, RuntimeError):
+            continue
+        if not any(
+            _is_relative_to(candidate_resolved, root)
+            for root in _CREATED_SKILL_ROOTS
+        ):
+            continue
+        if _is_relative_to(candidate_resolved, resolved):
+            return True
+    return False
 
 
 def _resolve_without_guard(path, *, strict=False):
@@ -180,6 +202,35 @@ def _collect_env_paths(name):
         if resolved not in paths:
             paths.append(resolved)
     return tuple(paths)
+
+
+def _collect_created_skill_roots():
+    workspace_dir = _ACTIVE_SKILL_BASE_DIR or _BASE_DIR
+    if workspace_dir is None:
+        return ()
+    manifest_path = workspace_dir / "skill.json"
+    try:
+        import json
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, AttributeError, TypeError, ImportError):
+        return ()
+
+    skills = manifest.get("skills", {})
+    if not isinstance(skills, dict):
+        return ()
+
+    roots = []
+    for skill_name, entry in skills.items():
+        if not _is_safe_active_skill_name(skill_name):
+            continue
+        if not isinstance(entry, dict) or entry.get("source") != "customized":
+            continue
+        for root_name in ("skills", ".disabled_skills"):
+            root = workspace_dir / root_name / skill_name
+            if root not in roots:
+                roots.append(root)
+    return tuple(roots)
 
 
 def _fsdecode_path(path):
@@ -309,6 +360,13 @@ def _check_skill_write_path(path, operation):
         decoded, resolved = _resolve_candidate(path)
         if resolved is None:
             return
+        if _is_created_skill_write_path(resolved):
+            return
+        if (
+            ("mkdir" in operation or "makedirs" in operation)
+            and _is_recursive_skill_parent_creation_path(resolved)
+        ):
+            return
         for root in _protected_skill_roots():
             if resolved == root or _is_relative_to(resolved, root):
                 raise TenantPathGuardError(
@@ -328,6 +386,24 @@ def _is_write_mode(mode):
     except Exception:
         return False
     return any(flag in mode_text for flag in ("w", "a", "x", "+"))
+
+
+def _is_os_open_write_flags(flags):
+    if flags is _MISSING or flags is None:
+        return False
+    try:
+        value = int(flags)
+    except (TypeError, ValueError):
+        return False
+
+    write_flags = (
+        getattr(os, "O_WRONLY", 0)
+        | getattr(os, "O_RDWR", 0)
+        | getattr(os, "O_CREAT", 0)
+        | getattr(os, "O_TRUNC", 0)
+        | getattr(os, "O_APPEND", 0)
+    )
+    return bool(value & write_flags)
 
 
 def _argument(args, kwargs, index, keyword):
@@ -365,6 +441,24 @@ def _wrap_open_function(module, name):
         mode = _argument(args, kwargs, 1, "mode")
         if path is not _MISSING:
             if _is_write_mode(mode):
+                _check_skill_write_path(path, f"{name} write path")
+            _check_path(path, f"{name} path")
+        return original(*args, **kwargs)
+
+    setattr(module, name, wrapper)
+
+
+def _wrap_os_open_function(module, name):
+    original = getattr(module, name, None)
+    if original is None or not callable(original):
+        return
+
+    @functools.wraps(original)
+    def wrapper(*args, **kwargs):
+        path = _argument(args, kwargs, 0, "path")
+        flags = _argument(args, kwargs, 1, "flags")
+        if path is not _MISSING:
+            if _is_os_open_write_flags(flags):
                 _check_skill_write_path(path, f"{name} write path")
             _check_path(path, f"{name} path")
         return original(*args, **kwargs)
@@ -552,31 +646,31 @@ def _install_function_wrappers():
         for name in (
             "access",
             "chdir",
-            "chmod",
-            "chown",
-            "lchown",
             "listdir",
             "lstat",
-            "open",
             "readlink",
             "scandir",
             "stat",
-            "utime",
         ):
             _wrap_path_function(module, name, [(0, "path", name)])
         for name in (
+            "chmod",
+            "chown",
+            "lchown",
             "mkdir",
             "makedirs",
             "remove",
             "rmdir",
             "truncate",
             "unlink",
+            "utime",
         ):
             _wrap_path_mutation_function(
                 module,
                 name,
                 [(0, "path", name)],
             )
+        _wrap_os_open_function(module, "open")
         for name in ("rename", "replace", "link"):
             _wrap_path_mutation_function(
                 module,
@@ -687,7 +781,7 @@ def install_from_env():
     global _INSTALLED, _TENANT_ROOT, _BASE_DIR, _RUNTIME_ALLOWED_ROOTS
     global _ACTIVE_SKILL, _ACTIVE_SKILL_BASE_DIR, _ACTIVE_SKILL_INVALID
     global _TRUSTED_ALLOWED_PATHS, _TRUSTED_ENTRYPOINT_ROOTS
-    global _TRUSTED_ENTRYPOINT_PATH, _TRUSTED_SWE_ENTRYPOINT
+    global _TRUSTED_ENTRYPOINT_PATH, _TRUSTED_SWE_ENTRYPOINT, _CREATED_SKILL_ROOTS
 
     if _INSTALLED:
         return
@@ -722,6 +816,7 @@ def install_from_env():
     _TRUSTED_ENTRYPOINT_ROOTS = _collect_env_paths(_TRUSTED_ENTRYPOINT_ROOTS_ENV)
     _TRUSTED_ENTRYPOINT_PATH = _resolve_trusted_swe_entrypoint()
     _TRUSTED_SWE_ENTRYPOINT = _TRUSTED_ENTRYPOINT_PATH is not None
+    _CREATED_SKILL_ROOTS = _collect_created_skill_roots()
 
     _install_function_wrappers()
     _install_pathlib_wrappers()
@@ -811,11 +906,13 @@ def prepare_python_runtime_path_guard_env(
         if not is_safe_active_skill_name(active_skill):
             raise ValueError(f"Unsafe active skill name: {active_skill!r}")
         env[_ACTIVE_SKILL_ENV] = active_skill
-        env[_ACTIVE_SKILL_BASE_DIR_ENV] = str(
-            (active_skill_base_dir or base_dir).resolve(),
-        )
     else:
         env.pop(_ACTIVE_SKILL_ENV, None)
+    if active_skill_base_dir is not None:
+        env[_ACTIVE_SKILL_BASE_DIR_ENV] = str(active_skill_base_dir.resolve())
+    elif active_skill:
+        env[_ACTIVE_SKILL_BASE_DIR_ENV] = str(base_dir.resolve())
+    else:
         env.pop(_ACTIVE_SKILL_BASE_DIR_ENV, None)
     _set_path_list_env(
         env,
