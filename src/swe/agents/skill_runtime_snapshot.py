@@ -10,6 +10,7 @@ from functools import wraps
 import logging
 from pathlib import Path
 from threading import RLock
+import time
 from types import MappingProxyType
 from typing import Any, Mapping
 
@@ -120,6 +121,7 @@ def get_workspace_skill_snapshot(
 ) -> WorkspaceSkillSnapshot:
     """Return a cached workspace snapshot, reconciling only on invalidation."""
     global _GENERATION
+    capture_started_at = time.monotonic()
     workspace_dir = workspace_dir.expanduser().resolve()
     from .skills_manager import (
         _build_signature,
@@ -135,11 +137,23 @@ def get_workspace_skill_snapshot(
         with _LOCK:
             previous = _CACHE.get(workspace_dir)
             if previous is not None and _fresh(previous, manifest_path):
+                logger.debug(
+                    "skill_manifest_cache_hit=true skill_count=%d "
+                    "runtime_skill_snapshot_generation=%d",
+                    len(previous.skills),
+                    previous.generation,
+                )
                 return previous
+        reconcile_started_at = time.monotonic()
         manifest = read_skill_manifest(workspace_dir, reconcile=reconcile)
+        logger.debug(
+            "skill_manifest_reconcile_ms=%.1f skill_manifest_cache_hit=false",
+            (time.monotonic() - reconcile_started_at) * 1000,
+        )
         manifest_stat_before = _stat(manifest_path)
         entries = manifest.get("skills", {})
         skills: dict[str, SkillRuntimeSnapshot] = {}
+        parse_started_at = time.monotonic()
         for name, entry in sorted(entries.items()):
             if not isinstance(entry, dict) or not entry.get("enabled", False):
                 continue
@@ -221,8 +235,7 @@ def get_workspace_skill_snapshot(
             for skill in skills.values()
         )
         if _retry < 1 and (
-            manifest_stat_before != manifest_stat_after
-            or not skills_still_current
+            manifest_stat_before != manifest_stat_after or not skills_still_current
         ):
             logger.info(
                 "Workspace skill snapshot changed during capture; retrying",
@@ -241,6 +254,15 @@ def get_workspace_skill_snapshot(
                 skills=MappingProxyType(skills),
             )
             _CACHE[workspace_dir] = snapshot
+            logger.debug(
+                "skill_md_parse_ms=%.1f skill_count=%d "
+                "runtime_skill_snapshot_generation=%d "
+                "snapshot_capture_ms=%.1f",
+                (time.monotonic() - parse_started_at) * 1000,
+                len(skills),
+                snapshot.generation,
+                (time.monotonic() - capture_started_at) * 1000,
+            )
             return snapshot
 
 
