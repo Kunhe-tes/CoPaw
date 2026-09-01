@@ -243,6 +243,7 @@ def test_runtime_guard_denies_direct_workspace_skill_write(
         env,
         tenant_root=tenant_root,
         base_dir=workspace_dir,
+        active_skill="uploaded",
     )
 
     with guard_dir:
@@ -267,3 +268,185 @@ def test_runtime_guard_denies_direct_workspace_skill_write(
     assert result.returncode != 0
     assert "workspace skill directory" in result.stderr
     assert not (workspace_dir / "skills" / "uploaded" / "SKILL.md").exists()
+
+
+def test_runtime_guard_allows_writes_to_other_workspace_skill(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+        active_skill="edited",
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "Path('skills/uploaded/SKILL.md').parent.mkdir(parents=True, exist_ok=True); "
+                    "Path('skills/uploaded/SKILL.md').write_text('# Uploaded\\n')"
+                ),
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode == 0, result.stderr
+    assert (workspace_dir / "skills" / "uploaded" / "SKILL.md").exists()
+
+
+def test_runtime_guard_keeps_active_skill_protection_after_env_mutation(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+        active_skill="edited",
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os; "
+                    "from pathlib import Path; "
+                    "os.environ.pop('SWE_TENANT_PATH_GUARD_ACTIVE_SKILL', None); "
+                    "Path('skills/edited/SKILL.md').parent.mkdir(parents=True, exist_ok=True); "
+                    "Path('skills/edited/SKILL.md').write_text('# Edited\\n')"
+                ),
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "workspace skill directory" in result.stderr
+    assert not (workspace_dir / "skills" / "edited" / "SKILL.md").exists()
+
+
+def test_runtime_guard_preserves_active_skill_protection_in_child_python(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    workspace_dir.mkdir(parents=True)
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=workspace_dir,
+        active_skill="edited",
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import os, subprocess, sys; "
+                    "os.environ.pop('SWE_TENANT_PATH_GUARD_ACTIVE_SKILL', None); "
+                    "subprocess.run([sys.executable, '-c', "
+                    '"from pathlib import Path; "'
+                    "\"Path('skills/edited/SKILL.md').parent.mkdir(parents=True, exist_ok=True); \""
+                    "\"Path('skills/edited/SKILL.md').write_text('x')\"], check=True)"
+                ),
+            ],
+            cwd=workspace_dir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "workspace skill directory" in result.stderr
+    assert not (workspace_dir / "skills" / "edited" / "SKILL.md").exists()
+
+
+def test_runtime_guard_rejects_unsafe_active_skill_name(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    tenant_root.mkdir()
+    env = os.environ.copy()
+
+    try:
+        prepare_python_runtime_path_guard_env(
+            env,
+            tenant_root=tenant_root,
+            base_dir=tenant_root,
+            active_skill="../edited",
+        )
+    except ValueError as exc:
+        assert "Unsafe active skill name" in str(exc)
+    else:
+        raise AssertionError("unsafe active skill name was accepted")
+
+
+def test_runtime_guard_denies_active_skill_write_when_cwd_is_subdir(
+    tmp_path: Path,
+) -> None:
+    tenant_root = tmp_path / "tenant"
+    workspace_dir = tenant_root / "workspaces" / "agent_a"
+    subdir = workspace_dir / "subdir"
+    subdir.mkdir(parents=True)
+
+    env = os.environ.copy()
+    guard_dir = prepare_python_runtime_path_guard_env(
+        env,
+        tenant_root=tenant_root,
+        base_dir=subdir,
+        active_skill="edited",
+        active_skill_base_dir=workspace_dir,
+    )
+
+    with guard_dir:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "from pathlib import Path; "
+                    "Path('../skills/edited/SKILL.md').parent.mkdir(parents=True, exist_ok=True); "
+                    "Path('../skills/edited/SKILL.md').write_text('# Edited\\n')"
+                ),
+            ],
+            cwd=subdir,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+
+    assert result.returncode != 0
+    assert "workspace skill directory" in result.stderr
+    assert not (workspace_dir / "skills" / "edited" / "SKILL.md").exists()

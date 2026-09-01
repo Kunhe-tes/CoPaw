@@ -39,12 +39,14 @@ from ...security.tenant_path_boundary import (
     TenantPathBoundaryError,
 )
 from ...security.python_runtime_path_guard import (
+    is_safe_active_skill_name,
     prepare_python_runtime_path_guard_env,
 )
 from ...security.process_limits import (
     CurrentProcessLimitPolicy,
     resolve_current_process_limit_policy,
 )
+from ..skill_context_manager import get_skill_context_manager
 
 _SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
     {
@@ -592,21 +594,25 @@ def _resolve_shell_path_token(token: str, base_dir: Path) -> Path:
     return path_obj.resolve(strict=False)
 
 
-def _is_workspace_skill_write_target(path: Path, base_dir: Path) -> bool:
+def _active_workspace_skill_write_root(base_dir: Path) -> Path | None:
+    current_skill = get_skill_context_manager().current_skill
+    if not current_skill:
+        return None
+    if not is_safe_active_skill_name(current_skill):
+        workspace_dir = get_current_tool_base_dir().resolve(strict=False)
+        try:
+            workspace_dir.relative_to(get_current_tenant_root().resolve())
+        except ValueError:
+            workspace_dir = base_dir.resolve(strict=False)
+        return workspace_dir / "skills"
+
     workspace_dir = get_current_tool_base_dir().resolve(strict=False)
     try:
         workspace_dir.relative_to(get_current_tenant_root().resolve())
     except ValueError:
         workspace_dir = base_dir.resolve(strict=False)
-    protected_roots = (
-        workspace_dir / "skills",
-        workspace_dir / ".disabled_skills",
-    )
-    resolved = path.resolve(strict=False)
-    return any(
-        resolved == root or resolved.is_relative_to(root)
-        for root in protected_roots
-    )
+
+    return workspace_dir / "skills" / current_skill
 
 
 def _append_shell_redirect_targets(
@@ -690,11 +696,17 @@ def _validate_workspace_skill_write_targets(
     command: str,
     base_dir: Path,
 ) -> Optional[str]:
+    active_skill_root = _active_workspace_skill_write_root(base_dir)
+    if active_skill_root is None:
+        return None
+
     for destination in _extract_shell_write_destinations(command):
         if not destination or destination in {".", ".."}:
             continue
         resolved = _resolve_shell_path_token(destination, base_dir)
-        if _is_workspace_skill_write_target(resolved, base_dir):
+        if resolved == active_skill_root or resolved.is_relative_to(
+            active_skill_root,
+        ):
             return (
                 "Error: Shell command writes directly into the workspace "
                 "skill directory. Use the skill import or edit APIs so "
@@ -1186,6 +1198,8 @@ def prepare_shell_command(
         env,
         tenant_root=get_current_tenant_root(),
         base_dir=working_dir,
+        active_skill=get_skill_context_manager().current_skill,
+        active_skill_base_dir=get_current_tool_base_dir(),
     )
 
     return PreparedShellCommand(

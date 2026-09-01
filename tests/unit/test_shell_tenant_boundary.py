@@ -37,6 +37,7 @@ from swe.agents.tools.shell import (
     _validate_shell_paths,
     _resolve_cwd,
 )
+from swe.agents.skill_context_manager import get_skill_context_manager
 from swe.security.tenant_path_boundary import (
     TenantPathBoundaryError,
     TenantContextMissingError,
@@ -403,7 +404,7 @@ class TestValidateShellPaths:
             result = _validate_shell_paths("cat file.txt", base_dir=tenant_dir)
             assert result is None
 
-    def test_direct_workspace_skill_write_target_denied(
+    def test_direct_active_workspace_skill_write_target_denied(
         self,
         mock_working_dir: Path,
     ):
@@ -415,13 +416,67 @@ class TestValidateShellPaths:
             tenant_id="test_tenant",
             workspace_dir=workspace_dir,
         ):
-            result = _validate_shell_paths(
-                "unzip uploaded.zip -d skills/uploaded",
-                base_dir=workspace_dir,
-            )
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("uploaded")
+            try:
+                result = _validate_shell_paths(
+                    "unzip uploaded.zip -d skills/uploaded",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
 
         assert result is not None
         assert "skills/uploaded" in result
+
+    def test_other_workspace_skill_write_target_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("edited-skill")
+            try:
+                result = _validate_shell_paths(
+                    "unzip uploaded.zip -d skills/uploaded",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is None
+
+    def test_unsafe_active_skill_name_does_not_escape_skill_root(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("../outside")
+            try:
+                result = _validate_shell_paths(
+                    "touch skills/other/SKILL.md",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is not None
+        assert "skills/other/SKILL.md" in result
 
     def test_python_script_content_outside_path_denied(
         self,

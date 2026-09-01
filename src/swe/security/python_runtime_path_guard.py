@@ -14,6 +14,18 @@ _TRUSTED_PATHS_ENV = "SWE_TENANT_PATH_GUARD_TRUSTED_PATHS"
 _TRUSTED_ENTRYPOINT_ROOTS_ENV = (
     "SWE_TENANT_PATH_GUARD_TRUSTED_ENTRYPOINT_ROOTS"
 )
+_ACTIVE_SKILL_ENV = "SWE_TENANT_PATH_GUARD_ACTIVE_SKILL"
+_ACTIVE_SKILL_BASE_DIR_ENV = "SWE_TENANT_PATH_GUARD_ACTIVE_SKILL_BASE_DIR"
+
+
+def is_safe_active_skill_name(skill_name: str | None) -> bool:
+    """Return whether a skill name is safe to append as one path segment."""
+    if not isinstance(skill_name, str) or not skill_name:
+        return False
+    if "\x00" in skill_name or "/" in skill_name or "\\" in skill_name:
+        return False
+    return skill_name not in {".", ".."}
+
 
 _SITE_CUSTOMIZE_SOURCE = """\
 from swe_tenant_path_guard import install_from_env
@@ -55,6 +67,8 @@ _TENANT_ROOT_ENV = "SWE_TENANT_PATH_GUARD_ROOT"
 _BASE_DIR_ENV = "SWE_TENANT_PATH_GUARD_BASE_DIR"
 _TRUSTED_PATHS_ENV = "SWE_TENANT_PATH_GUARD_TRUSTED_PATHS"
 _TRUSTED_ENTRYPOINT_ROOTS_ENV = "SWE_TENANT_PATH_GUARD_TRUSTED_ENTRYPOINT_ROOTS"
+_ACTIVE_SKILL_ENV = "SWE_TENANT_PATH_GUARD_ACTIVE_SKILL"
+_ACTIVE_SKILL_BASE_DIR_ENV = "SWE_TENANT_PATH_GUARD_ACTIVE_SKILL_BASE_DIR"
 _MISSING = object()
 
 
@@ -68,6 +82,9 @@ _ORIGINAL_SUBPROCESS_POPEN = subprocess.Popen
 _INSTALLED = False
 _TENANT_ROOT = None
 _BASE_DIR = None
+_ACTIVE_SKILL = None
+_ACTIVE_SKILL_BASE_DIR = None
+_ACTIVE_SKILL_INVALID = False
 _RUNTIME_ALLOWED_ROOTS = ()
 _TRUSTED_ALLOWED_PATHS = ()
 _TRUSTED_ENTRYPOINT_ROOTS = ()
@@ -76,10 +93,28 @@ _TRUSTED_SWE_ENTRYPOINT = False
 _CHECKING_PATH = False
 
 
+def _is_safe_active_skill_name(skill_name):
+    if not isinstance(skill_name, str) or not skill_name:
+        return False
+    if "\x00" in skill_name or "/" in skill_name or "\\" in skill_name:
+        return False
+    return skill_name not in {".", ".."}
+
+
 def _protected_skill_roots():
-    if _BASE_DIR is None:
+    if _ACTIVE_SKILL_BASE_DIR is None:
         return ()
-    return (_BASE_DIR / "skills", _BASE_DIR / ".disabled_skills")
+    if _ACTIVE_SKILL_INVALID:
+        return (
+            _ACTIVE_SKILL_BASE_DIR / "skills",
+            _ACTIVE_SKILL_BASE_DIR / ".disabled_skills",
+        )
+    if not _ACTIVE_SKILL:
+        return ()
+    return (
+        _ACTIVE_SKILL_BASE_DIR / "skills" / _ACTIVE_SKILL,
+        _ACTIVE_SKILL_BASE_DIR / ".disabled_skills" / _ACTIVE_SKILL,
+    )
 
 
 def _resolve_without_guard(path, *, strict=False):
@@ -435,6 +470,48 @@ def _check_subprocess_command(command, cwd=None, executable=None):
             _check_path(token, "subprocess argument")
 
 
+def _prepend_pythonpath(env, path):
+    existing = env.get("PYTHONPATH")
+    if existing:
+        parts = existing.split(os.pathsep)
+        if path not in parts:
+            env["PYTHONPATH"] = path + os.pathsep + existing
+    else:
+        env["PYTHONPATH"] = path
+
+
+def _apply_guard_env(env):
+    if _TENANT_ROOT is not None:
+        env[_TENANT_ROOT_ENV] = str(_TENANT_ROOT)
+    if _BASE_DIR is not None:
+        env[_BASE_DIR_ENV] = str(_BASE_DIR)
+    if _ACTIVE_SKILL_BASE_DIR is not None:
+        env[_ACTIVE_SKILL_BASE_DIR_ENV] = str(_ACTIVE_SKILL_BASE_DIR)
+    if _ACTIVE_SKILL:
+        env[_ACTIVE_SKILL_ENV] = _ACTIVE_SKILL
+    elif _ACTIVE_SKILL_INVALID:
+        env[_ACTIVE_SKILL_ENV] = "."
+    else:
+        env.pop(_ACTIVE_SKILL_ENV, None)
+        env.pop(_ACTIVE_SKILL_BASE_DIR_ENV, None)
+
+    if _TRUSTED_ALLOWED_PATHS:
+        env[_TRUSTED_PATHS_ENV] = os.pathsep.join(
+            str(path) for path in _TRUSTED_ALLOWED_PATHS
+        )
+    else:
+        env.pop(_TRUSTED_PATHS_ENV, None)
+    if _TRUSTED_ENTRYPOINT_ROOTS:
+        env[_TRUSTED_ENTRYPOINT_ROOTS_ENV] = os.pathsep.join(
+            str(path) for path in _TRUSTED_ENTRYPOINT_ROOTS
+        )
+    else:
+        env.pop(_TRUSTED_ENTRYPOINT_ROOTS_ENV, None)
+
+    _prepend_pythonpath(env, str(pathlib.Path(__file__).parent))
+    return env
+
+
 class _GuardedPopen(_ORIGINAL_SUBPROCESS_POPEN):
     def __init__(self, *args, **kwargs):
         command = _argument(args, kwargs, 0, "args")
@@ -444,6 +521,7 @@ class _GuardedPopen(_ORIGINAL_SUBPROCESS_POPEN):
                 cwd=kwargs.get("cwd"),
                 executable=kwargs.get("executable"),
             )
+        kwargs["env"] = _apply_guard_env(dict(kwargs.get("env") or os.environ))
         super().__init__(*args, **kwargs)
 
 
@@ -455,6 +533,7 @@ def _wrap_os_system(name):
     @functools.wraps(original)
     def wrapper(command, *args, **kwargs):
         _check_subprocess_command(command)
+        _apply_guard_env(os.environ)
         return original(command, *args, **kwargs)
 
     setattr(os, name, wrapper)
@@ -606,6 +685,7 @@ def _audit_hook(event, args):
 
 def install_from_env():
     global _INSTALLED, _TENANT_ROOT, _BASE_DIR, _RUNTIME_ALLOWED_ROOTS
+    global _ACTIVE_SKILL, _ACTIVE_SKILL_BASE_DIR, _ACTIVE_SKILL_INVALID
     global _TRUSTED_ALLOWED_PATHS, _TRUSTED_ENTRYPOINT_ROOTS
     global _TRUSTED_ENTRYPOINT_PATH, _TRUSTED_SWE_ENTRYPOINT
 
@@ -623,6 +703,18 @@ def install_from_env():
     base_dir = os.environ.get(_BASE_DIR_ENV) or tenant_root
     _BASE_DIR = _resolve_without_guard(
         pathlib.Path(os.path.expanduser(base_dir)),
+        strict=False,
+    )
+    active_skill = os.environ.get(_ACTIVE_SKILL_ENV, "").strip()
+    _ACTIVE_SKILL = (
+        active_skill if _is_safe_active_skill_name(active_skill) else None
+    )
+    _ACTIVE_SKILL_INVALID = bool(active_skill and _ACTIVE_SKILL is None)
+    active_skill_base_dir = (
+        os.environ.get(_ACTIVE_SKILL_BASE_DIR_ENV) or base_dir
+    )
+    _ACTIVE_SKILL_BASE_DIR = _resolve_without_guard(
+        pathlib.Path(os.path.expanduser(active_skill_base_dir)),
         strict=False,
     )
     _RUNTIME_ALLOWED_ROOTS = _collect_runtime_allowed_roots()
@@ -690,6 +782,8 @@ def prepare_python_runtime_path_guard_env(
     *,
     tenant_root: Path,
     base_dir: Path,
+    active_skill: str | None = None,
+    active_skill_base_dir: Path | None = None,
     trusted_paths: Iterable[Path] | None = None,
     trusted_entrypoint_roots: Iterable[Path] | None = None,
 ) -> tempfile.TemporaryDirectory[str]:
@@ -713,6 +807,16 @@ def prepare_python_runtime_path_guard_env(
 
     env[_TENANT_ROOT_ENV] = str(tenant_root.resolve())
     env[_BASE_DIR_ENV] = str(base_dir.resolve())
+    if active_skill:
+        if not is_safe_active_skill_name(active_skill):
+            raise ValueError(f"Unsafe active skill name: {active_skill!r}")
+        env[_ACTIVE_SKILL_ENV] = active_skill
+        env[_ACTIVE_SKILL_BASE_DIR_ENV] = str(
+            (active_skill_base_dir or base_dir).resolve(),
+        )
+    else:
+        env.pop(_ACTIVE_SKILL_ENV, None)
+        env.pop(_ACTIVE_SKILL_BASE_DIR_ENV, None)
     _set_path_list_env(
         env,
         _TRUSTED_PATHS_ENV,
