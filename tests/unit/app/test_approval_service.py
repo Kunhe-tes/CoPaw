@@ -10,6 +10,11 @@ import pytest
 
 from swe.app.approvals.service import ApprovalService
 from swe.app.runner.runner import AgentRunner
+from swe.app.source_system_config.models import (
+    EffectiveSourceSystemConfig,
+    SourceSystemConfig,
+)
+from swe.app.source_system_config.runtime import bind_source_system_config
 from swe.config.context import tenant_context
 from swe.security.tool_guard.approval import ApprovalDecision
 
@@ -114,9 +119,27 @@ def _runner_with_zhaohu_workspace() -> tuple[AgentRunner, _ZhaohuChannel]:
     return runner, channel_manager.zhaohu
 
 
+def _source_config_with_zhaohu_tool_guard_notifications():
+    raw_config = SourceSystemConfig.model_validate(
+        {
+            "approval_notifications": {
+                "zhaohu_tool_guard_enabled": True,
+            },
+        },
+    )
+    return EffectiveSourceSystemConfig(
+        source_id="source-a",
+        config=raw_config.merged_with_defaults(),
+        raw_config=raw_config,
+        version=1,
+    )
+
+
 @pytest.mark.asyncio
 async def test_approval_lookup_logs_in_memory_request_ids(caplog) -> None:
     service = ApprovalService()
+    approval_logger = logging.getLogger("swe.app.approvals.service")
+    approval_logger.addHandler(caplog.handler)
     with tenant_context(tenant_id="tenant-a", source_id="source-a"):
         pending = await service.create_pending(
             session_id="session-1",
@@ -138,8 +161,14 @@ async def test_approval_lookup_logs_in_memory_request_ids(caplog) -> None:
         )
 
         caplog.clear()
-        with caplog.at_level(logging.INFO, logger="swe.app.approvals.service"):
-            found = await service.get_request(pending.request_id)
+        try:
+            with caplog.at_level(
+                logging.INFO,
+                logger="swe.app.approvals.service",
+            ):
+                found = await service.get_request(pending.request_id)
+        finally:
+            approval_logger.removeHandler(caplog.handler)
 
     assert found is pending
     assert any(
@@ -419,7 +448,15 @@ async def test_runner_approves_requested_pending_id_not_fifo_head(
     )
     runner = AgentRunner()
 
-    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+    with (
+        tenant_context(
+            tenant_id="tenant-a",
+            source_id="source-a",
+        ),
+        bind_source_system_config(
+            _source_config_with_zhaohu_tool_guard_notifications(),
+        ),
+    ):
         response, consumed, approved_tool_call = (
             await runner._resolve_pending_approval(
                 "session-1",
@@ -505,7 +542,15 @@ async def test_runner_console_approve_notifies_zhaohu_result(
     )
     runner, zhaohu = _runner_with_zhaohu_workspace()
 
-    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+    with (
+        tenant_context(
+            tenant_id="tenant-a",
+            source_id="source-a",
+        ),
+        bind_source_system_config(
+            _source_config_with_zhaohu_tool_guard_notifications(),
+        ),
+    ):
         response, consumed, approved_tool_call = (
             await runner._resolve_pending_approval(
                 "session-1",
@@ -548,7 +593,15 @@ async def test_runner_console_deny_notifies_zhaohu_result(
     )
     runner, zhaohu = _runner_with_zhaohu_workspace()
 
-    with tenant_context(tenant_id="tenant-a", source_id="source-a"):
+    with (
+        tenant_context(
+            tenant_id="tenant-a",
+            source_id="source-a",
+        ),
+        bind_source_system_config(
+            _source_config_with_zhaohu_tool_guard_notifications(),
+        ),
+    ):
         response, consumed, approved_tool_call = (
             await runner._resolve_pending_approval(
                 "session-1",

@@ -10,9 +10,11 @@ from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
+from swe.app.answer_turn.models import StopClaim, TurnIdentity, TurnStatus
 from swe.app.wplus_sop import service as service_module
 from swe.app.wplus_sop.models import (
     CommandReceipt,
@@ -74,7 +76,7 @@ class FakeTaskTracker:
         self.stops += 1
         return True
 
-    async def get_status(self, _run_key: str) -> str:
+    async def read_status(self, _run_key: str) -> str:
         self.status_reads += 1
         if (
             self.idle_after_reads is not None
@@ -89,6 +91,39 @@ class FakeTaskTracker:
         return True, callback()
 
 
+class FakeAnswerTurnCoordinator:
+    def __init__(self, tracker: FakeTaskTracker) -> None:
+        self.tracker = tracker
+        self.identity = TurnIdentity(
+            chat_id="chat-1",
+            msgid="msg-1",
+            turn_id="turn-1",
+        )
+
+    async def status(self, _chat_id: str) -> TurnStatus | None:
+        status = await self.tracker.read_status(_chat_id)
+        if status == "idle":
+            return None
+        if status == "stopping":
+            return TurnStatus.STOPPING
+        return TurnStatus.RUNNING
+
+    async def current_identity(self, chat_id: str) -> TurnIdentity | None:
+        status = await self.status(chat_id)
+        return self.identity if status is not None else None
+
+    async def claim_stop(
+        self,
+        identity: TurnIdentity,
+        *,
+        msgid: str | None = None,
+        internal: bool = False,
+    ) -> StopClaim:
+        _ = msgid, internal
+        self.tracker.stops += 1
+        return StopClaim(True, identity=identity, status=TurnStatus.STOPPING)
+
+
 def _ownership() -> OwnershipTuple:
     return OwnershipTuple(
         tenant_id="tenant-1",
@@ -101,11 +136,13 @@ def _ownership() -> OwnershipTuple:
 
 
 def _service(tmp_path: Path) -> WPlusSopService:
+    tracker = FakeTaskTracker()
     workspace = SimpleNamespace(
         workspace_dir=tmp_path,
         chat_manager=FakeChatManager(),
-        task_tracker=FakeTaskTracker(),
+        task_tracker=tracker,
     )
+    workspace.answer_turn_coordinator = FakeAnswerTurnCoordinator(tracker)
     return WPlusSopService(
         workspace=workspace,
         ownership=_ownership(),
@@ -597,7 +634,9 @@ async def test_completed_trial_snapshot_restores_results_and_evidence(
         event_key="trial-evidence-completed",
     )
 
-    reloaded = WPlusSopStore(tmp_path / "wplus-sop.json").get_session(session_id)
+    reloaded = WPlusSopStore(tmp_path / "wplus-sop.json").get_session(
+        session_id,
+    )
     assert reloaded is not None
     snapshot = serialize_session(reloaded)
 
@@ -698,7 +737,9 @@ async def test_confirm_persists_session_before_starting_agent_turn(
     async def fake_start(**kwargs):
         record = service.store.get_session(kwargs["sop_session_id"])
         assert record is not None
-        assert record.projection.state is SessionState.GENERATING_STAGE_PROPOSAL
+        assert (
+            record.projection.state is SessionState.GENERATING_STAGE_PROPOSAL
+        )
         observed["session_id"] = kwargs["sop_session_id"]
         observed["payload"] = kwargs["payload"]
         return SimpleNamespace(run_id=kwargs["run_id"])
@@ -720,9 +761,10 @@ async def test_confirm_persists_session_before_starting_agent_turn(
 
     projected = await service.flush_chat_projection_outbox()
     assert projected == 1
-    assert service.workspace.chat_manager.chat.meta[
-        "wplus_sop_session"
-    ]["state"] == "GeneratingStageProposal"
+    assert (
+        service.workspace.chat_manager.chat.meta["wplus_sop_session"]["state"]
+        == "GeneratingStageProposal"
+    )
     assert service.store.pending_outbox() == []
 
 
@@ -739,7 +781,7 @@ async def test_confirm_allows_source_id_to_differ_from_chat_channel(
         original_text="创建 SOP",
         mode="explicit",
     )
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def fake_start(**kwargs):
         captured.update(kwargs)
@@ -903,7 +945,9 @@ async def test_submit_answers_accepts_structured_and_legacy_values(
     )
 
     accepted = mutation.record.projection.answers[-1].answers
-    assert mutation.record.projection.state is SessionState.GENERATING_TRIAL
+    assert (
+        mutation.record.projection.state is SessionState.GENERATING_QUESTIONS
+    )
     assert accepted[0].selected_option_ids == ["other"]
     assert accepted[0].text == "企业微信侧边栏"
     assert accepted[1].selected_option_ids == ["chat", "api"]
@@ -920,7 +964,7 @@ async def test_submit_answers_waits_for_prior_chat_run_cleanup(
     tracker = service.workspace.task_tracker
     tracker.status = "running"
     tracker.idle_after_reads = 2
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fake_start(**kwargs):
         if tracker.status != "idle":
@@ -947,7 +991,9 @@ async def test_submit_answers_waits_for_prior_chat_run_cleanup(
 
     assert tracker.status_reads >= 2
     assert len(starts) == 1
-    assert mutation.record.projection.state is SessionState.GENERATING_TRIAL
+    assert (
+        mutation.record.projection.state is SessionState.GENERATING_QUESTIONS
+    )
 
 
 @pytest.mark.asyncio
@@ -1294,7 +1340,7 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fake_start(**kwargs):
         starts.append(kwargs)
@@ -1437,9 +1483,10 @@ async def test_complete_two_stage_flow_preserves_nested_object_lists(
         for snapshot in finalizing_payload["confirmed_snapshots"]
     ] == ["stage-1", "stage-2"]
     assert await service.flush_chat_projection_outbox() > 0
-    assert service.workspace.chat_manager.chat.meta[
-        "wplus_sop_session"
-    ]["state"] == "Completed"
+    assert (
+        service.workspace.chat_manager.chat.meta["wplus_sop_session"]["state"]
+        == "Completed"
+    )
     assert service.store.pending_outbox() == []
 
 
@@ -1449,7 +1496,7 @@ async def test_output_review_previews_artifacts_then_writes_approved_memory(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fake_start(**kwargs):
         starts.append(kwargs)
@@ -1541,7 +1588,11 @@ async def test_output_review_previews_artifacts_then_writes_approved_memory(
         service,
         session_id,
         "resolve_memory",
-        {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+        {
+            "decisions": [
+                {"candidate_id": "candidate-1", "decision": "approve"},
+            ],
+        },
         request_id="cmd-approve-memory",
     )
 
@@ -1550,28 +1601,34 @@ async def test_output_review_previews_artifacts_then_writes_approved_memory(
     assert candidate.status.value == "writing"
     assert candidate.write_receipt is None
     assert starts[-1]["target_state"] == "WritingMemory"
-    assert starts[-1]["payload"] == {"candidates": [{
-        "candidate_id": "candidate-1",
-        "type": "common_wplus_knowledge",
-        "content": {"rule": "优先复核高风险分组"},
-        "evidence": "用户确认该页面口径已经验证。",
-        "target_scope": "common",
-        "target_file": "memory/common-wplus-knowledge.jsonl",
-        "script": "scripts/memory_store.py",
-        "approved": True,
-    }]}
+    assert starts[-1]["payload"] == {
+        "candidates": [
+            {
+                "candidate_id": "candidate-1",
+                "type": "common_wplus_knowledge",
+                "content": {"rule": "优先复核高风险分组"},
+                "evidence": "用户确认该页面口径已经验证。",
+                "target_scope": "common",
+                "target_file": "memory/common-wplus-knowledge.jsonl",
+                "script": "scripts/memory_store.py",
+                "approved": True,
+            },
+        ],
+    }
 
     completed = service.append_agent_event(
         kind="memory_write_batch_result",
         payload={
-            "results": [{
-                "candidate_id": "candidate-1",
-                "status": "succeeded",
-                "target_scope": "common",
-                "target_file": "memory/common-wplus-knowledge.jsonl",
-                "result": "appended",
-                "script": "scripts/memory_store.py",
-            }],
+            "results": [
+                {
+                    "candidate_id": "candidate-1",
+                    "status": "succeeded",
+                    "target_scope": "common",
+                    "target_file": "memory/common-wplus-knowledge.jsonl",
+                    "result": "appended",
+                    "script": "scripts/memory_store.py",
+                },
+            ],
         },
         event_key="memory-write-candidate-1",
         trusted_sop_session_id=session_id,
@@ -1606,7 +1663,7 @@ async def test_failed_memory_write_stays_retryable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fake_start(**kwargs):
         starts.append(kwargs)
@@ -1649,19 +1706,25 @@ async def test_failed_memory_write_stays_retryable(
         service,
         session_id,
         "resolve_memory",
-        {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+        {
+            "decisions": [
+                {"candidate_id": "candidate-1", "decision": "approve"},
+            ],
+        },
         request_id="cmd-memory-failed",
     )
     failed = service.append_agent_event(
         kind="memory_write_batch_result",
         payload={
-            "results": [{
-                "candidate_id": "candidate-1",
-                "status": "failed",
-                "error_code": "memory_store_rejected",
-                "summary": "disk unavailable",
-                "script": "scripts/memory_store.py",
-            }],
+            "results": [
+                {
+                    "candidate_id": "candidate-1",
+                    "status": "failed",
+                    "error_code": "memory_store_rejected",
+                    "summary": "disk unavailable",
+                    "script": "scripts/memory_store.py",
+                },
+            ],
         },
         event_key="memory-write-failed-candidate-1",
         trusted_sop_session_id=session_id,
@@ -1678,7 +1741,11 @@ async def test_failed_memory_write_stays_retryable(
         service,
         session_id,
         "resolve_memory",
-        {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+        {
+            "decisions": [
+                {"candidate_id": "candidate-1", "decision": "approve"},
+            ],
+        },
         request_id="cmd-memory-retry",
     )
     assert retried.record.projection.state is SessionState.WRITING_MEMORY
@@ -1757,7 +1824,7 @@ async def test_memory_decisions_are_atomic_and_approved_candidates_share_one_run
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fake_start(**kwargs):
         starts.append(kwargs)
@@ -1785,7 +1852,9 @@ async def test_memory_decisions_are_atomic_and_approved_candidates_share_one_run
             state=SessionState.MEMORY_REVIEW,
             state_version=1,
             title="SOP",
-            final_result=FinalSopResult.model_validate(_final_result_payload(tmp_path)),
+            final_result=FinalSopResult.model_validate(
+                _final_result_payload(tmp_path),
+            ),
             memory_candidates=candidates,
         ),
         command_receipt=CommandReceipt(
@@ -1801,7 +1870,11 @@ async def test_memory_decisions_are_atomic_and_approved_candidates_share_one_run
             service,
             session_id,
             "resolve_memory",
-            {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+            {
+                "decisions": [
+                    {"candidate_id": "candidate-1", "decision": "approve"},
+                ],
+            },
             request_id="cmd-incomplete-memory",
         )
     assert service.store.get_session(session_id).projection.state_version == 1
@@ -1853,7 +1926,10 @@ async def test_memory_decisions_are_atomic_and_approved_candidates_share_one_run
         trusted_attempt_id=starts[0]["attempt_id"],
     )
     assert result.record.projection.state is SessionState.MEMORY_REVIEW
-    assert [candidate.status.value for candidate in result.record.projection.memory_candidates] == [
+    assert [
+        candidate.status.value
+        for candidate in result.record.projection.memory_candidates
+    ] == [
         "approved",
         "failed",
     ]
@@ -1866,7 +1942,7 @@ async def test_rejecting_all_memory_candidates_does_not_start_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fake_start(**kwargs):
         starts.append(kwargs)
@@ -1882,15 +1958,17 @@ async def test_rejecting_all_memory_candidates_does_not_start_agent(
             state=SessionState.MEMORY_REVIEW,
             state_version=1,
             title="SOP",
-            memory_candidates=[{
-                "candidate_id": "candidate-1",
-                "summary": "不保存规则",
-                "memory_type": "sop_case",
-                "value": {"pattern": "rule"},
-                "evidence": "用户审阅该脱敏规则。",
-                "target_scope": "cases",
-                "target_file": "memory/cases/sop-cases.jsonl",
-            }],
+            memory_candidates=[
+                {
+                    "candidate_id": "candidate-1",
+                    "summary": "不保存规则",
+                    "memory_type": "sop_case",
+                    "value": {"pattern": "rule"},
+                    "evidence": "用户审阅该脱敏规则。",
+                    "target_scope": "cases",
+                    "target_file": "memory/cases/sop-cases.jsonl",
+                },
+            ],
         ),
         command_receipt=CommandReceipt(
             command_request_id="cmd-memory-review",
@@ -1980,7 +2058,10 @@ async def test_legacy_unwritable_memory_candidate_can_only_be_rejected(
         request_id="cmd-reject-legacy",
     )
     assert rejected.record.projection.state is SessionState.COMPLETED
-    assert rejected.record.projection.memory_candidates[0].status.value == "rejected"
+    assert (
+        rejected.record.projection.memory_candidates[0].status.value
+        == "rejected"
+    )
 
 
 @pytest.mark.asyncio
@@ -1992,7 +2073,7 @@ async def test_memory_batch_waits_for_prior_agent_then_starts_once(
     tracker = service.workspace.task_tracker
     tracker.status = "running"
     tracker.idle_after_reads = 2
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fake_start(**kwargs):
         assert tracker.status == "idle"
@@ -2009,15 +2090,17 @@ async def test_memory_batch_waits_for_prior_agent_then_starts_once(
             state=SessionState.MEMORY_REVIEW,
             state_version=1,
             title="SOP",
-            memory_candidates=[{
-                "candidate_id": "candidate-1",
-                "summary": "保存规则",
-                "memory_type": "sop_case",
-                "value": {"pattern": "rule"},
-                "evidence": "用户确认该脱敏规则。",
-                "target_scope": "cases",
-                "target_file": "memory/cases/sop-cases.jsonl",
-            }],
+            memory_candidates=[
+                {
+                    "candidate_id": "candidate-1",
+                    "summary": "保存规则",
+                    "memory_type": "sop_case",
+                    "value": {"pattern": "rule"},
+                    "evidence": "用户确认该脱敏规则。",
+                    "target_scope": "cases",
+                    "target_file": "memory/cases/sop-cases.jsonl",
+                },
+            ],
         ),
         command_receipt=CommandReceipt(
             command_request_id="cmd-memory-review",
@@ -2030,7 +2113,11 @@ async def test_memory_batch_waits_for_prior_agent_then_starts_once(
         service,
         session_id,
         "resolve_memory",
-        {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+        {
+            "decisions": [
+                {"candidate_id": "candidate-1", "decision": "approve"},
+            ],
+        },
         request_id="cmd-memory-wait",
     )
     assert tracker.status_reads >= 2
@@ -2044,7 +2131,11 @@ async def test_memory_batch_idle_timeout_does_not_mutate_or_create_run(
 ) -> None:
     service = _service(tmp_path)
     service.workspace.task_tracker.status = "running"
-    monkeypatch.setattr(service_module, "_CHAT_IDLE_WAIT_TIMEOUT_SECONDS", 0.001)
+    monkeypatch.setattr(
+        service_module,
+        "_CHAT_IDLE_WAIT_TIMEOUT_SECONDS",
+        0.001,
+    )
     monkeypatch.setattr(service_module, "_CHAT_IDLE_POLL_SECONDS", 0.001)
     session_id = "sop-memory-timeout"
     service.store.create_session(
@@ -2055,15 +2146,17 @@ async def test_memory_batch_idle_timeout_does_not_mutate_or_create_run(
             state=SessionState.MEMORY_REVIEW,
             state_version=1,
             title="SOP",
-            memory_candidates=[{
-                "candidate_id": "candidate-1",
-                "summary": "保存规则",
-                "memory_type": "sop_case",
-                "value": {"pattern": "rule"},
-                "evidence": "用户确认该脱敏规则。",
-                "target_scope": "cases",
-                "target_file": "memory/cases/sop-cases.jsonl",
-            }],
+            memory_candidates=[
+                {
+                    "candidate_id": "candidate-1",
+                    "summary": "保存规则",
+                    "memory_type": "sop_case",
+                    "value": {"pattern": "rule"},
+                    "evidence": "用户确认该脱敏规则。",
+                    "target_scope": "cases",
+                    "target_file": "memory/cases/sop-cases.jsonl",
+                },
+            ],
         ),
         command_receipt=CommandReceipt(
             command_request_id="cmd-memory-review",
@@ -2078,7 +2171,11 @@ async def test_memory_batch_idle_timeout_does_not_mutate_or_create_run(
             service,
             session_id,
             "resolve_memory",
-            {"decisions": [{"candidate_id": "candidate-1", "decision": "approve"}]},
+            {
+                "decisions": [
+                    {"candidate_id": "candidate-1", "decision": "approve"},
+                ],
+            },
             request_id="cmd-memory-timeout",
         )
     after = service.get_session(session_id)
@@ -2093,7 +2190,7 @@ async def test_question_generation_commands_forward_server_target_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fake_start(**kwargs):
         starts.append(kwargs)
@@ -2219,7 +2316,7 @@ async def test_resume_question_generation_forwards_server_target_state(
             resulting_state_version=1,
         ),
     )
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def fake_start(**kwargs):
         captured.update(kwargs)
@@ -2277,7 +2374,7 @@ async def test_retry_question_generation_forwards_server_target_state(
             status=RunStatus.FAILED,
         ),
     )
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def fake_start(**kwargs):
         captured.update(kwargs)
@@ -2477,7 +2574,9 @@ async def test_historical_question_event_is_not_duplicate_in_next_stage(
 
     assert first.duplicate is False
     assert awaiting_answer_replay.duplicate is True
-    assert len(awaiting_answer_replay.record.events) == len(first.record.events)
+    assert len(awaiting_answer_replay.record.events) == len(
+        first.record.events,
+    )
 
     await _send(
         service,
@@ -2646,6 +2745,7 @@ async def test_pending_exit_rejects_duplicate_exit_and_supports_controls(
         is SessionState.GENERATING_STAGE_PROPOSAL
     )
 
+    service.workspace.task_tracker.status = "running"
     paused = await _send(
         service,
         session_id,
@@ -2898,7 +2998,9 @@ async def test_memory_candidates_require_final_sop_result(
     )
 
 
-def test_agent_cannot_forge_memory_approval_or_write_receipt(tmp_path: Path) -> None:
+def test_agent_cannot_forge_memory_approval_or_write_receipt(
+    tmp_path: Path,
+) -> None:
     service = _service(tmp_path)
     service.store.create_session(
         SessionProjection(
@@ -3179,7 +3281,7 @@ async def test_revise_answer_invalidates_downstream_and_starts_new_run(
     )
 
     projection = revised.record.projection
-    assert projection.state is SessionState.GENERATING_TRIAL
+    assert projection.state is SessionState.GENERATING_QUESTIONS
     assert projection.revision == 2
     assert projection.round == 1
     assert projection.answers[0].answers[0].selected_option_ids == ["no"]
@@ -3238,7 +3340,7 @@ async def test_agent_completion_without_boundary_becomes_recoverable_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def fake_start(**kwargs):
         captured.update(kwargs)
@@ -3300,7 +3402,7 @@ async def test_runtime_start_failure_can_retry_from_server_owned_state(
     )
     assert failed.runs[0].status is RunStatus.FAILED
 
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def succeed_start(**kwargs):
         captured.update(kwargs)
@@ -3362,7 +3464,7 @@ async def test_retry_current_turn_allows_source_id_to_differ_from_chat_channel(
     assert failed.projection.state is SessionState.RECOVERABLE_FAILURE
     assert service.workspace.chat_manager.chat.channel == "console"
     failed_run = failed.runs[0]
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
 
     async def succeed_start(**kwargs):
         captured.update(kwargs)
@@ -3406,7 +3508,7 @@ async def test_confirm_retry_replays_runtime_failure_without_duplicate_state(
         original_text="创建 SOP",
         mode="explicit",
     )
-    starts: list[dict[str, object]] = []
+    starts: list[dict[str, Any]] = []
 
     async def fail_start(**kwargs):
         starts.append(kwargs)
@@ -3513,11 +3615,7 @@ async def test_active_or_fresh_generation_run_is_not_recovered(
     _create_generation_run(
         service,
         session_id="sop-active-or-fresh",
-        created_at=(
-            now
-            if is_fresh
-            else now - timedelta(minutes=1)
-        ),
+        created_at=(now if is_fresh else now - timedelta(minutes=1)),
     )
 
     recovered = await service.recover_orphaned_generation_run(
@@ -3526,10 +3624,7 @@ async def test_active_or_fresh_generation_run_is_not_recovered(
 
     assert recovered is None
     record = service.get_session("sop-active-or-fresh")
-    assert (
-        record.projection.state
-        is SessionState.GENERATING_STAGE_PROPOSAL
-    )
+    assert record.projection.state is SessionState.GENERATING_STAGE_PROPOSAL
     assert record.runs[0].status is RunStatus.CLAIMED
 
 
@@ -3558,10 +3653,7 @@ async def test_pending_exit_orphan_pauses_into_retryable_failure(
     assert recovered is not None
     record = recovered.record
     assert record.projection.state is SessionState.PAUSED
-    assert (
-        record.projection.resume_state
-        is SessionState.RECOVERABLE_FAILURE
-    )
+    assert record.projection.resume_state is SessionState.RECOVERABLE_FAILURE
     assert record.projection.last_error.error_code == "orphaned_agent_run"
     assert record.projection.pending_exit_action is None
     assert record.runs[0].status is RunStatus.FAILED
@@ -3573,7 +3665,7 @@ async def test_retry_uses_only_server_owned_target_and_lineage(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     _create_generation_run(
         service,
         session_id="sop-server-owned-retry",
@@ -3606,9 +3698,7 @@ async def test_retry_uses_only_server_owned_target_and_lineage(
         "retry_of_run_id": "run-sop-server-owned-retry",
     }
     assert (
-        service.get_session("sop-server-owned-retry")
-        .runs[-1]
-        .retry_of_run_id
+        service.get_session("sop-server-owned-retry").runs[-1].retry_of_run_id
         == "run-sop-server-owned-retry"
     )
 
@@ -3619,7 +3709,7 @@ async def test_finalizing_retry_reports_when_sop_result_is_already_persisted(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     service = _service(tmp_path)
-    captured: dict[str, object] = {}
+    captured: dict[str, Any] = {}
     session_id = "sop-finalizing-retry"
     failed_run_id = "run-finalizing-failed"
     service.store.create_session(
@@ -3698,15 +3788,13 @@ async def test_orphan_recovery_fails_closed_on_stale_projection(
 
     monkeypatch.setattr(service.store, "commit_event", stale_commit)
 
-    assert (
-        await service.recover_orphaned_generation_run("sop-stale")
-        is None
-    )
+    assert await service.recover_orphaned_generation_run("sop-stale") is None
     record = service.get_session("sop-stale")
     assert (
         record.projection.state
         is SessionState.GENERATING_STAGE_PROPOSAL
     )
+    assert record.runs[0].status is RunStatus.CLAIMED
 
 
 async def _new_two_stage_session(

@@ -322,12 +322,15 @@ class ConsoleChannel(BaseChannel):
         user_name = meta.get("user_name")
         bbk_id = meta.get("bbk_id")
         b3_trace_id = meta.get("b3_trace_id")
+        b3_context = meta.get("b3_context")
         if user_name:
             request.user_name = user_name  # type: ignore[attr-defined]
         if bbk_id:
             request.bbk_id = bbk_id  # type: ignore[attr-defined]
         if b3_trace_id:
             request.b3_trace_id = b3_trace_id  # type: ignore[attr-defined]
+        if isinstance(b3_context, dict):
+            request.b3_context = dict(b3_context)  # type: ignore[attr-defined]
 
         return request
 

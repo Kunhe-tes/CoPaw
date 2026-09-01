@@ -3413,6 +3413,7 @@ class QueryService:
             JOIN swe_cron_jobs j
               ON c.cron_task_id = j.id
             WHERE c.clicked_at >= %s AND c.clicked_at <= %s
+              AND c.event_type = 'button_click'
               AND c.cron_task_id IS NOT NULL
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
@@ -3668,6 +3669,7 @@ class QueryService:
                 COUNT(*) AS total_clicks
             FROM swe_html_preview_click_events
             WHERE clicked_at >= %s AND clicked_at <= %s
+              AND event_type = 'button_click'
               AND cron_task_id IS NOT NULL
               AND bbk_id IS NOT NULL
               AND bbk_id != ''
@@ -3738,6 +3740,7 @@ class QueryService:
             FROM swe_html_preview_click_events
             WHERE bbk_id = %s
               AND clicked_at >= %s AND clicked_at <= %s
+              AND event_type = 'button_click'
               AND button_type IN ('plan', 'insight', 'phone')
               {source_where}
             GROUP BY button_type
@@ -3773,6 +3776,7 @@ class QueryService:
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
+              AND c.event_type = 'button_click'
               AND c.button_type IN ('plan', 'insight', 'phone')
               AND j.deleted_at IS NULL
               AND j.status != 'deleted'
@@ -3808,6 +3812,7 @@ class QueryService:
             FROM swe_html_preview_click_events
             WHERE bbk_id = %s
               AND clicked_at >= %s AND clicked_at <= %s
+              AND event_type = 'button_click'
               AND button_type IN ('plan', 'insight', 'phone')
               AND customer_id IS NOT NULL
               {source_where}
@@ -3844,6 +3849,7 @@ class QueryService:
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
+              AND c.event_type = 'button_click'
               AND c.button_type IN ('plan', 'insight', 'phone')
               AND c.customer_id IS NOT NULL
               AND j.deleted_at IS NULL
@@ -3894,6 +3900,7 @@ class QueryService:
             FROM swe_html_preview_click_events a
             LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
             WHERE a.customer_id IS NOT NULL
+              AND a.event_type = 'button_click'
               AND (
                 a.clicked_at >= %s AND a.clicked_at <= %s
                 OR b.clicked_at >= %s AND b.clicked_at <= %s
@@ -5065,6 +5072,7 @@ class QueryService:
             FROM swe_html_preview_click_events c
             JOIN swe_cron_jobs j ON c.cron_task_id = j.id
             WHERE c.bbk_id = %s AND c.clicked_at >= %s AND c.clicked_at <= %s
+              AND c.event_type = 'button_click'
               AND c.button_type IN ('plan', 'insight', 'phone')
               AND c.customer_id IS NOT NULL
               AND j.deleted_at IS NULL
@@ -5117,6 +5125,7 @@ class QueryService:
             LEFT JOIN swe_skill_contact_detail b ON a.id = b.click_id
             WHERE a.bbk_id = %s
               AND a.customer_id IS NOT NULL
+              AND a.event_type = 'button_click'
               AND (
                 a.clicked_at >= %s AND a.clicked_at <= %s
                 OR b.clicked_at >= %s AND b.clicked_at <= %s
@@ -5301,6 +5310,7 @@ class QueryService:
             LEFT JOIN swe_html_preview_click_events c
                 ON c.cron_task_id = e.job_id
                 AND c.clicked_at >= %s AND c.clicked_at <= %s
+                AND c.event_type = 'button_click'
                 {click_source_on}
             WHERE j.bbk_id = %s
               AND e.actual_time >= %s AND e.actual_time <= %s
@@ -5387,6 +5397,7 @@ class QueryService:
               AND c.user_id = %s
               AND {skill_expr} = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
+              AND c.event_type = 'button_click'
               {source_where}
             GROUP BY c.customer_id, c.customer_name
             ORDER BY click_time DESC
@@ -5614,6 +5625,7 @@ class QueryService:
               AND c.user_id = %s
               AND c.clicked_at >= %s AND c.clicked_at <= %s
               AND c.customer_id IS NOT NULL
+              AND c.event_type = 'button_click'
               {skill_filter}
               {source_where}
             GROUP BY c.customer_id, c.customer_name
