@@ -583,9 +583,8 @@ KEEP_DIRS = {
     "backup",
     "skills",
     "governance",
+    "dialog",
 }
-
-ORPHAN_EXCLUDED_DIRS = {"dialog"}
 
 
 # ------------------------------------------------------------------
@@ -721,15 +720,6 @@ def _is_keep_dir_path(relative_path: str) -> bool:
     """判断相对路径是否位于根目录保留目录下。"""
     first = relative_path.split("/", 1)[0]
     return first in KEEP_DIRS
-
-
-def _is_excluded_orphan_path(relative_path: str) -> bool:
-    """判断孤立文件路径是否位于隐藏目录或治理排除目录。"""
-    parts = relative_path.replace("\\", "/").split("/")
-    return any(
-        part.startswith(".") or part.casefold() in ORPHAN_EXCLUDED_DIRS
-        for part in parts
-    )
 
 
 def _protected_path_set(workspace_dir: Path) -> set[str]:
@@ -2430,7 +2420,7 @@ def _scan_orphan_files(workspace_dir: Path) -> list[OrphanFileInfo]:
         try:
             for item in dir_path.iterdir():
                 relative_path = item.relative_to(relative_base).as_posix()
-                if _is_excluded_orphan_path(relative_path):
+                if item.name.startswith("."):
                     continue
 
                 # Skip directories in keep list (at root level only)
@@ -2754,7 +2744,7 @@ async def delete_orphan_file(
 ) -> DeleteBackupResponse:
     """Delete an orphan file."""
     workspace_dir = _get_workspace_dir(request)
-    relative_path, file_path = _resolve_workspace_file(workspace_dir, filepath)
+    _, file_path = _resolve_workspace_file(workspace_dir, filepath)
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -2770,12 +2760,6 @@ async def delete_orphan_file(
         raise HTTPException(
             status_code=403,
             detail="Cannot delete protected file",
-        )
-
-    if _is_excluded_orphan_path(relative_path):
-        raise HTTPException(
-            status_code=403,
-            detail="Cannot delete excluded governance file",
         )
 
     try:
@@ -2999,9 +2983,6 @@ def _archive_index_expired_item_ids(workspace_dir: Path) -> set[str]:
         str(item.get("id") or "")
         for item in _load_archive_index(workspace_dir).get("items", [])
         if _archive_item_expired(item)
-        and not _is_excluded_orphan_path(
-            str(item.get("original_path") or ""),
-        )
     }
 
 
@@ -3060,9 +3041,6 @@ def _expired_archive_row_context(
     if not _archive_item_expired(
         {"archived_at": getattr(row, "archived_at", "")},
     ):
-        return None
-    original_path = str(getattr(row, "original_path", "") or "")
-    if _is_excluded_orphan_path(original_path):
         return None
     archive_item_id = str(getattr(row, "archive_item_id", "") or "")
     if not archive_item_id:

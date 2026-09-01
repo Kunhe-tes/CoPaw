@@ -185,8 +185,8 @@ def _workspace(tmp_path: Path, tenant_id: str, source_id: str) -> Path:
     return path
 
 
-def test_orphan_scan_skips_hidden_and_dialog_directories(tmp_path: Path) -> None:
-    """隐藏目录和任意层级 dialog 目录不应进入过期文件候选。"""
+def test_orphan_scan_skips_hidden_and_root_keep_directories(tmp_path: Path) -> None:
+    """隐藏目录和根目录保留目录不应进入过期文件候选。"""
     workspace = tmp_path / "workspace"
     (workspace / "allowed").mkdir(parents=True)
     (workspace / "allowed" / "keep.txt").write_text("keep", encoding="utf-8")
@@ -194,11 +194,6 @@ def test_orphan_scan_skips_hidden_and_dialog_directories(tmp_path: Path) -> None
     (workspace / ".cache" / "hidden.txt").write_text("hidden", encoding="utf-8")
     (workspace / "dialog").mkdir()
     (workspace / "dialog" / "root.txt").write_text("dialog", encoding="utf-8")
-    (workspace / "nested" / "dialog").mkdir(parents=True)
-    (workspace / "nested" / "dialog" / "nested.txt").write_text(
-        "dialog",
-        encoding="utf-8",
-    )
 
     paths = {item.path for item in _scan_orphan_files(workspace)}
 
@@ -212,12 +207,12 @@ def test_delete_orphan_file_rejects_dialog_directory(
     """直接调用删除接口也不能绕过 dialog 目录过滤。"""
     client, _ = _client(tmp_path, monkeypatch)
     workspace = _workspace(tmp_path, "manager", "source-a")
-    target = workspace / "nested" / "dialog" / "expired.txt"
+    target = workspace / "dialog" / "expired.txt"
     target.parent.mkdir(parents=True)
     target.write_text("expired", encoding="utf-8")
 
     response = client.delete(
-        "/dream-logs/orphan-files/nested/dialog/expired.txt",
+        "/dream-logs/orphan-files/dialog/expired.txt",
     )
 
     assert response.status_code == 403
@@ -626,110 +621,6 @@ def test_purge_expired_accepts_missing_body(
     assert response.status_code == 200
     assert response.json()["files_deleted"] == ["old.md"]
     assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-1"]
-
-
-def test_purge_expired_filters_hidden_and_dialog_index_items(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """本地索引中的隐藏路径和 dialog 路径不得进入过期清理。"""
-    client, service = _client(tmp_path, monkeypatch)
-    workspace = _workspace(tmp_path, "alice", "source-a")
-    items = []
-    for archive_id, original_path in [
-        ("archive-safe", "safe.md"),
-        ("archive-dialog", "nested/dialog/record.md"),
-        ("archive-hidden", ".cache/record.md"),
-    ]:
-        archive_file = workspace / "governance" / "archive" / "files" / archive_id
-        archive_file.parent.mkdir(parents=True, exist_ok=True)
-        archive_file.write_text("old", encoding="utf-8")
-        items.append(
-            {
-                "id": archive_id,
-                "original_path": original_path,
-                "archive_path": f"governance/archive/files/{archive_id}",
-                "size_bytes": 3,
-                "mtime": "2000-01-01T00:00:00Z",
-                "archived_at": "2000-01-01T00:00:00Z",
-                "archived_by": "admin",
-                "archive_reason": "manual",
-            },
-        )
-    (workspace / ARCHIVE_INDEX_FILE).parent.mkdir(parents=True, exist_ok=True)
-    (workspace / ARCHIVE_INDEX_FILE).write_text(
-        json.dumps({"version": 1, "items": items}),
-        encoding="utf-8",
-    )
-
-    response = client.post(
-        "/dream-logs/archive/purge-expired",
-        json={"target_user_id": "alice"},
-        headers={
-            "X-Source-Id": "source-a",
-            "X-Tenant-Id": "manager",
-            "X-User-Role": "manager",
-            "X-User-Id": "admin",
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["files_deleted"] == ["safe.md"]
-    assert service.delete_archive_calls[0]["archive_item_ids"] == ["archive-safe"]
-    assert (workspace / "governance/archive/files/archive-dialog").is_file()
-    assert (workspace / "governance/archive/files/archive-hidden").is_file()
-
-
-def test_purge_expired_filters_hidden_and_dialog_read_model_rows(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    """数据库补齐的隐藏路径和 dialog 路径同样不得进入过期清理。"""
-    client, service = _client(tmp_path, monkeypatch)
-    workspace = _workspace(tmp_path, "alice", "source-a")
-    for archive_id, original_path in [
-        ("archive-safe-db", "safe-db.md"),
-        ("archive-dialog-db", "dialog/record.md"),
-        ("archive-hidden-db", "nested/.history/record.md"),
-    ]:
-        archive_file = workspace / "governance" / "archive" / "files" / archive_id
-        archive_file.parent.mkdir(parents=True, exist_ok=True)
-        archive_file.write_text("old", encoding="utf-8")
-        service.archive_records.append(
-            SimpleNamespace(
-                source_id="source-a",
-                target_user_id="alice",
-                target_agent_id="default",
-                archive_item_id=archive_id,
-                original_path=original_path,
-                archive_path=f"governance/archive/files/{archive_id}",
-                size_bytes=3,
-                mtime="2000-01-01T00:00:00Z",
-                archived_at="2000-01-01T00:00:00Z",
-                archived_by="admin",
-                archive_reason="manual",
-                raw_item={},
-            ),
-        )
-
-    response = client.post(
-        "/dream-logs/archive/purge-expired",
-        json={"target_user_id": "alice"},
-        headers={
-            "X-Source-Id": "source-a",
-            "X-Tenant-Id": "manager",
-            "X-User-Role": "manager",
-            "X-User-Id": "admin",
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["files_deleted"] == ["safe-db.md"]
-    assert service.delete_archive_calls[0]["archive_item_ids"] == [
-        "archive-safe-db",
-    ]
-    assert (workspace / "governance/archive/files/archive-dialog-db").is_file()
-    assert (workspace / "governance/archive/files/archive-hidden-db").is_file()
 
 
 def test_purge_expired_uses_database_archive_records_when_index_missing(
