@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 import threading
 import time
@@ -85,6 +86,62 @@ def test_scan_skill_directory_reuses_scan_executor(
 
     assert [executor.max_workers for executor in created_executors] == [2]
     assert submitted_paths == [first.resolve(), second.resolve()]
+
+
+def test_scan_skill_directory_logs_queue_and_scan_durations(
+    monkeypatch,
+    tmp_path: Path,
+    caplog,
+) -> None:
+    """Scanner diagnostics expose bounded queue and worker durations."""
+    skill_dir = tmp_path / "diagnostic"
+    skill_dir.mkdir()
+
+    class _FakeExecutor:
+        def shutdown(self, **_kwargs):
+            return None
+
+        def submit(self, fn, scanner, resolved, **kwargs):
+            return _FakeFuture(fn(scanner, resolved, **kwargs))
+
+    class _FakeScanner:
+        def scan_skill(self, resolved, *, skill_name=None):
+            return ScanResult(
+                skill_name=skill_name or Path(resolved).name,
+                skill_directory=str(resolved),
+            )
+
+    monkeypatch.setenv("SWE_SKILL_SCAN_MODE", "warn")
+    monkeypatch.setenv("SWE_SKILL_SCAN_EXECUTOR_WORKERS", "1")
+    monkeypatch.setattr(skill_scanner, "_scanner_instance", _FakeScanner())
+    monkeypatch.setattr(skill_scanner, "_scan_executor", _FakeExecutor())
+    monkeypatch.setattr(skill_scanner, "_scan_executor_workers", 1)
+    monkeypatch.setattr(
+        skill_scanner,
+        "_scan_executor_slots",
+        threading.BoundedSemaphore(1),
+    )
+    monkeypatch.setattr(skill_scanner, "_scan_cache", {})
+
+    scanner_logger = logging.getLogger(skill_scanner.__name__)
+    scanner_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=skill_scanner.__name__):
+            skill_scanner.scan_skill_directory(
+                skill_dir,
+                skill_name="diagnostic",
+            )
+            skill_scanner.scan_skill_directory(
+                skill_dir,
+                skill_name="diagnostic",
+            )
+    finally:
+        scanner_logger.removeHandler(caplog.handler)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("skill_scan_queue_ms=" in message for message in messages)
+    assert any("skill_scan_ms=" in message for message in messages)
+    assert any("skill_scan_cache_hit=true" in message for message in messages)
 
 
 @pytest.mark.asyncio

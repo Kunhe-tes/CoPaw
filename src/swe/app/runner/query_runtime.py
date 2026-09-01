@@ -165,6 +165,21 @@ async def select_runtime_context_directives(
     inputs.selected_context_directives = [
         directive.render() for directive in all_directives
     ]
+    logger.debug(
+        "runtime_skill_snapshot_generation=%d selected_skill_count=%d "
+        "reference_skill_count=%d",
+        getattr(inputs.workspace_skill_snapshot, "generation", 0),
+        sum(
+            1
+            for directive in selected_directives
+            if isinstance(directive, SkillUseDirective)
+        ),
+        sum(
+            1
+            for directive in reference_directives
+            if isinstance(directive, SkillUseDirective)
+        ),
+    )
     return scenario_snapshot
 
 

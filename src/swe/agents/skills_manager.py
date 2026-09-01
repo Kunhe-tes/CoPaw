@@ -739,7 +739,22 @@ def _mutate_json(
     # process-local coordinator prevents a query snapshot from being
     # published while a manifest mutation is still assembling its payload;
     # the existing file lock continues to provide cross-process exclusion.
-    if path.name == "skill.json" and path.parent.name != "skill_pool":
+    # Do not infer manifest kind from the parent directory name: a perfectly
+    # valid workspace may itself be named ``skill_pool``.  Pool callers pass
+    # the pool schema default, so additionally verify that the path is the
+    # canonical pool manifest for its working directory.
+    is_pool_manifest = False
+    if (
+        path.name == "skill.json"
+        and default.get("schema_version") == "skill-pool-manifest.v1"
+    ):
+        expected_pool_path = get_pool_skill_manifest_path(
+            working_dir=path.parent.parent,
+        )
+        is_pool_manifest = path.expanduser().resolve() == (
+            expected_pool_path.expanduser().resolve()
+        )
+    if path.name == "skill.json" and not is_pool_manifest:
         from .skill_runtime_snapshot import workspace_skill_coordinator
 
         coordination = workspace_skill_coordinator(path.parent)

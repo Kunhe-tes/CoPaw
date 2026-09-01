@@ -319,10 +319,25 @@ def _scan_with_slot_release(
     *,
     skill_name: str | None,
     slot: threading.BoundedSemaphore,
+    queued_at: float | None = None,
 ) -> ScanResult:
+    scan_started_at = time.monotonic()
     try:
         return scanner.scan_skill(resolved, skill_name=skill_name)
     finally:
+        logger.debug(
+            "skill_scan_queue_ms=%.1f skill_scan_ms=%.1f skill_name=%s",
+            (
+                max(
+                    0.0,
+                    (scan_started_at - queued_at) * 1000,
+                )
+                if queued_at is not None
+                else 0.0
+            ),
+            (time.monotonic() - scan_started_at) * 1000,
+            skill_name or resolved.name,
+        )
         slot.release()
 
 
@@ -481,9 +496,15 @@ def scan_skill_directory(
     cached = _get_cached_result(resolved)
     if cached is not None:
         result = cached
+        logger.debug(
+            "skill_scan_queue_ms=0.0 skill_scan_ms=0.0 "
+            "skill_scan_cache_hit=true skill_name=%s",
+            effective_name,
+        )
     else:
         scanner = _get_scanner()
         deadline = time.monotonic() + effective_timeout
+        queued_at = time.monotonic()
         executor, slot = _get_scan_executor()
         # Slot acquisition is released by _scan_with_slot_release.
         # pylint: disable-next=consider-using-with
@@ -502,6 +523,7 @@ def scan_skill_directory(
                 resolved,
                 skill_name=skill_name,
                 slot=slot,
+                queued_at=queued_at,
             )
         except Exception:
             slot.release()

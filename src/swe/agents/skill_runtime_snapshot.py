@@ -113,6 +113,7 @@ def _fresh(snapshot: WorkspaceSkillSnapshot, manifest_path: Path) -> bool:
     )
 
 
+# pylint: disable-next=too-many-statements
 def get_workspace_skill_snapshot(
     workspace_dir: Path,
     *,
@@ -185,15 +186,19 @@ def get_workspace_skill_snapshot(
                     scan_skill_directory,
                 )
 
+                scan_mode = _get_scan_mode()
                 try:
                     scan_result = scan_skill_directory(
                         directory,
                         skill_name=name,
-                        block=True,
+                        # Let the scanner apply the configured block/warn/off
+                        # policy.  Forcing ``block=True`` here made warn mode
+                        # silently drop otherwise loadable skills.
+                        block=None,
                     )
                     if (
                         scan_result is None
-                        and _get_scan_mode() != "off"
+                        and scan_mode != "off"
                         and not is_skill_whitelisted(name, directory)
                     ):
                         logger.warning(
@@ -202,11 +207,20 @@ def get_workspace_skill_snapshot(
                         )
                         continue
                 except SkillScanError:
+                    if scan_mode == "block":
+                        logger.warning(
+                            "Workspace skill '%s' excluded after security scan",
+                            name,
+                        )
+                        continue
+                    # A scanner implementation may still raise while the
+                    # effective policy is warn (for example during a config
+                    # transition).  Warn mode is explicitly non-blocking.
                     logger.warning(
-                        "Workspace skill '%s' excluded after security scan",
+                        "Workspace skill '%s' has scanner findings; "
+                        "continuing because scan mode is warn",
                         name,
                     )
-                    continue
 
                 skills[name] = SkillRuntimeSnapshot(
                     directory=directory.resolve(),
@@ -235,7 +249,8 @@ def get_workspace_skill_snapshot(
             for skill in skills.values()
         )
         if _retry < 1 and (
-            manifest_stat_before != manifest_stat_after or not skills_still_current
+            manifest_stat_before != manifest_stat_after
+            or not skills_still_current
         ):
             logger.info(
                 "Workspace skill snapshot changed during capture; retrying",

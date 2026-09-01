@@ -177,3 +177,73 @@ def test_snapshot_validation_refreshes_stat_token_without_rehashing_forever(
         ),
     )
     assert snapshots._filter_changed_skills(validated) is validated
+
+
+def test_snapshot_warn_mode_keeps_skill_when_scan_reports_blocking_finding(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Warn mode must not turn a scanner finding into snapshot exclusion."""
+    from swe.agents import skill_runtime_snapshot as snapshots
+    from swe.agents import skills_manager
+    from swe.security import skill_scanner
+
+    _write_workspace(tmp_path)
+    manifest = json.loads(
+        (tmp_path / "skill.json").read_text(encoding="utf-8"),
+    )
+    monkeypatch.setattr(
+        skills_manager,
+        "read_skill_manifest",
+        lambda *_args, **_kwargs: manifest,
+    )
+    monkeypatch.setenv("SWE_SKILL_SCAN_MODE", "warn")
+
+    def raise_scan(*_args, **_kwargs):
+        raise skill_scanner.SkillScanError(
+            skill_scanner.ScanResult(
+                skill_name="demo",
+                skill_directory=str(tmp_path / "skills" / "demo"),
+            ),
+        )
+
+    monkeypatch.setattr(skill_scanner, "scan_skill_directory", raise_scan)
+
+    snapshot = snapshots.get_workspace_skill_snapshot(tmp_path)
+
+    assert "demo" in snapshot.skills
+
+
+def test_mutate_json_coordinator_uses_manifest_kind_not_parent_name(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """A workspace directory named ``skill_pool`` is still a workspace."""
+    from swe.agents import skill_runtime_snapshot as snapshots
+    from swe.agents import skills_manager
+
+    workspace = tmp_path / "skill_pool"
+    workspace.mkdir()
+    manifest_path = workspace / "skill.json"
+    entered: list[Path] = []
+
+    class _Coordinator:
+        def __enter__(self):
+            entered.append(workspace)
+
+        def __exit__(self, *_args):
+            return False
+
+    monkeypatch.setattr(
+        snapshots,
+        "workspace_skill_coordinator",
+        lambda path: _Coordinator(),
+    )
+
+    skills_manager._mutate_json(
+        manifest_path,
+        {"schema_version": "workspace-skill-manifest.v1", "skills": {}},
+        lambda payload: payload,
+    )
+
+    assert entered == [workspace]
