@@ -772,6 +772,9 @@ def _create_session_skill_detector(
     source_id: str,
     enabled_skills: list[str],
     skill_runtime_profiles: dict[str, Any] | None = None,
+    skill_metadata: dict[str, Any] | None = None,
+    skill_dirs: dict[str, Path] | None = None,
+    skill_signatures: dict[str, str] | None = None,
     get_hook_state: Callable[[], HookSessionState],
     set_hook_state: Callable[[HookSessionState], None],
     approved_http_urls: Collection[str] | None = None,
@@ -786,9 +789,25 @@ def _create_session_skill_detector(
     )
 
     async def _load_skill_hooks(skill_name: str) -> None:
-        skill_root = resolve_effective_skill_dir(workspace, skill_name)
+        skill_root = (skill_dirs or {}).get(skill_name)
+        if skill_root is None:
+            skill_root = resolve_effective_skill_dir(workspace, skill_name)
         if skill_root is None:
             return
+        expected_signature = (skill_signatures or {}).get(skill_name)
+        if expected_signature:
+            from ...agents.skills_manager import _build_signature
+
+            actual_signature = await asyncio.to_thread(
+                _build_signature,
+                skill_root,
+            )
+            if actual_signature != expected_signature:
+                logger.warning(
+                    "Skipping hooks for changed skill '%s'",
+                    skill_name,
+                )
+                return
         try:
             next_state = await asyncio.to_thread(
                 load_skill_hooks_for_session,
@@ -817,7 +836,7 @@ def _create_session_skill_detector(
         skill_hook_loader=_load_skill_hooks,
         confirmed_skill_callback=confirmed_skill_callback,
     )
-    detector.set_enabled_skills(enabled_skills)
+    detector.set_enabled_skills(enabled_skills, skill_metadata)
     if skill_runtime_profiles:
         detector.set_skill_runtime_profiles(skill_runtime_profiles)
     return detector
@@ -4201,6 +4220,12 @@ class AgentRunner(Runner):
             )
 
         source_id_for_hooks = _request_source_id(request)
+        workspace_skill_snapshot = getattr(
+            runtime.agent,
+            "_workspace_skill_snapshot",
+            None,
+        )
+        snapshot_skills = getattr(workspace_skill_snapshot, "skills", {})
         runtime.session_skill_detector = _create_session_skill_detector(
             workspace_dir=Path(self.workspace_dir or WORKING_DIR),
             tenant_id=self.tenant_id,
@@ -4218,6 +4243,18 @@ class AgentRunner(Runner):
                 if hasattr(runtime.agent, "get_skill_runtime_profiles")
                 else {}
             ),
+            skill_metadata={
+                name: dict(skill.metadata)
+                for name, skill in snapshot_skills.items()
+            },
+            skill_dirs={
+                name: skill.directory
+                for name, skill in snapshot_skills.items()
+            },
+            skill_signatures={
+                name: skill.content_signature
+                for name, skill in snapshot_skills.items()
+            },
             get_hook_state=_get_session_hook_state,
             set_hook_state=_set_session_hook_state,
             confirmed_skill_callback=(_queue_confirmed_skill_snapshot_update),

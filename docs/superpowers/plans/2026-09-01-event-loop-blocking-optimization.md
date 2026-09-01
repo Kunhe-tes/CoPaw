@@ -22,6 +22,7 @@
 
 - A2–A4 与 B2–B4 的运行时隔离已落地：媒体入口使用进程级有界 worker/slot，HTTP(S) 优先走流式异步下载，多个 block 并行且按原序写回；query 使用一次性 Workspace Skill Snapshot，Agent、Hooks 和 Background SubAgent 复用其已确认依赖。
 - 安全扫描和 manifest 重整的同步等待已移入 worker bridge；扫描缓存先做递归 stat 探测，变化后再计算内容签名；HTTP 4xx/5xx 不再无谓回退到 wget/curl。
+- Workspace manifest/目录变更已接入进程内 coordinator；快照发布前后复核 manifest 与技能 freshness，变化时有限重试，避免在本进程内发布半成品快照。该协调不跨 Kubernetes 进程，跨进程一致性仍依赖现有文件锁与构建后复核。
 - 已通过的定向测试与静态检查记录在交付报告中；生产压测、RUNTIME_DIAGNOSTIC p95/p99 基线和完整测试套件仍未标记为完成。完整测试当前受仓库缺失 `skills/wplus-sop-miner/scripts/validate_stage_sop.py` 阻断，部分 runner 测试受本机 provider secret 目录权限阻断。
 
 ---
@@ -229,7 +230,7 @@ select_runtime_context_directives()
 - [x] 使用有界 bridge worker 隔离 `scan_skill_directory()` 的同步等待，不在事件循环中调用同步 scanner。
 - [x] 保留现有扫描超时语义：`off` 跳过、`warn` 记录后继续、`block` 超时仍按当前实现返回 `None` 并继续；只有明确安全结果才写入缓存。
 - [x] 扫描缓存键使用技能目录路径和 stat/content fingerprint；变化后重新计算内容签名，不能按技能名永久缓存。
-- [ ] reconcile、扫描和请求读取共享同一工作区级协调器：变更期间不发布半成品 snapshot，失败时保留旧快照并记录错误。
+- [x] reconcile、扫描和请求读取共享同一工作区级协调器：变更期间不发布半成品 snapshot，失败时保留旧快照并记录错误。协调器为每进程一个；跨进程竞态由现有 manifest 文件锁及快照构建后复核/有限重试兜底。
 
 ### Task B5：技能路径测试与验收
 

@@ -116,6 +116,64 @@ async def test_http_policy_error_does_not_fallback_to_legacy_worker(
 
 
 @pytest.mark.asyncio
+async def test_cancelled_remote_preparation_cleans_partial_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = file_handling._prepare_remote_target
+    started = threading.Event()
+    release = threading.Event()
+
+    def slow_prepare(*args, **kwargs):
+        result = original(*args, **kwargs)
+        started.set()
+        release.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(file_handling, "_prepare_remote_target", slow_prepare)
+    task = asyncio.create_task(
+        file_handling.download_file_from_url(
+            "https://example.test/cancelled.bin",
+            download_dir=str(tmp_path),
+        ),
+    )
+    await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    release.set()
+    await asyncio.sleep(0.1)
+    assert not list(tmp_path.glob("*.part-*"))
+
+
+@pytest.mark.asyncio
+async def test_cancelled_media_slot_waiter_cleans_prepared_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    started = asyncio.Event()
+
+    async def blocked_slot() -> float:
+        started.set()
+        await asyncio.Future()
+        return 0.0
+
+    monkeypatch.setattr(file_handling, "_run_async_media_slot", blocked_slot)
+    task = asyncio.create_task(
+        file_handling.download_file_from_url(
+            "https://example.test/cancelled-slot.bin",
+            download_dir=str(tmp_path),
+        ),
+    )
+    await started.wait()
+    assert list(tmp_path.glob("*.part-*"))
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not list(tmp_path.glob("*.part-*"))
+
+
+@pytest.mark.asyncio
 async def test_media_worker_executor_is_bounded(monkeypatch) -> None:
     active = 0
     peak = 0

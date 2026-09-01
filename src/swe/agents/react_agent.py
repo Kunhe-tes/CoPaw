@@ -849,6 +849,14 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             if workspace_snapshot is not None
             else None
         )
+        skill_snapshot_dirs = (
+            {
+                name: skill.directory
+                for name, skill in workspace_snapshot.skills.items()
+            }
+            if workspace_snapshot is not None
+            else None
+        )
         tools = create_background_subagent_tools(
             supervisor=supervisor,
             parent_agent_config=self._agent_config,
@@ -856,6 +864,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             request_context=request_context,
             effective_skill_names=effective_skill_names,
             skill_snapshot_signatures=skill_snapshot_signatures,
+            skill_snapshot_dirs=skill_snapshot_dirs,
             selected_expert_id=str(
                 request_context.get("selected_expert_id") or "",
             ).strip()
@@ -1228,7 +1237,9 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
 
         try:
             self._skill_tool_registry = (
-                build_skill_tool_registry_from_profiles(profiles)
+                build_skill_tool_registry_from_profiles(
+                    profiles,
+                )
             )
         except Exception as e:
             logger.warning("Failed to build skill-tool registry: %s", e)
@@ -1296,6 +1307,19 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                             "skills",
                             {},
                         ).items()
+                    }
+                    if getattr(self, "_workspace_skill_snapshot", None)
+                    is not None
+                    else None
+                ),
+                skill_signatures=(
+                    {
+                        name: skill.content_signature
+                        for name, skill in getattr(
+                            self,
+                            "_workspace_skill_snapshot",
+                            None,
+                        ).skills.items()
                     }
                     if getattr(self, "_workspace_skill_snapshot", None)
                     is not None

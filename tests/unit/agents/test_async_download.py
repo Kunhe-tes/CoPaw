@@ -100,13 +100,15 @@ async def test_rejects_chunked_response_after_limit(
         return httpx.Response(200, content=body())
 
     await mock_client(handler)
+    destination = tmp_path / ".chunked.part"
     with pytest.raises(ValueError, match="10 MiB"):
         await async_download.download_http_to_path(
             "https://example.test/chunked.bin",
-            tmp_path / ".chunked.part",
+            destination,
             deadline=async_download.time.monotonic() + 5,
             max_bytes=10,
         )
+    assert not destination.exists()
 
 
 @pytest.mark.asyncio

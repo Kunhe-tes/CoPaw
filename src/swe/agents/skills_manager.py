@@ -14,7 +14,7 @@ import threading
 import time
 import zipfile
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TypeVar
@@ -23,6 +23,7 @@ import frontmatter
 from pydantic import BaseModel, Field
 from ..constant import env_var_overrides
 from ..security.skill_scanner import scan_skill_directory
+from .skill_runtime_snapshot import coordinate_workspace_skill_mutation
 from ..security.skill_scanner.safe_unpack import safe_unpack_skill_zip
 from .utils.file_handling import read_text_file_with_encoding_fallback
 from ..utils.fs_text import (
@@ -734,12 +735,23 @@ def _mutate_json(
     default: dict[str, Any],
     mutator: Callable[[dict[str, Any]], _RegistryResult],
 ) -> _RegistryResult:
-    with _file_write_lock(_lock_path_for(path)):
-        payload = _read_json_unlocked(path, default)
-        result = mutator(payload)
-        if result is not False:
-            _write_json_atomic(path, payload)
-        return result
+    # Workspace and pool manifests are both named ``skill.json``.  A
+    # process-local coordinator prevents a query snapshot from being
+    # published while a manifest mutation is still assembling its payload;
+    # the existing file lock continues to provide cross-process exclusion.
+    if path.name == "skill.json" and path.parent.name != "skill_pool":
+        from .skill_runtime_snapshot import workspace_skill_coordinator
+
+        coordination = workspace_skill_coordinator(path.parent)
+    else:
+        coordination = nullcontext()
+    with coordination:
+        with _file_write_lock(_lock_path_for(path)):
+            payload = _read_json_unlocked(path, default)
+            result = mutator(payload)
+            if result is not False:
+                _write_json_atomic(path, payload)
+            return result
 
 
 def _default_workspace_manifest() -> dict[str, Any]:
@@ -1529,6 +1541,17 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
         if registered ``demo_skill`` is disabled, the next reconcile moves it
         from ``skills/demo_skill`` to ``.disabled_skills/demo_skill``.
     """
+    from .skill_runtime_snapshot import workspace_skill_coordinator
+
+    workspace_dir = Path(workspace_dir).expanduser().resolve()
+    with workspace_skill_coordinator(workspace_dir):
+        return _reconcile_workspace_manifest_locked(workspace_dir)
+
+
+def _reconcile_workspace_manifest_locked(
+    workspace_dir: Path,
+) -> dict[str, Any]:
+    """Reconcile while holding the workspace skill coordinator."""
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
     sanitized_rename_moves: list[tuple[Path, Path]] = []
 
@@ -2067,6 +2090,7 @@ class SkillService:
                 skills.append(skill)
         return skills
 
+    @coordinate_workspace_skill_mutation
     def create_skill(
         self,
         name: str,
@@ -2160,6 +2184,7 @@ class SkillService:
         )
         return skill_name
 
+    @coordinate_workspace_skill_mutation
     def replace_workspace_skill_from_dir(
         self,
         *,
@@ -2235,6 +2260,7 @@ class SkillService:
         )
         return {"success": True, "name": final_name}
 
+    @coordinate_workspace_skill_mutation
     def save_skill(
         self,
         *,
@@ -2446,6 +2472,7 @@ class SkillService:
             _register,
         )
 
+    @coordinate_workspace_skill_mutation
     def import_from_zip(
         self,
         data: bytes,
@@ -2584,6 +2611,7 @@ class SkillService:
         finally:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
+    @coordinate_workspace_skill_mutation
     def enable_skill(
         self,
         name: str,
@@ -2656,6 +2684,7 @@ class SkillService:
             "reason": None,
         }
 
+    @coordinate_workspace_skill_mutation
     def disable_skill(self, name: str) -> dict[str, Any]:
         skill_name = str(name or "")
         manifest_path = get_workspace_skill_manifest_path(self.workspace_dir)
@@ -2687,6 +2716,7 @@ class SkillService:
             "updated_workspaces": [self.workspace_dir.name],
         }
 
+    @coordinate_workspace_skill_mutation
     def set_skill_channels(
         self,
         name: str,
@@ -2712,6 +2742,7 @@ class SkillService:
         )
         return updated
 
+    @coordinate_workspace_skill_mutation
     def delete_skill(self, name: str) -> bool:
         skill_name = str(name or "")
         manifest = self._read_manifest()
@@ -3416,6 +3447,7 @@ class SkillPoolService:
             _update,
         )
 
+    @coordinate_workspace_skill_mutation
     def download_to_workspace(
         self,
         skill_name: str,

@@ -7,7 +7,7 @@ import asyncio
 from datetime import datetime
 import json
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
 from agentscope.message import TextBlock
 from agentscope.tool import ToolResponse
@@ -116,6 +116,7 @@ def create_background_subagent_tools(
     request_context: dict[str, Any],
     effective_skill_names: list[str] | None = None,
     skill_snapshot_signatures: dict[str, str] | None = None,
+    skill_snapshot_dirs: Mapping[str, Path] | None = None,
     selected_expert_id: str | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
@@ -127,6 +128,7 @@ def create_background_subagent_tools(
         tool_scope=tool_scope,
         workspace_dir=workspace_dir,
         effective_skill_names=effective_skill_names,
+        skill_snapshot_dirs=skill_snapshot_dirs,
         selected_expert_id=selected_expert_id,
     )
     directory = _format_skill_definition_directory(definition_catalog)
@@ -248,6 +250,7 @@ def create_background_subagent_tools(
                     else []
                 ),
                 skill_snapshot_signatures=skill_snapshot_signatures,
+                skill_snapshot_dirs=skill_snapshot_dirs,
             )
             if goal_id:
                 run_id = getattr(result, "run_id", None)
@@ -345,6 +348,7 @@ def _build_definition_catalog(
     tool_scope: BackgroundSubAgentScope,
     workspace_dir: Path,
     effective_skill_names: list[str] | None,
+    skill_snapshot_dirs: Mapping[str, Path] | None = None,
     selected_expert_id: str | None = None,
 ):
     """Build the catalog only for an explicit delegation-intent turn."""
@@ -378,6 +382,7 @@ def _build_definition_catalog(
         skill_definitions=load_skill_owned_definitions(
             workspace_dir=workspace_dir,
             effective_skill_names=effective_skill_names or [],
+            skill_snapshot_dirs=skill_snapshot_dirs,
         ).definitions,
         builtin_definitions=builtin_definitions,
         agent_owned_definitions=[

@@ -109,6 +109,15 @@ async def _acquire_media_slot() -> None:
         await asyncio.sleep(0.005)
 
 
+async def _run_async_media_slot_with_cleanup(temp_path: Path) -> float:
+    """Acquire a media slot and clean its prepared target if cancelled."""
+    try:
+        return await _run_async_media_slot()
+    except BaseException:
+        await asyncio.to_thread(temp_path.unlink, True)
+        raise
+
+
 def read_text_file_with_encoding_fallback(file_path: Path | str) -> str:
     """Read text file with multiple encoding attempts for cross-platform
     compatibility.
@@ -384,9 +393,7 @@ def _guess_suffix_from_url_headers(
         if deadline is not None:
             timeout = min(timeout, _remaining_timeout(deadline))
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = (
-                (resp.headers.get("Content-Type") or "").split(";")[0].strip()
-            )
+            raw = (resp.headers.get("Content-Type") or "").split(";")[0].strip()
             if not raw:
                 return None
             suffix = mimetypes.guess_extension(raw)
@@ -553,14 +560,7 @@ def _download_file_from_url_sync(
         temp_path = Path(temp_name)
         deadline = deadline or (time.monotonic() + _MEDIA_TOTAL_TIMEOUT)
         try:
-            try:
-                _download_remote_to_path(url, temp_path, deadline)
-            except TypeError as exc:
-                # Keep compatibility with older test/integration hooks that
-                # monkeypatch the historical two-argument worker.
-                if "positional" not in str(exc) and "argument" not in str(exc):
-                    raise
-                _download_remote_to_path(url, temp_path)
+            _download_remote_to_path(url, temp_path, deadline)
             if not temp_path.exists():
                 raise FileNotFoundError("Downloaded file does not exist")
             size = temp_path.stat().st_size
@@ -647,17 +647,45 @@ async def download_file_from_url(
     HTTP(S) uses streaming ``httpx`` first; the legacy wget/curl/urllib
     implementation remains an isolated worker fallback for compatibility.
     """
-    prepared = await asyncio.to_thread(
-        _prepare_remote_target,
-        url,
-        filename,
-        download_dir,
+    loop = asyncio.get_running_loop()
+    preparation = asyncio.create_task(
+        asyncio.to_thread(
+            _prepare_remote_target,
+            url,
+            filename,
+            download_dir,
+        ),
     )
+    try:
+        prepared = await asyncio.shield(preparation)
+    except asyncio.CancelledError:
+
+        def _cleanup_prepared(done: asyncio.Future) -> None:
+            if done.cancelled():
+                return
+            try:
+                result = done.result()
+            except Exception:
+                return
+            if isinstance(result, tuple):
+                temp_path = result[1]
+
+                async def _cleanup() -> None:
+                    try:
+                        await asyncio.to_thread(temp_path.unlink, True)
+                    except OSError:
+                        pass
+
+                if not loop.is_closed():
+                    loop.create_task(_cleanup())
+
+        preparation.add_done_callback(_cleanup_prepared)
+        raise
     if isinstance(prepared, str):
         return prepared
     final_path, temp_path, deadline = prepared
     started_at = time.monotonic()
-    queue_ms = await _run_async_media_slot()
+    queue_ms = await _run_async_media_slot_with_cleanup(temp_path)
     try:
         content_type = await download_http_to_path(
             url,
@@ -689,13 +717,10 @@ async def download_file_from_url(
     except (AsyncDownloadHTTPError, AsyncDownloadPolicyError) as exc:
         await asyncio.to_thread(temp_path.unlink, True)
         error_kind = (
-            "http_status"
-            if isinstance(exc, AsyncDownloadHTTPError)
-            else "http_policy"
+            "http_status" if isinstance(exc, AsyncDownloadHTTPError) else "http_policy"
         )
         logger.info(
-            "media_timeout=false media_error=%s media_source_type=url "
-            "error_type=%s",
+            "media_timeout=false media_error=%s media_source_type=url " "error_type=%s",
             error_kind,
             type(exc).__name__,
         )

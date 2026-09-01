@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import dataclass, replace
+from functools import wraps
 import logging
 from pathlib import Path
 from threading import RLock
@@ -44,6 +46,41 @@ class WorkspaceSkillSnapshot:
 _LOCK = RLock()
 _CACHE: dict[Path, WorkspaceSkillSnapshot] = {}
 _GENERATION = 0
+_COORDINATORS: dict[Path, RLock] = {}
+
+
+@contextmanager
+def workspace_skill_coordinator(workspace_dir: Path):
+    """Serialize workspace skill mutations and snapshot publication.
+
+    The lock is process-local (the manifest file lock remains the
+    cross-process guard).  Keeping it separate from ``_LOCK`` ensures a
+    reconcile/scan cannot race a local manifest mutation while a snapshot is
+    being assembled.
+    """
+    key = Path(workspace_dir).expanduser().resolve()
+    with _LOCK:
+        coordinator = _COORDINATORS.setdefault(key, RLock())
+    with coordinator:
+        yield
+
+
+def coordinate_workspace_skill_mutation(func):
+    """Wrap a workspace skill mutation in the process-local coordinator."""
+
+    @wraps(func)
+    def wrapped(self, *args, **kwargs):
+        workspace_dir = getattr(self, "workspace_dir", None)
+        if workspace_dir is None:
+            workspace_dir = kwargs.get("workspace_dir")
+        if workspace_dir is None and len(args) >= 2:
+            workspace_dir = args[1]
+        if workspace_dir is None:
+            return func(self, *args, **kwargs)
+        with workspace_skill_coordinator(workspace_dir):
+            return func(self, *args, **kwargs)
+
+    return wrapped
 
 
 def _stat(path: Path) -> ManifestStat:
@@ -79,6 +116,7 @@ def get_workspace_skill_snapshot(
     workspace_dir: Path,
     *,
     reconcile: bool = True,
+    _retry: int = 0,
 ) -> WorkspaceSkillSnapshot:
     """Return a cached workspace snapshot, reconciling only on invalidation."""
     global _GENERATION
@@ -93,11 +131,13 @@ def get_workspace_skill_snapshot(
     )
 
     manifest_path = get_workspace_skill_manifest_path(workspace_dir)
-    with _LOCK:
-        previous = _CACHE.get(workspace_dir)
-        if previous is not None and _fresh(previous, manifest_path):
-            return previous
+    with workspace_skill_coordinator(workspace_dir):
+        with _LOCK:
+            previous = _CACHE.get(workspace_dir)
+            if previous is not None and _fresh(previous, manifest_path):
+                return previous
         manifest = read_skill_manifest(workspace_dir, reconcile=reconcile)
+        manifest_stat_before = _stat(manifest_path)
         entries = manifest.get("skills", {})
         skills: dict[str, SkillRuntimeSnapshot] = {}
         for name, entry in sorted(entries.items()):
@@ -175,15 +215,33 @@ def get_workspace_skill_snapshot(
                     name,
                     exc,
                 )
-        _GENERATION += 1
-        snapshot = WorkspaceSkillSnapshot(
-            workspace_dir=workspace_dir,
-            generation=_GENERATION,
-            manifest_stat=_stat(manifest_path),
-            skills=MappingProxyType(skills),
+        manifest_stat_after = _stat(manifest_path)
+        skills_still_current = all(
+            get_skill_freshness_token(skill.directory) == skill.freshness_token
+            for skill in skills.values()
         )
-        _CACHE[workspace_dir] = snapshot
-        return snapshot
+        if _retry < 1 and (
+            manifest_stat_before != manifest_stat_after
+            or not skills_still_current
+        ):
+            logger.info(
+                "Workspace skill snapshot changed during capture; retrying",
+            )
+            return get_workspace_skill_snapshot(
+                workspace_dir,
+                reconcile=reconcile,
+                _retry=_retry + 1,
+            )
+        with _LOCK:
+            _GENERATION += 1
+            snapshot = WorkspaceSkillSnapshot(
+                workspace_dir=workspace_dir,
+                generation=_GENERATION,
+                manifest_stat=manifest_stat_after,
+                skills=MappingProxyType(skills),
+            )
+            _CACHE[workspace_dir] = snapshot
+            return snapshot
 
 
 def invalidate_workspace_skill_snapshot(workspace_dir: Path) -> None:
@@ -208,14 +266,23 @@ def _filter_changed_skills(
     snapshot: WorkspaceSkillSnapshot,
 ) -> WorkspaceSkillSnapshot:
     """Drop skills whose content changed after the snapshot was captured."""
-    from .skills_manager import _build_signature
+    from .skills_manager import _build_signature, get_skill_freshness_token
 
-    valid = {
-        name: skill
-        for name, skill in snapshot.skills.items()
-        if _build_signature(skill.directory) == skill.content_signature
-    }
-    if len(valid) == len(snapshot.skills):
+    valid: dict[str, SkillRuntimeSnapshot] = {}
+    changed = False
+    for name, skill in snapshot.skills.items():
+        # The recursive stat token is the cheap admission check. Hash the
+        # directory only when metadata/size/timestamps changed.
+        current_freshness = get_skill_freshness_token(skill.directory)
+        if current_freshness == skill.freshness_token:
+            valid[name] = skill
+            continue
+        if _build_signature(skill.directory) == skill.content_signature:
+            # A metadata-only touch is still the same content, but update the
+            # token so subsequent query admissions stay on the stat-only path.
+            valid[name] = replace(skill, freshness_token=current_freshness)
+            changed = True
+    if not changed and len(valid) == len(snapshot.skills):
         return snapshot
     return WorkspaceSkillSnapshot(
         workspace_dir=snapshot.workspace_dir,

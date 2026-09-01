@@ -35,6 +35,7 @@ def capture_launch_dependencies(
     definition: SubAgentDefinition,
     effective_skill_names: list[str],
     skill_snapshot_signatures: Mapping[str, str] | None = None,
+    skill_snapshot_dirs: Mapping[str, Path] | None = None,
 ) -> tuple[list[str], str | None, SubAgentLaunchDiagnostics]:
     """Snapshot effective Skills and MCP configuration privately."""
     community = getattr(definition.agent_owned, "community", None)
@@ -66,11 +67,14 @@ def capture_launch_dependencies(
     if metadata is not None:
         available_skills = set(effective_skill_names)
         for skill_name in metadata.declared_skills:
-            source = (
-                frozen_root / "skills" / skill_name
-                if frozen_root is not None
-                else resolve_effective_skill_dir(workspace_dir, skill_name)
-            )
+            if frozen_root is not None:
+                source = frozen_root / "skills" / skill_name
+            elif skill_snapshot_dirs is not None:
+                # A parent Query snapshot is authoritative.  Never silently
+                # resolve a missing entry from the mutable workspace.
+                source = skill_snapshot_dirs.get(skill_name)
+            else:
+                source = resolve_effective_skill_dir(workspace_dir, skill_name)
             if frozen_root is None and skill_name not in available_skills:
                 skipped_skills.append(skill_name)
                 continue

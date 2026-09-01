@@ -190,6 +190,7 @@ class SkillInvocationDetector:
         bbk_id: Optional[str] = None,
         workspace_dir: Optional[Path] = None,
         skill_dirs: Optional[dict[str, Path]] = None,
+        skill_signatures: Optional[dict[str, str]] = None,
         skill_hook_loader: (
             Callable[[str], Awaitable[None] | None] | None
         ) = None,
@@ -230,6 +231,7 @@ class SkillInvocationDetector:
         self._bbk_id = bbk_id
         self._workspace_dir = workspace_dir
         self._skill_dirs = dict(skill_dirs or {})
+        self._skill_signatures = dict(skill_signatures or {})
         self._skill_hook_loader = skill_hook_loader
         self._confirmed_skill_callback = confirmed_skill_callback
 
@@ -1343,6 +1345,35 @@ class SkillInvocationDetector:
             file_path,
         )
         return skill_name
+
+    async def validate_tool_call_snapshot(
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+    ) -> bool:
+        """Check snapshot content before attributing a workspace skill read."""
+        if tool_name != "read_file" or not self._skill_signatures:
+            return True
+        skill_name = self._detect_skill_from_skill_md_read(
+            tool_name,
+            tool_input,
+        )
+        if skill_name is None:
+            return True
+        expected = self._skill_signatures.get(skill_name)
+        skill_dir = self._skill_dirs.get(skill_name)
+        if expected is None or skill_dir is None:
+            return False
+        from .skills_manager import _build_signature
+
+        actual = await asyncio.to_thread(_build_signature, skill_dir)
+        if actual != expected:
+            logger.warning(
+                "Skipping skill attribution for changed skill '%s'",
+                skill_name,
+            )
+            return False
+        return True
 
     def _update_skill_state(self, skill: str) -> None:
         """Update skill state after a tool call.
