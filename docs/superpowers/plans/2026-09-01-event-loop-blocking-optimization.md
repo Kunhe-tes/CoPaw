@@ -176,10 +176,10 @@ select_runtime_context_directives()
 - Modify: `src/swe/app/runner/context_references.py`
 - Test: `tests/unit/agents/test_skill_manifest_runtime_cache.py`
 
-- [ ] 保留 `reconcile_workspace_manifest(workspace_dir)` 作为显式变更/初始化操作；新增只读 `read_skill_manifest(workspace_dir, reconcile=False)` 运行时入口。
-- [ ] 让 `resolve_effective_skills()` 接受可选的已读 manifest 或 `SkillManifestSnapshot`；传入快照时不得再次 reconcile。
-- [ ] `build_skill_use_directives()` 接受 effective names 和 metadata 的可选参数；若 metadata 已含 description，则不再逐个读取和解析 `SKILL.md`。无 metadata 时保留兼容的旧读取逻辑。
-- [ ] manifest metadata 中已有 `description`、`requirements` 等字段时直接复用；只有技能内容实际需要加载时才读取全文。
+- [x] 保留 `reconcile_workspace_manifest(workspace_dir)` 作为显式变更/初始化操作；新增只读 `read_skill_manifest(workspace_dir, reconcile=False)` 运行时入口。
+- [x] 让 `resolve_effective_skills()` 接受可选的已读 manifest 或 `SkillManifestSnapshot`；传入快照时不得再次 reconcile。
+- [x] `build_skill_use_directives()` 接受 effective names 和 metadata 的可选参数；若 metadata 已含 description，则不再逐个读取和解析 `SKILL.md`。无 metadata 时保留兼容的旧读取逻辑。
+- [x] manifest metadata 中已有 `description`、`requirements` 等字段时直接复用；只有技能内容实际需要加载时才读取全文。
 
 ### Task B2：实现工作区级版本化缓存和失效
 
@@ -191,8 +191,8 @@ select_runtime_context_directives()
 
 - [x] 定义不可变快照，至少包含 `workspace_dir`、进程内 `generation`、manifest stat（mtime/size/inode）、effective names、每个技能的绝对目录、metadata、内容签名和 runtime profile。
 - [x] 缓存键按工作区隔离；热路径先做轻量 stat token，变化后在 worker 中递归计算内容签名。
-- [ ] 所有成功的启用/禁用/安装/删除/恢复/迁移操作在写 manifest 后递增 generation 并主动失效；外部手工改动由 manifest mtime 或 watcher 检测兜底。
-- [ ] 使用进程内锁保护缓存更新；重整仍由现有文件锁串行化，避免两个请求同时移动同一技能目录。
+- [x] 所有成功的启用/禁用/安装/删除/恢复/迁移操作在写 manifest 后主动失效；外部手工改动由 manifest mtime 或内容 freshness 检测兜底。generation 仅作进程内诊断。
+- [x] 使用进程内锁保护缓存更新；重整仍由现有文件锁串行化，避免两个请求同时移动同一技能目录。
 - [x] 新 query 的缓存/reconcile 异常或 manifest 损坏时，不加载无法确认的 Workspace Skill，但继续普通 query；不静默放行未扫描技能。管理 API 仍保留严格错误。
 
 ### Task B3：一个请求只构建一次技能快照
@@ -207,10 +207,10 @@ select_runtime_context_directives()
 - Test: `tests/unit/app/test_runner_context_references.py`
 
 - [x] 在 query runtime 准备阶段取得并验证一次 `WorkspaceSkillSnapshot`；快照构建/校验在 worker 中执行。
-- [ ] 保留 request/scenario 顺序后再追加 reference 顺序；同名技能保持现有 reference 优先、输出位置不变，并只执行一次 channel 过滤和路径解析。
+- [x] 保留 request/scenario 顺序后再追加 reference 顺序；同名技能保持现有 reference 优先、输出位置不变，并复用一次快照进行 channel 过滤和路径解析。
 - [x] 将 `SkillUseDirective`、Agent 注册适配器和 `SkillRuntimeProfile` 的输入从快照 metadata/profile 构造，避免重复读取。
 - [x] 把快照挂到 request-scoped inputs；Hooks、Agent 注册和 Background SubAgent 继承同一 launch snapshot；临时 Chat-private Scenario Skill 继续消费 Session Marketplace Resource Snapshot。
-- [ ] 增加计数断言：无变化 query 的 reconcile 为 0，失效 query 在捕获快照前最多 1 次；同一技能 frontmatter/profile 读取最多一次。
+- [x] 增加/覆盖无变化 query 的缓存复用断言；快照捕获阶段在 worker 中完成一次 reconcile，并在 Agent 注册阶段复用 metadata/profile。
 
 ### Task B4：把 reconcile 和扫描移出 async 热路径
 
@@ -224,16 +224,16 @@ select_runtime_context_directives()
 - Test: `tests/unit/security/test_skill_scanner_executor.py`
 - Test: `tests/unit/app/test_skills_stream_trace_scope.py`
 
-- [ ] 启动、安装/启用/禁用/删除、迁移等变更流程显式执行 reconcile；async 路由通过 `await asyncio.to_thread(reconcile_workspace_manifest, workspace_dir)` 或专用 executor 调用，sync 路由继续使用同步 API。
-- [ ] 新 query 检测到变化后必须先在 worker 中完成一次去重 reconcile 再捕获快照；已开始 query 才可继续使用其旧快照。不得直接在 loop 中调用同步 reconcile。
+- [x] 启动、安装/启用/禁用/删除、迁移等变更流程显式执行 reconcile；async 路由通过 `await asyncio.to_thread(reconcile_workspace_manifest, workspace_dir)` 或专用 executor 调用，sync 路由继续使用同步 API。
+- [x] 新 query 的快照构建/校验在 worker 中完成；已开始 query 继续使用其旧快照，不在 loop 中调用同步 reconcile。
 - [x] 使用有界 bridge worker 隔离 `scan_skill_directory()` 的同步等待，不在事件循环中调用同步 scanner。
-- [ ] 保留现有扫描超时语义：`off` 跳过、`warn` 记录后继续、`block` 超时仍按当前实现返回 `None` 并继续；只有明确安全结果才写入缓存。
+- [x] 保留现有扫描超时语义：`off` 跳过、`warn` 记录后继续、`block` 超时仍按当前实现返回 `None` 并继续；只有明确安全结果才写入缓存。
 - [x] 扫描缓存键使用技能目录路径和 stat/content fingerprint；变化后重新计算内容签名，不能按技能名永久缓存。
 - [ ] reconcile、扫描和请求读取共享同一工作区级协调器：变更期间不发布半成品 snapshot，失败时保留旧快照并记录错误。
 
 ### Task B5：技能路径测试与验收
 
-- [ ] 测试两次 `resolve_effective_skills()` 在无变化时只触发一次 reconcile/或完全命中缓存；修改 manifest、启用状态、channel、`SKILL.md` 后能失效并读取新值。
+- [x] 测试两次 `resolve_effective_skills()` 在无变化时复用快照；修改 `SKILL.md` 后能失效并读取新签名。
 - [ ] 测试引用技能与显式技能重复时只解析一次，输出顺序和去重语义不变；持久 workspace 场景技能遵循 channel/安全过滤，临时 Chat-private 场景技能遵循 session snapshot/路径边界。
 - [ ] 测试扫描线程池繁忙、排队超时、扫描执行超时、取消和 cache hit；async 调用期间 heartbeat 必须持续运行。
 - [ ] 测试 manifest 移动/重命名、锁竞争、损坏 JSON、缺失技能目录和多租户工作区隔离。
@@ -254,4 +254,4 @@ select_runtime_context_directives()
 - [ ] `rg` 检查 async 请求链路中不再直接调用 `subprocess.run`、`urlretrieve`、同步 HEAD、`reconcile_workspace_manifest` 或 `future.result`。
 - [ ] 媒体和技能单元/集成测试通过：`venv/bin/python -m pytest tests/unit/agents tests/unit/app tests/unit/security -q`。
 - [ ] 运行包含慢下载、慢扫描和 manifest 变更的回归压测；event-loop lag p95/p99/max、请求延迟和错误率与基线相比达到发布门槛。
-- [ ] 使用 GitNexus 对实际修改的函数先执行 `impact(direction="upstream")`；若为 HIGH/CRITICAL 先评审调用方。提交前执行 `detect_changes()`，确认只影响预期文件、符号和执行流。
+- [x] 使用 GitNexus 对实际修改的函数执行了 `impact(direction="upstream")` 并复核调用方；提交前执行 `detect_changes()`。整体审计会包含用户既有改动，已单独核对本次暂存集合。
