@@ -137,13 +137,9 @@ def test_snapshot_build_failure_keeps_previous_cached_snapshot(
         raise RuntimeError("reconcile unavailable")
 
     monkeypatch.setattr(skills_manager, "read_skill_manifest", fail_read)
-    try:
-        snapshots.get_workspace_skill_snapshot(tmp_path)
-    except RuntimeError as exc:
-        assert str(exc) == "reconcile unavailable"
-    else:  # pragma: no cover - defensive assertion
-        raise AssertionError("snapshot build unexpectedly succeeded")
+    degraded = snapshots.get_workspace_skill_snapshot(tmp_path)
 
+    assert degraded.skills == {}
     assert snapshots._CACHE[tmp_path.resolve()] is first
 
 
@@ -247,3 +243,78 @@ def test_mutate_json_coordinator_uses_manifest_kind_not_parent_name(
     )
 
     assert entered == [workspace]
+
+
+def test_reconcile_moves_registered_skill_to_enabled_root(
+    tmp_path: Path,
+) -> None:
+    """A registered skill is moved when its manifest enablement changes."""
+    from swe.agents import skills_manager
+
+    workspace = tmp_path / "workspace"
+    disabled = workspace / ".disabled_skills" / "demo"
+    disabled.mkdir(parents=True)
+    (disabled / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: moved\n---\nbody\n",
+        encoding="utf-8",
+    )
+    (workspace / "skill.json").write_text(
+        json.dumps(
+            {
+                "layout_version": 2,
+                "skills": {"demo": {"enabled": True, "channels": ["all"]}},
+            },
+        ),
+        encoding="utf-8",
+    )
+
+    skills_manager.reconcile_workspace_manifest(workspace)
+
+    assert (workspace / "skills" / "demo" / "SKILL.md").exists()
+    assert not disabled.exists()
+
+
+def test_corrupt_manifest_and_missing_skill_fail_closed_for_snapshot(
+    tmp_path: Path,
+) -> None:
+    """Unreadable or missing workspace state must not load a skill."""
+    from swe.agents.skill_runtime_snapshot import get_workspace_skill_snapshot
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "skill.json").write_text("{not-json", encoding="utf-8")
+
+    first = get_workspace_skill_snapshot(workspace)
+    assert first.skills == {}
+
+    (workspace / "skill.json").write_text(
+        json.dumps(
+            {
+                "layout_version": 2,
+                "skills": {"missing": {"enabled": True, "channels": ["all"]}},
+            },
+        ),
+        encoding="utf-8",
+    )
+    second = get_workspace_skill_snapshot(workspace)
+    assert second.skills == {}
+
+
+def test_workspace_snapshots_are_isolated_between_tenants(
+    tmp_path: Path,
+) -> None:
+    """A skill snapshot never crosses workspace/tenant boundaries."""
+    from swe.agents.skill_runtime_snapshot import get_workspace_skill_snapshot
+
+    tenant_a = tmp_path / "tenant-a"
+    tenant_b = tmp_path / "tenant-b"
+    _write_workspace(tenant_a, description="tenant-a")
+    _write_workspace(tenant_b, description="tenant-b")
+
+    snapshot_a = get_workspace_skill_snapshot(tenant_a)
+    snapshot_b = get_workspace_skill_snapshot(tenant_b)
+
+    assert snapshot_a.workspace_dir == tenant_a.resolve()
+    assert snapshot_b.workspace_dir == tenant_b.resolve()
+    assert snapshot_a.skills["demo"].metadata["description"] == "tenant-a"
+    assert snapshot_b.skills["demo"].metadata["description"] == "tenant-b"

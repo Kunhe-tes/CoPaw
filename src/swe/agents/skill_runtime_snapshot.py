@@ -146,7 +146,20 @@ def get_workspace_skill_snapshot(
                 )
                 return previous
         reconcile_started_at = time.monotonic()
-        manifest = read_skill_manifest(workspace_dir, reconcile=reconcile)
+        manifest_available = True
+        try:
+            manifest = read_skill_manifest(workspace_dir, reconcile=reconcile)
+        except Exception as exc:  # noqa: BLE001
+            # Query startup is fail-closed: an unreadable or malformed
+            # manifest must not prevent the query from running, and must not
+            # allow any workspace skill whose state cannot be confirmed.
+            logger.warning(
+                "Workspace skill manifest unavailable; continuing without "
+                "workspace skills: %s",
+                exc,
+            )
+            manifest_available = False
+            manifest = {"skills": {}}
         logger.debug(
             "skill_manifest_reconcile_ms=%.1f skill_manifest_cache_hit=false",
             (time.monotonic() - reconcile_started_at) * 1000,
@@ -268,7 +281,8 @@ def get_workspace_skill_snapshot(
                 manifest_stat=manifest_stat_after,
                 skills=MappingProxyType(skills),
             )
-            _CACHE[workspace_dir] = snapshot
+            if manifest_available:
+                _CACHE[workspace_dir] = snapshot
             logger.debug(
                 "skill_md_parse_ms=%.1f skill_count=%d "
                 "runtime_skill_snapshot_generation=%d "
