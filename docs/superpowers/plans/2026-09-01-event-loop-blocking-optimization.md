@@ -164,7 +164,7 @@ select_runtime_context_directives()
 
 - [x] 测试 URL 成功、HTTP 4xx/5xx、超大响应、重定向上限和临时文件边界；legacy fallback 保留既有测试覆盖。
 - [x] 测试两个以上 block 的并行上限、写回顺序、取消后 message 不被半写入。
-- [ ] 使用 heartbeat + `RUNTIME_DIAGNOSTIC` 集成测试验证：人为延迟下载时，event-loop sampler 仍能采样；下载耗时应出现在媒体日志而不是 loop lag 中。
+- [x] 使用 heartbeat + `RUNTIME_DIAGNOSTIC` 集成测试验证：人为延迟下载时，event-loop sampler 仍能采样；下载耗时应出现在媒体日志而不是 loop lag 中。
 
 ## 4. 工作流 B：技能 manifest、SKILL.md 与安全扫描
 
@@ -235,10 +235,10 @@ select_runtime_context_directives()
 ### Task B5：技能路径测试与验收
 
 - [x] 测试两次 `resolve_effective_skills()` 在无变化时复用快照；修改 `SKILL.md` 后能失效并读取新签名。
-- [ ] 测试引用技能与显式技能重复时只解析一次，输出顺序和去重语义不变；持久 workspace 场景技能遵循 channel/安全过滤，临时 Chat-private 场景技能遵循 session snapshot/路径边界。
-- [ ] 测试扫描线程池繁忙、排队超时、扫描执行超时、取消和 cache hit；async 调用期间 heartbeat 必须持续运行。
+- [x] 测试引用技能与显式技能重复时只解析一次，输出顺序和去重语义不变；持久 workspace 场景技能遵循 channel/安全过滤，临时 Chat-private 场景技能遵循 session snapshot/路径边界。
+- [x] 测试扫描线程池繁忙、排队超时、扫描执行超时、取消和 cache hit；async 调用期间 heartbeat 必须持续运行。
 - [ ] 测试 manifest 移动/重命名、锁竞争、损坏 JSON、缺失技能目录和多租户工作区隔离。
-- [ ] 在技能数量（10/100/500）和并发请求（1/10/50）下记录 reconcile 次数、`SKILL.md` 读取次数、扫描队列等待和 event-loop lag。
+- [ ] 在技能数量（10/100/500）和并发请求（1/10/50）下记录 reconcile 次数、`SKILL.md` 读取次数、扫描队列等待和 event-loop lag（需生产/压测环境执行）。
 
 ## 5. 发布顺序与回滚
 
