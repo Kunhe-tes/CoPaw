@@ -1065,17 +1065,40 @@ class QueryService:
 
         return True
 
-    @staticmethod
-    def _build_result_index_users(
+    async def _build_result_index_users(
+        self,
         rows: list[dict],
     ) -> list[dict[str, str]]:
         """Build push user info from successfully indexed rows."""
+        first_bbk_ids = list(
+            dict.fromkeys(
+                row["first_bbk_id"] for row in rows if row.get("first_bbk_id")
+            ),
+        )
+        if not first_bbk_ids:
+            return []
+
+        placeholders = ", ".join(["%s"] * len(first_bbk_ids))
+        skill_config_rows = await self.db.fetch_all(
+            f"""
+                SELECT bbk_id, skill_id
+                FROM swe_skill_config
+                WHERE bbk_id IN ({placeholders})
+                  AND customer_insight_enabled = 1
+            """,
+            tuple(first_bbk_ids),
+        )
+        enabled_skills = {
+            (config["bbk_id"], config["skill_id"])
+            for config in skill_config_rows
+        }
+
         return [
             {"custUid": row["custuid"], "bbkId": row["bbk_org_id"]}
             for row in rows
             if row.get("custuid")
             and row.get("bbk_org_id")
-            and row.get("tenant_id") in ["01100129", "01100816", "01238694"]
+            and (row["first_bbk_id"], row["skill_id"]) in enabled_skills
         ]
 
     async def _index_success_execution_results(
@@ -1121,7 +1144,7 @@ class QueryService:
             row for row in result_rows if self._is_valid_result_index_row(row)
         ]
         await self._write_result_index_rows(valid_result_rows)
-        return len(valid_result_rows), self._build_result_index_users(
+        return len(valid_result_rows), await self._build_result_index_users(
             valid_result_rows,
         )
 
