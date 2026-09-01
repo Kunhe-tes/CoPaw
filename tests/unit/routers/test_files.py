@@ -45,7 +45,7 @@ def _target(
     scope_id = encode_scope_id(tenant_id, source_id)
     workspace = tmp_path / scope_id / "workspaces" / agent_id
     workspace.mkdir(parents=True)
-    return {"tenant_id": tenant_id, "scope_id": scope_id}, workspace
+    return {"tenantId": tenant_id, "sourceId": source_id}, workspace
 
 
 def test_distribute_copies_to_each_target_and_replaces_existing_file(
@@ -65,20 +65,30 @@ def test_distribute_copies_to_each_target_and_replaces_existing_file(
     response = client.post(
         "/files/distribute",
         json={
-            "source_path": "exports/report.txt",
+            "sourcePath": "exports/report.txt",
             "targets": [target_a, target_b],
-            "target_path": "inbox/daily.txt",
+            "targetPath": "inbox/daily.txt",
         },
     )
 
     assert response.status_code == 200
     assert response.json() == {
-        "source_path": "exports/report.txt",
-        "target_path": "inbox/daily.txt",
-        "agent_id": "agent-a",
+        "sourcePath": "exports/report.txt",
+        "targetPath": "inbox/daily.txt",
+        "agentId": "agent-a",
         "results": [
-            {**target_a, "success": True, "error": ""},
-            {**target_b, "success": True, "error": ""},
+            {
+                **target_a,
+                "scopeId": encode_scope_id("target-a", "source-a"),
+                "success": True,
+                "error": "",
+            },
+            {
+                **target_b,
+                "scopeId": encode_scope_id("target-b", "source-a"),
+                "success": True,
+                "error": "",
+            },
         ],
     }
     assert existing.read_text(encoding="utf-8") == "fresh report"
@@ -93,18 +103,17 @@ def test_distribute_keeps_processing_after_missing_target_workspace(
 ) -> None:
     client, source_workspace = _client(monkeypatch, tmp_path)
     (source_workspace / "source.txt").write_text("content", encoding="utf-8")
-    missing_scope = encode_scope_id("missing-user", "source-a")
     valid_target, valid_workspace = _target(tmp_path, "valid-user")
 
     response = client.post(
         "/files/distribute",
         json={
-            "source_path": "source.txt",
+            "sourcePath": "source.txt",
             "targets": [
-                {"tenant_id": "missing-user", "scope_id": missing_scope},
+                {"tenantId": "missing-user", "sourceId": "source-a"},
                 valid_target,
             ],
-            "target_path": "received/source.txt",
+            "targetPath": "received/source.txt",
         },
     )
 
@@ -119,12 +128,12 @@ def test_distribute_keeps_processing_after_missing_target_workspace(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("source_path", "../secret.txt"),
-        ("target_path", "nested/../../secret.txt"),
-        ("source_path", "/etc/passwd"),
-        ("target_path", "C:/outside.txt"),
-        ("target_path", "C:outside.txt"),
-        ("target_path", r"..\outside.txt"),
+        ("sourcePath", "../secret.txt"),
+        ("targetPath", "nested/../../secret.txt"),
+        ("sourcePath", "/etc/passwd"),
+        ("targetPath", "C:/outside.txt"),
+        ("targetPath", "C:outside.txt"),
+        ("targetPath", r"..\outside.txt"),
     ],
 )
 def test_distribute_rejects_non_relative_paths(
@@ -137,9 +146,9 @@ def test_distribute_rejects_non_relative_paths(
     (source_workspace / "source.txt").write_text("content", encoding="utf-8")
     target, _ = _target(tmp_path, "target-a")
     body = {
-        "source_path": "source.txt",
+        "sourcePath": "source.txt",
         "targets": [target],
-        "target_path": "received.txt",
+        "targetPath": "received.txt",
     }
     body[field] = value
 
@@ -148,45 +157,69 @@ def test_distribute_rejects_non_relative_paths(
     assert response.status_code == 422
 
 
-def test_distribute_rejects_empty_duplicate_or_mismatched_targets_before_copy(
+def test_distribute_rejects_empty_duplicate_or_legacy_targets_before_copy(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     client, source_workspace = _client(monkeypatch, tmp_path)
     (source_workspace / "source.txt").write_text("content", encoding="utf-8")
     target, target_workspace = _target(tmp_path, "target-a")
-    mismatched_scope = encode_scope_id("other-user", "source-a")
 
     empty = client.post(
         "/files/distribute",
         json={
-            "source_path": "source.txt",
+            "sourcePath": "source.txt",
             "targets": [],
-            "target_path": "received.txt",
+            "targetPath": "received.txt",
         },
     )
     duplicate = client.post(
         "/files/distribute",
         json={
-            "source_path": "source.txt",
+            "sourcePath": "source.txt",
             "targets": [target, target],
-            "target_path": "received.txt",
+            "targetPath": "received.txt",
         },
     )
-    mismatch = client.post(
+    snake_case = client.post(
         "/files/distribute",
         json={
             "source_path": "source.txt",
             "targets": [
-                {"tenant_id": "target-a", "scope_id": mismatched_scope},
+                {"tenant_id": "target-a", "source_id": "source-a"},
             ],
             "target_path": "received.txt",
+        },
+    )
+    explicit_scope = client.post(
+        "/files/distribute",
+        json={
+            "sourcePath": "source.txt",
+            "targets": [
+                {
+                    **target,
+                    "scopeId": encode_scope_id("target-a", "source-a"),
+                },
+            ],
+            "targetPath": "received.txt",
+        },
+    )
+    invalid_source = client.post(
+        "/files/distribute",
+        json={
+            "sourcePath": "source.txt",
+            "targets": [
+                {"tenantId": "target-a", "sourceId": "../source-a"},
+            ],
+            "targetPath": "received.txt",
         },
     )
 
     assert empty.status_code == 422
     assert duplicate.status_code == 422
-    assert mismatch.status_code == 422
+    assert snake_case.status_code == 422
+    assert explicit_scope.status_code == 422
+    assert invalid_source.status_code == 422
     assert not (target_workspace / "received.txt").exists()
 
 
@@ -212,9 +245,9 @@ def test_distribute_rejects_invalid_source_file(
     response = client.post(
         "/files/distribute",
         json={
-            "source_path": "source.txt",
+            "sourcePath": "source.txt",
             "targets": [target],
-            "target_path": "received.txt",
+            "targetPath": "received.txt",
         },
     )
 
@@ -242,9 +275,9 @@ def test_distribute_reports_target_symlink_escape_and_continues(
     response = client.post(
         "/files/distribute",
         json={
-            "source_path": "source.txt",
+            "sourcePath": "source.txt",
             "targets": [escaped_target, valid_target],
-            "target_path": "received/source.txt",
+            "targetPath": "received/source.txt",
         },
     )
 
@@ -276,9 +309,9 @@ def test_distribute_replaces_hard_link_without_mutating_linked_file(
     response = client.post(
         "/files/distribute",
         json={
-            "source_path": "source.txt",
+            "sourcePath": "source.txt",
             "targets": [target],
-            "target_path": "received.txt",
+            "targetPath": "received.txt",
         },
     )
 

@@ -16,9 +16,9 @@ Add a backend endpoint that resolves a source file inside the current request's 
 ## Requirements
 
 - R1. Resolve the source workspace from the current request headers and existing Agent workspace rules.
-- R2. Accept a relative source path, a non-empty list of `{tenant_id, scope_id}` targets, and a relative target path.
-- R3. Reject absolute paths, traversal, symbolic-link escapes, missing/non-file sources, duplicate targets, and tenant/scope mismatches.
-- R4. Copy the source file to `<WORKING_DIR>/<scope_id>/workspaces/<current-agent>/<target-path>`, creating ordinary parent directories and replacing an existing regular target file.
+- R2. Accept camelCase `sourcePath`, `targetPath`, and a non-empty list of `{tenantId, sourceId}` targets; reject legacy snake_case and caller-supplied `scopeId` fields.
+- R3. Derive each target `scopeId` from `tenantId + sourceId`, and reject invalid identities, absolute paths, traversal, symbolic-link escapes, missing/non-file sources, and duplicate derived scopes.
+- R4. Copy the source file to `<WORKING_DIR>/<scopeId>/workspaces/<current-agent>/<targetPath>`, creating ordinary parent directories and replacing an existing regular target file.
 - R5. Return one result per target so a failure for one target does not prevent attempts for the remaining targets.
 
 ---
@@ -51,7 +51,8 @@ Add a backend endpoint that resolves a source file inside the current request's 
 ## Key Technical Decisions
 
 - Reuse `resolve_file_manager_workspace_dir()` for the source workspace so header, active-Agent, and workspace-root validation stay centralized.
-- Canonicalize each supplied `scope_id`, decode it, and require its logical tenant to equal the supplied `tenant_id` before constructing a target path.
+- Generate each target scope with the repository's canonical `encode_scope_id(tenant_id, source_id)` helper instead of trusting a caller-supplied scope.
+- Keep Python model attributes snake_case internally while requiring and emitting camelCase aliases at the HTTP boundary.
 - Resolve source and target candidates before checking that they remain within their workspace roots; reject symlink endpoints explicitly.
 - Preserve batch semantics by returning per-target success/error results while rejecting malformed request-wide inputs before any copy begins.
 
@@ -86,7 +87,7 @@ Add a backend endpoint that resolves a source file inside the current request's 
 - Edge case: one missing target workspace fails while a later valid target still succeeds.
 - Error path: reject an absolute or traversing source/target path.
 - Error path: reject source and target paths that escape through symbolic links.
-- Error path: reject a target whose decoded scope tenant differs from `tenant_id`, and reject duplicate targets.
+- Error path: reject invalid `tenantId`/`sourceId`, duplicate derived scopes, legacy snake_case fields, and explicit caller-supplied `scopeId`.
 - Error path: reject an empty target list and a missing or non-file source.
 
 **Verification:**
@@ -105,7 +106,7 @@ Add a backend endpoint that resolves a source file inside the current request's 
 - Test: `tests/unit/routers/test_files.py`
 
 **Approach:**
-- Add Pydantic request/response models and small single-purpose helpers for relative-path validation, containment, target identity validation, and one-target copying.
+- Add strict camelCase Pydantic request/response aliases and small single-purpose helpers for relative-path validation, containment, target identity validation, scope derivation, and one-target copying.
 - Use `shutil.copy2()` only after all request-wide validation completes.
 - Report filesystem failures as target-specific errors without exposing file content.
 
@@ -138,7 +139,7 @@ Add a backend endpoint that resolves a source file inside the current request's 
 | Risk | Mitigation |
 |------|------------|
 | Path traversal or symlink escape | Resolve paths and enforce workspace-root containment; reject symlink endpoints. |
-| Forged tenant/scope pairing | Decode canonical scope and compare its tenant component to the declared tenant. |
+| Forged or inconsistent target scope | Derive scope server-side from validated `tenantId + sourceId`; forbid caller-supplied `scopeId`. |
 | Partial batch writes | Preserve per-target results and do not claim transactionality. |
 | Platform metadata differences | Treat file content copy as the contract; `copy2()` metadata preservation is best effort. |
 

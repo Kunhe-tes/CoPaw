@@ -10,13 +10,12 @@ import shutil
 import tempfile
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import FileResponse
 
 from ...config.context import (
-    canonicalize_scope_id,
-    decode_scope_id,
+    encode_scope_id,
     is_valid_identity_value,
 )
 from ...constant import WORKING_DIR
@@ -30,21 +29,35 @@ router = APIRouter(prefix="/files", tags=["files"])
 class WorkspaceFileCopyTarget(BaseModel):
     """One tenant-scoped copy destination."""
 
-    tenant_id: str
-    scope_id: str
+    model_config = ConfigDict(populate_by_name=False, extra="forbid")
+
+    tenant_id: str = Field(alias="tenantId")
+    source_id: str = Field(alias="sourceId")
+
+    @property
+    def scope_id(self) -> str:
+        """Return the server-derived canonical target scope."""
+        return encode_scope_id(self.tenant_id, self.source_id)
 
 
 class WorkspaceFileDistributionRequest(BaseModel):
     """Request to copy one current-workspace file to several users."""
 
-    source_path: str = Field(min_length=1)
+    model_config = ConfigDict(populate_by_name=False, extra="forbid")
+
+    source_path: str = Field(alias="sourcePath", min_length=1)
     targets: list[WorkspaceFileCopyTarget] = Field(min_length=1)
-    target_path: str = Field(min_length=1)
+    target_path: str = Field(alias="targetPath", min_length=1)
 
 
-class WorkspaceFileCopyResult(WorkspaceFileCopyTarget):
+class WorkspaceFileCopyResult(BaseModel):
     """Outcome for one requested target."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
+    tenant_id: str = Field(alias="tenantId")
+    source_id: str = Field(alias="sourceId")
+    scope_id: str = Field(alias="scopeId")
     success: bool
     error: str = ""
 
@@ -52,9 +65,11 @@ class WorkspaceFileCopyResult(WorkspaceFileCopyTarget):
 class WorkspaceFileDistributionResponse(BaseModel):
     """Batch copy result."""
 
-    source_path: str
-    target_path: str
-    agent_id: str
+    model_config = ConfigDict(populate_by_name=True)
+
+    source_path: str = Field(alias="sourcePath")
+    target_path: str = Field(alias="targetPath")
+    agent_id: str = Field(alias="agentId")
     results: list[WorkspaceFileCopyResult] = Field(default_factory=list)
 
 
@@ -91,24 +106,18 @@ def _canonical_targets(
     seen_scope_ids: set[str] = set()
     for target in targets:
         tenant_id = target.tenant_id.strip()
+        source_id = target.source_id.strip()
         if not is_valid_identity_value(tenant_id):
             raise HTTPException(
                 status_code=422,
-                detail="Invalid target tenant_id",
+                detail="Invalid target tenantId",
             )
-        try:
-            scope_id = canonicalize_scope_id(target.scope_id.strip())
-            scope_tenant_id, _ = decode_scope_id(scope_id)
-        except (UnicodeDecodeError, ValueError) as exc:
+        if not is_valid_identity_value(source_id):
             raise HTTPException(
                 status_code=422,
-                detail="Invalid target scope_id",
-            ) from exc
-        if scope_tenant_id != tenant_id:
-            raise HTTPException(
-                status_code=422,
-                detail="Target tenant_id does not match scope_id",
+                detail="Invalid target sourceId",
             )
+        scope_id = encode_scope_id(tenant_id, source_id)
         if scope_id in seen_scope_ids:
             raise HTTPException(
                 status_code=422,
@@ -116,9 +125,11 @@ def _canonical_targets(
             )
         seen_scope_ids.add(scope_id)
         normalized_targets.append(
-            WorkspaceFileCopyTarget(
-                tenant_id=tenant_id,
-                scope_id=scope_id,
+            target.model_copy(
+                update={
+                    "tenant_id": tenant_id,
+                    "source_id": source_id,
+                },
             ),
         )
     return normalized_targets
@@ -213,12 +224,14 @@ def _copy_to_target(
             temporary_path.unlink(missing_ok=True)
         return WorkspaceFileCopyResult(
             tenant_id=target.tenant_id,
+            source_id=target.source_id,
             scope_id=target.scope_id,
             success=True,
         )
     except ValueError as exc:
         return WorkspaceFileCopyResult(
             tenant_id=target.tenant_id,
+            source_id=target.source_id,
             scope_id=target.scope_id,
             success=False,
             error=str(exc),
@@ -231,6 +244,7 @@ def _copy_to_target(
         )
         return WorkspaceFileCopyResult(
             tenant_id=target.tenant_id,
+            source_id=target.source_id,
             scope_id=target.scope_id,
             success=False,
             error="Failed to copy file",
