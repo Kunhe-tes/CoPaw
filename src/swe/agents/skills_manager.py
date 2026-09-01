@@ -1082,6 +1082,8 @@ def _build_skill_config_env_overrides(
 def apply_skill_config_env_overrides(
     workspace_dir: Path,
     channel_name: str,
+    *,
+    snapshot: Any | None = None,
 ) -> Iterator[None]:
     """Inject effective skill config into request-scoped env overrides.
 
@@ -1089,13 +1091,23 @@ def apply_skill_config_env_overrides(
     ``EnvVarLoader`` for the current agent turn only. The full config is also
     available as ``COPAW_SKILL_CONFIG_<SKILL_NAME>`` within the same scope.
     """
-    manifest = reconcile_workspace_manifest(workspace_dir)
-    entries = manifest.get("skills", {})
+    if snapshot is None:
+        manifest = reconcile_workspace_manifest(workspace_dir)
+        entries = manifest.get("skills", {})
+    else:
+        entries = {
+            name: {
+                "config": dict(skill.config),
+                "requirements": dict(skill.requirements),
+            }
+            for name, skill in snapshot.skills.items()
+        }
     overrides: dict[str, str] = {}
 
     for skill_name in resolve_effective_skills(
         workspace_dir,
         channel_name,
+        _snapshot=snapshot,
     ):
         entry = entries.get(skill_name) or {}
         config = entry.get("config") or {}
@@ -1603,11 +1615,15 @@ def reconcile_workspace_manifest(workspace_dir: Path) -> dict[str, Any]:
 
         return payload
 
-    return _mutate_workspace_manifest_strict(
+    result = _mutate_workspace_manifest_strict(
         manifest_path,
         _update,
         sanitized_rename_moves,
     )
+    from .skill_runtime_snapshot import invalidate_workspace_skill_snapshot
+
+    invalidate_workspace_skill_snapshot(workspace_dir)
+    return result
 
 
 def list_workspaces(tenant_id: str | None = None) -> list[dict[str, str]]:
@@ -1703,23 +1719,18 @@ def resolve_effective_skills(
     channel_name: str,
     *,
     _registry: dict | None = None,
+    _snapshot: Any | None = None,
 ) -> list[str]:
     """Resolve enabled workspace skills for one channel."""
-    manifest = reconcile_workspace_manifest(workspace_dir)
-    resolved = []
-    for skill_name, entry in sorted(manifest.get("skills", {}).items()):
-        if not entry.get("enabled", False):
-            continue
-        channels = entry.get("channels") or ["all"]
-        if "all" in channels or channel_name in channels:
-            skill_dir = resolve_workspace_managed_skill_dir(
-                workspace_dir,
-                skill_name,
-                enabled=True,
-            )
-            if skill_dir.exists():
-                resolved.append(skill_name)
-    return resolved
+    if _snapshot is None:
+        from .skill_runtime_snapshot import get_workspace_skill_snapshot
+
+        _snapshot = get_workspace_skill_snapshot(workspace_dir)
+    return [
+        name
+        for name, skill in sorted(_snapshot.skills.items())
+        if "all" in skill.channels or channel_name in skill.channels
+    ]
 
 
 def ensure_skills_initialized(workspace_dir: Path) -> None:

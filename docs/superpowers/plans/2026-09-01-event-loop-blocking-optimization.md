@@ -1,0 +1,251 @@
+# 事件循环阻塞优化实施计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 消除文件/媒体处理和技能运行时解析路径中的同步阻塞，降低 `RUNTIME_DIAGNOSTIC` 的 `event_loop_lag`，并保持现有文件安全边界、技能选择语义和多租户隔离。
+
+**Architecture:** 将媒体下载拆为“异步 I/O + 有界并发 + 原子落盘”的适配层；将技能 manifest 重整/安全扫描从请求热路径移到启动、变更或后台任务，并为每个请求复用不可变的技能快照。短期先把无法立即异步化的同步工作整体移入专用 worker，长期替换为真正的异步 HTTP 和可 await 的扫描接口。
+
+**Tech Stack:** Python `asyncio`、`httpx.AsyncClient`、`ThreadPoolExecutor`、现有 workspace manifest/skill scanner、pytest、`RUNTIME_DIAGNOSTIC`。
+
+## 已确认的运行边界
+
+- Query 在开始时捕获不可变 `Query Skill Snapshot`（有效技能、metadata、路径、内容签名和 runtime profile）；后续技能变更只影响后续 query。注册前签名变化时仅该技能失败关闭，query 继续运行但不加载无法确认的 Workspace Skill。
+- 新 query 发现缓存失效时，先在 worker 中等待一次去重后的 reconcile，再捕获快照；不得用旧快照静默满足新 query。已开始的 query/子 Agent 继续持有其 launch snapshot。
+- Workspace Skill 使用 manifest/channel/签名校验；临时 Chat-private Scenario Skill 继续使用 Session Marketplace Resource Snapshot，不进入 workspace manifest/channel 解析，但同样要求扫描结果和路径边界有效。
+- 媒体只允许 HTTP(S)、`file://`、本地路径和 base64；媒体解码后统一上限 10 MiB，单次下载共享 60 秒总 deadline（连接 10 秒、读取空闲 30 秒），最多 3 跳重定向。
+- 媒体使用每进程一个有界 executor/semaphore（默认 4）；取消时协程立即结束，worker 负责 `.part-*` 清理。音频下载可并行，转码/转写使用独立并发 1；转写 provider 优化不在本计划范围内。
+- 安全扫描保留现有 `block/warn/off` 超时语义；不叠加长期双层线程池。generation 仅进程内诊断使用，不写入 manifest；不引入运行时 feature flag，回滚依赖 Kubernetes 镜像/版本。
+- 本计划不改变现有本地路径策略、最终文件名覆盖语义或 host/IP 访问策略；这些另行审计。
+
+---
+
+## 1. 现状与问题边界
+
+### 1.1 文件/媒体消息链路
+
+当前调用链为：
+
+```text
+SWEAgent.reply()/run_research_phase()
+  -> process_file_and_media_blocks_in_message()
+  -> _process_single_block()
+  -> _process_single_file_block()
+  -> download_file_from_base64()/download_file_from_url()
+  -> _download_remote_to_path()
+  -> subprocess.run(wget/curl) 或 urllib.request.urlretrieve
+```
+
+关键事实：
+
+- `src/swe/agents/react_agent.py:2145`、`:2239` 在 async 方法中直接 `await process_file_and_media_blocks_in_message(msg)`。
+- `src/swe/agents/utils/message_processing.py:43-78` 虽然调用的是 async 函数，但这些函数内部仍执行同步解码、目录创建、写盘和远端下载。
+- `src/swe/agents/utils/file_handling.py:140-177` 最多连续等待 60 秒 `wget` 和 60 秒 `curl`；回退到 `urllib.request.urlretrieve` 时没有显式超时。
+- `src/swe/agents/utils/file_handling.py:180-197` 对 `.file` 文件再做一次同步 HEAD 请求（10 秒超时）。
+- `src/swe/agents/utils/file_handling.py:249-267` 的 base64 解码、MD5、`mkdir` 和整块写盘也在事件循环线程执行。
+- `process_file_and_media_blocks_in_message()` 按 block 顺序串行处理；多个媒体块会累加等待时间。音频 ffmpeg 转换已使用 `asyncio.to_thread`，但下载本身没有隔离。
+
+因此，“函数声明为 async”不能代表不阻塞；只要任一同步调用运行，事件循环线程就无法处理其他请求和 sampler。
+
+### 1.2 技能运行时链路
+
+当前查询阶段的主要链路为：
+
+```text
+select_runtime_context_directives()
+  -> build_context_reference_directives()
+       -> _skill_directives_by_name()
+            -> build_skill_use_directives()
+                 -> resolve_effective_skills()
+                      -> reconcile_workspace_manifest()
+  -> build_skill_use_directives()                 # 显式/场景技能再次执行
+       -> resolve_effective_skills()
+            -> reconcile_workspace_manifest()
+```
+
+关键事实：
+
+- `src/swe/app/runner/query_runtime.py:88` 先处理引用技能，`:99` 再处理显式/场景技能。
+- `src/swe/app/runner/skill_selection.py:49` 每次解析都调用 `resolve_effective_skills()`；`:67-76` 对每个选中技能再次读取并解析 `SKILL.md` frontmatter。
+- `src/swe/agents/skills_manager.py:1708` 的 `resolve_effective_skills()` 无条件调用 `reconcile_workspace_manifest()`。
+- `reconcile_workspace_manifest()` 会获得文件锁、读写 JSON、遍历 enabled/disabled 技能目录、移动目录、读取每个 `SKILL.md` 并重建 metadata；这是同步文件系统操作，而且可能触发安全扫描相关逻辑。
+- `src/swe/agents/react_agent.py:_register_skills()` 还先调用 `ensure_skills_initialized()`，随后再调用 `resolve_effective_skills()`，存在额外重整。
+- `src/swe/security/skill_scanner/__init__.py:505` 在线程池提交扫描后调用 `future.result(timeout=...)`；若该函数从 async 路由直接调用，等待仍发生在事件循环线程。
+
+### 1.3 不应改变的语义
+
+- manifest 中 `enabled`、`channels`、`config`、`source`、metadata 合并和 UTF-8 安全重命名规则必须保持不变。
+- 技能安全扫描不能因缓存或异步化而绕过；缓存键必须能检测 `SKILL.md`/技能目录内容变化。
+- 下载仍需支持 `file://`、本地路径、base64、HTTP(S)、`.file` 后缀修正和现有错误占位文本。
+- 每个租户/工作区的路径解析、manifest 锁和权限边界必须保持隔离。
+
+## 2. 目标与可观测性
+
+### 2.1 目标
+
+1. 请求处理线程不再执行网络读写、外部进程等待、整块媒体写盘、manifest 重整或同步安全扫描。
+2. 同一请求内最多读取一次技能 manifest、每个技能的 frontmatter/runtime profile；命中签名缓存时不重复读取。
+3. 多媒体块可并行下载，但并发受限且结果写回顺序稳定。
+4. 所有远端操作具备连接、读取、总时长和大小上限，并在失败时清理临时文件。
+5. 能用日志将单次下载/重整/扫描耗时与 `event_loop_lag_max_ms` 对齐。
+
+### 2.2 指标与日志
+
+新增结构化字段（不记录 URL query 中的 token）：
+
+- 下载：`media_download_ms`、`media_source_type`、`media_method`、`media_bytes`、`media_timeout`、`media_error`、`media_worker_queue_ms`。
+- 技能：`skill_manifest_reconcile_ms`、`skill_manifest_cache_hit`、`skill_count`、`skill_md_parse_ms`、`skill_scan_queue_ms`、`skill_scan_ms`。
+- 请求：`runtime_skill_snapshot_generation`、`selected_skill_count`、`reference_skill_count`。
+
+验收基线和目标应在压测前记录：在相同流量、相同媒体大小和技能数量下，`event_loop_lag` 的 p95/p99/max、请求 p95、下载超时率和 manifest cache hit ratio 均需对比。第一阶段以“p95 < 200 ms、且不再出现由单次下载/重整造成的秒级尖峰”为目标；若生产基线高于 200 ms，则采用相对基线下降并消除可归因秒级尖峰作为门槛，具体数值写入压测报告。
+
+## 3. 工作流 A：文件/媒体处理
+
+### Task A1：建立可回归的阻塞基线
+
+**Files:**
+
+- Modify: `src/swe/agents/utils/file_handling.py`
+- Modify: `src/swe/agents/utils/message_processing.py`
+- Test: `tests/unit/agents/` 下新增媒体处理测试（沿用现有测试目录风格）
+
+- [ ] 在下载入口记录 `monotonic()` 前后耗时、来源类型、最终字节数和异常类别；日志不得包含完整签名 URL。
+- [ ] 用可控的 fake downloader 注入 100–500 ms 延迟，测试同时运行的 heartbeat task 能持续 tick，从而先证明现状测试会暴露 loop block。
+- [ ] 记录单个、多个 URL/base64、`.file` 后缀和失败回退四组基线，保存到压测报告而不是提交运行时数据。
+
+### Task A2：立即止血——把整个同步实现移出事件循环
+
+**Files:**
+
+- Modify: `src/swe/agents/utils/file_handling.py`
+- Modify: `src/swe/agents/utils/message_processing.py`
+
+- [ ] 保留现有同步实现为明确的私有 worker 函数（包括 `_resolve_local_path`、`_download_remote_to_path`、HEAD、magic bytes、base64 写盘），在 async 公共入口中使用专用有界 `ThreadPoolExecutor` 的 `loop.run_in_executor()`；不要只包裹某一条 `subprocess.run`。
+- [ ] 使用每进程共享、默认 4 的媒体 worker/semaphore；请求只申请 slot，不创建线程池。
+- [ ] 为 `urllib.request.urlretrieve` 增加显式总时长控制；短期可在线程 worker 内设置 socket default timeout，长期由 A3 的 httpx 替换。
+- [ ] 保持取消语义：协程取消后不再修改 message，但 worker 需要在 finally 中关闭临时文件；记录“取消但后台 worker 尚未结束”的计数，避免误以为取消能杀死线程。
+- [ ] 下载到 `<name>.part-<随机后缀>`，校验存在、非空和大小后用 `os.replace()` 原子改名；失败或超限删除临时文件。
+
+### Task A3：长期方案——真正的异步 HTTP 流式下载
+
+**Files:**
+
+- Create: `src/swe/agents/utils/async_download.py`
+- Modify: `src/swe/agents/utils/file_handling.py`
+- Modify: `src/swe/agents/utils/message_processing.py`
+- Test: `tests/unit/agents/test_async_download.py`
+
+- [ ] 使用复用的 `httpx.AsyncClient`，配置 `connect`、`read`、`write`、`pool` timeout 和总时长 deadline；禁止每个 block 新建 client。
+- [ ] 以 `aiter_bytes()` 流式写临时文件，累计字节超过 `MAX_MEDIA_BYTES` 立即中止并删除；若有 `Content-Length` 且超过上限，在读取前拒绝。
+- [ ] 最多允许 3 跳 HTTP(S) 重定向，每跳重新校验 scheme、剩余 deadline 和大小上限；不把不受信任 URL 拼接到 shell 命令。
+- [ ] 通过响应头和首块 magic bytes推断扩展名，替代额外同步 HEAD；仅在确实需要兼容旧服务时保留 HEAD fallback。
+- [ ] A2 将 base64 整体解码/hash/写盘放入同一有界 worker，并对约 14 MiB 编码原文预检；暂不做分块解码。
+
+### Task A4：有界并行处理多个 block
+
+**Files:**
+
+- Modify: `src/swe/agents/utils/message_processing.py`
+- Test: `tests/unit/agents/test_message_processing.py`
+
+- [ ] 先收集待处理 block，使用 `asyncio.gather()` 并通过媒体 semaphore 限制并发；每个任务返回 `(index, local_path, status)`，不在 worker 中直接并发修改 `message.content`。
+- [ ] gather 完成后按原 index 顺序统一写回 block 和“文件已下载”文本，确保模型看到的内容顺序不变。
+- [ ] 单个 block 失败只影响该 block；保留现有 file 错误文本和 image/audio/video 保留原 block 的行为。
+- [ ] 为音频保留现有 ffmpeg `to_thread` 路径，并把下载计时与转码/转写计时分开记录。
+
+### Task A5：媒体路径测试与验收
+
+- [ ] 测试 URL 成功、wget/curl fallback、urllib 超时、HTTP 4xx/5xx、超大响应、零字节、断点失败和临时文件清理。
+- [ ] 测试两个以上 block 的并行上限、写回顺序、取消后 message 不被半写入。
+- [ ] 使用 heartbeat + `RUNTIME_DIAGNOSTIC` 集成测试验证：人为延迟下载时，event-loop sampler 仍能采样；下载耗时应出现在媒体日志而不是 loop lag 中。
+
+## 4. 工作流 B：技能 manifest、SKILL.md 与安全扫描
+
+### Task B1：拆分“重整”和“只读解析”接口
+
+**Files:**
+
+- Modify: `src/swe/agents/skills_manager.py`
+- Modify: `src/swe/app/runner/skill_selection.py`
+- Modify: `src/swe/app/runner/context_references.py`
+- Test: `tests/unit/agents/test_skill_manifest_runtime_cache.py`
+
+- [ ] 保留 `reconcile_workspace_manifest(workspace_dir)` 作为显式变更/初始化操作；新增只读 `read_skill_manifest(workspace_dir, reconcile=False)` 运行时入口。
+- [ ] 让 `resolve_effective_skills()` 接受可选的已读 manifest 或 `SkillManifestSnapshot`；传入快照时不得再次 reconcile。
+- [ ] `build_skill_use_directives()` 接受 effective names 和 metadata 的可选参数；若 metadata 已含 description，则不再逐个读取和解析 `SKILL.md`。无 metadata 时保留兼容的旧读取逻辑。
+- [ ] manifest metadata 中已有 `description`、`requirements` 等字段时直接复用；只有技能内容实际需要加载时才读取全文。
+
+### Task B2：实现工作区级版本化缓存和失效
+
+**Files:**
+
+- Modify: `src/swe/agents/skills_manager.py`
+- Create: `src/swe/agents/skill_runtime_snapshot.py`
+- Test: `tests/unit/agents/test_skill_manifest_runtime_cache.py`
+
+- [ ] 定义不可变快照，至少包含 `workspace_dir`、进程内 `generation`、manifest stat（mtime/size/inode）、effective names、每个技能的绝对目录、metadata、内容签名和 runtime profile。
+- [ ] 缓存键按工作区隔离；热路径只做 manifest/已知技能路径 stat，变化后在 worker 中递归计算内容签名，不扫描整个目录。
+- [ ] 所有成功的启用/禁用/安装/删除/恢复/迁移操作在写 manifest 后递增 generation 并主动失效；外部手工改动由 manifest mtime 或 watcher 检测兜底。
+- [ ] 使用进程内锁保护缓存更新；重整仍由现有文件锁串行化，避免两个请求同时移动同一技能目录。
+- [ ] 新 query 的缓存/reconcile 异常或 manifest 损坏时，不加载无法确认的 Workspace Skill，但继续普通 query；不静默放行未扫描技能。管理 API 仍保留严格错误。
+
+### Task B3：一个请求只构建一次技能快照
+
+**Files:**
+
+- Modify: `src/swe/app/runner/query_runtime.py`
+- Modify: `src/swe/app/runner/context_references.py`
+- Modify: `src/swe/app/runner/skill_selection.py`
+- Modify: `src/swe/app/runner/query_contracts.py`（若运行时输入模型需要字段）
+- Test: `tests/unit/app/test_skill_selection.py`
+- Test: `tests/unit/app/test_runner_context_references.py`
+
+- [ ] 在 `select_runtime_context_directives()` 开始处取得一次 `SkillManifestSnapshot`；缓存失效时先 await 一次去重后的 worker reconcile，再捕获快照。
+- [ ] 保留 request/scenario 顺序后再追加 reference 顺序；同名技能保持现有 reference 优先、输出位置不变，并只执行一次 channel 过滤和路径解析。
+- [ ] 将 `SkillUseDirective`、AgentScope 注册适配器和 `SkillRuntimeProfile` 的输入从快照 metadata/profile 构造，避免重复读取 `SKILL.md`、`hooks.json` 和 feature extraction。
+- [ ] 把快照挂到 request-scoped inputs；Hooks、Agent 注册和 background-subagent 继承同一 launch snapshot。临时 Chat-private Scenario Skill 继续消费 Session Marketplace Resource Snapshot。
+- [ ] 增加计数断言：无变化 query 的 reconcile 为 0，失效 query 在捕获快照前最多 1 次；同一技能 frontmatter/profile 读取最多一次。
+
+### Task B4：把 reconcile 和扫描移出 async 热路径
+
+**Files:**
+
+- Modify: `src/swe/agents/skills_manager.py`
+- Modify: `src/swe/security/skill_scanner/__init__.py`
+- Modify: `src/swe/app/routers/skills.py`
+- Modify: `src/swe/app/routers/agents.py`
+- Modify: `src/swe/app/workspace/tenant_initializer.py`
+- Test: `tests/unit/security/test_skill_scanner_executor.py`
+- Test: `tests/unit/app/test_skills_stream_trace_scope.py`
+
+- [ ] 启动、安装/启用/禁用/删除、迁移等变更流程显式执行 reconcile；async 路由通过 `await asyncio.to_thread(reconcile_workspace_manifest, workspace_dir)` 或专用 executor 调用，sync 路由继续使用同步 API。
+- [ ] 新 query 检测到变化后必须先在 worker 中完成一次去重 reconcile 再捕获快照；已开始 query 才可继续使用其旧快照。不得直接在 loop 中调用同步 reconcile。
+- [ ] 短期仅用有界 bridge worker 隔离 `scan_skill_directory()` 的同步等待；长期让现有 scanner executor 暴露可 await 的 future/slot 接口，不叠加第二个长期线程池。
+- [ ] 保留现有扫描超时语义：`off` 跳过、`warn` 记录后继续、`block` 超时仍按当前实现返回 `None` 并继续；只有明确安全结果才写入缓存。
+- [ ] 扫描缓存键使用技能目录 canonical path + 内容签名；热路径轻量 stat，变化后在 worker 中递归校验，不能按技能名永久缓存。
+- [ ] reconcile、扫描和请求读取共享同一工作区级协调器：变更期间不发布半成品 snapshot，失败时保留旧快照并记录错误。
+
+### Task B5：技能路径测试与验收
+
+- [ ] 测试两次 `resolve_effective_skills()` 在无变化时只触发一次 reconcile/或完全命中缓存；修改 manifest、启用状态、channel、`SKILL.md` 后能失效并读取新值。
+- [ ] 测试引用技能与显式技能重复时只解析一次，输出顺序和去重语义不变；持久 workspace 场景技能遵循 channel/安全过滤，临时 Chat-private 场景技能遵循 session snapshot/路径边界。
+- [ ] 测试扫描线程池繁忙、排队超时、扫描执行超时、取消和 cache hit；async 调用期间 heartbeat 必须持续运行。
+- [ ] 测试 manifest 移动/重命名、锁竞争、损坏 JSON、缺失技能目录和多租户工作区隔离。
+- [ ] 在技能数量（10/100/500）和并发请求（1/10/50）下记录 reconcile 次数、`SKILL.md` 读取次数、扫描队列等待和 event-loop lag。
+
+## 5. 发布顺序与回滚
+
+1. 先发布 A1/B0 观测字段，至少采集一个完整生产窗口，确认 lag 尖峰与下载或 reconcile 的相关性。
+2. 发布 A2 和 B4 的 worker 隔离，稳定前保留有界 worker 兼容路径；若出现线程池饥饿，优先降低 worker 并发或回退到串行 worker，不回退到 loop 内同步调用。
+3. 发布 B1–B3 快照缓存；通过命中率、技能选择结果和安全扫描结果对比旧路径。
+4. 发布 A3/A4 真异步下载和并行 block；按部署批次推进，重点观察超时、磁盘占用、连接池和上游限流。
+5. 稳定后删除旧 wget/curl 热路径和同步扫描调用，仅保留供迁移/CLI 使用的显式同步 API。
+
+回滚要求：不增加运行时 feature flag；通过 Kubernetes 镜像/版本回滚，稳定前保留有界 worker 兼容路径。回滚不得删除已有 manifest、下载文件或扫描缓存，且应保留诊断字段以便定位。
+
+## 6. 完成标准
+
+- [ ] `rg` 检查 async 请求链路中不再直接调用 `subprocess.run`、`urlretrieve`、同步 HEAD、`reconcile_workspace_manifest` 或 `future.result`。
+- [ ] 媒体和技能单元/集成测试通过：`venv/bin/python -m pytest tests/unit/agents tests/unit/app tests/unit/security -q`。
+- [ ] 运行包含慢下载、慢扫描和 manifest 变更的回归压测；event-loop lag p95/p99/max、请求延迟和错误率与基线相比达到发布门槛。
+- [ ] 使用 GitNexus 对实际修改的函数先执行 `impact(direction="upstream")`；若为 HIGH/CRITICAL 先评审调用方。提交前执行 `detect_changes()`，确认只影响预期文件、符号和执行流。

@@ -90,6 +90,7 @@ async def select_runtime_context_directives(
         channel=inputs.channel,
         agent_config=inputs.agent_config,
         references=request_context_references(request),
+        snapshot=inputs.workspace_skill_snapshot,
     )
     reference_skill_names = {
         directive.name
@@ -107,6 +108,7 @@ async def select_runtime_context_directives(
             ]
             if name not in reference_skill_names
         ],
+        snapshot=inputs.workspace_skill_snapshot,
     )
     if scenario_snapshot is not None and chat is not None:
         selected_directives.extend(
@@ -255,6 +257,36 @@ async def build_query_runtime_inputs(
             tenant_id=owner.tenant_id,
         )
     )
+    workspace_skill_snapshot = None
+    if getattr(agent_config, "enable_workspace_skills", True):
+        from ...agents.skill_runtime_snapshot import (
+            get_workspace_skill_snapshot_async,
+        )
+
+        try:
+            workspace_skill_snapshot = (
+                await get_workspace_skill_snapshot_async(
+                    owner.workspace_dir or WORKING_DIR,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            # A failed reconcile must not prevent ordinary queries from
+            # running; the Agent receives no workspace skills for this turn.
+            logger.warning(
+                "Workspace skill snapshot unavailable; loading no workspace skills: %s",
+                exc,
+            )
+            from ...agents.skill_runtime_snapshot import (
+                ManifestStat,
+                WorkspaceSkillSnapshot,
+            )
+
+            workspace_skill_snapshot = WorkspaceSkillSnapshot(
+                workspace_dir=(owner.workspace_dir or WORKING_DIR),
+                generation=0,
+                manifest_stat=ManifestStat(0, 0, 0),
+                skills={},
+            )
     passthrough_headers = dict[str, str](
         current_passthrough_headers() or {},
     )
@@ -287,6 +319,7 @@ async def build_query_runtime_inputs(
         ),
         selected_context_directives=[],
         selected_skill_directives=[],
+        workspace_skill_snapshot=workspace_skill_snapshot,
         auth_token=getattr(request, "auth_token", None),
         passthrough_headers=passthrough_headers,
         session_execution=session_execution,
@@ -322,6 +355,7 @@ async def finalize_query_runtime(
         auth_token=inputs.auth_token,
         approved_tool_call=preflight.approved_tool_call,
         current_user_text=query or get_last_user_text(msgs) or "",
+        workspace_skill_snapshot=inputs.workspace_skill_snapshot,
     )
     await agent.register_mcp_clients()
     agent.set_console_output_enabled(enabled=False)

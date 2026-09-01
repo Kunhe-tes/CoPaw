@@ -3597,6 +3597,7 @@ class AgentRunner(Runner):
         auth_token: str | None,
         approved_tool_call: dict[str, Any] | None,
         current_user_text: str = "",
+        workspace_skill_snapshot: Any | None = None,
     ) -> SWEAgent:
         """创建 SWEAgent，并注入本轮请求上下文。"""
         request_enable_subagents = getattr(request, "enable_subagents", False)
@@ -3758,6 +3759,7 @@ class AgentRunner(Runner):
             memory_manager=self.memory_manager,
             request_context=request_context,
             workspace_dir=self.workspace_dir,
+            workspace_skill_snapshot=workspace_skill_snapshot,
             task_tracker=self._task_tracker,
             source_tool_versions=source_tool_versions,
         )

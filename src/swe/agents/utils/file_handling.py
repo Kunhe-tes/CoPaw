@@ -8,12 +8,18 @@ This module provides utilities for:
 - Reading text files with encoding fallback for cross-platform compatibility
 """
 
-import os
-import mimetypes
+import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import functools
 import hashlib
 import logging
+import mimetypes
+import os
 import subprocess
+import tempfile
+import threading
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -23,6 +29,36 @@ from ...config.context import get_current_workspace_dir
 from ...constant import WORKING_DIR
 
 logger = logging.getLogger(__name__)
+
+_MAX_MEDIA_BYTES = 10 * 1024 * 1024
+_MEDIA_TOTAL_TIMEOUT = 60.0
+_MEDIA_CONNECT_TIMEOUT = 10.0
+_MEDIA_READ_TIMEOUT = 30.0
+_MEDIA_WORKER_COUNT = 4
+_media_executor: ThreadPoolExecutor | None = None
+_media_executor_lock = threading.Lock()
+
+
+def _get_media_executor() -> ThreadPoolExecutor:
+    """Return the process-local bounded executor for blocking media work."""
+    global _media_executor
+    if _media_executor is None:
+        with _media_executor_lock:
+            if _media_executor is None:
+                _media_executor = ThreadPoolExecutor(
+                    max_workers=_MEDIA_WORKER_COUNT,
+                    thread_name_prefix="swe-media",
+                )
+    return _media_executor
+
+
+async def _run_media_worker(func, *args):
+    """Run blocking media work on the process-local bounded executor."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _get_media_executor(),
+        functools.partial(func, *args),
+    )
 
 
 def read_text_file_with_encoding_fallback(file_path: Path | str) -> str:
@@ -138,39 +174,131 @@ def _resolve_local_path(
     return None
 
 
-def _download_remote_to_path(url: str, local_file_path: Path) -> None:
+def _remaining_timeout(deadline: float) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("Media download deadline exceeded")
+    return remaining
+
+
+def _redacted_url(url: str) -> str:
+    """Return a log-safe URL containing no path, query, or fragment."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme and parsed.netloc:
+        host = parsed.hostname or "<invalid-host>"
+        try:
+            port = f":{parsed.port}" if parsed.port else ""
+        except ValueError:
+            port = ""
+        return f"{parsed.scheme}://{host}{port}"
+    return "<local-media>"
+
+
+def _set_response_timeout(response, timeout: float) -> None:
+    """Apply an idle read timeout to urllib's underlying socket when present."""
+    candidates = [
+        getattr(
+            getattr(getattr(response, "fp", None), "raw", None),
+            "_sock",
+            None,
+        ),
+        getattr(response, "_sock", None),
+    ]
+    for sock in candidates:
+        if sock is not None and hasattr(sock, "settimeout"):
+            sock.settimeout(timeout)
+            return
+
+
+def _download_remote_to_path(
+    url: str,
+    local_file_path: Path,
+    deadline: float | None = None,
+) -> None:
     """
     Download url to local_file_path via wget, curl, or urllib. Raises on fail.
     """
+    deadline = deadline or (time.monotonic() + _MEDIA_TOTAL_TIMEOUT)
     try:
         subprocess.run(
-            ["wget", "-q", "-O", str(local_file_path), url],
+            [
+                "wget",
+                "-q",
+                "--connect-timeout=10",
+                "--max-redirect=3",
+                "--max-filesize=10m",
+                "-O",
+                str(local_file_path),
+                url,
+            ],
             capture_output=True,
-            timeout=60,
+            timeout=_remaining_timeout(deadline),
             check=True,
         )
+        if local_file_path.stat().st_size > _MAX_MEDIA_BYTES:
+            raise ValueError("Downloaded media exceeds 10 MiB limit")
         logger.debug("Downloaded file via wget to: %s", local_file_path)
         return
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
         logger.debug("wget failed, trying curl: %s", e)
     try:
         subprocess.run(
-            ["curl", "-s", "-L", "-o", str(local_file_path), url],
+            [
+                "curl",
+                "-s",
+                "-L",
+                "--connect-timeout",
+                str(int(_MEDIA_CONNECT_TIMEOUT)),
+                "--max-redirs",
+                "3",
+                "--max-filesize",
+                str(_MAX_MEDIA_BYTES),
+                "-o",
+                str(local_file_path),
+                url,
+            ],
             capture_output=True,
-            timeout=60,
+            timeout=_remaining_timeout(deadline),
             check=True,
         )
+        if local_file_path.stat().st_size > _MAX_MEDIA_BYTES:
+            raise ValueError("Downloaded media exceeds 10 MiB limit")
         logger.debug("Downloaded file via curl to: %s", local_file_path)
         return
     except (subprocess.CalledProcessError, FileNotFoundError) as curl_err:
         logger.debug("curl failed, trying urllib: %s", curl_err)
     try:
-        urllib.request.urlretrieve(url, str(local_file_path))
+        with (
+            urllib.request.urlopen(
+                url,
+                timeout=min(
+                    _MEDIA_CONNECT_TIMEOUT,
+                    _remaining_timeout(deadline),
+                ),
+            ) as response,
+            open(local_file_path, "wb") as output,
+        ):
+            total = 0
+            while True:
+                read_timeout = min(
+                    _MEDIA_READ_TIMEOUT,
+                    _remaining_timeout(deadline),
+                )
+                _set_response_timeout(response, read_timeout)
+                chunk = response.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > _MAX_MEDIA_BYTES:
+                    raise ValueError("Downloaded media exceeds 10 MiB limit")
+                output.write(chunk)
         logger.debug("Downloaded file via urllib to: %s", local_file_path)
+    except TimeoutError:
+        raise
     except Exception as urllib_err:
         logger.error(
-            "wget, curl and urllib all failed for URL %s: %s",
-            url,
+            "wget, curl and urllib all failed for %s: %s",
+            _redacted_url(url),
             urllib_err,
         )
         raise RuntimeError(
@@ -178,7 +306,10 @@ def _download_remote_to_path(url: str, local_file_path: Path) -> None:
         ) from urllib_err
 
 
-def _guess_suffix_from_url_headers(url: str) -> Optional[str]:
+def _guess_suffix_from_url_headers(
+    url: str,
+    deadline: float | None = None,
+) -> Optional[str]:
     """
     HEAD request to get Content-Type and return a suffix like '.pdf'.
     Used to fix DingTalk download URLs that always return .file extension.
@@ -186,7 +317,10 @@ def _guess_suffix_from_url_headers(url: str) -> Optional[str]:
     """
     try:
         req = urllib.request.Request(url, method="HEAD")
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        timeout = _MEDIA_CONNECT_TIMEOUT
+        if deadline is not None:
+            timeout = min(timeout, _remaining_timeout(deadline))
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = (
                 (resp.headers.get("Content-Type") or "").split(";")[0].strip()
             )
@@ -228,7 +362,7 @@ def _guess_suffix_from_file_content(path: Path) -> Optional[str]:
         return None
 
 
-async def download_file_from_base64(
+def _download_file_from_base64_sync(
     base64_data: str,
     filename: Optional[str] = None,
     download_dir: str = "",
@@ -245,8 +379,13 @@ async def download_file_from_base64(
     Returns:
         The local file path.
     """
+    started_at = time.monotonic()
     try:
+        if len(base64_data) > 14 * 1024 * 1024:
+            raise ValueError("Base64 media exceeds 10 MiB limit")
         file_content = base64.b64decode(base64_data)
+        if len(file_content) > _MAX_MEDIA_BYTES:
+            raise ValueError("Base64 media exceeds 10 MiB limit")
 
         download_path = Path(
             download_dir if download_dir else _default_download_dir(),
@@ -258,10 +397,25 @@ async def download_file_from_base64(
             filename = f"file_{file_hash}"
 
         local_file_path = download_path / filename
-        with open(local_file_path, "wb") as f:
-            f.write(file_content)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{local_file_path.name}.part-",
+            dir=str(download_path),
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(file_content)
+            os.replace(temp_path, local_file_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
-        logger.debug("Downloaded file to: %s", local_file_path)
+        logger.debug(
+            "media_download_ms=%.1f media_source_type=base64 media_method=decode "
+            "media_bytes=%d",
+            (time.monotonic() - started_at) * 1000,
+            len(file_content),
+        )
         return str(local_file_path.absolute())
 
     except Exception as e:
@@ -269,7 +423,21 @@ async def download_file_from_base64(
         raise
 
 
-async def download_file_from_url(
+async def download_file_from_base64(
+    base64_data: str,
+    filename: Optional[str] = None,
+    download_dir: str = "",
+) -> str:
+    """Async boundary for bounded, blocking base64 media persistence."""
+    return await _run_media_worker(
+        _download_file_from_base64_sync,
+        base64_data,
+        filename,
+        download_dir,
+    )
+
+
+def _download_file_from_url_sync(
     url: str,
     filename: Optional[str] = None,
     download_dir: str = "",
@@ -291,11 +459,15 @@ async def download_file_from_url(
         `str`:
             The local file path.
     """
+    started_at = time.monotonic()
     try:
         parsed = urllib.parse.urlparse(url)
         local = _resolve_local_path(url, parsed)
         if local is not None:
             return local
+
+        if parsed.scheme not in {"http", "https"}:
+            raise ValueError("Unsupported media URL scheme")
 
         download_path = Path(
             download_dir if download_dir else _default_download_dir(),
@@ -309,30 +481,73 @@ async def download_file_from_url(
                 else f"file_{hashlib.md5(url.encode()).hexdigest()}"
             )
         local_file_path = download_path / filename
-        _download_remote_to_path(url, local_file_path)
-        if not local_file_path.exists():
-            raise FileNotFoundError("Downloaded file does not exist")
-        if local_file_path.stat().st_size == 0:
-            raise ValueError("Downloaded file is empty")
-        # DingTalk (and similar) return URLs that save as .file; replace with
-        # real extension. Try HEAD first; if that fails (e.g. OSS), use magic.
-        if local_file_path.suffix == ".file":
-            real_suffix = _guess_suffix_from_url_headers(url)
-            if not real_suffix:
-                real_suffix = _guess_suffix_from_file_content(local_file_path)
-            if real_suffix:
-                new_path = local_file_path.with_suffix(real_suffix)
-                local_file_path.rename(new_path)
-                local_file_path = new_path
-                logger.debug(
-                    "Replaced .file with %s for %s",
-                    real_suffix,
-                    local_file_path,
-                )
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f".{local_file_path.name}.part-",
+            dir=str(download_path),
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
+        deadline = time.monotonic() + _MEDIA_TOTAL_TIMEOUT
+        try:
+            try:
+                _download_remote_to_path(url, temp_path, deadline)
+            except TypeError as exc:
+                # Keep compatibility with older test/integration hooks that
+                # monkeypatch the historical two-argument worker.
+                if "positional" not in str(exc) and "argument" not in str(exc):
+                    raise
+                _download_remote_to_path(url, temp_path)
+            if not temp_path.exists():
+                raise FileNotFoundError("Downloaded file does not exist")
+            size = temp_path.stat().st_size
+            if size == 0:
+                raise ValueError("Downloaded file is empty")
+            if size > _MAX_MEDIA_BYTES:
+                raise ValueError("Downloaded media exceeds 10 MiB limit")
+            # DingTalk (and similar) return URLs that save as .file; replace
+            # with real extension. Try HEAD first; if that fails, use magic.
+            if local_file_path.suffix == ".file":
+                real_suffix = _guess_suffix_from_url_headers(url, deadline)
+                if not real_suffix:
+                    real_suffix = _guess_suffix_from_file_content(temp_path)
+                if real_suffix:
+                    local_file_path = local_file_path.with_suffix(real_suffix)
+                    logger.debug(
+                        "Replaced .file with %s for %s",
+                        real_suffix,
+                        local_file_path,
+                    )
+            os.replace(temp_path, local_file_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        logger.debug(
+            "media_download_ms=%.1f media_source_type=url media_method=worker "
+            "media_bytes=%d",
+            (time.monotonic() - started_at) * 1000,
+            size,
+        )
         return str(local_file_path.absolute())
     except subprocess.TimeoutExpired as e:
-        logger.error("Download timeout for URL: %s", url)
-        raise TimeoutError(f"Download timeout for URL: {url}") from e
+        logger.error("Download timeout for %s", _redacted_url(url))
+        raise TimeoutError("Download timeout") from e
     except Exception as e:
-        logger.error("Failed to download file from URL %s: %s", url, e)
+        logger.error(
+            "Failed to download file from %s: %s",
+            _redacted_url(url),
+            e,
+        )
         raise
+
+
+async def download_file_from_url(
+    url: str,
+    filename: Optional[str] = None,
+    download_dir: str = "",
+) -> str:
+    """Async boundary for bounded, blocking media download work."""
+    return await _run_media_worker(
+        _download_file_from_url_sync,
+        url,
+        filename,
+        download_dir,
+    )
