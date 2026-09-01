@@ -118,6 +118,7 @@ def get_workspace_skill_snapshot(
     workspace_dir: Path,
     *,
     reconcile: bool = True,
+    fail_closed: bool = False,
     _retry: int = 0,
 ) -> WorkspaceSkillSnapshot:
     """Return a cached workspace snapshot, reconciling only on invalidation."""
@@ -150,6 +151,8 @@ def get_workspace_skill_snapshot(
         try:
             manifest = read_skill_manifest(workspace_dir, reconcile=reconcile)
         except Exception as exc:  # noqa: BLE001
+            if not fail_closed:
+                raise
             # Query startup is fail-closed: an unreadable or malformed
             # manifest must not prevent the query from running, and must not
             # allow any workspace skill whose state cannot be confirmed.
@@ -271,6 +274,7 @@ def get_workspace_skill_snapshot(
             return get_workspace_skill_snapshot(
                 workspace_dir,
                 reconcile=reconcile,
+                fail_closed=fail_closed,
                 _retry=_retry + 1,
             )
         with _LOCK:
@@ -310,6 +314,7 @@ async def get_workspace_skill_snapshot_async(
         get_workspace_skill_snapshot,
         workspace_dir,
         reconcile=reconcile,
+        fail_closed=True,
     )
 
 

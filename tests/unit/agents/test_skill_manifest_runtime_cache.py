@@ -7,6 +7,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 
 def _write_workspace(workspace: Path, *, description: str = "cached") -> None:
     skill_dir = workspace / "skills" / "demo"
@@ -137,9 +139,9 @@ def test_snapshot_build_failure_keeps_previous_cached_snapshot(
         raise RuntimeError("reconcile unavailable")
 
     monkeypatch.setattr(skills_manager, "read_skill_manifest", fail_read)
-    degraded = snapshots.get_workspace_skill_snapshot(tmp_path)
+    with pytest.raises(RuntimeError, match="reconcile unavailable"):
+        snapshots.get_workspace_skill_snapshot(tmp_path)
 
-    assert degraded.skills == {}
     assert snapshots._CACHE[tmp_path.resolve()] is first
 
 
@@ -274,17 +276,20 @@ def test_reconcile_moves_registered_skill_to_enabled_root(
     assert not disabled.exists()
 
 
-def test_corrupt_manifest_and_missing_skill_fail_closed_for_snapshot(
+@pytest.mark.asyncio
+async def test_corrupt_manifest_and_missing_skill_fail_closed_for_snapshot(
     tmp_path: Path,
 ) -> None:
     """Unreadable or missing workspace state must not load a skill."""
-    from swe.agents.skill_runtime_snapshot import get_workspace_skill_snapshot
+    from swe.agents.skill_runtime_snapshot import (
+        get_workspace_skill_snapshot_async,
+    )
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "skill.json").write_text("{not-json", encoding="utf-8")
 
-    first = get_workspace_skill_snapshot(workspace)
+    first = await get_workspace_skill_snapshot_async(workspace)
     assert first.skills == {}
 
     (workspace / "skill.json").write_text(
@@ -296,7 +301,7 @@ def test_corrupt_manifest_and_missing_skill_fail_closed_for_snapshot(
         ),
         encoding="utf-8",
     )
-    second = get_workspace_skill_snapshot(workspace)
+    second = await get_workspace_skill_snapshot_async(workspace)
     assert second.skills == {}
 
 
