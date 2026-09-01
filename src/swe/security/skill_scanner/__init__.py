@@ -451,6 +451,8 @@ def scan_skill_directory(
     skill_name: str | None = None,
     block: bool | None = None,
     timeout: float | None = None,
+    _direct: bool = False,
+    _cache_result: bool = True,
 ) -> ScanResult | None:
     """Scan a skill directory and optionally block on unsafe results.
 
@@ -518,37 +520,47 @@ def scan_skill_directory(
                 effective_timeout,
             )
             return None
-        try:
-            future = executor.submit(
-                _scan_with_slot_release,
+        if _direct:
+            result = _scan_with_slot_release(
                 scanner,
                 resolved,
                 skill_name=skill_name,
                 slot=slot,
                 queued_at=queued_at,
             )
-        except Exception:
-            slot.release()
-            raise
+        else:
+            try:
+                future = executor.submit(
+                    _scan_with_slot_release,
+                    scanner,
+                    resolved,
+                    skill_name=skill_name,
+                    slot=slot,
+                    queued_at=queued_at,
+                )
+            except Exception:
+                slot.release()
+                raise
 
-        future.add_done_callback(
-            lambda completed: (
-                slot.release() if completed.cancelled() else None
-            ),
-        )
-        remaining_timeout = max(0.0, deadline - time.monotonic())
-        try:
-            result = future.result(timeout=remaining_timeout)
-        except futures.TimeoutError:
-            logger.warning(
-                "Security scan of skill '%s' timed out after %.0fs",
-                effective_name,
-                effective_timeout,
+            future.add_done_callback(
+                lambda completed: (
+                    slot.release() if completed.cancelled() else None
+                ),
             )
-            future.cancel()
-            return None
+            remaining_timeout = max(0.0, deadline - time.monotonic())
+            try:
+                result = future.result(timeout=remaining_timeout)
+            except futures.TimeoutError:
+                logger.warning(
+                    "Security scan of skill '%s' timed out after %.0fs",
+                    effective_name,
+                    effective_timeout,
+                )
+                future.cancel()
+                return None
 
-        _store_cached_result(resolved, result)
+        if _cache_result:
+            _store_cached_result(resolved, result)
 
     if not result.is_safe:
         should_block = block if block is not None else (mode == "block")
@@ -574,11 +586,27 @@ async def scan_skill_directory_async(
     block: bool | None = None,
     timeout: float | None = None,
 ) -> ScanResult | None:
-    """Await the complete scanner, including cache and policy work, off-loop."""
-    return await asyncio.to_thread(
+    """Await the scanner on its bounded executor without nested pools."""
+    loop = asyncio.get_running_loop()
+    executor, _slot = _get_scan_executor()
+    future = executor.submit(
         scan_skill_directory,
         skill_dir,
         skill_name=skill_name,
         block=block,
         timeout=timeout,
+        _direct=True,
+        _cache_result=False,
     )
+    wrapped = asyncio.wrap_future(future, loop=loop)
+    try:
+        result = await asyncio.wait_for(
+            wrapped,
+            timeout=timeout if timeout is not None else _scan_timeout(),
+        )
+        if result is not None:
+            _store_cached_result(Path(skill_dir).resolve(), result)
+        return result
+    except asyncio.CancelledError:
+        future.cancel()
+        raise

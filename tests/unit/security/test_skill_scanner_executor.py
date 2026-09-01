@@ -170,6 +170,47 @@ async def test_async_scan_cancellation_returns_without_waiting_for_worker(
     assert await asyncio.to_thread(finished.wait, 1)
 
 
+@pytest.mark.asyncio
+async def test_async_scan_uses_bounded_scanner_executor_with_one_worker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """Async scans must not nest a second executor or deadlock at one worker."""
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    started: list[Path] = []
+
+    class _FakeScanner:
+        def scan_skill(self, resolved, *, skill_name=None):
+            started.append(Path(resolved))
+            time.sleep(0.02)
+            return ScanResult(
+                skill_name=skill_name or Path(resolved).name,
+                skill_directory=str(resolved),
+            )
+
+    monkeypatch.setenv("SWE_SKILL_SCAN_MODE", "warn")
+    monkeypatch.setenv("SWE_SKILL_SCAN_EXECUTOR_WORKERS", "1")
+    monkeypatch.setattr(skill_scanner, "_scanner_instance", _FakeScanner())
+    monkeypatch.setattr(skill_scanner, "_scan_executor", None)
+    monkeypatch.setattr(skill_scanner, "_scan_executor_workers", None)
+    monkeypatch.setattr(skill_scanner, "_scan_executor_slots", None)
+    monkeypatch.setattr(skill_scanner, "_scan_cache", {})
+
+    results = await asyncio.gather(
+        skill_scanner.scan_skill_directory_async(first),
+        skill_scanner.scan_skill_directory_async(second),
+    )
+
+    assert [result.skill_directory for result in results if result] == [
+        str(first.resolve()),
+        str(second.resolve()),
+    ]
+    assert started == [first.resolve(), second.resolve()]
+
+
 def test_scan_skill_directory_times_out_before_queueing_when_slots_busy(
     monkeypatch,
     tmp_path: Path,

@@ -119,6 +119,7 @@ def get_workspace_skill_snapshot(
     *,
     reconcile: bool = True,
     fail_closed: bool = False,
+    _scan_direct: bool = False,
     _retry: int = 0,
 ) -> WorkspaceSkillSnapshot:
     """Return a cached workspace snapshot, reconciling only on invalidation."""
@@ -211,6 +212,7 @@ def get_workspace_skill_snapshot(
                         # policy.  Forcing ``block=True`` here made warn mode
                         # silently drop otherwise loadable skills.
                         block=None,
+                        _direct=_scan_direct,
                     )
                     if (
                         scan_result is None
@@ -275,6 +277,7 @@ def get_workspace_skill_snapshot(
                 workspace_dir,
                 reconcile=reconcile,
                 fail_closed=fail_closed,
+                _scan_direct=_scan_direct,
                 _retry=_retry + 1,
             )
         with _LOCK:
@@ -310,12 +313,17 @@ async def get_workspace_skill_snapshot_async(
     reconcile: bool = True,
 ) -> WorkspaceSkillSnapshot:
     """Build or fetch a snapshot without blocking the event loop."""
-    return await asyncio.to_thread(
+    from ..security.skill_scanner import _get_scan_executor
+
+    executor, _slot = _get_scan_executor()
+    future = executor.submit(
         get_workspace_skill_snapshot,
         workspace_dir,
         reconcile=reconcile,
         fail_closed=True,
+        _scan_direct=True,
     )
+    return await asyncio.wrap_future(future)
 
 
 def _filter_changed_skills(
