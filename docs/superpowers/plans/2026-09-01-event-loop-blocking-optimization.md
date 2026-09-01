@@ -237,7 +237,7 @@ select_runtime_context_directives()
 - [x] 测试两次 `resolve_effective_skills()` 在无变化时复用快照；修改 `SKILL.md` 后能失效并读取新签名。
 - [x] 测试引用技能与显式技能重复时只解析一次，输出顺序和去重语义不变；持久 workspace 场景技能遵循 channel/安全过滤，临时 Chat-private 场景技能遵循 session snapshot/路径边界。
 - [x] 测试扫描线程池繁忙、排队超时、扫描执行超时、取消和 cache hit；async 调用期间 heartbeat 必须持续运行。
-- [ ] 测试 manifest 移动/重命名、锁竞争、损坏 JSON、缺失技能目录和多租户工作区隔离。
+- [x] 测试 manifest 移动/重命名、锁竞争、损坏 JSON、缺失技能目录和多租户工作区隔离。
 - [ ] 在技能数量（10/100/500）和并发请求（1/10/50）下记录 reconcile 次数、`SKILL.md` 读取次数、扫描队列等待和 event-loop lag（需生产/压测环境执行）。
 
 ## 5. 发布顺序与回滚
