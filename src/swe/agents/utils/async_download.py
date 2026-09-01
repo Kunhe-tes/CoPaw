@@ -19,6 +19,10 @@ class AsyncDownloadError(RuntimeError):
     """Raised when a streaming HTTP download cannot be completed safely."""
 
 
+class AsyncDownloadPolicyError(AsyncDownloadError):
+    """Raised when a URL violates the media download policy."""
+
+
 class AsyncDownloadHTTPError(AsyncDownloadError):
     """Raised for an HTTP response status that must not use legacy fallback."""
 
@@ -56,7 +60,7 @@ async def _client_for_loop() -> httpx.AsyncClient:
 def _validate_http_url(url: str) -> None:
     parsed = urlparse(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise AsyncDownloadError("Unsupported media URL scheme")
+        raise AsyncDownloadPolicyError("Unsupported media URL scheme")
 
 
 async def download_http_to_path(
@@ -84,7 +88,7 @@ async def download_http_to_path(
                     if response.is_redirect:
                         location = response.headers.get("location")
                         if not location or redirect_count >= _MAX_REDIRECTS:
-                            raise AsyncDownloadError(
+                            raise AsyncDownloadPolicyError(
                                 "Too many media redirects",
                             )
                         current = urljoin(current, location)
@@ -130,4 +134,4 @@ async def download_http_to_path(
             ) from exc
         except httpx.HTTPError as exc:
             raise AsyncDownloadError("HTTP media download failed") from exc
-    raise AsyncDownloadError("Too many media redirects")
+    raise AsyncDownloadPolicyError("Too many media redirects")

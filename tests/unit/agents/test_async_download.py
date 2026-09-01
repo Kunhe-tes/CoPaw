@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from pathlib import Path
 
 import httpx
 import pytest
 
+from swe.app.runtime_diagnostic import RuntimeDiagnosticManager
 from swe.agents.utils import async_download
 
 
@@ -175,3 +177,59 @@ async def test_slow_stream_keeps_heartbeat_running(
         heartbeat(),
     )
     assert ticks == 3
+
+
+@pytest.mark.asyncio
+async def test_slow_stream_allows_runtime_diagnostic_sampler(
+    tmp_path: Path,
+    mock_client,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        del request
+        await asyncio.sleep(0.08)
+        return httpx.Response(200, content=b"hello")
+
+    await mock_client(handler)
+
+    class _Process:
+        def cpu_percent(self) -> float:
+            return 0.0
+
+        def create_time(self) -> float:
+            return time.time()
+
+    manager = RuntimeDiagnosticManager(
+        process=_Process(),
+        disk_usage=lambda _path: type(
+            "Disk",
+            (),
+            {"total": 1, "used": 0, "free": 1, "percent": 0.0},
+        )(),
+        pod_open_fd_count=lambda: 0,
+        pod_disk_io_bytes=lambda: (0, 0),
+        log_sink=lambda _message: None,
+    )
+    download_finished = asyncio.Event()
+    sampled_during_download = False
+
+    async def download() -> None:
+        await async_download.download_http_to_path(
+            "https://example.test/diagnostic",
+            tmp_path / ".diagnostic.part",
+            deadline=time.monotonic() + 5,
+            max_bytes=10,
+        )
+        download_finished.set()
+
+    async def sampler() -> None:
+        nonlocal sampled_during_download
+        for _ in range(4):
+            await asyncio.sleep(0.02)
+            await manager.sample_once(planned_wakeup=time.monotonic())
+            sampled_during_download |= not download_finished.is_set()
+
+    await asyncio.gather(download(), sampler())
+    payload = manager.build_diagnostic_payload()
+
+    assert sampled_during_download
+    assert payload["event_loop_lag_max_ms"] < 20.0

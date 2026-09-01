@@ -30,6 +30,7 @@ from ...constant import WORKING_DIR
 from .async_download import (
     AsyncDownloadError,
     AsyncDownloadHTTPError,
+    AsyncDownloadPolicyError,
     download_http_to_path,
 )
 
@@ -61,21 +62,51 @@ def _get_media_executor() -> ThreadPoolExecutor:
 async def _run_media_worker(func, *args):
     """Run blocking media work on the process-local bounded executor."""
     loop = asyncio.get_running_loop()
-    await asyncio.to_thread(_media_slots.acquire)
+    await _acquire_media_slot()
     try:
-        return await loop.run_in_executor(
+        future = loop.run_in_executor(
             _get_media_executor(),
             functools.partial(func, *args),
         )
-    finally:
+    except BaseException:
         _media_slots.release()
+        raise
+    released = False
+
+    def _release_slot(_future=None) -> None:
+        nonlocal released
+        if not released:
+            released = True
+            _media_slots.release()
+
+    try:
+        result = await asyncio.shield(future)
+    except asyncio.CancelledError:
+        # Keep the slot held until the underlying worker actually exits;
+        # otherwise a cancelled coroutine can temporarily exceed the process
+        # concurrency bound while its executor task is still running.
+        future.add_done_callback(_release_slot)
+        raise
+    except BaseException:
+        _release_slot()
+        raise
+    _release_slot()
+    return result
 
 
 async def _run_async_media_slot() -> float:
     """Acquire the shared process-level media slot without blocking the loop."""
     queued_at = time.monotonic()
-    await asyncio.to_thread(_media_slots.acquire)
+    await _acquire_media_slot()
     return (time.monotonic() - queued_at) * 1000
+
+
+async def _acquire_media_slot() -> None:
+    """Acquire a media slot without leaving an orphaned waiter on cancel."""
+    while not _media_slots.acquire(  # pylint: disable=consider-using-with
+        blocking=False,
+    ):
+        await asyncio.sleep(0.005)
 
 
 def read_text_file_with_encoding_fallback(file_path: Path | str) -> str:
@@ -167,14 +198,22 @@ def _resolve_local_path(
         local_path = Path(urllib.request.url2pathname(parsed.path))
         if not local_path.exists():
             raise FileNotFoundError(f"Local file not found: {local_path}")
-        if local_path.is_file() and local_path.stat().st_size == 0:
-            raise ValueError(f"Local file is empty: {local_path}")
+        if local_path.is_file():
+            size = local_path.stat().st_size
+            if size == 0:
+                raise ValueError(f"Local file is empty: {local_path}")
+            if size > _MAX_MEDIA_BYTES:
+                raise ValueError("Downloaded media exceeds 10 MiB limit")
         return str(local_path.resolve())
     if parsed.scheme == "" and parsed.netloc == "":
         p = Path(url).expanduser()
         if p.exists():
-            if p.is_file() and p.stat().st_size == 0:
-                raise ValueError(f"Local file is empty: {p}")
+            if p.is_file():
+                size = p.stat().st_size
+                if size == 0:
+                    raise ValueError(f"Local file is empty: {p}")
+                if size > _MAX_MEDIA_BYTES:
+                    raise ValueError("Downloaded media exceeds 10 MiB limit")
             return str(p.resolve())
     # Windows absolute path: urlparse("C:\\path") -> scheme="c", path="\\path"
     if (
@@ -185,8 +224,11 @@ def _resolve_local_path(
     ):
         p = Path(url.strip()).resolve()
         if p.exists() and p.is_file():
-            if p.stat().st_size == 0:
+            size = p.stat().st_size
+            if size == 0:
                 raise ValueError(f"Local file is empty: {p}")
+            if size > _MAX_MEDIA_BYTES:
+                raise ValueError("Downloaded media exceeds 10 MiB limit")
             return str(p)
     return None
 
@@ -644,11 +686,17 @@ async def download_file_from_url(
             queue_ms,
         )
         return str(final_path.absolute())
-    except AsyncDownloadHTTPError as exc:
+    except (AsyncDownloadHTTPError, AsyncDownloadPolicyError) as exc:
         await asyncio.to_thread(temp_path.unlink, True)
+        error_kind = (
+            "http_status"
+            if isinstance(exc, AsyncDownloadHTTPError)
+            else "http_policy"
+        )
         logger.info(
-            "media_timeout=false media_error=http_status media_source_type=url "
+            "media_timeout=false media_error=%s media_source_type=url "
             "error_type=%s",
+            error_kind,
             type(exc).__name__,
         )
         raise
