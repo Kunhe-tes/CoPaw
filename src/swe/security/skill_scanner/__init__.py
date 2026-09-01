@@ -599,11 +599,9 @@ async def scan_skill_directory_async(
     )
     wrapped = asyncio.wrap_future(future, loop=loop)
     try:
-        result = await asyncio.wait_for(
-            wrapped,
-            timeout=timeout if timeout is not None else _scan_timeout(),
-        )
-        return result
+        if timeout is None:
+            return await wrapped
+        return await asyncio.wait_for(wrapped, timeout=timeout)
     except asyncio.CancelledError:
         future.cancel()
         raise
