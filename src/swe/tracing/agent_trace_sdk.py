@@ -79,6 +79,15 @@ except ModuleNotFoundError as exc:
     chat_traced = _noop_decorator
     execute_tool_traced = _noop_decorator
 
+    def extract_trace_context(*_args: Any, **_kwargs: Any) -> None:
+        """Ignore remote context when the optional SDK is unavailable."""
+        return None
+
+    @contextmanager
+    def use_trace_context(*_args: Any, **_kwargs: Any) -> Iterator[None]:
+        """Provide a no-op context manager for the development fallback."""
+        yield
+
     def shutdown_global_tracer() -> None:
         return None
 

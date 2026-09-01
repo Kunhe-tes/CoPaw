@@ -4,6 +4,83 @@ This context defines the domain language for Swe's agent orchestration runtime, 
 
 ## Language
 
+**Chat History Snapshot**:
+The externally returned point-in-time representation of one Chat's persisted conversation and turn state. It is a read result, not a promise to wait for an active Answer Turn to finish.
+_Avoid_: live stream, wait-for-completion read, session-file view
+
+**Stream Attachability**:
+The condition in which an active Answer Turn still accepts an additional stream subscriber for its exact turn identity. It is distinct from a previously observed Chat History Snapshot status.
+_Avoid_: historical `running` status, reconnect hint, durable completion state
+
+**Compatible Chat API Evolution**:
+The rule for externally consumed Chat APIs: established paths, request fields, response fields, status values, successful SSE framing, and documented error meanings remain valid; new recovery capability is additive and optional.
+_Avoid_: breaking reconnect migration, Console-only protocol, silent contract replacement
+
+**Atomic Chat Recovery**:
+One recovery request for a Chat that either attaches to its exact active Answer Turn or yields that turn's terminal Chat History Snapshot. A natural completion between observation and recovery is a successful terminal result, not a missing Chat error.
+_Avoid_: GET-then-POST reconnect, stale-running retry, completion-as-404
+
+**Recovery Event Stream**:
+The single SSE response form of an Atomic Chat Recovery. It carries either the active turn's replay and live events, or one explicit terminal Chat History Snapshot event followed by normal stream completion.
+_Avoid_: JSON-or-SSE response switching, terminal recovery error, second history fetch
+
+**Terminal Chat Snapshot Event**:
+The `chat.snapshot` SSE event emitted by a Compatible Current-Recovery Mode when no active Answer Turn is selected. It contains the resolved Chat ID, selected User Question Message ID when present, and the complete terminal Chat History Snapshot, after which the stream closes normally.
+_Avoid_: empty assistant placeholder, terminal 404, second client history read
+
+**Recoverable Turn Terminal Status**:
+The durable public terminal status of the Answer Turn selected by a Terminal Chat Snapshot Event: `completed`, `stopped`, `failed`, or `null` when no turn exists. It is a business result within a successful recovery response, not an HTTP recovery error.
+_Avoid_: internal `cancelled` exposure, completion-only persistence, terminal transport failure
+
+**Answer Turn Settlement Barrier**:
+The per-Chat admission boundary from terminal-outcome selection until that outcome is durably persisted. Current recovery and a later user submission wait behind this barrier; recovery then sees the complete terminal snapshot and only afterward may a new Answer Turn begin.
+_Avoid_: pre-persistence next turn, terminal-status race, user-visible settlement conflict
+
+**Pending Settlement Recovery**:
+The failure-closed state of an Answer Turn whose terminal snapshot has not yet been durably written. The Chat retries that same write without rerunning the model and rejects recovery and new submission with retryable service unavailability; after process restart, a persisted admitted turn with no local active turn is reconciled as `failed` before the Chat resumes.
+_Avoid_: unbounded silent inconsistency, rerun-on-persist-failure, orphaned-running turn, next-turn overwrite
+
+**Current Chat Recovery**:
+The default Atomic Chat Recovery scoped by Chat ID. It selects the Chat's current active Answer Turn when one exists, otherwise its latest terminal Chat History Snapshot; the server returns the selected User Question Message ID as correlation metadata rather than requiring it as recovery input.
+_Avoid_: client-known-turn-only recovery, logical-session-only recovery, client-guessed current turn
+
+**Current Chat Recovery Linearization**:
+The point at which a Current Chat Recovery selects its result, shared with Answer Turn admission through one per-Chat coordinator lock. A recovery returns one coherent selected active turn or terminal snapshot; a concurrent later submission belongs wholly before or after that selection.
+_Avoid_: mixed-turn snapshot, post-selection implicit refresh, independently locked recovery and submission
+
+**Compatible Current-Recovery Mode**:
+The opt-in `reconnect_mode: "current"` behavior of the established Console Chat POST. It provides Current Chat Recovery while callers that omit the mode retain the established reconnect result and error semantics.
+_Avoid_: replacement recovery endpoint, changed legacy 404, implicit protocol upgrade
+
+**Recovery Mode Selection**:
+The Console Chat POST selects Compatible Current-Recovery Mode whenever `reconnect_mode` is `"current"`, with or without legacy `reconnect: true`; a request without that mode follows its established reconnect or new-submission path.
+_Avoid_: required paired flags, breaking mode migration, mode-without-reconnect rejection
+
+**Unknown Recovery Mode Tolerance**:
+Any missing, non-string, or unrecognized `reconnect_mode` is treated as absent and follows the established Console Chat POST path. Only the exact value `"current"` changes behavior.
+_Avoid_: unknown-mode validation error, third-party passthrough breakage, accidental protocol activation
+
+**Console Recovery Compatibility Fallback**:
+The Console sends both the established reconnect flag and Compatible Current-Recovery Mode, then treats a reconnect 404 as one prompt Chat history refresh rather than a failed assistant response. A returned history is applied as terminal state; only a second Chat-not-found result is presented as absence.
+_Avoid_: legacy-backend error bubble, repeated reconnect retries, 404-as-assistant-output
+
+**Compatible Recovery Locator**:
+The optional Chat ID and established session locator accepted by Compatible Current-Recovery Mode. A caller may continue to identify its current Chat through the existing session-shaped request format; an explicit Chat ID only narrows that resolution and is never a required migration field.
+When an optional Chat ID cannot be resolved or authorized, the established session locator remains eligible to resolve the caller's own Chat.
+_Avoid_: mandatory Chat-ID migration, session-locator removal, optional-ID validation failure, client-generated turn identity
+
+**Compatible Recovery Target Resolution**:
+The ordered resolution of a Compatible Recovery Locator: an authorized optional Chat ID, then an existing session-shaped value that directly identifies a Chat, then a Chat uniquely selected by logical session ID, current user, and channel. An unresolved or unauthorized optional Chat ID does not prevent session resolution; the final resolved Chat is always ownership-authorized before recovery.
+_Avoid_: mandatory locator precedence, session-only cross-user lookup, locator ambiguity, authorization-after-attach
+
+**Recovery Target Concealment**:
+The compatible recovery response rule that a missing Chat, an unresolvable locator, and an unauthorized resolved Chat are indistinguishable as `404 Chat not found`. Recovery never attaches or reveals turn state before Chat ownership authorization succeeds.
+_Avoid_: cross-user Chat oracle, attach-before-authorize, unauthorized-state disclosure
+
+**Non-blocking Chat History Read**:
+The established Chat detail read returns the latest durably committed Chat History Snapshot immediately, including `running` when an Answer Turn remains active. It does not wait for the turn or claim to contain uncommitted live stream output.
+_Avoid_: completion-waiting GET, live-token history read, stream replacement
+
 **Tenant Bootstrap**:
 The creation or repair of one tenant scope's minimum runnable directory state, including its default Agent Profile and required workspace assets. A Tenant Bootstrap completes only when that scope can load its Default Agent Profile.
 _Avoid_: directory creation, partial initialization, workspace startup

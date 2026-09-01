@@ -2454,7 +2454,9 @@ export default function ChatPage() {
               headers,
               body: JSON.stringify({
                 reconnect: true,
+                reconnect_mode: "current",
                 session_id: reconnectSessionId,
+                chat_id: data.chat_id || undefined,
                 // ==================== userId 统一整改 (Kun He) ====================
                 // 使用 getUserId()/getChannel() 获取
                 user_id: getUserId(),
