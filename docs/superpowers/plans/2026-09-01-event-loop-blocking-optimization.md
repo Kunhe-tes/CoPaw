@@ -24,6 +24,7 @@
 - 安全扫描和 manifest 重整的同步等待已移入 worker bridge；扫描缓存先做递归 stat 探测，变化后再计算内容签名；HTTP 4xx/5xx 不再无谓回退到 wget/curl。
 - Workspace manifest/目录变更已接入进程内 coordinator；快照发布前后复核 manifest 与技能 freshness，变化时有限重试，避免在本进程内发布半成品快照。该协调不跨 Kubernetes 进程，跨进程一致性仍依赖现有文件锁与构建后复核。
 - 最终快照复核若遇到权限/读取异常会 fail-closed 地移除全部 Workspace Skill，并继续普通 Query；已通过的定向测试与静态检查记录在交付报告中。生产压测、RUNTIME_DIAGNOSTIC p95/p99 基线和完整测试套件仍未标记为完成。完整测试当前受仓库缺失 `skills/wplus-sop-miner/scripts/validate_stage_sop.py` 阻断，部分 runner 测试受本机 provider secret 目录权限阻断。
+- 已知剩余性能风险：`get_workspace_skill_snapshot_async()` 在默认 asyncio worker 中执行同步快照，而快照内的同步扫描还会等待专用 scanner pool，形成外层 bridge + 内层 scanner pool。两层均已移出事件循环，故不会制造 loop lag，但高并发时会额外占用默认 worker；消除该双层结构需要单独重构扫描 timeout/取消/slot 语义，本计划暂不将其标记为完成。
 
 ---
 
