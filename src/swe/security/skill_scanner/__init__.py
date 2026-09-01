@@ -30,6 +30,7 @@ Quick start::
 
 from __future__ import annotations
 
+import asyncio
 from concurrent import futures
 import hashlib
 import logging
@@ -75,6 +76,7 @@ __all__ = [
     "install_skill_scan_history_recorder",
     "is_skill_whitelisted",
     "scan_skill_directory",
+    "scan_skill_directory_async",
 ]
 
 # ---------------------------------------------------------------------------
@@ -329,23 +331,27 @@ def _scan_with_slot_release(
 # ---------------------------------------------------------------------------
 
 _MAX_CACHE_ENTRIES = 64
-_scan_cache: dict[str, tuple[float, ScanResult]] = {}
+_scan_cache: dict[str, tuple[str, str, ScanResult]] = {}
 _cache_lock = threading.Lock()
 
 
-def _get_dir_mtime(skill_dir: Path) -> float:
-    """Return the latest mtime among the directory and its immediate files."""
+def _get_tree_stat_token(skill_dir: Path) -> str:
+    """Return a cheap recursive path/stat fingerprint for cache probing."""
+    digest = hashlib.blake2b(digest_size=16)
     try:
-        latest = skill_dir.stat().st_mtime
+        for path in sorted(skill_dir.rglob("*")):
+            if not path.is_file() or path.is_symlink():
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            digest.update(path.relative_to(skill_dir).as_posix().encode())
+            digest.update(str(stat.st_mtime_ns).encode())
+            digest.update(str(stat.st_size).encode())
     except OSError:
-        return 0.0
-    try:
-        for p in skill_dir.iterdir():
-            if p.is_file() and not p.is_symlink():
-                latest = max(latest, p.stat().st_mtime)
-    except OSError:
-        pass
-    return latest
+        return "missing"
+    return digest.hexdigest()
 
 
 def _get_cached_result(
@@ -357,13 +363,18 @@ def _get_cached_result(
         entry = _scan_cache.get(key)
     if entry is None:
         return None
-    cached_mtime, cached_result = entry
-    current_mtime = _get_dir_mtime(skill_dir)
-    if current_mtime == cached_mtime:
+    cached_stat, cached_hash, cached_result = entry
+    current_stat = _get_tree_stat_token(skill_dir)
+    if current_stat == cached_stat:
         logger.debug(
             "Returning cached scan result for '%s'",
             cached_result.skill_name,
         )
+        return cached_result
+    current_hash = compute_skill_content_hash(skill_dir)
+    if current_hash == cached_hash:
+        with _cache_lock:
+            _scan_cache[key] = (current_stat, cached_hash, cached_result)
         return cached_result
     return None
 
@@ -374,10 +385,11 @@ def _store_cached_result(
 ) -> None:
     """Store a scan result in the cache (LRU eviction)."""
     key = str(skill_dir)
-    mtime = _get_dir_mtime(skill_dir)
+    stat_token = _get_tree_stat_token(skill_dir)
+    content_hash = compute_skill_content_hash(skill_dir)
     with _cache_lock:
         _scan_cache.pop(key, None)
-        _scan_cache[key] = (mtime, result)
+        _scan_cache[key] = (stat_token, content_hash, result)
         while len(_scan_cache) > _MAX_CACHE_ENTRIES:
             oldest = next(iter(_scan_cache))
             del _scan_cache[oldest]
@@ -529,3 +541,20 @@ def scan_skill_directory(
         )
 
     return result
+
+
+async def scan_skill_directory_async(
+    skill_dir: str | Path,
+    *,
+    skill_name: str | None = None,
+    block: bool | None = None,
+    timeout: float | None = None,
+) -> ScanResult | None:
+    """Await the complete scanner, including cache and policy work, off-loop."""
+    return await asyncio.to_thread(
+        scan_skill_directory,
+        skill_dir,
+        skill_name=skill_name,
+        block=block,
+        timeout=timeout,
+    )

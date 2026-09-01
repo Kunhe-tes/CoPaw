@@ -124,6 +124,35 @@ def get_workspace_skill_snapshot(
                         compute_signature=False,
                     )
                 from .skill_runtime_profile import build_skill_runtime_profile
+                from ..security.skill_scanner import (
+                    SkillScanError,
+                    _get_scan_mode,
+                    is_skill_whitelisted,
+                    scan_skill_directory,
+                )
+
+                try:
+                    scan_result = scan_skill_directory(
+                        directory,
+                        skill_name=name,
+                        block=True,
+                    )
+                    if (
+                        scan_result is None
+                        and _get_scan_mode() != "off"
+                        and not is_skill_whitelisted(name, directory)
+                    ):
+                        logger.warning(
+                            "Workspace skill '%s' excluded because scan did not complete",
+                            name,
+                        )
+                        continue
+                except SkillScanError:
+                    logger.warning(
+                        "Workspace skill '%s' excluded after security scan",
+                        name,
+                    )
+                    continue
 
                 skills[name] = SkillRuntimeSnapshot(
                     directory=directory.resolve(),
@@ -173,3 +202,31 @@ async def get_workspace_skill_snapshot_async(
         workspace_dir,
         reconcile=reconcile,
     )
+
+
+def _filter_changed_skills(
+    snapshot: WorkspaceSkillSnapshot,
+) -> WorkspaceSkillSnapshot:
+    """Drop skills whose content changed after the snapshot was captured."""
+    from .skills_manager import _build_signature
+
+    valid = {
+        name: skill
+        for name, skill in snapshot.skills.items()
+        if _build_signature(skill.directory) == skill.content_signature
+    }
+    if len(valid) == len(snapshot.skills):
+        return snapshot
+    return WorkspaceSkillSnapshot(
+        workspace_dir=snapshot.workspace_dir,
+        generation=snapshot.generation,
+        manifest_stat=snapshot.manifest_stat,
+        skills=MappingProxyType(valid),
+    )
+
+
+async def validate_workspace_skill_snapshot(
+    snapshot: WorkspaceSkillSnapshot,
+) -> WorkspaceSkillSnapshot:
+    """Recheck content signatures off-loop immediately before consumption."""
+    return await asyncio.to_thread(_filter_changed_skills, snapshot)

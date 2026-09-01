@@ -790,7 +790,8 @@ def _create_session_skill_detector(
         if skill_root is None:
             return
         try:
-            next_state = load_skill_hooks_for_session(
+            next_state = await asyncio.to_thread(
+                load_skill_hooks_for_session,
                 skill_name=skill_name,
                 skill_root=skill_root,
                 workspace_dir=workspace,

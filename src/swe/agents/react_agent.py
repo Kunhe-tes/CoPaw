@@ -841,12 +841,21 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 workspace_dir,
                 request_context.get("channel", "console"),
             )
+        skill_snapshot_signatures = (
+            {
+                name: skill.content_signature
+                for name, skill in workspace_snapshot.skills.items()
+            }
+            if workspace_snapshot is not None
+            else None
+        )
         tools = create_background_subagent_tools(
             supervisor=supervisor,
             parent_agent_config=self._agent_config,
             workspace_dir=workspace_dir,
             request_context=request_context,
             effective_skill_names=effective_skill_names,
+            skill_snapshot_signatures=skill_snapshot_signatures,
             selected_expert_id=str(
                 request_context.get("selected_expert_id") or "",
             ).strip()
@@ -1064,17 +1073,6 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
             registered_skills: list[str] = []
             for skill_name in effective_skills:
                 runtime_skill = workspace_snapshot.skills[skill_name]
-                from .skills_manager import get_skill_freshness_token
-
-                if (
-                    get_skill_freshness_token(runtime_skill.directory)
-                    != runtime_skill.freshness_token
-                ):
-                    logger.warning(
-                        "Workspace skill '%s' changed after snapshot; skipping",
-                        skill_name,
-                    )
-                    continue
                 try:
                     # AgentScope's public helper reparses SKILL.md.  The
                     # query snapshot already validated and captured its
@@ -1244,15 +1242,7 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
         Args:
             trace_id: The trace ID to setup detector for
         """
-        if (
-            getattr(self, "_workspace_skill_dirs", {})
-            or getattr(
-                self,
-                "_workspace_skill_snapshot",
-                None,
-            )
-            is not None
-        ):
+        if getattr(self, "_workspace_skill_dirs", {}):
             # The detector resolves manifests and asset paths relative to a
             # workspace. Snapshot-backed agents must never consult the mutable
             # parent workspace after launch.
@@ -1285,6 +1275,32 @@ class SWEAgent(ToolGuardMixin, ToolOutputBudgetMixin, ReActAgent):
                 skill_runtime_profiles=self.get_skill_runtime_profiles(),
                 workspace_dir=workspace_dir,
                 skill_tool_registry=self.get_skill_tool_registry(),
+                skill_metadata=(
+                    {
+                        name: dict(skill.metadata)
+                        for name, skill in getattr(
+                            self._workspace_skill_snapshot,
+                            "skills",
+                            {},
+                        ).items()
+                    }
+                    if getattr(self, "_workspace_skill_snapshot", None)
+                    is not None
+                    else None
+                ),
+                skill_dirs=(
+                    {
+                        name: skill.directory
+                        for name, skill in getattr(
+                            self._workspace_skill_snapshot,
+                            "skills",
+                            {},
+                        ).items()
+                    }
+                    if getattr(self, "_workspace_skill_snapshot", None)
+                    is not None
+                    else None
+                ),
             )
         except Exception as e:
             logger.debug("Failed to setup skill detector: %s", e)

@@ -3,9 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
+from types import MappingProxyType
 from typing import Any
 
 from agentscope_runtime.engine.schemas.agent_schemas import AgentRequest
@@ -112,7 +114,8 @@ async def select_runtime_context_directives(
     )
     if scenario_snapshot is not None and chat is not None:
         selected_directives.extend(
-            scenario_snapshot_skill_directives(
+            await asyncio.to_thread(
+                scenario_snapshot_skill_directives,
                 scenario_snapshot,
                 workspace_dir=workspace_dir,
                 chat_id=chat.id,
@@ -182,7 +185,22 @@ async def load_selected_skill_hooks(
     state: HookSessionState = inputs.hook_overlay
     for directive in inputs.selected_skill_directives:
         try:
-            state = load_skill_hooks_for_session(
+            content_signature = getattr(directive, "content_signature", None)
+            if content_signature:
+                from ...agents.skills_manager import _build_signature
+
+                current_signature = await asyncio.to_thread(
+                    _build_signature,
+                    directive.path.parent,
+                )
+                if current_signature != content_signature:
+                    logger.warning(
+                        "Skipping hooks for changed skill '%s'",
+                        directive.name,
+                    )
+                    continue
+            state = await asyncio.to_thread(
+                load_skill_hooks_for_session,
                 skill_name=directive.name,
                 skill_root=directive.path.parent,
                 workspace_dir=workspace_dir,
@@ -261,6 +279,7 @@ async def build_query_runtime_inputs(
     if getattr(agent_config, "enable_workspace_skills", True):
         from ...agents.skill_runtime_snapshot import (
             get_workspace_skill_snapshot_async,
+            validate_workspace_skill_snapshot,
         )
 
         try:
@@ -268,6 +287,9 @@ async def build_query_runtime_inputs(
                 await get_workspace_skill_snapshot_async(
                     owner.workspace_dir or WORKING_DIR,
                 )
+            )
+            workspace_skill_snapshot = await validate_workspace_skill_snapshot(
+                workspace_skill_snapshot,
             )
         except Exception as exc:  # noqa: BLE001
             # A failed reconcile must not prevent ordinary queries from
@@ -285,7 +307,7 @@ async def build_query_runtime_inputs(
                 workspace_dir=(owner.workspace_dir or WORKING_DIR),
                 generation=0,
                 manifest_stat=ManifestStat(0, 0, 0),
-                skills={},
+                skills=MappingProxyType({}),
             )
     passthrough_headers = dict[str, str](
         current_passthrough_headers() or {},

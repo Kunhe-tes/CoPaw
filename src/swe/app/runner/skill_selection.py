@@ -23,6 +23,7 @@ class SkillUseDirective:
     name: str
     description: str
     path: Path
+    content_signature: str | None = None
 
     def render(self) -> str:
         return f"""<SKILL-USE>
@@ -81,6 +82,7 @@ def build_skill_use_directives(
                         runtime_skill.metadata.get("description") or "",
                     ),
                     path=runtime_skill.directory / "SKILL.md",
+                    content_signature=runtime_skill.content_signature,
                 ),
             )
             continue

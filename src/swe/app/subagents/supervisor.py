@@ -179,6 +179,7 @@ class BackgroundSubAgentSupervisor:
         runtime_policy: PermissionPolicy | None = None,
         request_context: dict[str, Any] | None = None,
         effective_skill_names: list[str] | None = None,
+        skill_snapshot_signatures: dict[str, str] | None = None,
         definition: SubAgentDefinition | None = None,
         start_request: SubAgentStartRequest | None = None,
         definition_match: DefinitionMatchMetadata | None = None,
@@ -234,6 +235,7 @@ class BackgroundSubAgentSupervisor:
                         parent_agent_config=parent_agent_config,
                         definition=definition,
                         effective_skill_names=effective_skill_names or [],
+                        skill_snapshot_signatures=skill_snapshot_signatures,
                     )
                 )
         except OSError as exc:

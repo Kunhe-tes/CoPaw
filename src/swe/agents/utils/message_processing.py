@@ -11,6 +11,7 @@ import asyncio
 import copy
 import logging
 import os
+import threading
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -27,17 +28,7 @@ from .file_handling import (
 
 logger = logging.getLogger(__name__)
 
-_audio_semaphore: asyncio.Semaphore | None = None
-_audio_semaphore_loop: asyncio.AbstractEventLoop | None = None
-
-
-def _get_audio_semaphore() -> asyncio.Semaphore:
-    global _audio_semaphore, _audio_semaphore_loop
-    loop = asyncio.get_running_loop()
-    if _audio_semaphore is None or _audio_semaphore_loop is not loop:
-        _audio_semaphore = asyncio.Semaphore(1)
-        _audio_semaphore_loop = loop
-    return _audio_semaphore
+_audio_slot = threading.BoundedSemaphore(1)
 
 
 async def _process_single_file_block(
@@ -365,13 +356,16 @@ async def _process_single_block(
                 # Audio blocks need transcription or format conversion
                 # depending on the configured audio_mode.
                 _update_block_with_local_path(block, block_type, local_path)
-                async with _get_audio_semaphore():
+                await asyncio.to_thread(_audio_slot.acquire)
+                try:
                     handled = await _process_audio_block(
                         message_content,
                         index,
                         local_path,
                         block,
                     )
+                finally:
+                    _audio_slot.release()
                 if handled:
                     # Audio was transcribed or sent natively; suppress the
                     # "file downloaded" notification that would follow.

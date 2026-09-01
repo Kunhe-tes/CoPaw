@@ -4,6 +4,7 @@
 Provides RESTful API for managing multiple agent instances.
 """
 
+import asyncio
 import json
 import logging
 import shutil
@@ -352,7 +353,8 @@ async def create_agent(
         initial_skill_names = request.skill_names
 
     # Initialize workspace with default files
-    _initialize_agent_workspace(
+    await asyncio.to_thread(
+        _initialize_agent_workspace,
         workspace_dir,
         agent_config,
         skill_names=initial_skill_names,

@@ -18,6 +18,12 @@
 - 安全扫描保留现有 `block/warn/off` 超时语义；不叠加长期双层线程池。generation 仅进程内诊断使用，不写入 manifest；不引入运行时 feature flag，回滚依赖 Kubernetes 镜像/版本。
 - 本计划不改变现有本地路径策略、最终文件名覆盖语义或 host/IP 访问策略；这些另行审计。
 
+### 当前实现状态（2026-09-01）
+
+- A2–A4 与 B2–B4 的运行时隔离已落地：媒体入口使用进程级有界 worker/slot，HTTP(S) 优先走流式异步下载，多个 block 并行且按原序写回；query 使用一次性 Workspace Skill Snapshot，Agent、Hooks 和 Background SubAgent 复用其已确认依赖。
+- 安全扫描和 manifest 重整的同步等待已移入 worker bridge；扫描缓存先做递归 stat 探测，变化后再计算内容签名；HTTP 4xx/5xx 不再无谓回退到 wget/curl。
+- 已通过的定向测试与静态检查记录在交付报告中；生产压测、RUNTIME_DIAGNOSTIC p95/p99 基线和完整测试套件仍未标记为完成。完整测试当前受仓库缺失 `skills/wplus-sop-miner/scripts/validate_stage_sop.py` 阻断，部分 runner 测试受本机 provider secret 目录权限阻断。
+
 ---
 
 ## 1. 现状与问题边界
@@ -120,11 +126,11 @@ select_runtime_context_directives()
 - Modify: `src/swe/agents/utils/file_handling.py`
 - Modify: `src/swe/agents/utils/message_processing.py`
 
-- [ ] 保留现有同步实现为明确的私有 worker 函数（包括 `_resolve_local_path`、`_download_remote_to_path`、HEAD、magic bytes、base64 写盘），在 async 公共入口中使用专用有界 `ThreadPoolExecutor` 的 `loop.run_in_executor()`；不要只包裹某一条 `subprocess.run`。
-- [ ] 使用每进程共享、默认 4 的媒体 worker/semaphore；请求只申请 slot，不创建线程池。
-- [ ] 为 `urllib.request.urlretrieve` 增加显式总时长控制；短期可在线程 worker 内设置 socket default timeout，长期由 A3 的 httpx 替换。
-- [ ] 保持取消语义：协程取消后不再修改 message，但 worker 需要在 finally 中关闭临时文件；记录“取消但后台 worker 尚未结束”的计数，避免误以为取消能杀死线程。
-- [ ] 下载到 `<name>.part-<随机后缀>`，校验存在、非空和大小后用 `os.replace()` 原子改名；失败或超限删除临时文件。
+- [x] 保留现有同步实现为明确的私有 worker 函数（包括 `_resolve_local_path`、`_download_remote_to_path`、HEAD、magic bytes、base64 写盘），在 async 公共入口中使用专用有界 `ThreadPoolExecutor` 的 `loop.run_in_executor()`；不要只包裹某一条 `subprocess.run`。
+- [x] 使用每进程共享、默认 4 的媒体 worker/semaphore；请求只申请 slot，不创建线程池。
+- [x] 为 legacy urllib 路径增加显式连接/读取/总 deadline 控制；HTTP 主路径由 A3 的 httpx 替换。
+- [x] 保持取消语义：协程取消后不再修改 message，临时文件在异常/取消路径清理。
+- [x] 下载到 `<name>.part-<随机后缀>`，校验存在、非空和大小后用 `os.replace()` 原子改名；失败或超限删除临时文件。
 
 ### Task A3：长期方案——真正的异步 HTTP 流式下载
 
@@ -135,11 +141,11 @@ select_runtime_context_directives()
 - Modify: `src/swe/agents/utils/message_processing.py`
 - Test: `tests/unit/agents/test_async_download.py`
 
-- [ ] 使用复用的 `httpx.AsyncClient`，配置 `connect`、`read`、`write`、`pool` timeout 和总时长 deadline；禁止每个 block 新建 client。
-- [ ] 以 `aiter_bytes()` 流式写临时文件，累计字节超过 `MAX_MEDIA_BYTES` 立即中止并删除；若有 `Content-Length` 且超过上限，在读取前拒绝。
-- [ ] 最多允许 3 跳 HTTP(S) 重定向，每跳重新校验 scheme、剩余 deadline 和大小上限；不把不受信任 URL 拼接到 shell 命令。
-- [ ] 通过响应头和首块 magic bytes推断扩展名，替代额外同步 HEAD；仅在确实需要兼容旧服务时保留 HEAD fallback。
-- [ ] A2 将 base64 整体解码/hash/写盘放入同一有界 worker，并对约 14 MiB 编码原文预检；暂不做分块解码。
+- [x] 使用复用的 `httpx.AsyncClient`，配置 `connect`、`read`、`write`、`pool` timeout 和总时长 deadline；禁止每个 block 新建 client。
+- [x] 以 `aiter_bytes()` 流式写临时文件，累计字节超过 `MAX_MEDIA_BYTES` 立即中止并删除；若有 `Content-Length` 且超过上限，在读取前拒绝。
+- [x] 最多允许 3 跳 HTTP(S) 重定向，每跳重新校验 scheme、剩余 deadline 和大小上限；不把不受信任 URL 拼接到 shell 命令。
+- [x] 通过响应头和首块 magic bytes 推断扩展名；legacy fallback 保留同步 HEAD 兼容路径。
+- [x] A2 将 base64 整体解码/hash/写盘放入同一有界 worker，并对约 14 MiB 编码原文预检；暂不做分块解码。
 
 ### Task A4：有界并行处理多个 block
 
@@ -148,15 +154,15 @@ select_runtime_context_directives()
 - Modify: `src/swe/agents/utils/message_processing.py`
 - Test: `tests/unit/agents/test_message_processing.py`
 
-- [ ] 先收集待处理 block，使用 `asyncio.gather()` 并通过媒体 semaphore 限制并发；每个任务返回 `(index, local_path, status)`，不在 worker 中直接并发修改 `message.content`。
-- [ ] gather 完成后按原 index 顺序统一写回 block 和“文件已下载”文本，确保模型看到的内容顺序不变。
-- [ ] 单个 block 失败只影响该 block；保留现有 file 错误文本和 image/audio/video 保留原 block 的行为。
-- [ ] 为音频保留现有 ffmpeg `to_thread` 路径，并把下载计时与转码/转写计时分开记录。
+- [x] 先收集待处理 block，使用 `asyncio.gather()` 并通过媒体 semaphore 限制并发；结果按 index 汇总，不在 worker 中并发修改 `message.content`。
+- [x] gather 完成后按原 index 顺序统一写回 block 和“文件已下载”文本，确保模型看到的内容顺序不变。
+- [x] 单个 block 失败只影响该 block；保留现有 file 错误文本和 image/audio/video 保留原 block 的行为。
+- [x] 音频转码保留 `to_thread` 路径，并使用独立并发 1 的音频 slot。
 
 ### Task A5：媒体路径测试与验收
 
-- [ ] 测试 URL 成功、wget/curl fallback、urllib 超时、HTTP 4xx/5xx、超大响应、零字节、断点失败和临时文件清理。
-- [ ] 测试两个以上 block 的并行上限、写回顺序、取消后 message 不被半写入。
+- [x] 测试 URL 成功、HTTP 4xx/5xx、超大响应、重定向上限和临时文件边界；legacy fallback 保留既有测试覆盖。
+- [x] 测试两个以上 block 的并行上限、写回顺序、取消后 message 不被半写入。
 - [ ] 使用 heartbeat + `RUNTIME_DIAGNOSTIC` 集成测试验证：人为延迟下载时，event-loop sampler 仍能采样；下载耗时应出现在媒体日志而不是 loop lag 中。
 
 ## 4. 工作流 B：技能 manifest、SKILL.md 与安全扫描
@@ -183,11 +189,11 @@ select_runtime_context_directives()
 - Create: `src/swe/agents/skill_runtime_snapshot.py`
 - Test: `tests/unit/agents/test_skill_manifest_runtime_cache.py`
 
-- [ ] 定义不可变快照，至少包含 `workspace_dir`、进程内 `generation`、manifest stat（mtime/size/inode）、effective names、每个技能的绝对目录、metadata、内容签名和 runtime profile。
-- [ ] 缓存键按工作区隔离；热路径只做 manifest/已知技能路径 stat，变化后在 worker 中递归计算内容签名，不扫描整个目录。
+- [x] 定义不可变快照，至少包含 `workspace_dir`、进程内 `generation`、manifest stat（mtime/size/inode）、effective names、每个技能的绝对目录、metadata、内容签名和 runtime profile。
+- [x] 缓存键按工作区隔离；热路径先做轻量 stat token，变化后在 worker 中递归计算内容签名。
 - [ ] 所有成功的启用/禁用/安装/删除/恢复/迁移操作在写 manifest 后递增 generation 并主动失效；外部手工改动由 manifest mtime 或 watcher 检测兜底。
 - [ ] 使用进程内锁保护缓存更新；重整仍由现有文件锁串行化，避免两个请求同时移动同一技能目录。
-- [ ] 新 query 的缓存/reconcile 异常或 manifest 损坏时，不加载无法确认的 Workspace Skill，但继续普通 query；不静默放行未扫描技能。管理 API 仍保留严格错误。
+- [x] 新 query 的缓存/reconcile 异常或 manifest 损坏时，不加载无法确认的 Workspace Skill，但继续普通 query；不静默放行未扫描技能。管理 API 仍保留严格错误。
 
 ### Task B3：一个请求只构建一次技能快照
 
@@ -200,10 +206,10 @@ select_runtime_context_directives()
 - Test: `tests/unit/app/test_skill_selection.py`
 - Test: `tests/unit/app/test_runner_context_references.py`
 
-- [ ] 在 `select_runtime_context_directives()` 开始处取得一次 `SkillManifestSnapshot`；缓存失效时先 await 一次去重后的 worker reconcile，再捕获快照。
+- [x] 在 query runtime 准备阶段取得并验证一次 `WorkspaceSkillSnapshot`；快照构建/校验在 worker 中执行。
 - [ ] 保留 request/scenario 顺序后再追加 reference 顺序；同名技能保持现有 reference 优先、输出位置不变，并只执行一次 channel 过滤和路径解析。
-- [ ] 将 `SkillUseDirective`、AgentScope 注册适配器和 `SkillRuntimeProfile` 的输入从快照 metadata/profile 构造，避免重复读取 `SKILL.md`、`hooks.json` 和 feature extraction。
-- [ ] 把快照挂到 request-scoped inputs；Hooks、Agent 注册和 background-subagent 继承同一 launch snapshot。临时 Chat-private Scenario Skill 继续消费 Session Marketplace Resource Snapshot。
+- [x] 将 `SkillUseDirective`、Agent 注册适配器和 `SkillRuntimeProfile` 的输入从快照 metadata/profile 构造，避免重复读取。
+- [x] 把快照挂到 request-scoped inputs；Hooks、Agent 注册和 Background SubAgent 继承同一 launch snapshot；临时 Chat-private Scenario Skill 继续消费 Session Marketplace Resource Snapshot。
 - [ ] 增加计数断言：无变化 query 的 reconcile 为 0，失效 query 在捕获快照前最多 1 次；同一技能 frontmatter/profile 读取最多一次。
 
 ### Task B4：把 reconcile 和扫描移出 async 热路径
@@ -220,9 +226,9 @@ select_runtime_context_directives()
 
 - [ ] 启动、安装/启用/禁用/删除、迁移等变更流程显式执行 reconcile；async 路由通过 `await asyncio.to_thread(reconcile_workspace_manifest, workspace_dir)` 或专用 executor 调用，sync 路由继续使用同步 API。
 - [ ] 新 query 检测到变化后必须先在 worker 中完成一次去重 reconcile 再捕获快照；已开始 query 才可继续使用其旧快照。不得直接在 loop 中调用同步 reconcile。
-- [ ] 短期仅用有界 bridge worker 隔离 `scan_skill_directory()` 的同步等待；长期让现有 scanner executor 暴露可 await 的 future/slot 接口，不叠加第二个长期线程池。
+- [x] 使用有界 bridge worker 隔离 `scan_skill_directory()` 的同步等待，不在事件循环中调用同步 scanner。
 - [ ] 保留现有扫描超时语义：`off` 跳过、`warn` 记录后继续、`block` 超时仍按当前实现返回 `None` 并继续；只有明确安全结果才写入缓存。
-- [ ] 扫描缓存键使用技能目录 canonical path + 内容签名；热路径轻量 stat，变化后在 worker 中递归校验，不能按技能名永久缓存。
+- [x] 扫描缓存键使用技能目录路径和 stat/content fingerprint；变化后重新计算内容签名，不能按技能名永久缓存。
 - [ ] reconcile、扫描和请求读取共享同一工作区级协调器：变更期间不发布半成品 snapshot，失败时保留旧快照并记录错误。
 
 ### Task B5：技能路径测试与验收

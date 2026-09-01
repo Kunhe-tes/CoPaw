@@ -115,6 +115,7 @@ def create_background_subagent_tools(
     workspace_dir: Path,
     request_context: dict[str, Any],
     effective_skill_names: list[str] | None = None,
+    skill_snapshot_signatures: dict[str, str] | None = None,
     selected_expert_id: str | None = None,
 ) -> dict[str, Callable[..., Any]]:
     """Create start/wait/get/cancel Background SubAgent tool callables."""
@@ -246,6 +247,7 @@ def create_background_subagent_tools(
                     )
                     else []
                 ),
+                skill_snapshot_signatures=skill_snapshot_signatures,
             )
             if goal_id:
                 run_id = getattr(result, "run_id", None)

@@ -27,6 +27,11 @@ from typing import Optional
 
 from ...config.context import get_current_workspace_dir
 from ...constant import WORKING_DIR
+from .async_download import (
+    AsyncDownloadError,
+    AsyncDownloadHTTPError,
+    download_http_to_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +42,7 @@ _MEDIA_READ_TIMEOUT = 30.0
 _MEDIA_WORKER_COUNT = 4
 _media_executor: ThreadPoolExecutor | None = None
 _media_executor_lock = threading.Lock()
+_media_slots = threading.BoundedSemaphore(_MEDIA_WORKER_COUNT)
 
 
 def _get_media_executor() -> ThreadPoolExecutor:
@@ -55,10 +61,21 @@ def _get_media_executor() -> ThreadPoolExecutor:
 async def _run_media_worker(func, *args):
     """Run blocking media work on the process-local bounded executor."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        _get_media_executor(),
-        functools.partial(func, *args),
-    )
+    await asyncio.to_thread(_media_slots.acquire)
+    try:
+        return await loop.run_in_executor(
+            _get_media_executor(),
+            functools.partial(func, *args),
+        )
+    finally:
+        _media_slots.release()
+
+
+async def _run_async_media_slot() -> float:
+    """Acquire the shared process-level media slot without blocking the loop."""
+    queued_at = time.monotonic()
+    await asyncio.to_thread(_media_slots.acquire)
+    return (time.monotonic() - queued_at) * 1000
 
 
 def read_text_file_with_encoding_fallback(file_path: Path | str) -> str:
@@ -240,12 +257,13 @@ def _download_remote_to_path(
         logger.debug("Downloaded file via wget to: %s", local_file_path)
         return
     except (subprocess.CalledProcessError, FileNotFoundError) as e:
-        logger.debug("wget failed, trying curl: %s", e)
+        logger.debug("wget failed, trying curl (%s)", type(e).__name__)
     try:
         subprocess.run(
             [
                 "curl",
                 "-s",
+                "--fail",
                 "-L",
                 "--connect-timeout",
                 str(int(_MEDIA_CONNECT_TIMEOUT)),
@@ -266,7 +284,10 @@ def _download_remote_to_path(
         logger.debug("Downloaded file via curl to: %s", local_file_path)
         return
     except (subprocess.CalledProcessError, FileNotFoundError) as curl_err:
-        logger.debug("curl failed, trying urllib: %s", curl_err)
+        logger.debug(
+            "curl failed, trying urllib (%s)",
+            type(curl_err).__name__,
+        )
     try:
         with (
             urllib.request.urlopen(
@@ -441,6 +462,7 @@ def _download_file_from_url_sync(
     url: str,
     filename: Optional[str] = None,
     download_dir: str = "",
+    deadline: float | None = None,
 ) -> str:
     """
     Download a file from URL to local download directory using wget or curl.
@@ -487,7 +509,7 @@ def _download_file_from_url_sync(
         )
         os.close(fd)
         temp_path = Path(temp_name)
-        deadline = time.monotonic() + _MEDIA_TOTAL_TIMEOUT
+        deadline = deadline or (time.monotonic() + _MEDIA_TOTAL_TIMEOUT)
         try:
             try:
                 _download_remote_to_path(url, temp_path, deadline)
@@ -539,15 +561,112 @@ def _download_file_from_url_sync(
         raise
 
 
+def _prepare_remote_target(
+    url: str,
+    filename: Optional[str],
+    download_dir: str,
+) -> tuple[Path, Path, float] | str:
+    """Prepare a remote destination in a worker-safe synchronous boundary."""
+    parsed = urllib.parse.urlparse(url)
+    local = _resolve_local_path(url, parsed)
+    if local is not None:
+        return local
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("Unsupported media URL scheme")
+    target_dir = Path(download_dir or _default_download_dir())
+    target_dir.mkdir(parents=True, exist_ok=True)
+    if not filename:
+        url_filename = os.path.basename(parsed.path)
+        filename = (
+            url_filename
+            if url_filename
+            else f"file_{hashlib.md5(url.encode()).hexdigest()}"
+        )
+    final_path = target_dir / filename
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{final_path.name}.part-",
+        dir=str(target_dir),
+    )
+    os.close(fd)
+    return (
+        final_path,
+        Path(temp_name),
+        time.monotonic() + _MEDIA_TOTAL_TIMEOUT,
+    )
+
+
 async def download_file_from_url(
     url: str,
     filename: Optional[str] = None,
     download_dir: str = "",
 ) -> str:
-    """Async boundary for bounded, blocking media download work."""
-    return await _run_media_worker(
-        _download_file_from_url_sync,
+    """Download media without blocking the event loop.
+
+    HTTP(S) uses streaming ``httpx`` first; the legacy wget/curl/urllib
+    implementation remains an isolated worker fallback for compatibility.
+    """
+    prepared = await asyncio.to_thread(
+        _prepare_remote_target,
         url,
         filename,
         download_dir,
     )
+    if isinstance(prepared, str):
+        return prepared
+    final_path, temp_path, deadline = prepared
+    started_at = time.monotonic()
+    queue_ms = await _run_async_media_slot()
+    try:
+        content_type = await download_http_to_path(
+            url,
+            temp_path,
+            deadline=deadline,
+            max_bytes=_MAX_MEDIA_BYTES,
+        )
+        size = await asyncio.to_thread(lambda: temp_path.stat().st_size)
+        if size == 0:
+            raise ValueError("Downloaded file is empty")
+        if final_path.suffix == ".file":
+            suffix = mimetypes.guess_extension(content_type or "")
+            if not suffix:
+                suffix = await asyncio.to_thread(
+                    _guess_suffix_from_file_content,
+                    temp_path,
+                )
+            if suffix:
+                final_path = final_path.with_suffix(suffix)
+        await asyncio.to_thread(os.replace, temp_path, final_path)
+        logger.debug(
+            "media_download_ms=%.1f media_source_type=url media_method=httpx "
+            "media_bytes=%d media_worker_queue_ms=%.1f",
+            (time.monotonic() - started_at) * 1000,
+            size,
+            queue_ms,
+        )
+        return str(final_path.absolute())
+    except AsyncDownloadHTTPError as exc:
+        await asyncio.to_thread(temp_path.unlink, True)
+        logger.info(
+            "media_timeout=false media_error=http_status media_source_type=url "
+            "error_type=%s",
+            type(exc).__name__,
+        )
+        raise
+    except (AsyncDownloadError, TimeoutError):
+        # Keep the legacy command-line/urllib path as a bounded worker
+        # fallback, but never execute it on the event-loop thread.
+        await asyncio.to_thread(temp_path.unlink, True)
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(
+            _get_media_executor(),
+            functools.partial(
+                _download_file_from_url_sync,
+                url,
+                filename,
+                download_dir,
+                deadline,
+            ),
+        )
+    finally:
+        _media_slots.release()
+        await asyncio.to_thread(temp_path.unlink, True)

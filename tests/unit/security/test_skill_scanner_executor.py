@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 import threading
+import time
+import pytest
 
 from swe.security import skill_scanner
 from swe.security.skill_scanner.models import ScanResult
@@ -111,3 +114,30 @@ def test_scan_skill_directory_times_out_before_queueing_when_slots_busy(
 
     assert result is None
     assert submitted_paths == []
+
+
+@pytest.mark.asyncio
+async def test_async_scan_bridge_does_not_block_event_loop(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    skill_dir = tmp_path / "slow"
+    skill_dir.mkdir()
+
+    def slow_scan(*_args, **_kwargs):
+        time.sleep(0.06)
+
+    monkeypatch.setattr(skill_scanner, "scan_skill_directory", slow_scan)
+    ticks = 0
+
+    async def heartbeat() -> None:
+        nonlocal ticks
+        for _ in range(3):
+            ticks += 1
+            await asyncio.sleep(0.02)
+
+    await asyncio.gather(
+        skill_scanner.scan_skill_directory_async(skill_dir),
+        heartbeat(),
+    )
+    assert ticks == 3

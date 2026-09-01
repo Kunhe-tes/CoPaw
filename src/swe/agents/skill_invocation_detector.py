@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Mapping
 from datetime import datetime
 from inspect import isawaitable
 from pathlib import Path
@@ -188,6 +189,7 @@ class SkillInvocationDetector:
         user_name: Optional[str] = None,
         bbk_id: Optional[str] = None,
         workspace_dir: Optional[Path] = None,
+        skill_dirs: Optional[dict[str, Path]] = None,
         skill_hook_loader: (
             Callable[[str], Awaitable[None] | None] | None
         ) = None,
@@ -227,6 +229,7 @@ class SkillInvocationDetector:
         self._user_name = user_name
         self._bbk_id = bbk_id
         self._workspace_dir = workspace_dir
+        self._skill_dirs = dict(skill_dirs or {})
         self._skill_hook_loader = skill_hook_loader
         self._confirmed_skill_callback = confirmed_skill_callback
 
@@ -254,7 +257,11 @@ class SkillInvocationDetector:
         self._pruned_context_tasks: set[asyncio.Task[None]] = set()
         self._pending_skill_md_continuation: Optional[str] = None
 
-    def set_enabled_skills(self, skills: list[str]) -> None:
+    def set_enabled_skills(
+        self,
+        skills: list[str],
+        metadata_by_name: dict[str, Any] | None = None,
+    ) -> None:
         """Set the list of enabled skills and cache their descriptions.
 
         Reads skill descriptions from the workspace management manifest at
@@ -265,6 +272,9 @@ class SkillInvocationDetector:
             skills: List of skill names that are currently enabled
         """
         self._enabled_skills = set(skills)
+
+        if metadata_by_name is not None:
+            self._cache_skill_metadata(skills, metadata_by_name)
 
         # 技能启用集变化后，立即清理已经失效的 SKILL.md 锁定状态，
         # 避免后续工具调用继续被已禁用技能短路归因。
@@ -299,7 +309,7 @@ class SkillInvocationDetector:
             self._schedule_pruned_context_finalization(removed_contexts)
 
         # Pre-cache descriptions from workspace manifest
-        if self._workspace_dir:
+        if metadata_by_name is None and self._workspace_dir:
             manifest_path = get_workspace_skill_manifest_path(
                 self._workspace_dir,
             )
@@ -353,6 +363,26 @@ class SkillInvocationDetector:
                             )
                 except Exception as e:
                     logger.warning("Failed to read skill manifest: %s", e)
+
+    def _cache_skill_metadata(
+        self,
+        skills: list[str],
+        metadata_by_name: Mapping[str, Any],
+    ) -> None:
+        """Cache descriptions and stable IDs supplied by a query snapshot."""
+        for skill_name in skills:
+            metadata = metadata_by_name.get(skill_name) or {}
+            if not isinstance(metadata, Mapping):
+                continue
+            description = metadata.get("description") or ""
+            if description:
+                self._skill_descriptions[skill_name] = str(description)
+            skill_id = metadata.get("skill_id") or ""
+            if skill_id:
+                self._skill_ids[skill_name] = str(skill_id)
+            cn_name = metadata.get("cn_name") or ""
+            if cn_name:
+                self._skill_cn_names[skill_name] = str(cn_name)
 
     def set_skill_runtime_profiles(
         self,
@@ -502,7 +532,11 @@ class SkillInvocationDetector:
         """返回可能的 skill 目录列表。"""
         candidate_dirs: list[Path] = []
 
-        if self._workspace_dir:
+        snapshot_dir = self._skill_dirs.get(skill_name)
+        if snapshot_dir is not None:
+            candidate_dirs.append(snapshot_dir)
+
+        if self._workspace_dir and snapshot_dir is None:
             try:
                 from .skills_manager import get_workspace_skills_dir
 

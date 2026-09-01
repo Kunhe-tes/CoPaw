@@ -797,8 +797,10 @@ def _build_pool_skill_specs(
 
 @router.get("")
 async def list_skills(request: Request) -> list[SkillSpec]:
+    import asyncio
+
     workspace_dir = await _request_workspace_dir(request)
-    return _build_workspace_skill_specs(workspace_dir)
+    return await asyncio.to_thread(_build_workspace_skill_specs, workspace_dir)
 
 
 @router.get("/effective")
@@ -806,11 +808,23 @@ async def list_effective_skills(
     request: Request,
 ) -> list[EffectiveSkillSpec]:
     """Return only skills currently available to the Console runtime."""
+    import asyncio
+
     workspace_dir = await _request_workspace_dir(request)
-    effective_names = set(resolve_effective_skills(workspace_dir, "console"))
+    effective_names = set(
+        await asyncio.to_thread(
+            resolve_effective_skills,
+            workspace_dir,
+            "console",
+        ),
+    )
+    specs = await asyncio.to_thread(
+        _build_workspace_skill_specs,
+        workspace_dir,
+    )
     return [
         EffectiveSkillSpec(name=skill.name, description=skill.description)
-        for skill in _build_workspace_skill_specs(workspace_dir)
+        for skill in specs
         if skill.name in effective_names
     ]
 
@@ -818,9 +832,11 @@ async def list_effective_skills(
 @router.post("/refresh")
 async def refresh_skills(request: Request) -> list[SkillSpec]:
     """Force reconcile and return updated workspace skill list."""
+    import asyncio
+
     workspace_dir = await _request_workspace_dir(request)
-    reconcile_workspace_manifest(workspace_dir)
-    return _build_workspace_skill_specs(workspace_dir)
+    await asyncio.to_thread(reconcile_workspace_manifest, workspace_dir)
+    return await asyncio.to_thread(_build_workspace_skill_specs, workspace_dir)
 
 
 @router.get("/hub/search")
@@ -851,12 +867,16 @@ async def list_workspace_skill_sources(
     )
     for workspace in workspaces:
         workspace_dir = Path(workspace["workspace_dir"])
+        skills = await asyncio.to_thread(
+            _build_workspace_skill_specs,
+            workspace_dir,
+        )
         summaries.append(
             WorkspaceSkillSummary(
                 agent_id=workspace["agent_id"],
                 agent_name=workspace.get("agent_name", ""),
                 workspace_dir=str(workspace_dir),
-                skills=_build_workspace_skill_specs(workspace_dir),
+                skills=skills,
             ),
         )
     return summaries
