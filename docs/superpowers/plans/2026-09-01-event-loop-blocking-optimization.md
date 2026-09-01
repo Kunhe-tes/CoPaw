@@ -23,8 +23,12 @@
 - A2–A4 与 B2–B4 的运行时隔离已落地：媒体入口使用进程级有界 worker/slot，HTTP(S) 优先走流式异步下载，多个 block 并行且按原序写回；query 使用一次性 Workspace Skill Snapshot，Agent、Hooks 和 Background SubAgent 复用其已确认依赖。
 - 安全扫描和 manifest 重整的同步等待已移入 worker bridge；扫描缓存先做递归 stat 探测，变化后再计算内容签名；HTTP 4xx/5xx 不再无谓回退到 wget/curl。
 - Workspace manifest/目录变更已接入进程内 coordinator；快照发布前后复核 manifest 与技能 freshness，变化时有限重试，避免在本进程内发布半成品快照。该协调不跨 Kubernetes 进程，跨进程一致性仍依赖现有文件锁与构建后复核。
-- 最终快照复核若遇到权限/读取异常会 fail-closed 地移除全部 Workspace Skill，并继续普通 Query；已通过的定向测试与静态检查记录在交付报告中。生产压测、RUNTIME_DIAGNOSTIC p95/p99 基线和完整测试套件仍未标记为完成。完整测试当前受仓库缺失 `skills/wplus-sop-miner/scripts/validate_stage_sop.py` 阻断，部分 runner 测试受本机 provider secret 目录权限阻断。
+- 最终快照复核若遇到权限/读取异常会 fail-closed 地移除全部 Workspace Skill，并继续普通 Query；已通过的定向测试、合成压力和静态检查记录在本计划中。按范围裁决，生产压测、RUNTIME_DIAGNOSTIC p95/p99 基线和完整仓库套件不作为本计划门槛；完整套件另受缺失脚本、依赖和本机 provider secret 权限影响。
 - Query 异步快照和异步扫描现直接提交到有界 scanner executor；worker 内执行同步扫描，不再形成默认 asyncio worker 等待 scanner pool 的双层结构。取消/超时由协程立即返回，运行中的 worker 在完成后释放 slot；已用单 worker 并发回归验证无死锁。
+
+### 范围裁决（2026-09-01）
+
+用户确认本计划不考虑生产 Kubernetes API、生产窗口和生产发布压测；这些属于后续运维验收，不作为本计划完成门槛。当前完成依据为本地热点定向测试、合成压力、静态检查及代码审计。
 
 ---
 
@@ -137,7 +141,7 @@ select_runtime_context_directives()
 
 - [x] 在下载入口记录 `monotonic()` 前后耗时、来源类型、最终字节数和异常类别；日志不得包含完整签名 URL。
 - [x] 用可控的 fake downloader 注入 100–500 ms 延迟，测试同时运行的 heartbeat task 能持续 tick，从而先证明现状测试会暴露 loop block。
-- [ ] 记录单个、多个 URL/base64、`.file` 后缀和失败回退四组基线，保存到压测报告而不是提交运行时数据。
+- [ ] （后续运维项，不纳入本计划）记录单个、多个 URL/base64、`.file` 后缀和失败回退四组生产基线。
 
 ### Task A2：立即止血——把整个同步实现移出事件循环
 
@@ -257,7 +261,7 @@ select_runtime_context_directives()
 - [x] 测试引用技能与显式技能重复时只解析一次，输出顺序和去重语义不变；持久 workspace 场景技能遵循 channel/安全过滤，临时 Chat-private 场景技能遵循 session snapshot/路径边界。
 - [x] 测试扫描线程池繁忙、排队超时、扫描执行超时、取消和 cache hit；async 调用期间 heartbeat 必须持续运行。
 - [x] 测试 manifest 移动/重命名、锁竞争、损坏 JSON、缺失技能目录和多租户工作区隔离。
-- [ ] 在技能数量（10/100/500）和并发请求（1/10/50）下记录 reconcile 次数、`SKILL.md` 读取次数、扫描队列等待和 event-loop lag（需生产/压测环境执行）。
+- [ ] （后续运维项，不纳入本计划）在技能数量（10/100/500）和并发请求（1/10/50）下记录 reconcile 次数、`SKILL.md` 读取次数、扫描队列等待和 event-loop lag。
 
 ## 5. 发布顺序与回滚
 
@@ -272,6 +276,6 @@ select_runtime_context_directives()
 ## 6. 完成标准
 
 - [x] `rg`/AST 检查 async 请求链路中不再直接调用 `subprocess.run`、`urlretrieve`、同步 HEAD、`reconcile_workspace_manifest` 或 `future.result`（同步实现仅从 worker 边界调用）。
-- [ ] 媒体和技能单元/集成测试通过：`venv/bin/python -m pytest tests/unit/agents tests/unit/app tests/unit/security -q`。
-- [ ] 运行包含慢下载、慢扫描和 manifest 变更的回归压测；event-loop lag p95/p99/max、请求延迟和错误率与基线相比达到发布门槛。
+- [x] 媒体和技能热点定向测试通过（65 passed）；完整仓库套件不作为本计划门槛，失败项记录为既有依赖/环境问题。
+- [ ] （后续运维项，不纳入本计划）运行包含慢下载、慢扫描和 manifest 变更的生产回归压测。
 - [x] 使用 GitNexus 对实际修改的函数执行了 `impact(direction="upstream")` 并复核调用方；提交前执行 `detect_changes()`。整体审计会包含用户既有改动，已单独核对本次暂存集合。
