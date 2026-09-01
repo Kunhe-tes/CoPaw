@@ -211,6 +211,39 @@ async def test_async_scan_uses_bounded_scanner_executor_with_one_worker(
     assert started == [first.resolve(), second.resolve()]
 
 
+@pytest.mark.asyncio
+async def test_async_scan_does_not_use_default_asyncio_executor(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    """The scanner bridge must remain on its dedicated bounded executor."""
+    skill_dir = tmp_path / "dedicated"
+    skill_dir.mkdir()
+
+    class _FakeScanner:
+        def scan_skill(self, resolved, *, skill_name=None):
+            return ScanResult(
+                skill_name=skill_name or Path(resolved).name,
+                skill_directory=str(resolved),
+            )
+
+    monkeypatch.setenv("SWE_SKILL_SCAN_MODE", "warn")
+    monkeypatch.setattr(skill_scanner, "_scanner_instance", _FakeScanner())
+    monkeypatch.setattr(skill_scanner, "_scan_executor", None)
+    monkeypatch.setattr(skill_scanner, "_scan_executor_workers", None)
+    monkeypatch.setattr(skill_scanner, "_scan_executor_slots", None)
+    monkeypatch.setattr(skill_scanner, "_scan_cache", {})
+
+    async def fail_default_executor(*_args, **_kwargs):
+        raise AssertionError("default asyncio executor must not be used")
+
+    monkeypatch.setattr(asyncio, "to_thread", fail_default_executor)
+
+    result = await skill_scanner.scan_skill_directory_async(skill_dir)
+
+    assert result is not None
+
+
 def test_scan_skill_directory_times_out_before_queueing_when_slots_busy(
     monkeypatch,
     tmp_path: Path,
