@@ -393,6 +393,8 @@ async def test_tool_guard_pending_extra_includes_request_scope_ids(
             "agent_id": "agent-a",
             "tenant_id": "tenant-a",
             "source_id": "source-a",
+            "chat_id": "chat-a",
+            "msgid": "msg-a",
         },
     )
     approval_service = _RecordingApprovalService()
@@ -433,6 +435,8 @@ async def test_tool_guard_pending_extra_includes_request_scope_ids(
     }
     assert OPERATION_GROUP_INTERNAL_FIELD not in extra["tool_call"]
     assert agent.printed[0].content[0]["_swe_tool_governance"] == "pending"
+    assert extra["chat_id"] == "chat-a"
+    assert extra["msgid"] == "msg-a"
 
 
 @pytest.mark.asyncio
@@ -455,7 +459,9 @@ async def test_tool_guard_pending_extra_carries_goal_id_only_in_goal_mode(
         ToolGuardResult(tool_name="execute_shell_command", params={}),
     )
 
-    assert approval_service.create_pending_kwargs["extra"]["goal_id"] == "goal-1"
+    assert (
+        approval_service.create_pending_kwargs["extra"]["goal_id"] == "goal-1"
+    )
 
 
 @pytest.mark.asyncio

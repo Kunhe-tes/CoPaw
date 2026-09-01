@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import pytest
 from starlette.requests import Request
 
+from swe.app.b3_headers import extract_b3_context
 from swe.app.middleware.header_passthrough import HeaderPassthroughMiddleware
 
 
@@ -61,3 +63,25 @@ def test_header_passthrough_canonicalizes_prefixed_b3_headers() -> None:
         "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
         "X-B3-Spanid": "32befd146889a61a",
     }
+
+
+@pytest.mark.parametrize(
+    "header_name, value",
+    [
+        ("X-B3-Traceid", "00000000000000000000000000000000"),
+        ("X-B3-Spanid", "0000000000000000"),
+    ],
+)
+def test_extract_b3_context_rejects_zero_identifiers(
+    header_name: str,
+    value: str,
+) -> None:
+    headers = {
+        "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
+        "X-B3-Spanid": "32befd146889a61a",
+        "X-B3-Sampled": "1",
+        header_name: value,
+    }
+
+    with pytest.raises(ValueError):
+        extract_b3_context(headers)

@@ -254,6 +254,88 @@ async def _messages_from_memory_state(
     )
 
 
+def _turn_state_messages_from_state(
+    state: dict,
+    *,
+    session_id: str,
+    chat_id: str | None = None,
+) -> list[ChatMessage]:
+    """Expose pre-admitted user anchors when Agent memory has no output yet."""
+    turn_states = state.get("turn_states")
+    if not isinstance(turn_states, dict):
+        return []
+    messages: list[ChatMessage] = []
+    for turn_id, turn_state in turn_states.items():
+        if not isinstance(turn_state, dict):
+            continue
+        stored_chat_id = turn_state.get("chat_id")
+        if (
+            chat_id is not None
+            and isinstance(stored_chat_id, str)
+            and stored_chat_id
+            and stored_chat_id != chat_id
+        ):
+            continue
+        raw = turn_state.get("message")
+        if not isinstance(raw, dict) or raw.get("role") != "user":
+            continue
+        content = raw.get("content")
+        if isinstance(content, str):
+            content = [{"type": "text", "text": content}]
+        if not isinstance(content, list):
+            continue
+        messages.append(
+            ChatMessage.model_validate(
+                {
+                    "id": raw.get("id") or str(turn_id),
+                    "type": raw.get("type") or "message",
+                    "role": "user",
+                    "content": content,
+                    "metadata": {
+                        **(raw.get("metadata") or {}),
+                        "original_id": raw.get("id") or str(turn_id),
+                    },
+                    "timestamp": raw.get("timestamp"),
+                },
+            ),
+        )
+    return messages
+
+
+def _turn_status_from_state(state: dict, msgid: str) -> str | None:
+    turn_states = state.get("turn_states")
+    if not isinstance(turn_states, dict):
+        return None
+    turn_state = turn_states.get(msgid)
+    if not isinstance(turn_state, dict):
+        return None
+    status = turn_state.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _turn_state_chat_id(state: dict, msgid: str) -> str | None:
+    turn_states = state.get("turn_states")
+    if not isinstance(turn_states, dict):
+        return None
+    turn_state = turn_states.get(msgid)
+    if not isinstance(turn_state, dict):
+        return None
+    chat_id = turn_state.get("chat_id")
+    return chat_id if isinstance(chat_id, str) and chat_id else None
+
+
+def _message_turn_status(message: ChatMessage) -> str | None:
+    metadata = getattr(message, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    for candidate in (metadata, metadata.get("metadata")):
+        if isinstance(candidate, dict):
+            status = candidate.get("turn_status")
+            if isinstance(status, str):
+                return status
+    return None
+
+
 def _slice_memory_state(
     memory_state: dict,
     start: int,
@@ -608,7 +690,13 @@ async def _build_chat_history(
         chat_spec.session_id,
         chat_spec.user_id,
     )
-    status = await workspace.task_tracker.get_status(chat_spec.id)
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+    turn_status = (
+        await coordinator.status(chat_spec.id)
+        if coordinator is not None
+        else None
+    )
+    status = turn_status.value if turn_status is not None else "idle"
     task_messages = _task_session_messages_from_state(state)
     model_call_failed_messages = _model_call_failed_messages_from_state(state)
     archive = await _archive_metadata(workspace, chat_spec.id)
@@ -639,6 +727,20 @@ async def _build_chat_history(
             )
     messages.extend(task_messages)
     messages.extend(model_call_failed_messages)
+    known_ids = {
+        _message_original_id(message)
+        for message in messages
+        if _message_original_id(message)
+    }
+    messages.extend(
+        message
+        for message in _turn_state_messages_from_state(
+            state,
+            session_id=chat_spec.session_id,
+            chat_id=chat_spec.id,
+        )
+        if _message_original_id(message) not in known_ids
+    )
     messages.sort(key=_message_sort_key)
     messages = await _annotate_approval_action_statuses(messages)
     messages = _redact_hidden_context_messages(messages)
@@ -792,7 +894,14 @@ async def list_chats(
             detail="page and page_size must be provided together",
         )
 
-    tracker = workspace.task_tracker
+    coordinator = getattr(workspace, "answer_turn_coordinator", None)
+
+    async def runtime_status(chat_id: str) -> str:
+        if coordinator is None:
+            return "idle"
+        turn_status = await coordinator.status(chat_id)
+        return turn_status.value if turn_status is not None else "idle"
+
     if cursor_mode and page_size is not None:
         try:
             chat_page = await mgr.list_chats_cursor(
@@ -805,7 +914,7 @@ async def list_chats(
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         items = []
         for spec in chat_page.items:
-            status = await tracker.get_status(spec.id)
+            status = await runtime_status(spec.id)
             items.append(spec.model_copy(update={"status": status}))
         return chat_page.model_copy(update={"items": items})
 
@@ -818,14 +927,14 @@ async def list_chats(
         )
         items = []
         for spec in chat_page.items:
-            status = await tracker.get_status(spec.id)
+            status = await runtime_status(spec.id)
             items.append(spec.model_copy(update={"status": status}))
         return chat_page.model_copy(update={"items": items})
 
     chats = await mgr.list_chats(user_id=user_id, channel=channel)
     result = []
     for spec in chats:
-        status = await tracker.get_status(spec.id)
+        status = await runtime_status(spec.id)
         result.append(spec.model_copy(update={"status": status}))
     return result
 
@@ -903,8 +1012,9 @@ async def batch_delete_chats(
 @router.get("/answer-turn", response_model=ChatHistory)
 async def get_answer_turn(
     request: Request,
-    sessionid: str = Query(..., description="Logical session id"),
+    sessionid: str | None = Query(None, description="Logical session id"),
     msgid: str = Query(..., description="User question message id"),
+    chat_id: str | None = Query(None, description="Chat id"),
     mgr: ChatManager = Depends(get_chat_manager),
     session: SafeJSONSession = Depends(get_session),
     workspace=Depends(get_workspace),
@@ -916,11 +1026,44 @@ async def get_answer_turn(
             status_code=400,
             detail="Request user identity is required",
         )
-    chat_spec = await mgr.get_chat_by_session(
-        sessionid,
-        channel="console",
-        user_id=user_id,
-    )
+    chat_spec = None
+    candidate_chats: list[ChatSpec] = []
+    if chat_id:
+        chat_spec = await mgr.get_chat(chat_id)
+        if chat_spec:
+            try:
+                _authorize_chat(request, chat_spec, workspace)
+            except HTTPException:
+                chat_spec = None
+    elif sessionid:
+        candidate_chats = [
+            chat
+            for chat in await mgr.list_chats(
+                user_id=user_id,
+                channel="console",
+            )
+            if chat.session_id == sessionid
+        ]
+        for candidate in candidate_chats:
+            try:
+                _authorize_chat(request, candidate, workspace)
+            except HTTPException:
+                continue
+            state = await session.get_session_state_dict(
+                candidate.session_id,
+                candidate.user_id,
+            )
+            stored_chat_id = _turn_state_chat_id(state, msgid)
+            if stored_chat_id is not None and stored_chat_id != candidate.id:
+                continue
+            history = await _build_chat_history(
+                candidate,
+                session=session,
+                workspace=workspace,
+            )
+            if _slice_answer_turn(history.messages, msgid=msgid) is not None:
+                chat_spec = candidate
+                break
     if not chat_spec:
         raise HTTPException(
             status_code=404,
@@ -938,10 +1081,27 @@ async def get_answer_turn(
             status_code=404,
             detail="Answer turn not found",
         )
+    state = await session.get_session_state_dict(
+        chat_spec.session_id,
+        chat_spec.user_id,
+    )
+    turn_status = _turn_status_from_state(state, msgid)
+    if turn_status is None:
+        turn_status = next(
+            (
+                status
+                for status in (
+                    _message_turn_status(message) for message in messages
+                )
+                if status is not None
+            ),
+            None,
+        )
     return ChatHistory(
         chat=chat_spec,
         messages=messages,
         status=history.status,
+        turn_status=turn_status,
     )
 
 

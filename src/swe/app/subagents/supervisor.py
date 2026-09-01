@@ -110,6 +110,8 @@ class _ActiveRun:
     scope: BackgroundSubAgentScope
     process: Any
     stderr_log_path: Path
+    parent_chat_id: str = ""
+    parent_msgid: str = ""
 
 
 def _worker_parent_agent_config(
@@ -398,8 +400,38 @@ class BackgroundSubAgentSupervisor:
             scope=scope,
             process=process,
             stderr_log_path=stderr_log_path,
+            parent_chat_id=spec.parent_chat_id,
+            parent_msgid=spec.parent_msgid,
         )
         return running
+
+    async def cancel_turn_runs(
+        self,
+        scope: BackgroundSubAgentScope,
+        *,
+        chat_id: str,
+        msgid: str,
+    ) -> list[str]:
+        """Best-effort cancel active runs owned by one chat answer turn."""
+        if not chat_id or not msgid:
+            return []
+        await self._reap_scope(scope)
+        active = self._active_for_scope(scope)
+        run_ids = [
+            run_id
+            for run_id, handle in active.items()
+            if handle.parent_chat_id == chat_id
+            and handle.parent_msgid == msgid
+        ]
+        cancelled: list[str] = []
+        for run_id in run_ids:
+            result = await self.cancel(scope, run_id)
+            if result is not None and not isinstance(
+                result,
+                BackgroundSubAgentNotManageable,
+            ):
+                cancelled.append(run_id)
+        return cancelled
 
     async def wait(
         self,
@@ -431,7 +463,9 @@ class BackgroundSubAgentSupervisor:
         active = self._active_for_scope(scope)
         handle = active.get(run_id)
         if handle is None:
-            return await PerRunSubAgentRunStore(scope.run_store_dir).get(run_id)
+            return await PerRunSubAgentRunStore(scope.run_store_dir).get(
+                run_id,
+            )
         await asyncio.to_thread(handle.process.wait)
         terminal_runs = await self._reap_scope(scope)
         return next(

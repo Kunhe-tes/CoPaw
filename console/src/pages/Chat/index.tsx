@@ -131,10 +131,7 @@ import { emit } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/C
 
 import RuntimeRequestCard from "./components/RuntimeRequestCard";
 import { FOLLOW_UP_SUBMIT_FAILED_EVENT } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/followUpSubmit";
-import {
-  createChatStreamAbortReason,
-  shouldStopBackendForFetchAbort,
-} from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/abortReasons";
+import { createChatStreamAbortReason } from "@/components/agentscope-chat/AgentScopeRuntimeWebUI/core/Chat/hooks/abortReasons";
 import RuntimeResponseCard, {
   RuntimeResponseFeedbackCard,
 } from "./components/RuntimeResponseCard";
@@ -196,6 +193,7 @@ import { isChatTaskProgressEnabled } from "./taskProgressConfig";
 import GlobalVoiceRecorder from "@/components/GlobalVoiceRecorder";
 import { shouldShowGlobalVoiceRecorder } from "@/components/GlobalVoiceRecorder/presentation";
 import { shouldRouteGoalRequestAsSteering } from "./goalSteeringRouting";
+import { FilePreviewPresentationProvider } from "@/components/agentscope-chat/FilePreviewPresentationContext";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
@@ -1993,11 +1991,8 @@ export default function ChatPage() {
       // has been submitted so aborts/network failures cannot leave stale UI
       // state for the next turn.
       setSelectedExpertId(null);
-      if (goalModeEnabled) {
-        setGoalModeEnabled(false);
-      }
+      setSubAgentMonitorResetKey((value) => value + 1);
       try {
-        setSubAgentMonitorResetKey((value) => value + 1);
         const response = await fetch(getApiUrl("/console/chat"), {
           method: "POST",
           headers,
@@ -2010,23 +2005,6 @@ export default function ChatPage() {
         }
 
         return response;
-      } catch (error) {
-        if (shouldStopBackendForFetchAbort(error, timeoutSignal.signal)) {
-          const backendChatId = resolveRequestChatId(
-            {
-              session_id: data.session_id,
-              logical_session_id: data.logical_session_id,
-              chat_id: data.chat_id,
-            },
-            requestBody.session_id,
-          );
-          if (backendChatId) {
-            chatApi.stopChat(backendChatId).catch((err) => {
-              console.error("Failed to stop chat after timeout:", err);
-            });
-          }
-        }
-        throw error;
       } finally {
         timeoutSignal.cleanup();
       }
@@ -2440,13 +2418,16 @@ export default function ChatPage() {
           session_id: string;
           logical_session_id?: string;
           chat_id?: string | null;
+          msgid?: string | null;
         }) {
           const logicalSessionId = resolveLogicalRequestSessionId(data);
           const chatId = resolveRequestChatId(data, logicalSessionId);
           if (chatId) {
-            return chatApi.stopChat(chatId).catch((err) => {
-              console.error("Failed to stop chat:", err);
-            });
+            return chatApi
+              .stopChat(chatId, data.msgid, logicalSessionId)
+              .catch((err) => {
+                console.error("Failed to stop chat:", err);
+              });
           }
           return Promise.resolve();
         },
@@ -2629,7 +2610,13 @@ export default function ChatPage() {
                         }
                         style={{ height: "100%", width: "100%" }}
                       >
-                        <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                        <FilePreviewPresentationProvider
+                          value={
+                            feedbackTask?.cronTaskId ? "modal" : "drawer"
+                          }
+                        >
+                          <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                        </FilePreviewPresentationProvider>
                       </div>
                     </GlobalVoiceRecorder>
                   </ChatPlanReviewRenderProvider>

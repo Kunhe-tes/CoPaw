@@ -44,7 +44,6 @@ from ...models.tracing import (
     UserMessageItem,
     UserStats,
     TaskStatusSummary,
-    DepthSummary,
 )
 
 logger = logging.getLogger(__name__)
@@ -296,6 +295,7 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         bbk_ids: Optional[str] = None,
+        include_resource_breakdown: bool = True,
     ) -> OverviewStats:
         """获取运营概览统计."""
         with MethodTimer(
@@ -308,24 +308,44 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             if end_date is None:
                 end_date = datetime.now() + timedelta(days=1)
 
-            # 并行获取当前周期各项统计数据
-            (
-                (total_users, it_users, business_users),
-                (online_users, online_user_ids),
-                token_row,
-                model_distribution,
-                top_tools,
-                top_skills,
-                (top_mcp_tools, mcp_servers),
-                branch_breakdown,
-                total_skill_calls,
-                customer_click_stats,
-            ) = await self._fetch_overview_data(
-                source_id,
-                start_date,
-                end_date,
-                bbk_ids,
-            )
+            if include_resource_breakdown:
+                # 并行获取当前周期各项统计数据
+                (
+                    (total_users, it_users, business_users),
+                    (online_users, online_user_ids),
+                    token_row,
+                    model_distribution,
+                    top_tools,
+                    top_skills,
+                    (top_mcp_tools, mcp_servers),
+                    branch_breakdown,
+                    total_skill_calls,
+                    customer_click_stats,
+                ) = await self._fetch_overview_data(
+                    source_id,
+                    start_date,
+                    end_date,
+                    bbk_ids,
+                )
+            else:
+                (
+                    (total_users, it_users, business_users),
+                    (online_users, online_user_ids),
+                    token_row,
+                    branch_breakdown,
+                    total_skill_calls,
+                    customer_click_stats,
+                ) = await self._fetch_overview_summary_data(
+                    source_id,
+                    start_date,
+                    end_date,
+                    bbk_ids,
+                )
+                model_distribution = []
+                top_tools = []
+                top_skills = []
+                top_mcp_tools = []
+                mcp_servers = []
 
             return self._build_overview_stats(
                 total_users=total_users,
@@ -365,6 +385,38 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             self._get_top_tools(source_id, start_date, end_date, bbk_ids),
             self._get_top_skills(source_id, start_date, end_date, bbk_ids),
             self._get_mcp_stats(source_id, start_date, end_date, bbk_ids),
+            self._get_branch_breakdown(
+                source_id,
+                start_date,
+                end_date,
+                bbk_ids,
+            ),
+            self._get_total_skill_calls(
+                source_id,
+                start_date,
+                end_date,
+                bbk_ids,
+            ),
+            self._get_customer_click_stats(
+                source_id,
+                start_date,
+                end_date,
+                bbk_ids,
+            ),
+        )
+
+    async def _fetch_overview_summary_data(
+        self,
+        source_id: str,
+        start_date: datetime,
+        end_date: datetime,
+        bbk_ids: Optional[str] = None,
+    ) -> list:
+        """并行获取概览首页实际会展示的轻量数据."""
+        return await asyncio.gather(
+            self._get_total_users(source_id, start_date, end_date, bbk_ids),
+            self._get_online_users(source_id, bbk_ids),
+            self._get_token_stats(source_id, start_date, end_date, bbk_ids),
             self._get_branch_breakdown(
                 source_id,
                 start_date,
@@ -684,348 +736,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             cron_tasks=build_branch_items(cron_rows),
             customers=build_branch_items(customer_rows),
         )
-
-    async def get_growth_stats(
-        self,
-        source_id: str,
-        start_date: datetime,
-        end_date: datetime,
-        time_range: str = "day",
-        bbk_ids: Optional[str] = None,
-    ) -> dict[str, Any]:
-        """获取运营看板核心指标的环比结果。
-
-        统计范围：
-        - 主事实表为 `swe_tracing_traces`，用于调用量、Token、会话数、
-          活跃用户数等核心规模指标。
-        - 定时任务执行量来自 `swe_cron_executions` 与 `swe_cron_jobs` 的
-          关联结果，口径为有效任务的执行记录数。
-        - `source_id='all'` 时汇总全部正式平台，并排除
-          `EXCLUDED_SOURCE_IDS`；指定 `source_id` 时仅统计单个平台。
-        - `bbk_ids` 为分行并集过滤条件，作用于 trace、span 与 cron
-          相关统计。
-
-        对比周期：
-        - 当前周期由调用方传入 `start_date`、`end_date` 定义。
-        - 上一周期的回溯长度由 `time_range` 决定：`day/week/month`
-          分别对应 1/7/30 天，`custom` 对应当前时间窗的自然日差值。
-        - 上一周期的结束边界与当前周期起点对齐，避免两个周期发生重叠。
-
-        返回字段口径：
-        - `callsGrowth`：调用量环比，口径为 trace 记录数。
-        - `tokensGrowth`：资源消耗环比，口径为 `total_tokens` 汇总值。
-        - `sessionGrowth`：会话数环比，口径为 `session_id` 去重数。
-        - `userGrowth`：活跃用户数环比，口径为 `user_id` 去重数。
-        - `cronGrowth`：定时任务执行次数环比，口径为 cron 执行记录数。
-        - `avgRoundsGrowth`：单次会话平均轮数环比，口径为 `calls/sessions`。
-        - `multiRoundRatioGrowth`：多轮会话占比环比，口径为大于 3 轮
-          会话的占比。
-        - `avgDurationGrowth`：平均对话时长环比，口径为秒。
-        - `avgSessionsPerUserGrowth`：人均会话数环比，口径为
-          `sessions/users`。
-        """
-        # pylint: disable=too-many-statements
-        method_start = time.time()
-        logger.info(
-            "[get_growth_stats] 开始处理: source_id=%s, time_range=%s",
-            source_id,
-            time_range,
-        )
-        # 环比回溯长度与看板筛选粒度保持一致，确保上一周期和当前周期
-        # 在展示层具备可直接比较的业务含义。
-        period_days = 1
-        if time_range == "week":
-            period_days = 7
-        elif time_range == "month":
-            period_days = 30
-        elif time_range == "custom":
-            period_days = (end_date - start_date).days
-
-        prev_start = start_date - timedelta(days=period_days)
-        # 使用 start_date 作为上一周期的结束时间，配合 SQL 的 < 比较
-        # 避免使用 timedelta(seconds=1) 造成的时间间隙问题
-        prev_end = start_date
-
-        # 分行筛选口径在所有子指标上保持一致，避免不同卡片的环比基线不一致。
-        bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
-        joined_bbk_filter_sql = bbk_filter_sql.replace(
-            " AND bbk_id IN",
-            " AND s.bbk_id IN",
-        )
-
-        async def get_stats(
-            s: datetime,
-            e: datetime,
-            is_prev: bool = False,
-        ) -> dict:
-            # 基础规模指标统一从 trace 主表读取，确保调用量、Token、
-            # 会话数、活跃用户数共享同一事实口径。
-            # 对于上一周期，使用 < 比较；对于当前周期，使用 <= 比较
-            time_compare = "<" if is_prev else "<="
-            if source_id == "all":
-                exclude_placeholders = ", ".join(
-                    ["%s"] * len(EXCLUDED_SOURCE_IDS),
-                )
-                query = f"""
-                    SELECT
-                        COUNT(*) as calls,
-                        COALESCE(SUM(total_tokens), 0) as tokens,
-                        COUNT(DISTINCT session_id) as sessions,
-                        COUNT(DISTINCT user_id) as users
-                    FROM swe_tracing_traces
-                    WHERE start_time >= %s AND start_time {time_compare} %s
-                      AND source_id NOT IN ({exclude_placeholders})
-                      AND user_id != 'default'{bbk_filter_sql}
-                """
-                params = (s, e, *EXCLUDED_SOURCE_IDS, *bbk_filter_params)
-                row = await self._db.fetch_one(query, params)
-            else:
-                query = f"""
-                    SELECT
-                        COUNT(*) as calls,
-                        COALESCE(SUM(total_tokens), 0) as tokens,
-                        COUNT(DISTINCT session_id) as sessions,
-                        COUNT(DISTINCT user_id) as users
-                    FROM swe_tracing_traces
-                    WHERE source_id = %s AND start_time >= %s AND start_time {time_compare} %s
-                      AND user_id != 'default'{bbk_filter_sql}
-                """
-                params = (source_id, s, e, *bbk_filter_params)
-                row = await self._db.fetch_one(query, params)
-
-            if row is None:
-                return {
-                    "calls": 0,
-                    "tokens": 0.0,
-                    "sessions": 0,
-                    "users": 0,
-                }
-            return {
-                "calls": row["calls"] or 0,
-                "tokens": float(row["tokens"] or 0),
-                "sessions": row["sessions"] or 0,
-                "users": row["users"] or 0,
-            }
-
-        async def get_cron_tasks_count(
-            s: datetime,
-            e: datetime,
-            is_prev: bool = False,
-        ) -> int:
-            """查询定时任务执行次数（cron_executions 表）.
-
-            统计的是有效任务的执行记录数，不是任务定义数；删除态任务、
-            默认租户任务和被排除平台的数据均不纳入口径。
-            """
-            time_compare = "<" if is_prev else "<="
-            bbk_filter_sql, bbk_filter_params = build_cron_bbk_in_filter(
-                bbk_ids,
-            )
-            cron_exclude_placeholders = ", ".join(
-                ["%s"] * len(EXCLUDED_SOURCE_IDS),
-            )
-            if source_id == "all":
-                query = f"""
-                    SELECT COUNT(*) as total
-                    FROM swe_cron_executions e
-                    INNER JOIN swe_cron_jobs j ON e.job_id = j.id
-                    WHERE e.actual_time >= %s AND e.actual_time {time_compare} %s
-                      AND j.status != 'deleted'
-                      AND j.deleted_at IS NULL
-                      AND j.source_id NOT IN ({cron_exclude_placeholders})
-                      AND j.tenant_id != 'default'
-                      {bbk_filter_sql}
-                """
-                query_params = (
-                    s,
-                    e,
-                    *EXCLUDED_SOURCE_IDS,
-                    *bbk_filter_params,
-                )
-            else:
-                query = f"""
-                    SELECT COUNT(*) as total
-                    FROM swe_cron_executions e
-                    INNER JOIN swe_cron_jobs j ON e.job_id = j.id
-                    WHERE e.actual_time >= %s AND e.actual_time {time_compare} %s
-                      AND j.status != 'deleted'
-                      AND j.deleted_at IS NULL
-                      AND j.tenant_id != 'default'
-                      AND j.source_id = %s
-                      {bbk_filter_sql}
-                """
-                query_params = (s, e, source_id, *bbk_filter_params)
-            row = await self._db.fetch_one(query, query_params)
-            return int((row or {}).get("total") or 0)
-
-        async def get_customer_click_stats_for_growth(
-            s: datetime,
-            e: datetime,
-            is_prev: bool = False,
-        ) -> dict[str, int]:
-            """获取客户点击统计（用于增长率计算）."""
-            time_compare = "<" if is_prev else "<="
-            if source_id == "all":
-                exclude_placeholders = ", ".join(
-                    ["%s"] * len(EXCLUDED_SOURCE_IDS),
-                )
-                query = f"""
-                    SELECT
-                        button_type,
-                        COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
-                    FROM swe_html_preview_click_events
-                    WHERE clicked_at >= %s AND clicked_at {time_compare} %s
-                      AND source_id NOT IN ({exclude_placeholders})
-                      AND button_type IN ('plan', 'insight', 'phone')
-                      AND cron_task_id IS NOT NULL
-                      AND customer_id IS NOT NULL{bbk_filter_sql}
-                    GROUP BY button_type
-                """
-                params = (s, e, *EXCLUDED_SOURCE_IDS, *bbk_filter_params)
-                rows = await self._db.fetch_all(query, params)
-            else:
-                query = f"""
-                    SELECT
-                        button_type,
-                        COUNT(DISTINCT CONCAT(COALESCE(cron_task_id, ''), '|', COALESCE(customer_id, ''))) as customer_count
-                    FROM swe_html_preview_click_events
-                    WHERE source_id = %s AND clicked_at >= %s AND clicked_at {time_compare} %s
-                      AND button_type IN ('plan', 'insight', 'phone')
-                      AND cron_task_id IS NOT NULL
-                      AND customer_id IS NOT NULL{bbk_filter_sql}
-                    GROUP BY button_type
-                """
-                params = (source_id, s, e, *bbk_filter_params)
-                rows = await self._db.fetch_all(query, params)
-
-            result = {"plan": 0, "insight": 0, "phone": 0}
-            for row in rows:
-                btn = row["button_type"]
-                if btn in result:
-                    result[btn] = row["customer_count"] or 0
-            return result
-
-        curr = await get_stats(start_date, end_date, is_prev=False)
-        prev = await get_stats(prev_start, prev_end, is_prev=True)
-        curr_cron_tasks = await get_cron_tasks_count(
-            start_date,
-            end_date,
-            is_prev=False,
-        )
-        prev_cron_tasks = await get_cron_tasks_count(
-            prev_start,
-            prev_end,
-            is_prev=True,
-        )
-
-        # 获取当前和上一周期的客户点击统计
-        curr_click_stats = await get_customer_click_stats_for_growth(
-            start_date,
-            end_date,
-            is_prev=False,
-        )
-        prev_click_stats = await get_customer_click_stats_for_growth(
-            prev_start,
-            prev_end,
-            is_prev=True,
-        )
-
-        # 深度指标与看板”使用深度”卡片口径保持一致：占比类指标和时长类
-        # 指标都通过专用聚合函数获取，不与基础规模指标混算。
-        curr_multi_round_ratio = await self._get_multi_round_ratio(
-            source_id,
-            start_date,
-            end_date,
-            bbk_ids,
-        )
-        prev_multi_round_ratio = await self._get_multi_round_ratio(
-            source_id,
-            prev_start,
-            prev_end,
-            bbk_ids,
-        )
-        curr_avg_duration = await self._get_avg_duration_seconds(
-            source_id,
-            start_date,
-            end_date,
-            bbk_ids,
-        )
-        prev_avg_duration = await self._get_avg_duration_seconds(
-            source_id,
-            prev_start,
-            prev_end,
-            bbk_ids,
-        )
-
-        def calc_growth(curr_val: float, prev_val: float) -> float | None:
-            # 环比空值约定：
-            # - 上期为 0 且本期有值：按 100% 展示，表示从无到有。
-            # - 上期和本期都为 0：按 0.0 处理。
-            # - 本期为 0 且上期有值：返回 None，由上层按“当前无数据”展示。
-            if prev_val == 0:
-                return 100.0 if curr_val > 0 else 0.0
-            if curr_val == 0:
-                # 当前周期无数据，上一周期有数据，返回 None 表示"当前无数据"
-                return None
-            return round(((curr_val - prev_val) / prev_val) * 100, 1)
-
-        # 深度指标环比直接对齐页面卡片展示公式，保证卡片值与环比基线可追溯。
-        # 1. 单次会话平均轮数环比 = 当前周期 calls/sessions 相对上一周期的变化。
-        curr_avg_rounds = curr["calls"] / max(curr["sessions"], 1)
-        prev_avg_rounds = prev["calls"] / max(prev["sessions"], 1)
-        avg_rounds_growth = calc_growth(curr_avg_rounds, prev_avg_rounds)
-
-        # 2. 多轮会话占比环比：以 >3 轮会话的占比作为口径。
-        multi_round_ratio_growth = calc_growth(
-            curr_multi_round_ratio,
-            prev_multi_round_ratio,
-        )
-
-        # 3. 平均对话时长环比：以秒为单位比较。
-        avg_duration_growth = calc_growth(curr_avg_duration, prev_avg_duration)
-
-        # 4. 人均会话数环比 = 当前周期 sessions/users 相对上一周期的变化。
-        curr_avg_sessions_per_user = curr["sessions"] / max(curr["users"], 1)
-        prev_avg_sessions_per_user = prev["sessions"] / max(prev["users"], 1)
-        avg_sessions_per_user_growth = calc_growth(
-            curr_avg_sessions_per_user,
-            prev_avg_sessions_per_user,
-        )
-
-        logger.info(
-            "[get_growth_stats] 方法总耗时: %.3fms",
-            (time.time() - method_start) * 1000,
-        )
-        return {
-            "callsGrowth": calc_growth(
-                curr["calls"],
-                prev["calls"],
-            ),  # trace 记录数口径
-            "tokensGrowth": calc_growth(
-                curr["tokens"],
-                prev["tokens"],
-            ),  # total_tokens 汇总口径
-            "sessionGrowth": calc_growth(
-                curr["sessions"],
-                prev["sessions"],
-            ),  # session_id 去重口径
-            "userGrowth": calc_growth(
-                curr["users"],
-                prev["users"],
-            ),  # user_id 去重口径
-            "cronGrowth": calc_growth(
-                curr_cron_tasks,
-                prev_cron_tasks,
-            ),  # cron 执行记录数口径
-            "avgRoundsGrowth": avg_rounds_growth,  # 单次会话平均轮数口径
-            "multiRoundRatioGrowth": multi_round_ratio_growth,  # >3 轮会话占比口径
-            "avgDurationGrowth": avg_duration_growth,  # 平均对话时长（秒）口径
-            "avgSessionsPerUserGrowth": avg_sessions_per_user_growth,  # 人均会话数口径
-            "planCustomersGrowth": calc_growth(
-                curr_click_stats.get("plan", 0),
-                prev_click_stats.get("plan", 0),
-            ),
-        }
 
     async def get_daily_trend(
         self,
@@ -3488,91 +3198,6 @@ class TracingQueryService:  # pylint: disable=too-many-public-methods
             total,
         )
         return ErrorListResponse(items=items, total=total)
-
-    async def get_depth_summary(
-        self,
-        source_id: str,
-        start_date: Optional[datetime] = None,
-        end_date: Optional[datetime] = None,
-        bbk_ids: Optional[str] = None,
-    ) -> DepthSummary:
-        """获取使用深度汇总统计."""
-        if start_date is None:
-            start_date = datetime.now() - timedelta(days=30)
-        if end_date is None:
-            end_date = datetime.now() + timedelta(days=1)
-
-        bbk_filter_sql, bbk_filter_params = build_bbk_in_filter(bbk_ids)
-        exclude_placeholders = ", ".join(["%s"] * len(EXCLUDED_SOURCE_IDS))
-
-        # 获取基础统计数据
-        if source_id == "all":
-            base_query = f"""
-                SELECT
-                    COUNT(*) as total_traces,
-                    COUNT(DISTINCT session_id) as total_sessions,
-                    COUNT(DISTINCT user_id) as total_users
-                FROM swe_tracing_traces
-                WHERE start_time >= %s AND start_time <= %s
-                  AND source_id NOT IN ({exclude_placeholders})
-                  AND user_id != 'default'
-                  {bbk_filter_sql}
-            """
-            base_params = (
-                start_date,
-                end_date,
-                *EXCLUDED_SOURCE_IDS,
-                *bbk_filter_params,
-            )
-        else:
-            base_query = f"""
-                SELECT
-                    COUNT(*) as total_traces,
-                    COUNT(DISTINCT session_id) as total_sessions,
-                    COUNT(DISTINCT user_id) as total_users
-                FROM swe_tracing_traces
-                WHERE source_id = %s AND start_time >= %s AND start_time <= %s
-                  AND user_id != 'default'
-                  {bbk_filter_sql}
-            """
-            base_params = (source_id, start_date, end_date, *bbk_filter_params)
-
-        base_row = await self._db.fetch_one(base_query, base_params)
-        total_traces = int((base_row or {}).get("total_traces") or 0)
-        total_sessions = max(
-            int((base_row or {}).get("total_sessions") or 0),
-            1,
-        )
-        total_users = max(int((base_row or {}).get("total_users") or 0), 1)
-
-        # 单次会话平均轮数
-        avg_rounds = round(total_traces / total_sessions, 1)
-
-        # 人均会话数
-        avg_sessions_per_user = round(total_sessions / total_users, 1)
-
-        # 多轮会话占比 (>3轮)
-        multi_round_ratio = await self._get_multi_round_ratio(
-            source_id,
-            start_date,
-            end_date,
-            bbk_ids,
-        )
-
-        # 平均对话时长（秒）
-        avg_duration_seconds = await self._get_avg_duration_seconds(
-            source_id,
-            start_date,
-            end_date,
-            bbk_ids,
-        )
-
-        return DepthSummary(
-            avg_rounds=avg_rounds,
-            multi_round_ratio=multi_round_ratio,
-            avg_duration_seconds=avg_duration_seconds,
-            avg_sessions_per_user=avg_sessions_per_user,
-        )
 
     async def get_mcp_servers_paginated(
         self,

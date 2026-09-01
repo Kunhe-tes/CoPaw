@@ -949,6 +949,7 @@ if CORS_ORIGINS:
             "Content-Disposition",
             "X-Swe-Msgid",
             "X-Swe-Sessionid",
+            "X-Swe-Chatid",
         ],
     )
 

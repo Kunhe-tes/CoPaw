@@ -11,6 +11,7 @@ from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+from ..answer_turn.models import TurnIdentity
 from ..channels.base import ContentType, TextContent
 from .runtime_context import WPlusRuntimeContext, bind_wplus_runtime
 
@@ -361,9 +362,13 @@ class WPlusSafeStreamTraceRegistry:
             entry_id=f"tool:{call_id}",
             kind="tool",
             status=status,
-            tool_name=tool_name or existing.tool_name if existing else tool_name,
+            tool_name=(
+                tool_name or existing.tool_name if existing else tool_name
+            ),
             server_label=(
-                server_label or existing.server_label if existing else server_label
+                server_label or existing.server_label
+                if existing
+                else server_label
             ),
         )
         run.timeline.setdefault(f"tool:{call_id}", ("tool", call_id))
@@ -384,8 +389,12 @@ class WPlusSafeStreamTraceRegistry:
 
     @staticmethod
     def _tool_name(data: dict[str, Any]) -> Any:
-        direct = data.get("name") or data.get("tool_name") or data.get(
-            "mcp_tool_name",
+        direct = (
+            data.get("name")
+            or data.get("tool_name")
+            or data.get(
+                "mcp_tool_name",
+            )
         )
         if direct:
             return direct
@@ -400,7 +409,7 @@ class WPlusSafeStreamTraceRegistry:
         if not isinstance(value, str):
             return ""
         normalized = " ".join(value.split()).strip()
-        if not normalized or any(char in normalized for char in "{}[]\""):
+        if not normalized or any(char in normalized for char in '{}[]"'):
             return ""
         return normalized[:96]
 
@@ -452,9 +461,7 @@ class WPlusSafeStreamTraceRegistry:
     @staticmethod
     def _render(run: _WPlusSafeStreamTraceRun) -> str:
         return "\n".join(
-            text
-            for message in run.messages.values()
-            if (text := message.text)
+            text for message in run.messages.values() if (text := message.text)
         )
 
     @staticmethod
@@ -504,7 +511,9 @@ class WPlusSafeStreamTraceRegistry:
                 message.parts = [
                     _WPlusSafeTextPart(
                         text="\n".join(lines[-self._max_lines :]),
-                        delta=(message.parts[-1].delta if message.parts else False),
+                        delta=(
+                            message.parts[-1].delta if message.parts else False
+                        ),
                     ),
                 ]
             run.truncated = True
@@ -518,7 +527,9 @@ class WPlusSafeStreamTraceRegistry:
                 message.parts = [
                     _WPlusSafeTextPart(
                         text=message.text[-self._max_chars :],
-                        delta=(message.parts[-1].delta if message.parts else False),
+                        delta=(
+                            message.parts[-1].delta if message.parts else False
+                        ),
                     ),
                 ]
             run.truncated = True
@@ -559,14 +570,26 @@ def _build_trial_command_contract(
                 "list_id": "actionable-findings",
                 "label": "业务发现与建议",
                 "columns": [
-                    {"field": "segment", "label": "对象分组", "type": "string"},
-                    {"field": "finding", "label": "关键发现", "type": "string"},
+                    {
+                        "field": "segment",
+                        "label": "对象分组",
+                        "type": "string",
+                    },
+                    {
+                        "field": "finding",
+                        "label": "关键发现",
+                        "type": "string",
+                    },
                     {
                         "field": "recommended_action",
                         "label": "建议动作",
                         "type": "string",
                     },
-                    {"field": "evidence", "label": "判断依据", "type": "string"},
+                    {
+                        "field": "evidence",
+                        "label": "判断依据",
+                        "type": "string",
+                    },
                     {
                         "field": "affected_count",
                         "label": "影响数量",
@@ -815,9 +838,13 @@ def build_wplus_command_text(
         payload,
         target_state,
     )
-    expected_event_kind = {
-        "GeneratingStageProposal": "stage_proposal",
-    }.get(effective_target_state)
+    expected_event_kind = (
+        {"GeneratingStageProposal": "stage_proposal"}.get(
+            effective_target_state,
+        )
+        if effective_target_state is not None
+        else None
+    )
     is_trial_turn = effective_target_state in {
         "GeneratingTrial",
         "ExecutingTrial",
@@ -856,11 +883,7 @@ def build_wplus_command_text(
         command_contract = (
             "\n在提出第一个澄清问题或拟定队列前，依次尝试读取 "
             "memory/common-wplus-knowledge.jsonl、"
-            + (
-                personal_memory + "、"
-                if personal_memory is not None
-                else ""
-            )
+            + (personal_memory + "、" if personal_memory is not None else "")
             + "memory/cases/sop-cases.jsonl。文件不存在表示当前没有对应记忆，"
             "不得仅因缺失而创建文件；没有匿名 user_scope 时不得读取个性化记忆。"
             "本回合只允许成功持久化一个业务边界事件。若 "
@@ -971,7 +994,7 @@ async def start_wplus_chat_turn(
         raise RuntimeError("Console channel is unavailable")
 
     message_id = str(uuid.uuid4())
-    native_payload = {
+    native_payload: dict[str, Any] = {
         "channel_id": "console",
         "sender_id": user_id,
         "content_parts": [
@@ -1009,29 +1032,51 @@ async def start_wplus_chat_turn(
         command=command,
     )
     with bind_wplus_runtime(trusted_runtime):
-        queue, is_new_run = await workspace.task_tracker.attach_or_start(
+        coordinator = workspace.answer_turn_coordinator
+        if coordinator is None:
+            raise RuntimeError("answer-turn coordinator is not configured")
+
+        async def producer(
+            identity: TurnIdentity,
+            bound_payload: dict[str, Any],
+        ):
+            next_payload = {
+                **bound_payload,
+                "meta": {
+                    **(bound_payload.get("meta") or {}),
+                    "answer_turn_identity": identity,
+                    "msgid": identity.msgid,
+                },
+            }
+            async for event in console_channel.stream_one(next_payload):
+                yield event
+
+        lease = await coordinator.start_or_attach(
             chat.id,
             native_payload,
-            console_channel.stream_one,
+            producer,
+            msgid=message_id,
             before_start=before_start,
         )
+        queue, is_new_run = lease.queue, lease.is_new_run
+        identity = lease.identity
     if not is_new_run:
-        await workspace.task_tracker.detach_subscriber(chat.id, queue)
+        await workspace.task_tracker.detach_subscriber(identity, queue)
         raise WPlusChatRunBusyError(
             "The owning Chat already has an active Agent run",
         )
 
     if on_complete is None:
-        await workspace.task_tracker.detach_subscriber(chat.id, queue)
+        await workspace.task_tracker.detach_subscriber(identity, queue)
     else:
         safe_traces = get_wplus_safe_stream_trace_registry(workspace)
         safe_traces.start_run(sop_session_id, run_id)
 
         async def _watch_completion() -> None:
             try:
-                async for chunk in workspace.task_tracker.stream_from_queue(
+                async for chunk in workspace.task_tracker.stream(
+                    identity,
                     queue,
-                    chat.id,
                 ):
                     safe_traces.ingest(sop_session_id, run_id, chunk)
             except asyncio.CancelledError:

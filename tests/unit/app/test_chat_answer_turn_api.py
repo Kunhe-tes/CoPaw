@@ -111,14 +111,20 @@ class _FakeTaskTracker:
         return "idle"
 
 
-def _client(monkeypatch, *, include_user_identity: bool = True) -> TestClient:
+def _client(
+    monkeypatch,
+    *,
+    include_user_identity: bool = True,
+    chats: list[ChatSpec] | None = None,
+) -> TestClient:
     from src.swe.app.runner import api as chat_api_module
 
     monkeypatch.setattr(chat_api_module, "InMemoryMemory", _FakeMemory)
 
     manager = ChatManager(
         repo=_InMemoryChatRepository(
-            [
+            chats
+            or [
                 ChatSpec(
                     id="chat-1",
                     session_id="session-1",
@@ -192,6 +198,84 @@ def test_answer_turn_returns_404_when_msgid_is_not_user_message(
     )
 
     assert response.status_code == 404
+
+
+def test_answer_turn_by_chat_id_returns_stopped_turn_status(
+    monkeypatch,
+) -> None:
+    async def stopped_state(
+        _self,
+        _session_id: str,
+        _user_id: str,
+    ) -> dict:
+        return {
+            "agent": {"memory": {"content": ["stored"]}},
+            "turn_states": {"user-msg-1": {"status": "stopped"}},
+        }
+
+    monkeypatch.setattr(
+        _FakeSession,
+        "get_session_state_dict",
+        stopped_state,
+    )
+
+    response = _client(monkeypatch).get(
+        "/chats/answer-turn",
+        params={"chat_id": "chat-1", "msgid": "user-msg-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["turn_status"] == "stopped"
+
+
+def test_answer_turn_legacy_session_uses_persisted_turn_chat_id(
+    monkeypatch,
+) -> None:
+    async def state_for_first_chat(
+        _self,
+        _session_id: str,
+        _user_id: str,
+    ) -> dict:
+        return {
+            "agent": {"memory": {"content": ["stored"]}},
+            "turn_states": {
+                "user-msg-1": {
+                    "status": "stopped",
+                    "chat_id": "chat-1",
+                },
+            },
+        }
+
+    monkeypatch.setattr(
+        _FakeSession,
+        "get_session_state_dict",
+        state_for_first_chat,
+    )
+    response = _client(
+        monkeypatch,
+        chats=[
+            ChatSpec(
+                id="chat-1",
+                session_id="session-1",
+                user_id="user-1",
+                channel="console",
+                name="older chat",
+            ),
+            ChatSpec(
+                id="chat-2",
+                session_id="session-1",
+                user_id="user-1",
+                channel="console",
+                name="newer chat",
+            ),
+        ],
+    ).get(
+        "/chats/answer-turn",
+        params={"sessionid": "session-1", "msgid": "user-msg-1"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["chat"]["id"] == "chat-1"
 
 
 def test_answer_turn_requires_request_user_identity(
