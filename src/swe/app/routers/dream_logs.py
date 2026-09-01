@@ -585,6 +585,8 @@ KEEP_DIRS = {
     "governance",
 }
 
+ORPHAN_EXCLUDED_DIRS = {"dialog"}
+
 
 # ------------------------------------------------------------------
 # Helpers
@@ -719,6 +721,15 @@ def _is_keep_dir_path(relative_path: str) -> bool:
     """判断相对路径是否位于根目录保留目录下。"""
     first = relative_path.split("/", 1)[0]
     return first in KEEP_DIRS
+
+
+def _is_excluded_orphan_path(relative_path: str) -> bool:
+    """判断孤立文件路径是否位于隐藏目录或治理排除目录。"""
+    parts = relative_path.replace("\\", "/").split("/")
+    return any(
+        part.startswith(".") or part.casefold() in ORPHAN_EXCLUDED_DIRS
+        for part in parts
+    )
 
 
 def _protected_path_set(workspace_dir: Path) -> set[str]:
@@ -2418,8 +2429,8 @@ def _scan_orphan_files(workspace_dir: Path) -> list[OrphanFileInfo]:
         """Recursively scan a directory for orphan files."""
         try:
             for item in dir_path.iterdir():
-                # Skip hidden files (starting with .)
-                if item.name.startswith("."):
+                relative_path = item.relative_to(relative_base).as_posix()
+                if _is_excluded_orphan_path(relative_path):
                     continue
 
                 # Skip directories in keep list (at root level only)
@@ -2439,8 +2450,6 @@ def _scan_orphan_files(workspace_dir: Path) -> list[OrphanFileInfo]:
                 if item.is_file():
                     try:
                         stat = item.stat()
-                        relative_path = str(item.relative_to(relative_base))
-                        relative_path = relative_path.replace("\\", "/")
                         if relative_path in _protected_path_set(workspace_dir):
                             continue
                         orphan_files.append(
@@ -2745,7 +2754,7 @@ async def delete_orphan_file(
 ) -> DeleteBackupResponse:
     """Delete an orphan file."""
     workspace_dir = _get_workspace_dir(request)
-    _, file_path = _resolve_workspace_file(workspace_dir, filepath)
+    relative_path, file_path = _resolve_workspace_file(workspace_dir, filepath)
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
@@ -2763,11 +2772,10 @@ async def delete_orphan_file(
             detail="Cannot delete protected file",
         )
 
-    # Extra check: ensure file is NOT hidden (starting with .)
-    if file_path.name.startswith("."):
+    if _is_excluded_orphan_path(relative_path):
         raise HTTPException(
             status_code=403,
-            detail="Cannot delete hidden file",
+            detail="Cannot delete excluded governance file",
         )
 
     try:
@@ -2991,6 +2999,9 @@ def _archive_index_expired_item_ids(workspace_dir: Path) -> set[str]:
         str(item.get("id") or "")
         for item in _load_archive_index(workspace_dir).get("items", [])
         if _archive_item_expired(item)
+        and not _is_excluded_orphan_path(
+            str(item.get("original_path") or ""),
+        )
     }
 
 
@@ -3049,6 +3060,9 @@ def _expired_archive_row_context(
     if not _archive_item_expired(
         {"archived_at": getattr(row, "archived_at", "")},
     ):
+        return None
+    original_path = str(getattr(row, "original_path", "") or "")
+    if _is_excluded_orphan_path(original_path):
         return None
     archive_item_id = str(getattr(row, "archive_item_id", "") or "")
     if not archive_item_id:
