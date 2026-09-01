@@ -80,10 +80,37 @@ def test_scan_skill_directory_reuses_scan_executor(
     )
 
     skill_scanner.scan_skill_directory(first)
+    skill_scanner.scan_skill_directory(first)
     skill_scanner.scan_skill_directory(second)
 
     assert [executor.max_workers for executor in created_executors] == [2]
     assert submitted_paths == [first.resolve(), second.resolve()]
+
+
+@pytest.mark.asyncio
+async def test_async_scan_cancellation_returns_without_waiting_for_worker(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    skill_dir = tmp_path / "cancelled"
+    skill_dir.mkdir()
+    started = threading.Event()
+    finished = threading.Event()
+
+    def slow_scan(*_args, **_kwargs):
+        started.set()
+        time.sleep(0.08)
+        finished.set()
+
+    monkeypatch.setattr(skill_scanner, "scan_skill_directory", slow_scan)
+    task = asyncio.create_task(
+        skill_scanner.scan_skill_directory_async(skill_dir),
+    )
+    assert await asyncio.to_thread(started.wait, 1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert await asyncio.to_thread(finished.wait, 1)
 
 
 def test_scan_skill_directory_times_out_before_queueing_when_slots_busy(
