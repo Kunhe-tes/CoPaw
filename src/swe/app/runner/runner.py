@@ -245,6 +245,16 @@ class _TurnPlan:
     turn_msgs: list[Any]
 
 
+@dataclass(frozen=True)
+class _QueryHandlerContext:
+    query: str | None
+    session_id: str
+    user_id: str
+    identity: TurnIdentity | None
+    turn_id: str
+    trace_fields: TraceFields | None
+
+
 @dataclass
 class _QueryTurnOutcome:
     """记录 agent 输出与完成态。"""
@@ -2880,10 +2890,10 @@ class AgentRunner(Runner):
             return
 
         session_id = str(
-            getattr(runtime, "session_id", "") or (location or ("", ""))[0]
+            getattr(runtime, "session_id", "") or (location or ("", ""))[0],
         )
         user_id = str(
-            getattr(runtime, "user_id", "") or (location or ("", ""))[1]
+            getattr(runtime, "user_id", "") or (location or ("", ""))[1],
         )
         if not session_id or self.session is None:
             raise RuntimeError("answer turn persistence target is unavailable")
@@ -5568,6 +5578,116 @@ class AgentRunner(Runner):
                 getattr(request, "trace_id", None),
             ), last
 
+    def _build_query_trace_fields(
+        self,
+        request: AgentRequest | None,
+        *,
+        session_id: str,
+        user_id: str,
+        turn_id: str,
+    ) -> TraceFields | None:
+        if (
+            getattr(request, "execution_origin", None) == "scheduled"
+            or not user_id
+            or not session_id
+            or not turn_id
+            or not self.agent_id
+        ):
+            return None
+        return TraceFields(
+            task_id=session_id,
+            user_id=user_id,
+            session_id=turn_id,
+            agent_id=self.agent_id,
+            agent_version=__version__,
+            source_id=_request_source_id(request),
+        )
+
+    def _prepare_query_handler_context(
+        self,
+        msgs: Any,
+        request: AgentRequest | None,
+    ) -> _QueryHandlerContext:
+        query = _get_last_user_text(msgs)
+        session_id = getattr(request, "session_id", "") or ""
+        user_id = getattr(request, "user_id", "") or ""
+        channel_meta = getattr(request, "channel_meta", None) or {}
+        identity = self._answer_turn_identity(request)
+        turn_id = identity.turn_id if identity is not None else ""
+        if identity is not None:
+            self._answer_turn_locations[identity] = (
+                str(session_id),
+                str(user_id),
+            )
+            request.channel_meta = {
+                **channel_meta,
+                "turn_id": identity.turn_id,
+                "msgid": identity.msgid,
+            }
+        return _QueryHandlerContext(
+            query=query,
+            session_id=session_id,
+            user_id=user_id,
+            identity=identity,
+            turn_id=turn_id,
+            trace_fields=self._build_query_trace_fields(
+                request,
+                session_id=session_id,
+                user_id=user_id,
+                turn_id=turn_id,
+            ),
+        )
+
+    async def _stream_query_handler_frames(
+        self,
+        msgs: Any,
+        request: AgentRequest | None,
+        context: _QueryHandlerContext,
+    ):
+        with use_b3_trace_context(
+            getattr(request, "b3_context", None),
+            context.trace_fields,
+        ):
+            trace_scope = (
+                global_tracer.start_as_current_span(
+                    "agent.run",
+                    kind=SpanKind.SERVER,
+                    trace_fields=context.trace_fields,
+                )
+                if context.trace_fields is not None
+                else nullcontext(None)
+            )
+            async with trace_scope as span:
+                if span is not None:
+                    span.set_attribute(
+                        "agent.user_message",
+                        context.query or "",
+                    )
+                async for msg, last in self._stream_query_frames(
+                    msgs,
+                    request=request,
+                    query=context.query,
+                    session_id=context.session_id,
+                    user_id=context.user_id,
+                ):
+                    yield msg, last
+
+    async def _settle_query_handler_outcome(
+        self,
+        identity: TurnIdentity | None,
+        status: str,
+        error: Exception | None = None,
+    ) -> None:
+        if identity is None:
+            return
+        if status == "cancelled":
+            outcome = TurnOutcome.cancelled(identity)
+        elif status == "failed":
+            outcome = TurnOutcome.failed(identity, error)
+        else:
+            outcome = TurnOutcome.completed(identity)
+        await self._report_answer_turn_outcome(identity, outcome)
+
     async def query_handler(
         self,
         msgs,
@@ -5579,88 +5699,36 @@ class AgentRunner(Runner):
             f"AgentRunner.query_handler called: agent_id={self.agent_id}, "
             f"msgs={msgs}, request={request}",
         )
-        query = _get_last_user_text(msgs)
-        session_id = getattr(request, "session_id", "") or ""
-        user_id = getattr(request, "user_id", "") or ""
-        channel_meta = getattr(request, "channel_meta", None) or {}
-        identity = self._answer_turn_identity(request)
-        turn_id = identity.turn_id if identity is not None else ""
-        if identity is not None:
-            self._answer_turn_locations[identity] = (str(session_id), str(user_id))
-        if identity is not None:
-            request.channel_meta = {
-                **channel_meta,
-                "turn_id": identity.turn_id,
-                "msgid": identity.msgid,
-            }
-        is_scheduled = (
-            getattr(request, "execution_origin", None) == "scheduled"
-        )
-        trace_fields = None
-        if (
-            not is_scheduled
-            and user_id
-            and session_id
-            and turn_id
-            and self.agent_id
-        ):
-            trace_fields = TraceFields(
-                task_id=session_id,
-                user_id=user_id,
-                session_id=turn_id,
-                agent_id=self.agent_id,
-                agent_version=__version__,
-                source_id=_request_source_id(request),
-            )
+        context = self._prepare_query_handler_context(msgs, request)
+        identity = context.identity
         task = asyncio.current_task()
         if identity is not None and task is not None:
             self._answer_turn_tasks[identity] = task
         try:
-            with use_b3_trace_context(
-                getattr(request, "b3_context", None),
-                trace_fields,
+            async for msg, last in self._stream_query_handler_frames(
+                msgs,
+                request,
+                context,
             ):
-                trace_scope = (
-                    global_tracer.start_as_current_span(
-                        "agent.run",
-                        kind=SpanKind.SERVER,
-                        trace_fields=trace_fields,
-                    )
-                    if trace_fields is not None
-                    else nullcontext(None)
-                )
-                async with trace_scope as span:
-                    if span is not None:
-                        span.set_attribute("agent.user_message", query or "")
-
-                    async for msg, last in self._stream_query_frames(
-                        msgs,
-                        request=request,
-                        query=query,
-                        session_id=session_id,
-                        user_id=user_id,
-                    ):
-                        yield msg, last
+                yield msg, last
         except asyncio.CancelledError:
-            if identity is not None:
-                await self._report_answer_turn_outcome(
-                    identity,
-                    TurnOutcome.cancelled(identity),
-                )
+            await self._settle_query_handler_outcome(
+                identity,
+                "cancelled",
+            )
             raise
         except Exception as exc:
-            if identity is not None:
-                await self._report_answer_turn_outcome(
-                    identity,
-                    TurnOutcome.failed(identity, exc),
-                )
+            await self._settle_query_handler_outcome(
+                identity,
+                "failed",
+                exc,
+            )
             raise
         else:
-            if identity is not None:
-                await self._report_answer_turn_outcome(
-                    identity,
-                    TurnOutcome.completed(identity),
-                )
+            await self._settle_query_handler_outcome(
+                identity,
+                "completed",
+            )
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)

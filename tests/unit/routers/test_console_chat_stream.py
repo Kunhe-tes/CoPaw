@@ -146,6 +146,16 @@ class _TaskStartCountingTracker:
         return None
 
 
+def test_build_console_chat_meta_carries_agent_and_source() -> None:
+    payload = {"meta": {"source_id": "source-a"}}
+    workspace = SimpleNamespace(agent_id="agent-1")
+
+    assert console_router._build_console_chat_meta(workspace, payload) == {
+        "agent_id": "agent-1",
+        "source_id": "source-a",
+    }
+
+
 def _with_coordinator(workspace, tracker):
     workspace.task_tracker = tracker
     workspace.answer_turn_coordinator = _FakeCoordinator(tracker)
@@ -1523,7 +1533,9 @@ def test_console_chat_stream_reuses_the_active_turn_identity(
     assert response.headers["x-swe-msgid"] == "server-turn-1"
 
 
-def test_console_chat_copies_complete_b3_context_to_native_meta(monkeypatch) -> None:
+def test_console_chat_copies_complete_b3_context_to_native_meta(
+    monkeypatch,
+) -> None:
     app = FastAPI()
     app.include_router(console_router.router)
 
