@@ -40,7 +40,7 @@ export default createGlobalStyle`
 .swe-bubble-share-checkbox {
   position: absolute;
   top: 50%;
-  left: -24px;
+  left: 0;
   z-index: 1;
   transform: translateY(-50%);
 }

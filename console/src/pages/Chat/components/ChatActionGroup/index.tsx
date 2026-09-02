@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { IconButton } from "@agentscope-ai/design";
 import { Button, Checkbox, Flex, Tooltip, message } from "antd";
 import {
@@ -112,6 +113,53 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
   const selectionState = getShareSelectionState(selectableCount, selectedCount);
   const allSelected = selectionState === "all";
 
+  const shareToolbar = shareSelection.active ? (
+    <div className={styles.toolbar} role="region" aria-label="分享选择操作">
+      <div className={styles.toolbarSelection}>
+        <Checkbox
+          checked={allSelected}
+          indeterminate={selectionState === "partial"}
+          disabled={selectableCount === 0}
+          onChange={(event) => shareSelection.selectAll(event.target.checked)}
+        >
+          全选
+        </Checkbox>
+      </div>
+      <div className={styles.toolbarActions}>
+        <Button
+          type="text"
+          className={styles.toolbarAction}
+          icon={<LinkOutlined />}
+          loading={generating}
+          disabled={selectedCount === 0}
+          onClick={() => void copyShareUrl()}
+        >
+          复制链接
+        </Button>
+        <Button
+          type="text"
+          className={styles.toolbarAction}
+          icon={<GlobalOutlined />}
+          loading={generating}
+          disabled={selectedCount === 0}
+          onClick={() => void openShareUrl()}
+        >
+          浏览器打开
+        </Button>
+      </div>
+      {selectableCount === 0 ? (
+        <span className={styles.emptyState}>暂无可分享内容</span>
+      ) : null}
+      <Button
+        className={styles.toolbarClose}
+        type="text"
+        aria-label="退出分享模式"
+        icon={<CloseOutlined />}
+        onClick={close}
+      />
+    </div>
+  ) : null;
+
   return (
     <>
       <Flex gap={8} align="center">
@@ -124,54 +172,7 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
           />
         </Tooltip>
       </Flex>
-      {shareSelection.active ? (
-        <div className={styles.toolbar} role="region" aria-label="分享选择操作">
-          <div className={styles.toolbarSelection}>
-            <Checkbox
-              checked={allSelected}
-              indeterminate={selectionState === "partial"}
-              disabled={selectableCount === 0}
-              onChange={(event) =>
-                shareSelection.selectAll(event.target.checked)
-              }
-            >
-              全选
-            </Checkbox>
-          </div>
-          <div className={styles.toolbarActions}>
-            <Button
-              type="text"
-              className={styles.toolbarAction}
-              icon={<LinkOutlined />}
-              loading={generating}
-              disabled={selectedCount === 0}
-              onClick={() => void copyShareUrl()}
-            >
-              复制链接
-            </Button>
-            <Button
-              type="text"
-              className={styles.toolbarAction}
-              icon={<GlobalOutlined />}
-              loading={generating}
-              disabled={selectedCount === 0}
-              onClick={() => void openShareUrl()}
-            >
-              浏览器打开
-            </Button>
-          </div>
-          {selectableCount === 0 ? (
-            <span className={styles.emptyState}>暂无可分享内容</span>
-          ) : null}
-          <Button
-            className={styles.toolbarClose}
-            type="text"
-            aria-label="退出分享模式"
-            icon={<CloseOutlined />}
-            onClick={close}
-          />
-        </div>
-      ) : null}
+      {shareToolbar ? createPortal(shareToolbar, document.body) : null}
     </>
   );
 };

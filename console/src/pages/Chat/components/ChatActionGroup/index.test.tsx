@@ -1,6 +1,32 @@
-import { describe, expect, it } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import type React from "react";
 import { buildChatShareUrl } from "./shareUrl";
 import { isShareableTurn } from "./shareSelection";
+
+vi.mock("../../chatShareContext", () => ({
+  useChatShareSelection: () => ({
+    active: true,
+    turns: [],
+    selectedTurnIds: ["turn-1"],
+    selectableTurnIds: ["turn-1"],
+    turnByMessageId: {},
+    shareUrl: null,
+    open: vi.fn(),
+    close: vi.fn(),
+    toggleTurn: vi.fn(),
+    selectAll: vi.fn(),
+    setShareUrl: vi.fn(),
+  }),
+}));
+
+vi.mock("@/api/modules/chat", () => ({ chatApi: {} }));
+
+vi.mock("@agentscope-ai/design", () => ({
+  IconButton: ({ icon, onClick }: { icon: React.ReactNode; onClick?: () => void }) => (
+    <button onClick={onClick}>{icon}</button>
+  ),
+}));
 
 describe("ChatActionGroup turn selection", () => {
   it("only enables turns with an authoritative completed status", () => {
@@ -28,5 +54,14 @@ describe("ChatActionGroup share URL", () => {
         pathname: "/console/chat/abc",
       }),
     ).toBe("https://example.test/console/chat-share/token-1");
+  });
+});
+
+describe("ChatActionGroup placement", () => {
+  it("mounts the active toolbar at document body level", async () => {
+    const { default: ChatActionGroup } = await import("./index");
+    render(<ChatActionGroup chatId="chat-1" />);
+    const toolbar = screen.getByRole("region", { name: "分享选择操作" });
+    expect(toolbar.parentElement).toBe(document.body);
   });
 });
