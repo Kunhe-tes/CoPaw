@@ -11,7 +11,6 @@ import {
   extractOperationGroup,
   getToolStepKey,
   getToolStepStatus,
-  getToolStepText,
   groupOperationMessages,
 } from "./operationGrouping";
 
@@ -186,73 +185,6 @@ describe("getToolStepKey", () => {
   });
 });
 
-describe("getToolStepText", () => {
-  it("uses fixed shell texts per status", () => {
-    expect(
-      getToolStepText(
-        toolMessage({ id: "t1", group: GROUP_A, inputStatus: "running" }),
-      ),
-    ).toBe("正在执行命令行操作");
-    expect(
-      getToolStepText(
-        toolMessage({
-          id: "t1",
-          group: GROUP_A,
-          inputStatus: "running",
-          outputStatus: "success",
-        }),
-      ),
-    ).toBe("命令行操作已完成");
-    expect(
-      getToolStepText(
-        toolMessage({
-          id: "t1",
-          group: GROUP_A,
-          inputStatus: "running",
-          governance: "rejected",
-        }),
-      ),
-    ).toBe("命令行操作已拒绝");
-  });
-
-  it("uses fixed background-process texts per status", () => {
-    const message = toolMessage({
-      id: "t1",
-      toolName: "start_background_process",
-      group: GROUP_A,
-      inputStatus: "running",
-      governance: "pending",
-    });
-    expect(getToolStepText(message)).toBe("后台任务待审批");
-  });
-
-  it("falls back to the backend summary for other tools", () => {
-    const message = toolMessage({
-      id: "t1",
-      toolName: "read_file",
-      group: GROUP_A,
-      inputStatus: "running",
-      outputStatus: "success",
-      outputSummary: "读取完成",
-    });
-    expect(getToolStepText(message)).toBe("读取完成");
-  });
-
-  it("prefers the call action summary over the result summary", () => {
-    const message = toolMessage({
-      id: "t1",
-      toolName: "glob_search",
-      group: GROUP_A,
-      inputStatus: "running",
-      outputStatus: "success",
-      summary: "正在查看工作目录文件",
-      outputSummary: "共找到 1 项内容",
-    });
-
-    expect(getToolStepText(message)).toBe("正在查看工作目录文件");
-  });
-});
-
 describe("aggregateGroupStatus", () => {
   it("returns success when every step succeeded", () => {
     const steps = [
@@ -373,19 +305,26 @@ describe("groupOperationMessages", () => {
     expect(groups).toHaveLength(3);
   });
 
-  it("keeps reasoning between same-group tools in stream order", () => {
+  it("keeps multiple reasoning messages between same-group tools", () => {
     const firstTool = toolMessage({ id: "t1", group: GROUP_A });
-    const reasoning = reasoningMessage("reason-1");
+    const firstReasoning = reasoningMessage("reason-1", "先检查目录");
+    const secondReasoning = reasoningMessage("reason-2", "再检查文件");
     const secondTool = toolMessage({ id: "t2", group: GROUP_A });
 
     const { groups } = groupOperationMessages([
       firstTool,
-      reasoning,
+      firstReasoning,
+      secondReasoning,
       secondTool,
     ]);
 
     expect(groups).toHaveLength(1);
-    expect(groups[0].steps).toEqual([firstTool, reasoning, secondTool]);
+    expect(groups[0].steps).toEqual([
+      firstTool,
+      firstReasoning,
+      secondReasoning,
+      secondTool,
+    ]);
   });
 
   it("keeps ungrouped tool messages as individual items (R16)", () => {

@@ -44,7 +44,16 @@ vi.mock("./style", () => ({
 }));
 
 vi.mock("./Tool", () => ({
-  default: () => React.createElement("div", { "data-testid": "tool-detail" }),
+  default: ({ data }: { data: IAgentScopeRuntimeMessage }) =>
+    React.createElement(
+      "button",
+      {
+        "data-message-id": data.id,
+        "data-testid": "tool-detail",
+        type: "button",
+      },
+      "工具详情",
+    ),
 }));
 
 vi.mock("./Reasoning", () => ({
@@ -163,15 +172,15 @@ describe("OperationGroup", () => {
     expect(headerIcon(container)?.getAttribute("data-testid")).toBe(
       "icon-running",
     );
-    const stepTexts = screen.getAllByText("正在执行命令行操作");
-    expect(stepTexts.length).toBe(2);
-    for (const step of stepTexts) {
-      expect(step.closest("[hidden]")).not.toBeNull();
+    const toolCards = screen.getAllByTestId("tool-detail");
+    expect(toolCards).toHaveLength(2);
+    for (const toolCard of toolCards) {
+      expect(toolCard).not.toBeVisible();
     }
-    expect(trigger.textContent).not.toContain("正在执行命令行操作");
+    expect(trigger.textContent).not.toContain("工具详情");
   });
 
-  it("expands on click and shows fixed sub-step texts", () => {
+  it("expands on click and shows the original tool cards", () => {
     const { container } = render(
       React.createElement(OperationGroup, {
         entry: entry([
@@ -191,8 +200,9 @@ describe("OperationGroup", () => {
       "aria-expanded",
       "true",
     );
-    expect(screen.getByText("正在执行命令行操作")).toBeVisible();
-    expect(screen.getByText("命令行操作已完成")).toBeVisible();
+    for (const toolCard of screen.getAllByTestId("tool-detail")) {
+      expect(toolCard).toBeVisible();
+    }
     expect(headerIcon(container)?.getAttribute("data-testid")).toBe(
       "icon-running",
     );
@@ -259,50 +269,54 @@ describe("OperationGroup", () => {
     expect(triggers[1]).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("never renders raw tool arguments or output after expansion", () => {
-    const message = toolMessage({ id: "t1", inputStatus: "running" });
-    const first = message.content[0] as {
-      data: Record<string, unknown>;
-    };
-    first.data.arguments = '{"command":"cat /tenant/secret.txt"}';
-    message.content.push({
-      type: AgentScopeRuntimeContentType.DATA,
-      status: AgentScopeRuntimeRunStatus.Completed,
-      data: {
-        name: "execute_shell_command",
-        output: "top-secret-output",
-        tool_status: "success",
-      },
-    });
-    render(React.createElement(OperationGroup, { entry: entry([message]) }));
+  it("uses the original independently expandable tool cards", () => {
+    render(
+      React.createElement(OperationGroup, {
+        entry: entry([
+          toolMessage({ id: "t1", inputStatus: "running" }),
+          toolMessage({ id: "t2", outputStatus: "success" }),
+        ]),
+      }),
+    );
 
     fireEvent.click(screen.getByRole("button", { name: /操作组/ }));
 
-    expect(screen.getByText("命令行操作已完成")).toBeVisible();
-    expect(screen.getAllByRole("button")).toHaveLength(1);
-    expect(screen.queryByTestId("tool-detail")).not.toBeInTheDocument();
-    expect(screen.queryByText(/cat \/tenant\/secret/)).not.toBeInTheDocument();
-    expect(screen.queryByText("top-secret-output")).not.toBeInTheDocument();
+    const toolCards = screen.getAllByTestId("tool-detail");
+    expect(toolCards).toHaveLength(2);
+    expect(toolCards[0]).toBeVisible();
+    expect(toolCards[0]).toHaveAttribute("data-message-id", "t1");
+    expect(toolCards[1]).toHaveAttribute("data-message-id", "t2");
+    expect(screen.queryByText("命令行操作已完成")).not.toBeInTheDocument();
   });
 
-  it("renders interleaved reasoning inside the expanded group", () => {
+  it("renders multiple interleaved reasoning messages inside one group", () => {
     render(
       React.createElement(OperationGroup, {
         entry: entry([
           toolMessage({ id: "t1", inputStatus: "running" }),
           reasoningMessage("reason-1", "检查完目录后继续读取"),
+          reasoningMessage("reason-2", "读取后继续核对结果"),
           toolMessage({ id: "t2", inputStatus: "running" }),
         ]),
       }),
     );
 
-    expect(screen.getByTestId("group-reasoning")).not.toBeVisible();
+    for (const reasoning of screen.getAllByTestId("group-reasoning")) {
+      expect(reasoning).not.toBeVisible();
+    }
     fireEvent.click(screen.getByRole("button", { name: /操作组/ }));
 
     const body = screen.getByRole("list");
-    expect(body.children).toHaveLength(3);
-    expect(body.children[0]).toHaveTextContent("正在执行命令行操作");
+    expect(body.children).toHaveLength(4);
+    expect(body.children[0].querySelector("button")).toHaveAttribute(
+      "data-message-id",
+      "t1",
+    );
     expect(body.children[1]).toHaveTextContent("检查完目录后继续读取");
-    expect(body.children[2]).toHaveTextContent("正在执行命令行操作");
+    expect(body.children[2]).toHaveTextContent("读取后继续核对结果");
+    expect(body.children[3].querySelector("button")).toHaveAttribute(
+      "data-message-id",
+      "t2",
+    );
   });
 });

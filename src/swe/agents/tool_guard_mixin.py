@@ -2386,40 +2386,62 @@ class ToolGuardMixin:
         context = self._request_context
         if not context.get(_SELECTED_EXPERT_EXECUTION_KEY):
             return None
-        tracker = context.get("_task_tracker")
-        is_turn_stopping = getattr(tracker, "is_turn_stopping", None)
-        if callable(is_turn_stopping) and await is_turn_stopping(
-            str(context.get("chat_id") or ""),
-            str(context.get("msgid") or ""),
-        ):
+        if await self._selected_expert_turn_is_stopping(context):
             context[_SELECTED_EXPERT_EXECUTION_KEY] = False
             return None
         tool_name = str(replay_info.get("tool_name") or "")
-        run_id = str(context.get(_SELECTED_EXPERT_RUN_ID_KEY) or "").strip()
         response = self._selected_expert_tool_response(replay_info)
         if tool_name == "start_subagent":
-            run_id = str(response.get("run_id") or "").strip()
-            if not response.get("accepted") or not run_id:
-                context[_SELECTED_EXPERT_EXECUTION_KEY] = False
-                context["selected_expert_execution_error"] = (
-                    "The selected expert could not be started. "
-                    "It was not replaced by the Main Agent."
-                )
-                return None
-            context[_SELECTED_EXPERT_RUN_ID_KEY] = run_id
-            return self._selected_expert_wait_tool_call()
+            return self._selected_expert_after_start(context, response)
         if tool_name == "get_subagent":
-            if self._selected_expert_record_is_terminal(response):
-                context[_SELECTED_EXPERT_EXECUTION_KEY] = False
-                return None
-            return self._selected_expert_wait_tool_call()
+            return self._selected_expert_after_get(context, response)
         if tool_name != "wait_subagent":
             return None
+        run_id = str(context.get(_SELECTED_EXPERT_RUN_ID_KEY) or "").strip()
         if not run_id or self._selected_expert_is_terminal(response, run_id):
             context[_SELECTED_EXPERT_EXECUTION_KEY] = False
             return None
         if not self._selected_expert_is_active(response, run_id):
             return self._selected_expert_get_tool_call(run_id)
+        return self._selected_expert_wait_tool_call()
+
+    @staticmethod
+    async def _selected_expert_turn_is_stopping(
+        context: dict[str, Any],
+    ) -> bool:
+        tracker = context.get("_task_tracker")
+        is_turn_stopping = getattr(tracker, "is_turn_stopping", None)
+        if not callable(is_turn_stopping):
+            return False
+        return await is_turn_stopping(
+            str(context.get("chat_id") or ""),
+            str(context.get("msgid") or ""),
+        )
+
+    def _selected_expert_after_start(
+        self,
+        context: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        run_id = str(response.get("run_id") or "").strip()
+        if response.get("accepted") and run_id:
+            context[_SELECTED_EXPERT_RUN_ID_KEY] = run_id
+            return self._selected_expert_wait_tool_call()
+        context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+        context["selected_expert_execution_error"] = (
+            "The selected expert could not be started. "
+            "It was not replaced by the Main Agent."
+        )
+        return None
+
+    def _selected_expert_after_get(
+        self,
+        context: dict[str, Any],
+        response: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if self._selected_expert_record_is_terminal(response):
+            context[_SELECTED_EXPERT_EXECUTION_KEY] = False
+            return None
         return self._selected_expert_wait_tool_call()
 
     def _selected_expert_tool_response(

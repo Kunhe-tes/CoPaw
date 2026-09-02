@@ -10,15 +10,15 @@ origin: docs/brainstorms/2026-08-27-tool-call-grouping-requirements.md
 
 ## Summary
 
-Extend the existing Console-only operation-group presentation so a group appears on its first live tool call, preserves interleaved reasoning and action-oriented tool labels, and moves into the existing execution-process disclosure after the response completes.
+Extend the existing Console-only operation-group presentation so a group appears on its first live tool call, preserves any number of interleaved reasoning messages, keeps every child tool's original expandable card, and moves into the existing execution-process disclosure after the response completes.
 
 ---
 
 ## Requirements
 
 - R22. Render an open operation group immediately from its first live grouped tool call.
-- R23. Prefer the call action summary over the terminal result summary for group step labels.
-- R24. Preserve reasoning messages inside an open group in stream order.
+- R23. Reuse the original expandable Tool card for every grouped invocation.
+- R24. Preserve one or more reasoning messages inside an open group in stream order without splitting the group.
 - R25. Move completed operation groups into ProcessDisclosure while keeping live groups directly visible.
 
 **Origin actors:** A1 Console user, A3 runtime and Console
@@ -30,7 +30,7 @@ Extend the existing Console-only operation-group presentation so a group appears
 ## Scope Boundaries
 
 - Do not change backend operation-group fields, Tool Guard semantics, persistence, or approval replay.
-- Do not expose raw tool arguments or outputs.
+- Do not expose tool details from the group header or custom group summaries; preserve the original Tool card's existing detail boundary.
 - Do not infer groups for events without an explicit operation-group declaration.
 - Do not redesign ProcessDisclosure or the broader Conversation Workspace.
 
@@ -40,8 +40,8 @@ Extend the existing Console-only operation-group presentation so a group appears
 
 ### Relevant Code and Patterns
 
-- `operationGrouping.ts` currently flushes a trailing open group, but treats reasoning as a hard boundary and prefers terminal `output_summary` for ordinary tools.
-- `OperationGroup.tsx` owns the safe, default-collapsed group UI and fixed tool-step presentation.
+- `operationGrouping.ts` keeps reasoning inside an open group and must preserve repeated reasoning messages without changing the explicit group boundary rules.
+- `OperationGroup.tsx` owns the default-collapsed group UI; its expanded body currently replaces ordinary Tool cards with simplified step rows.
 - `Card.tsx` currently routes every group to `direct`, explicitly excluding groups from ProcessDisclosure.
 - `Reasoning.tsx` is the existing rendering contract for reasoning content and should be reused inside a group.
 
@@ -50,9 +50,9 @@ Extend the existing Console-only operation-group presentation so a group appears
 ## Key Technical Decisions
 
 - Keep grouping as a pure projection over the current merged message list; an unfinished group is a valid renderable result.
-- Treat reasoning after a grouped tool as part of the open group until user-facing text, an ungrouped tool, or a new group closes it.
+- Treat every reasoning message after a grouped tool as part of the open group until user-facing text, an ungrouped tool, or a new group closes it.
 - Derive group status and tool counts from tool messages only; reasoning participates in ordering and process-step counts but not tool status aggregation.
-- Reuse the existing Reasoning component within OperationGroup and keep raw Tool cards excluded.
+- Reuse the existing Reasoning and Tool components within OperationGroup so grouped children match their ordinary presentation and interaction.
 - Route grouped items into ProcessDisclosure only after the existing response-completion gate succeeds.
 
 ---
@@ -61,7 +61,7 @@ Extend the existing Console-only operation-group presentation so a group appears
 
 ### U1. Extend grouping semantics and labels
 
-**Goal:** Preserve reasoning in an open group, render unfinished groups, and prefer action summaries.
+**Goal:** Preserve repeated reasoning in an open group and render unfinished groups without changing explicit boundaries.
 
 **Requirements:** R22, R23, R24; AE12, AE13, AE14
 
@@ -75,14 +75,13 @@ Extend the existing Console-only operation-group presentation so a group appears
 
 **Test scenarios:**
 - A single running grouped tool produces a group immediately.
-- Call summary wins when both call and output summaries exist.
-- Tool, reasoning, and same-group tool remain ordered in one group.
+- Tool, multiple reasoning messages, and the next same-group tool remain ordered in one group.
 - User-facing text, ungrouped tools and a new group remain boundaries.
 - Reasoning does not alter aggregate tool status.
 
-### U2. Render reasoning inside operation groups
+### U2. Render original tools and reasoning inside operation groups
 
-**Goal:** Reuse the established reasoning presentation inside expanded group details.
+**Goal:** Reuse the established Tool and Reasoning presentations inside expanded group details.
 
 **Requirements:** R24; AE14
 
@@ -94,9 +93,10 @@ Extend the existing Console-only operation-group presentation so a group appears
 - `console/src/components/agentscope-chat/AgentScopeRuntimeWebUI/core/AgentScopeRuntime/Response/style.ts`
 
 **Test scenarios:**
-- Reasoning appears between the correct two tool steps after expansion.
+- Each grouped tool uses the ordinary default-collapsed Tool card and remains independently expandable.
+- Multiple reasoning messages appear between the correct tool cards after expansion.
 - Collapsed groups hide reasoning.
-- Reasoning never exposes raw tool details or changes the group status icon.
+- Reasoning does not change the group status icon; the group header does not expose tool details.
 
 ### U3. Fold completed groups into execution process
 
@@ -115,6 +115,28 @@ Extend the existing Console-only operation-group presentation so a group appears
 - A completed response with final text places the whole group inside ProcessDisclosure.
 - Process counts include grouped reasoning and tools once; tool-call counts include tools only.
 - Failed grouped tools contribute to the ProcessDisclosure failure count.
+
+### U4. Reduce flagged Python control-flow complexity
+
+**Goal:** Bring the three Sonar-reported functions within the repository complexity budget without changing selected-expert replay, assistant-response extraction, tracing, streaming, or turn-settlement behavior.
+
+**Requirements:** Repository Sonar complexity limit of 15
+
+**Dependencies:** None
+
+**Files:**
+- `src/swe/agents/tool_guard_mixin.py`
+- `src/swe/app/runner/runner.py`
+- `tests/unit/agents/test_complexity_budget.py`
+- Existing selected-expert, Stop-hook, TraceSDK and QueryExecution tests under `tests/unit/subagents/` and `tests/unit/app/`
+
+**Execution note:** Add the three reported targets to the executable complexity budget before extracting cohesive helpers.
+
+**Test scenarios:**
+- Selected-expert start, wait, terminal, cancellation-fetch and stop paths preserve their existing next action.
+- Assistant response extraction keeps accepting supported assistant content and rejecting live/tool messages.
+- Query handler preserves both QueryExecution and legacy admission frame order, trace parenting and terminal outcome reporting.
+- Each reported function measures at or below 15 using the repository complexity counter.
 
 ---
 

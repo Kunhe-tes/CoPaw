@@ -370,70 +370,7 @@ export default createGlobalStyle`
     display: none;
   }
 
-  &-step {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 6px 10px;
-    border-radius: 8px;
-    background: ${({ theme }) => theme.colorFillQuaternary};
-    color: ${({ theme }) => theme.colorText};
-    font-size: 12px;
-    line-height: 20px;
-  }
-
-  &-step-icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 16px;
-    height: 16px;
-    flex: 0 0 16px;
-    color: ${({ theme }) => theme.colorTextTertiary};
-
-    svg {
-      width: 13px;
-      height: 13px;
-    }
-
-    &[data-status="running"] {
-      color: ${({ theme }) => theme.colorPrimary};
-    }
-
-    &[data-status="pending"],
-    &[data-status="rejected"],
-    &[data-status="blocked"] {
-      color: ${({ theme }) => theme.colorWarning};
-    }
-
-    &[data-status="failed"] {
-      color: ${({ theme }) => theme.colorError};
-    }
-
-    &[data-status="success"] {
-      color: ${({ theme }) => theme.colorSuccess};
-    }
-
-    &[data-status="canceled"] {
-      color: ${({ theme }) => theme.colorTextTertiary};
-    }
-  }
-
-  &-step-text {
-    flex: 1 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  &-step-status {
-    flex: 0 0 auto;
-    color: ${({ theme }) => theme.colorTextTertiary};
-    font-size: 12px;
-  }
-
+  &-tool,
   &-reasoning {
     min-width: 0;
   }
