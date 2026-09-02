@@ -158,6 +158,7 @@ class SessionState(str, Enum):
 ```
 
 - 最后环节确认且累计刷新成功后，直接进入现有 `FinalizingOutputs → OutputReview`，但最终结果由累计组装（R10）。
+- `confirm_stage` 启动的所属 Chat Agent 回合只负责累计刷新，事件序列固定为 `cumulative_refreshed`。该事件持久化后，服务端拒绝旧 run 提交下一环节或最终结果事件；只有旧 run 完整结束，完成回调才原子结算它并认领一个新的 Agent run：非最后环节的新 run 进入 `GeneratingQuestions`，最后环节的新 run 进入 `FinalizingOutputs`。进程在结算与认领后、实际启动前中断时，新 run 仍以 `CLAIMED` 持久化并可由孤儿恢复处理。
 - `OutputReview` 确认（`confirm_outputs`）后仍走现有 `MemoryReview`（R12：记忆授权顺序不变）。
 
 ### 5.3 状态机约束
@@ -265,6 +266,7 @@ Miner 是 Agent 驱动，技能契约必须与新事件协议同步（参考蓝�
 
 - **报告生成失败**（预跑成功但渲染/校验失败）：不产生可确认版本；复用 `RecoverableFailure`：保留该环节最后一个稳定报告版本为只读兜底，提供 `retry_current_turn`（幂等，不追加重复审计记录）。
 - **累计刷新失败**：会话处于"已锁定待刷新"恢复态（`RecoverableFailure` 变体，附失败码 `cumulative_refresh_failed`），不得进入下一环节；Retry 重算（确定性幂等）。
+- **Agent 提前结束**：任何生成态（包括 `GeneratingStageReport` 和 `RefreshingCumulative`）在所属 Agent 回合结束时仍未到达所需结构化边界，都必须把 run 标记为失败并进入 `RecoverableFailure`，保留原生成态作为 `resume_state`；不得把 run 标记为完成后让会话永久停留在生成态。
 - **事件幂等**：`event_key` 稳定（§6），重发不产生重复版本。
 - **状态机合法性**：新增状态加入 `_validate_agent_event_state` 与前端状态机映射，防止非法迁移。
 
