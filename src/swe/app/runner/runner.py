@@ -3533,8 +3533,19 @@ class AgentRunner(Runner):
         channel_meta = _without_request_scenario_snapshot(
             getattr(request, "channel_meta", None) or {},
         )
-        plan_mode_enabled = _resolve_plan_mode_enabled(channel_meta, chat)
-        requested_plan_mode = _requested_plan_mode_update(channel_meta)
+        scheduled_request = (
+            getattr(request, "execution_origin", None) == "scheduled"
+        )
+        plan_mode_enabled = (
+            False
+            if scheduled_request
+            else _resolve_plan_mode_enabled(channel_meta, chat)
+        )
+        requested_plan_mode = (
+            None
+            if scheduled_request
+            else _requested_plan_mode_update(channel_meta)
+        )
         if requested_plan_mode is not None:
             chat.meta = {
                 **(getattr(chat, "meta", None) or {}),
@@ -3680,7 +3691,10 @@ class AgentRunner(Runner):
         request_context["goal_mode_enabled"] = goal_mode_enabled
         plan_mode_enabled = (
             False
-            if goal_request
+            if (
+                goal_request
+                or request_context.get("execution_origin") == "scheduled"
+            )
             else bool(channel_meta.get(_PLAN_MODE_META_KEY, False))
         )
         request_context[_PLAN_MODE_META_KEY] = plan_mode_enabled
