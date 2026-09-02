@@ -1,0 +1,72 @@
+.toolbar {
+  position: fixed;
+  right: 24px;
+  bottom: 20px;
+  left: 50%;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: min(760px, calc(100vw - 32px));
+  padding: 12px 14px 12px 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 -10px 30px rgba(35, 31, 27, 0.1);
+  transform: translateX(-50%);
+  backdrop-filter: blur(8px);
+}
+
+.toolbarSelection,
+.toolbarActions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.toolbarActions {
+  flex-shrink: 0;
+}
+
+.count {
+  max-width: 260px;
+  overflow: hidden;
+  color: #8a94a6;
+  font-size: 13px;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .toolbar {
+    right: 16px;
+    bottom: 12px;
+    left: 16px;
+    width: auto;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .toolbarSelection,
+  .toolbarActions {
+    justify-content: space-between;
+  }
+
+  .toolbarActions > button {
+    flex: 1;
+  }
+
+  .toolbarActions > button:last-child {
+    flex: 0 0 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolbar {
+    transition: none;
+  }
+}

@@ -2,6 +2,7 @@ import { createGlobalStyle } from "antd-style";
 
 export default createGlobalStyle`
 .${(p) => p.theme.prefixCls}-bubble {
+  position: relative;
   display: flex;
 
   &-end,
@@ -34,6 +35,24 @@ export default createGlobalStyle`
     line-height: ${(p) => p.theme.lineHeight};
     word-break: break-word;
   }
+}
+
+.swe-bubble-share-checkbox {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  z-index: 1;
+  transform: translateY(-50%);
+}
+
+.swe-bubble-share-checkbox .ant-checkbox-inner {
+  width: 20px;
+  height: 20px;
+  border-radius: 5px;
+}
+
+.swe-chat-share-active [class*="-bubble-list-scroll"] {
+  padding-bottom: 96px;
 }
 
 .${(p) => p.theme.prefixCls}-bubble {

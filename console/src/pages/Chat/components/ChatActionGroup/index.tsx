@@ -1,21 +1,21 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { IconButton } from "@agentscope-ai/design";
 import { SparkNewChatFill } from "@agentscope-ai/icons";
-// ==================== 组件引入方式变更 (Kun He) ====================
 import { useChatAnywhereSessions } from "@/components/agentscope-chat";
-// ==================== 组件引入方式变更结束 ====================
 import { useTranslation } from "react-i18next";
-import { Checkbox, Flex, Modal, Tooltip, message } from "antd";
-import { ShareAltOutlined } from "@ant-design/icons";
-import { useState } from "react";
+import { Button, Checkbox, Flex, Tooltip, message } from "antd";
+import {
+  CloseOutlined,
+  GlobalOutlined,
+  LinkOutlined,
+  ShareAltOutlined,
+} from "@ant-design/icons";
 import { chatApi } from "@/api/modules/chat";
-import type { ChatShareOptions, Message } from "@/api/types";
+import type { ChatShareOptions } from "@/api/types";
 import { buildChatShareUrl } from "./shareUrl";
-import { isShareableTurn } from "./shareSelection";
-// ==================== 首页改版 (Kun He) ====================
-// 历史记录已迁移到左侧 ChatSidebar，不再需要右侧 Drawer 和历史按钮
-// import ChatSessionDrawer from "../ChatSessionDrawer";
-// ==================== 首页改版结束 ====================
+import { useChatShareSelection } from "../../chatShareContext";
+import { copyToClipboard } from "@/utils/clipboard";
+import styles from "./index.module.less";
 
 interface ChatActionGroupProps {
   chatId?: string;
@@ -24,22 +24,13 @@ interface ChatActionGroupProps {
 const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
   const { t } = useTranslation();
   const { createSession } = useChatAnywhereSessions();
-  const [open, setOpen] = useState(false);
+  const shareSelection = useChatShareSelection();
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [turnStatuses, setTurnStatuses] = useState<Record<string, string>>({});
-  const [selected, setSelected] = useState<string[]>([]);
 
-  const turns = messages.filter((item) => item.role === "user");
-  const messageId = (item: Message) => {
-    const metadata = item.metadata;
-    if (metadata && typeof metadata === "object") {
-      const originalId = (metadata as Record<string, unknown>).original_id;
-      if (typeof originalId === "string" && originalId) return originalId;
-    }
-    return typeof item.id === "string" ? item.id : "";
-  };
+  useEffect(() => {
+    shareSelection.close();
+  }, [chatId, shareSelection.close]);
 
   const openShare = async () => {
     if (!chatId) {
@@ -48,11 +39,10 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
     }
     setLoading(true);
     try {
-      const options: ChatShareOptions = await chatApi.getChatShareOptions(chatId);
-      setMessages(options.messages || []);
-      setTurnStatuses(options.turn_statuses || {});
-      setSelected([]);
-      setOpen(true);
+      const options: ChatShareOptions = await chatApi.getChatShareOptions(
+        chatId,
+      );
+      shareSelection.open(options.messages || [], options.turn_statuses || {});
     } catch {
       message.error("加载会话记录失败");
     } finally {
@@ -60,73 +50,118 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
     }
   };
 
-  const createShare = async () => {
-    if (!chatId || selected.length === 0) return;
+  const getShareUrl = async () => {
+    if (shareSelection.shareUrl) return shareSelection.shareUrl;
+    if (!chatId || shareSelection.selectedTurnIds.length === 0) return null;
     setGenerating(true);
     try {
-      const result = await chatApi.createChatShare(chatId, selected);
+      const result = await chatApi.createChatShare(
+        chatId,
+        shareSelection.selectedTurnIds,
+      );
       const url = buildChatShareUrl(result.share_path);
-      await navigator.clipboard.writeText(url);
-      message.success("分享链接已复制");
-      setOpen(false);
+      shareSelection.setShareUrl(url);
+      return url;
     } catch (error) {
-      message.error(error instanceof Error ? error.message : "生成分享链接失败");
+      message.error(
+        error instanceof Error ? error.message : "生成分享链接失败",
+      );
+      return null;
     } finally {
       setGenerating(false);
     }
   };
 
+  const copyShareUrl = async () => {
+    const url = await getShareUrl();
+    if (!url) return;
+    try {
+      const copied = await copyToClipboard(url);
+      if (!copied) throw new Error("clipboard unavailable");
+      message.success("分享链接已复制");
+      shareSelection.close();
+    } catch {
+      message.error("复制分享链接失败");
+    }
+  };
+
+  const openShareUrl = async () => {
+    const url = await getShareUrl();
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+    shareSelection.close();
+  };
+
+  const selectableCount = shareSelection.selectableTurnIds.length;
+  const selectedCount = shareSelection.selectedTurnIds.length;
+  const allSelected = selectableCount > 0 && selectedCount === selectableCount;
+
   return (
-    <Flex gap={8} align="center">
-      <Tooltip title={t("chat.newChatTooltip")} mouseEnterDelay={0.5}>
-        <IconButton
-          bordered={false}
-          icon={<SparkNewChatFill />}
-          onClick={() => createSession()}
-        />
-      </Tooltip>
-      <Tooltip title="分享会话" mouseEnterDelay={0.5}>
-        <IconButton
-          bordered={false}
-          icon={<ShareAltOutlined />}
-          loading={loading}
-          onClick={() => void openShare()}
-        />
-      </Tooltip>
-      <Modal
-        open={open}
-        title="选择要分享的回答轮次"
-        okText="生成分享链接"
-        cancelText="取消"
-        okButtonProps={{ disabled: selected.length === 0, loading: generating }}
-        onOk={() => void createShare()}
-        onCancel={() => setOpen(false)}
-      >
-        <Flex vertical gap={8}>
-          {turns.map((turn, index) => {
-            const id = messageId(turn);
-            const status = turnStatuses[id];
-            const disabled = !isShareableTurn(id, turnStatuses);
-            return (
-              <Checkbox
-                key={id || index}
-                disabled={disabled || !id}
-                checked={selected.includes(id)}
-                onChange={(event) => {
-                  setSelected((current) => event.target.checked
-                    ? [...current, id]
-                    : current.filter((value) => value !== id));
-                }}
-              >
-                {`第 ${index + 1} 轮：${String(turn.content || "").slice(0, 60)}${
-                  status && status !== "completed" ? `（${status}）` : ""
-                }`}
-              </Checkbox>
-            );
-          })}
-        </Flex>
-      </Modal>
-    </Flex>
+    <>
+      <Flex gap={8} align="center">
+        <Tooltip title={t("chat.newChatTooltip")} mouseEnterDelay={0.5}>
+          <IconButton
+            bordered={false}
+            icon={<SparkNewChatFill />}
+            onClick={() => createSession()}
+          />
+        </Tooltip>
+        <Tooltip title="分享会话" mouseEnterDelay={0.5}>
+          <IconButton
+            bordered={false}
+            icon={<ShareAltOutlined />}
+            loading={loading}
+            onClick={() => void openShare()}
+          />
+        </Tooltip>
+      </Flex>
+      {shareSelection.active ? (
+        <div className={styles.toolbar} role="region" aria-label="分享选择操作">
+          <div className={styles.toolbarSelection}>
+            <Checkbox
+              checked={allSelected}
+              indeterminate={selectedCount > 0 && !allSelected}
+              disabled={selectableCount === 0}
+              onChange={(event) =>
+                shareSelection.selectAll(event.target.checked)
+              }
+            >
+              全选
+            </Checkbox>
+            <span className={styles.count}>
+              {selectableCount === 0
+                ? "暂无可分享的完整回答轮次"
+                : `已选 ${selectedCount} / ${selectableCount} 轮`}
+            </span>
+          </div>
+          <div className={styles.toolbarActions}>
+            <Button
+              type="primary"
+              icon={<LinkOutlined />}
+              loading={generating}
+              disabled={selectedCount === 0}
+              onClick={() => void copyShareUrl()}
+            >
+              复制链接
+            </Button>
+            <Button
+              icon={<GlobalOutlined />}
+              loading={generating}
+              disabled={selectedCount === 0}
+              onClick={() => void openShareUrl()}
+            >
+              浏览器打开
+            </Button>
+            <Button
+              type="text"
+              aria-label="退出分享模式"
+              icon={<CloseOutlined />}
+              onClick={shareSelection.close}
+            />
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 };
 
