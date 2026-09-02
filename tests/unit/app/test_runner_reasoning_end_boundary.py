@@ -4,6 +4,10 @@ from __future__ import annotations
 import json
 
 import pytest
+from agentscope.message import Msg, ToolResultBlock
+from agentscope_runtime.adapters.agentscope.stream import (
+    adapt_agentscope_message_stream,
+)
 from agentscope_runtime.engine.schemas.agent_schemas import (
     DataContent,
     Message,
@@ -16,6 +20,10 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 from swe.app.runner.stream_boundary import (
     _normalize_reasoning_boundary_events,
     normalize_reasoning_boundary_stream,
+)
+from swe.agents.tool_failure import (
+    TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD,
+    build_failed_tool_result_block,
 )
 from swe.agents.utils import tool_summary
 
@@ -410,6 +418,52 @@ async def test_stream_tool_output_marks_pending_governance() -> None:
     assert "tool_status" not in data
     assert "tool_error" not in data
     assert data["output_summary"] == "操作等待审批"
+
+
+@pytest.mark.asyncio
+async def test_agentscope_live_adapter_preserves_pending_governance() -> None:
+    async def source():
+        block = build_failed_tool_result_block(
+            tool_call_id="tool-live-1",
+            tool_name="execute_shell_command",
+            error_type="approval_required",
+            detail="risk detected",
+            governance_status="pending",
+        )
+        msg = Msg(
+            "system",
+            [ToolResultBlock(**block)],
+            "system",
+        )
+        msg.metadata = {
+            TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD: {
+                "tool-live-1": "pending",
+            },
+        }
+        yield msg, True
+
+    events = [
+        item
+        async for item in normalize_reasoning_boundary_stream(
+            adapt_agentscope_message_stream(source()),
+        )
+    ]
+    output_event = next(
+        item
+        for item in events
+        if isinstance(item, Message)
+        and item.type == MessageType.PLUGIN_CALL_OUTPUT
+        and item.content
+    )
+    data = output_event.content[0].data
+
+    assert data["tool_governance"] == "pending"
+    assert "tool_status" not in data
+    assert "tool_error" not in data
+    assert data["output_summary"] == "操作等待审批"
+    assert TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD not in (
+        output_event.metadata or {}
+    )
 
 
 @pytest.mark.asyncio

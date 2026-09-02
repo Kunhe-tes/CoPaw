@@ -23,6 +23,7 @@ function toolMessage(options: {
   outputStatus?: string;
   governance?: string;
   outputSummary?: string;
+  summary?: string;
   callId?: string;
   messageStatus?: AgentScopeRuntimeRunStatus;
 }): IAgentScopeRuntimeMessage {
@@ -30,7 +31,7 @@ function toolMessage(options: {
   const inputData: Record<string, unknown> = {
     name: toolName,
     arguments: "{}",
-    summary: "开始执行操作",
+    summary: options.summary || "开始执行操作",
   };
   if (options.callId) inputData.call_id = options.callId;
   if (options.group) {
@@ -82,6 +83,27 @@ function textMessage(id: string): IAgentScopeRuntimeMessage {
         type: AgentScopeRuntimeContentType.TEXT,
         status: AgentScopeRuntimeRunStatus.Completed,
         text: "正在处理",
+      },
+    ],
+  };
+}
+
+function reasoningMessage(
+  id: string,
+  text = "正在判断下一步",
+  status = AgentScopeRuntimeRunStatus.Completed,
+): IAgentScopeRuntimeMessage {
+  return {
+    id,
+    object: "message",
+    role: "assistant",
+    type: AgentScopeRuntimeMessageType.REASONING,
+    status,
+    content: [
+      {
+        type: AgentScopeRuntimeContentType.TEXT,
+        status,
+        text,
       },
     ],
   };
@@ -215,6 +237,20 @@ describe("getToolStepText", () => {
     });
     expect(getToolStepText(message)).toBe("读取完成");
   });
+
+  it("prefers the call action summary over the result summary", () => {
+    const message = toolMessage({
+      id: "t1",
+      toolName: "glob_search",
+      group: GROUP_A,
+      inputStatus: "running",
+      outputStatus: "success",
+      summary: "正在查看工作目录文件",
+      outputSummary: "共找到 1 项内容",
+    });
+
+    expect(getToolStepText(message)).toBe("正在查看工作目录文件");
+  });
 });
 
 describe("aggregateGroupStatus", () => {
@@ -265,9 +301,37 @@ describe("aggregateGroupStatus", () => {
     ];
     expect(aggregateGroupStatus(steps)).toBe("running");
   });
+
+  it("ignores reasoning status when aggregating tool status", () => {
+    const steps = [
+      toolMessage({ id: "t1", group: GROUP_A, outputStatus: "success" }),
+      reasoningMessage(
+        "reason-1",
+        "思考失败字样",
+        AgentScopeRuntimeRunStatus.Failed,
+      ),
+    ];
+
+    expect(aggregateGroupStatus(steps)).toBe("success");
+  });
 });
 
 describe("groupOperationMessages", () => {
+  it("renders a group from the first still-running tool call", () => {
+    const message = toolMessage({
+      id: "t1",
+      group: GROUP_A,
+      inputStatus: "running",
+      messageStatus: AgentScopeRuntimeRunStatus.InProgress,
+    });
+
+    const { items, groups } = groupOperationMessages([message]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].steps).toEqual([message]);
+    expect(items).toEqual([groups[0]]);
+  });
+
   it("groups consecutive tool calls sharing the same explicit id", () => {
     const messages = [
       toolMessage({ id: "t1", group: GROUP_A }),
@@ -307,6 +371,21 @@ describe("groupOperationMessages", () => {
     const { groups } = groupOperationMessages(messages);
 
     expect(groups).toHaveLength(3);
+  });
+
+  it("keeps reasoning between same-group tools in stream order", () => {
+    const firstTool = toolMessage({ id: "t1", group: GROUP_A });
+    const reasoning = reasoningMessage("reason-1");
+    const secondTool = toolMessage({ id: "t2", group: GROUP_A });
+
+    const { groups } = groupOperationMessages([
+      firstTool,
+      reasoning,
+      secondTool,
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0].steps).toEqual([firstTool, reasoning, secondTool]);
   });
 
   it("keeps ungrouped tool messages as individual items (R16)", () => {

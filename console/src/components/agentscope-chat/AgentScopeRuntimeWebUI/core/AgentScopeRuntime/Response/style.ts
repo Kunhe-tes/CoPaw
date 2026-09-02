@@ -434,6 +434,10 @@ export default createGlobalStyle`
     font-size: 12px;
   }
 
+  &-reasoning {
+    min-width: 0;
+  }
+
 }
 
 @keyframes ${(p) => p.theme.prefixCls}-response-operation-group-open {

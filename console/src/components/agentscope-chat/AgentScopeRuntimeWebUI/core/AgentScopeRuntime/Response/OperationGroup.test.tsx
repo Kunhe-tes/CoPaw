@@ -47,6 +47,17 @@ vi.mock("./Tool", () => ({
   default: () => React.createElement("div", { "data-testid": "tool-detail" }),
 }));
 
+vi.mock("./Reasoning", () => ({
+  default: ({ data }: { data: IAgentScopeRuntimeMessage }) =>
+    React.createElement(
+      "div",
+      { "data-testid": "group-reasoning" },
+      data.content[0]?.type === AgentScopeRuntimeContentType.TEXT
+        ? data.content[0].text
+        : "",
+    ),
+}));
+
 afterEach(() => {
   cleanup();
 });
@@ -92,6 +103,23 @@ function toolMessage(options: {
     type: AgentScopeRuntimeMessageType.PLUGIN_CALL,
     status: AgentScopeRuntimeRunStatus.InProgress,
     content,
+  };
+}
+
+function reasoningMessage(id: string, text: string): IAgentScopeRuntimeMessage {
+  return {
+    id,
+    object: "message",
+    role: "assistant",
+    type: AgentScopeRuntimeMessageType.REASONING,
+    status: AgentScopeRuntimeRunStatus.Completed,
+    content: [
+      {
+        type: AgentScopeRuntimeContentType.TEXT,
+        status: AgentScopeRuntimeRunStatus.Completed,
+        text,
+      },
+    ],
   };
 }
 
@@ -255,5 +283,26 @@ describe("OperationGroup", () => {
     expect(screen.queryByTestId("tool-detail")).not.toBeInTheDocument();
     expect(screen.queryByText(/cat \/tenant\/secret/)).not.toBeInTheDocument();
     expect(screen.queryByText("top-secret-output")).not.toBeInTheDocument();
+  });
+
+  it("renders interleaved reasoning inside the expanded group", () => {
+    render(
+      React.createElement(OperationGroup, {
+        entry: entry([
+          toolMessage({ id: "t1", inputStatus: "running" }),
+          reasoningMessage("reason-1", "检查完目录后继续读取"),
+          toolMessage({ id: "t2", inputStatus: "running" }),
+        ]),
+      }),
+    );
+
+    expect(screen.getByTestId("group-reasoning")).not.toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: /操作组/ }));
+
+    const body = screen.getByRole("list");
+    expect(body.children).toHaveLength(3);
+    expect(body.children[0]).toHaveTextContent("正在执行命令行操作");
+    expect(body.children[1]).toHaveTextContent("检查完目录后继续读取");
+    expect(body.children[2]).toHaveTextContent("正在执行命令行操作");
   });
 });

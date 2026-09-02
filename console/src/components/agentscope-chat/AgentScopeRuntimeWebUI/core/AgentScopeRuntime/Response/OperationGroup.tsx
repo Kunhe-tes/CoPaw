@@ -13,6 +13,7 @@ import {
 } from "@agentscope-ai/icons";
 import { useProviderContext } from "@/components/agentscope-chat";
 import Style from "./style";
+import Reasoning from "./Reasoning";
 import type { IAgentScopeRuntimeMessage } from "../types";
 import type {
   GroupSummaryStatus,
@@ -24,6 +25,7 @@ import {
   getToolStepKey,
   getToolStepStatus,
   getToolStepText,
+  isOperationGroupToolMessage,
 } from "./operationGrouping";
 
 function getGroupStatusIcon(
@@ -163,12 +165,21 @@ function OperationGroupComponent({ entry }: { entry: OperationGroupEntry }) {
           hidden={!open}
           role="list"
         >
-          {entry.steps.map((message) => (
-            <StepRow
-              key={entry.key + ":" + getToolStepKey(message)}
-              message={message}
-            />
-          ))}
+          {entry.steps.map((message) => {
+            const key = entry.key + ":" + getToolStepKey(message);
+            if (isOperationGroupToolMessage(message)) {
+              return <StepRow key={key} message={message} />;
+            }
+            return (
+              <div
+                key={key}
+                className={prefixCls + "-reasoning"}
+                role="listitem"
+              >
+                <Reasoning data={message} />
+              </div>
+            );
+          })}
         </div>
       </div>
     </>

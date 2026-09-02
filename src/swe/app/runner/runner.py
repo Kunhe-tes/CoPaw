@@ -80,6 +80,10 @@ from ...__version__ import __version__
 from ...agents.react_agent import SWEAgent
 from ...agents.skill_invocation_detector import SkillInvocationDetector
 from ...agents.tool_guard_mixin import PreToolUseTerminalStop
+from ...agents.tool_failure import (
+    TOOL_GOVERNANCE_BLOCK_FIELD,
+    attach_tool_governance_message_metadata,
+)
 from ...agents.skills_manager import (
     get_skill_freshness_token,
     get_workspace_skills_dir,
@@ -658,12 +662,12 @@ def _build_denial_response_msg(pending: Any, text: str) -> Msg:
     block keeps the existing user-visible denial message.
     """
     blocks: list[Any] = []
+    governance_tool_call_id = ""
     extra = getattr(pending, "extra", None)
     if isinstance(extra, dict):
-        from ...agents.tool_failure import TOOL_GOVERNANCE_BLOCK_FIELD
-
         tool_call = extra.get("tool_call")
         if isinstance(tool_call, dict) and tool_call.get("id"):
+            governance_tool_call_id = str(tool_call["id"])
             result_block = {
                 "type": "tool_result",
                 "id": tool_call.get("id", ""),
@@ -686,7 +690,14 @@ def _build_denial_response_msg(pending: Any, text: str) -> Msg:
                 result_block["operation_group"] = operation_group
             blocks.append(result_block)
     blocks.append(TextBlock(type="text", text=text))
-    return Msg(name="Friday", role="assistant", content=blocks)
+    message = Msg(name="Friday", role="assistant", content=blocks)
+    if governance_tool_call_id:
+        attach_tool_governance_message_metadata(
+            message,
+            tool_call_id=governance_tool_call_id,
+            governance_status="rejected",
+        )
+    return message
 
 
 def _copy_list_extra(

@@ -20,6 +20,7 @@ from swe.app.source_system_config.models import (
 )
 from swe.app.source_system_config.runtime import bind_source_system_config
 from swe.config.context import tenant_context
+from swe.agents.tool_failure import TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
 from swe.security.tool_guard.approval import ApprovalDecision
 
 
@@ -97,6 +98,9 @@ def test_denial_response_carries_trusted_governance_and_group() -> None:
     assert result["operation_group"] == {
         "id": "inspect",
         "title": "检查图片",
+    }
+    assert response.metadata[TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD] == {
+        "tool-1": "rejected",
     }
 
 

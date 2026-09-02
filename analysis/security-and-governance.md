@@ -13,7 +13,7 @@
 | Guardian | `src/swe/security/tool_guard/guardians/file_guardian.py`, `src/swe/security/tool_guard/guardians/rule_guardian.py` | 文件边界和规则守卫 |
 | 规则集 | `src/swe/security/tool_guard/rules/dangerous_shell_commands.yaml` | 危险命令规则 |
 | 工具函数 | `src/swe/security/tool_guard/utils.py` | 守卫辅助逻辑 |
-| 展示治理状态 | `src/swe/app/runner/tool_status.py` | 从 Tool Guard 内部标记重建待审批、已拒绝和已拦截状态；不把治理结果等同于执行失败 |
+| 展示治理状态 | `src/swe/app/runner/tool_status.py`, `src/swe/app/runner/stream_boundary.py` | 从 Tool Guard 内部标记重建待审批、已拒绝和已拦截状态；实时适配通过按调用 ID 绑定的内部消息 metadata 保留该标记，并在投影后移除；不从普通工具输出推断治理状态，也不把治理结果等同于执行失败 |
 
 ## 其他安全边界
 

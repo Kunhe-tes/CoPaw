@@ -1380,7 +1380,7 @@ The user-visible pre-execution governance state of one tool invocation when Tool
 _Avoid_: tool failure, approval error, failed Tool Call Status, execution result
 
 **Tool Operation Group**:
-A user-visible presentation group for consecutive tool invocations that the Main Agent explicitly declares as one user-understandable task stage through a shared group identity and a validated display title. A **Tool Operation Group** is collapsed by default, preserves every child invocation's own **Tool Call Status** and **Tool Governance Status**, and is never inferred from timing, adjacency, or raw tool arguments.
+A user-visible presentation group for consecutive tool invocations that the Main Agent explicitly declares as one user-understandable task stage through a shared group identity and a validated display title. A **Tool Operation Group** appears when its first invocation starts, may preserve reasoning between its invocations in stream order, and moves into the completed response's execution-process disclosure as one group. It is collapsed by default, preserves every child invocation's own **Tool Call Status** and **Tool Governance Status**, and is never inferred from timing, adjacency, or raw tool arguments.
 _Avoid_: tool batch, time-window group, assistant turn, plan step, merged tool call
 
 **Tool Output Frame**:

@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import copy
-from typing import AsyncGenerator, AsyncIterator, Iterable
+from typing import Any, AsyncGenerator, AsyncIterator, Iterable
 
 from agentscope_runtime.engine.schemas.agent_schemas import (
     ContentType,
@@ -18,7 +18,10 @@ from ...agents.utils.tool_summary import (
     generate_tool_call_summary,
     generate_tool_output_summary,
 )
-from ...agents.tool_failure import TOOL_GOVERNANCE_BLOCK_FIELD
+from ...agents.tool_failure import (
+    TOOL_GOVERNANCE_BLOCK_FIELD,
+    TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD,
+)
 from .operation_group import attach_operation_group
 from .tool_status import (
     apply_governance_tool_status,
@@ -59,6 +62,29 @@ def _is_empty_reasoning_boundary_message(event: Event) -> bool:
     if event.status != RunStatus.InProgress:
         return False
     return not event.content
+
+
+def _consume_tool_governance_metadata(
+    event: Message,
+    data: dict,
+) -> Any:
+    """Read trusted governance metadata and strip it from the UI event."""
+    governance_status = data.get(TOOL_GOVERNANCE_BLOCK_FIELD)
+    metadata = getattr(event, "metadata", None)
+    if governance_status is None and isinstance(metadata, dict):
+        by_call = metadata.get(TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD)
+        call_id = data.get("call_id")
+        if isinstance(by_call, dict) and isinstance(call_id, str):
+            governance_status = by_call.get(call_id)
+    if isinstance(metadata, dict) and (
+        TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD in metadata
+    ):
+        event.metadata = {
+            key: value
+            for key, value in metadata.items()
+            if key != TOOL_GOVERNANCE_MESSAGE_METADATA_FIELD
+        }
+    return governance_status
 
 
 def _normalize_reasoning_boundary_events(
@@ -148,16 +174,17 @@ async def _enrich_tool_message(event: Message) -> None:
             tool_name = data.get("name", "")
             output = data.get("output", "")
             arguments = data.get("arguments")
+            governance_status = _consume_tool_governance_metadata(event, data)
             fallback = generate_tool_output_summary(
                 tool_name=tool_name,
                 output=output,
-                governance_status=data.get(TOOL_GOVERNANCE_BLOCK_FIELD),
+                governance_status=governance_status,
             )
             data["output_summary"] = fallback
             apply_terminal_tool_status(data)
             apply_governance_tool_status(
                 data,
-                data.get(TOOL_GOVERNANCE_BLOCK_FIELD),
+                governance_status,
             )
             data.pop(TOOL_GOVERNANCE_BLOCK_FIELD, None)
 

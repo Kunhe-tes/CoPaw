@@ -38,7 +38,10 @@ from .hook_runtime.models import (
     HookSessionState,
     MergedHookResult,
 )
-from .tool_failure import build_failed_tool_result_block
+from .tool_failure import (
+    attach_tool_governance_message_metadata,
+    build_failed_tool_result_block,
+)
 from ..security.tool_guard.models import TOOL_GUARD_DENIED_MARK
 from ..tracing import has_trace_manager, get_trace_manager, get_current_trace
 
@@ -2055,6 +2058,11 @@ class ToolGuardMixin:
             ],
             "system",
         )
+        attach_tool_governance_message_metadata(
+            tool_res_msg,
+            tool_call_id=tool_call["id"],
+            governance_status="blocked",
+        )
 
         await self.print(tool_res_msg, True)
         await self.memory.add(tool_res_msg)
@@ -2185,6 +2193,11 @@ class ToolGuardMixin:
                 ),
             ],
             "system",
+        )
+        attach_tool_governance_message_metadata(
+            tool_res_msg,
+            tool_call_id=tool_call["id"],
+            governance_status="pending",
         )
         await self.print(tool_res_msg, True)
         await self.memory.add(tool_res_msg, marks=TOOL_GUARD_DENIED_MARK)

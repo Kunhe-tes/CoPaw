@@ -76,8 +76,14 @@ const GOVERNANCE_STATUSES: ToolStepStatus[] = [
 
 const TOOL_STATUSES: ToolStepStatus[] = ["running", "success", "failed"];
 
-function isToolMessage(message: IAgentScopeRuntimeMessage): boolean {
+export function isOperationGroupToolMessage(
+  message: IAgentScopeRuntimeMessage,
+): boolean {
   return TOOL_MESSAGE_TYPES.has(message.type);
+}
+
+function isReasoningMessage(message: IAgentScopeRuntimeMessage): boolean {
+  return message.type === AgentScopeRuntimeMessageType.REASONING;
 }
 
 function isToolStatus(value: unknown): value is ToolStepStatus {
@@ -110,7 +116,7 @@ function blockData(message: IAgentScopeRuntimeMessage, index: number) {
 export function extractOperationGroup(
   message: IAgentScopeRuntimeMessage,
 ): OperationGroupInfo | null {
-  if (!isToolMessage(message)) return null;
+  if (!isOperationGroupToolMessage(message)) return null;
   const data = blockData(message, 0);
   const group = data?.operation_group;
   if (!group || typeof group !== "object") return null;
@@ -185,6 +191,7 @@ export function aggregateGroupStatus(
 ): GroupSummaryStatus {
   let best: GroupSummaryStatus = "success";
   for (const step of steps) {
+    if (!isOperationGroupToolMessage(step)) continue;
     const summary = toSummaryStatus(getToolStepStatus(step));
     if (
       SUMMARY_PRECEDENCE.indexOf(summary) < SUMMARY_PRECEDENCE.indexOf(best)
@@ -223,6 +230,10 @@ function readToolName(message: IAgentScopeRuntimeMessage): string {
   return typeof name === "string" ? name : "";
 }
 
+function isGenericToolSummary(value: string): boolean {
+  return /^(开始执行操作|正在工具操作|工具操作)$/.test(value.trim());
+}
+
 export function getToolStepText(message: IAgentScopeRuntimeMessage): string {
   const toolName = readToolName(message);
   const status = getToolStepStatus(message);
@@ -237,8 +248,21 @@ export function getToolStepText(message: IAgentScopeRuntimeMessage): string {
   const terminalData = blockData(message, 1) as
     | Record<string, unknown>
     | undefined;
-  const summary = terminalData?.output_summary || inputData?.summary;
-  if (typeof summary === "string" && summary.trim()) return summary.trim();
+  const callSummary = inputData?.summary;
+  if (
+    typeof callSummary === "string" &&
+    callSummary.trim() &&
+    !isGenericToolSummary(callSummary)
+  ) {
+    return callSummary.trim();
+  }
+  const outputSummary = terminalData?.output_summary;
+  if (typeof outputSummary === "string" && outputSummary.trim()) {
+    return outputSummary.trim();
+  }
+  if (typeof callSummary === "string" && callSummary.trim()) {
+    return callSummary.trim();
+  }
   return toolName ? "工具调用：" + toolName : "工具操作";
 }
 
@@ -277,7 +301,7 @@ export function groupOperationMessages(messages: IAgentScopeRuntimeMessage[]): {
   };
 
   for (const message of messages) {
-    const groupInfo = isToolMessage(message)
+    const groupInfo = isOperationGroupToolMessage(message)
       ? extractOperationGroup(message)
       : null;
     if (groupInfo) {
@@ -293,8 +317,12 @@ export function groupOperationMessages(messages: IAgentScopeRuntimeMessage[]): {
       }
       continue;
     }
-    // Any non-grouped message (user-facing text, reasoning, error or an
-    // ungrouped tool call) is a boundary that closes the open group (R4).
+    if (openSteps.length > 0 && isReasoningMessage(message)) {
+      openSteps.push(message);
+      continue;
+    }
+    // User-facing text, errors and ungrouped tool calls close the open group.
+    // Reasoning is handled above so it stays in stream order within the group.
     flush();
     items.push({ kind: "message", message });
   }
