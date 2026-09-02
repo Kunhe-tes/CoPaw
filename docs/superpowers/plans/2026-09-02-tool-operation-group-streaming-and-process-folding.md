@@ -50,7 +50,7 @@ Extend the existing Console-only operation-group presentation so a group appears
 ## Key Technical Decisions
 
 - Keep grouping as a pure projection over the current merged message list; an unfinished group is a valid renderable result.
-- Treat every reasoning message after a grouped tool as part of the open group until user-facing text, an ungrouped tool, or a new group closes it.
+- Treat every reasoning message after a grouped tool as part of the open group, and ignore the invisible in-progress assistant boundary emitted when reasoning completes, until user-facing text, an ungrouped tool, or a new group closes it.
 - Derive group status and tool counts from tool messages only; reasoning participates in ordering and process-step counts but not tool status aggregation.
 - Reuse the existing Reasoning and Tool components within OperationGroup so grouped children match their ordinary presentation and interaction.
 - Route grouped items into ProcessDisclosure only after the existing response-completion gate succeeds.
@@ -76,6 +76,7 @@ Extend the existing Console-only operation-group presentation so a group appears
 **Test scenarios:**
 - A single running grouped tool produces a group immediately.
 - Tool, multiple reasoning messages, and the next same-group tool remain ordered in one group.
+- A reasoning-completion boundary with no visible content is omitted and does not split equal group IDs.
 - User-facing text, ungrouped tools and a new group remain boundaries.
 - Reasoning does not alter aggregate tool status.
 

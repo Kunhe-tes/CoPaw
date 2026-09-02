@@ -86,6 +86,16 @@ function isReasoningMessage(message: IAgentScopeRuntimeMessage): boolean {
   return message.type === AgentScopeRuntimeMessageType.REASONING;
 }
 
+function isInvisibleAssistantBoundary(
+  message: IAgentScopeRuntimeMessage,
+): boolean {
+  return (
+    message.type === AgentScopeRuntimeMessageType.MESSAGE &&
+    message.status === AgentScopeRuntimeRunStatus.InProgress &&
+    !message.content?.length
+  );
+}
+
 function isToolStatus(value: unknown): value is ToolStepStatus {
   return (
     typeof value === "string" && TOOL_STATUSES.includes(value as ToolStepStatus)
@@ -257,8 +267,11 @@ export function groupOperationMessages(messages: IAgentScopeRuntimeMessage[]): {
       openSteps.push(message);
       continue;
     }
+    if (openSteps.length > 0 && isInvisibleAssistantBoundary(message)) {
+      continue;
+    }
     // User-facing text, errors and ungrouped tool calls close the open group.
-    // Reasoning is handled above so it stays in stream order within the group.
+    // Reasoning and its invisible assistant boundary are handled above.
     flush();
     items.push({ kind: "message", message });
   }

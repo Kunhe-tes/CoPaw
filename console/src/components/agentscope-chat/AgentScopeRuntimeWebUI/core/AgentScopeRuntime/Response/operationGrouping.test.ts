@@ -87,6 +87,17 @@ function textMessage(id: string): IAgentScopeRuntimeMessage {
   };
 }
 
+function emptyMessage(id: string): IAgentScopeRuntimeMessage {
+  return {
+    id,
+    object: "message",
+    role: "assistant",
+    type: AgentScopeRuntimeMessageType.MESSAGE,
+    status: AgentScopeRuntimeRunStatus.InProgress,
+    content: [],
+  };
+}
+
 function reasoningMessage(
   id: string,
   text = "正在判断下一步",
@@ -325,6 +336,24 @@ describe("groupOperationMessages", () => {
       secondReasoning,
       secondTool,
     ]);
+  });
+
+  it("ignores an invisible assistant boundary after reasoning", () => {
+    const firstTool = toolMessage({ id: "t1", group: GROUP_A });
+    const reasoning = reasoningMessage("reason-1", "继续执行同一阶段");
+    const invisibleBoundary = emptyMessage("assistant-boundary-1");
+    const secondTool = toolMessage({ id: "t2", group: GROUP_A });
+
+    const { items, groups } = groupOperationMessages([
+      firstTool,
+      reasoning,
+      invisibleBoundary,
+      secondTool,
+    ]);
+
+    expect(groups).toHaveLength(1);
+    expect(items).toEqual([groups[0]]);
+    expect(groups[0].steps).toEqual([firstTool, reasoning, secondTool]);
   });
 
   it("keeps ungrouped tool messages as individual items (R16)", () => {
