@@ -63,7 +63,7 @@ export default createGlobalStyle`
 }
 
 .swe-chat-share-active [class*="-bubble-list-scroll"] {
-  padding-bottom: calc(88px + env(safe-area-inset-bottom));
+  padding-bottom: calc(98px + env(safe-area-inset-bottom));
 }
 
 .${(p) => p.theme.prefixCls}-bubble {
