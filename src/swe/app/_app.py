@@ -648,6 +648,7 @@ async def _initialize_database_backed_modules(
             init_html_preview_click_module,
         )
         from .scenario_preset.router import init_scenario_preset_module
+        from .chat_sharing.router import initialize_chat_sharing_module
 
         await initialize_goal_service(db_connection)
         init_greeting_module(db_connection)
@@ -656,9 +657,10 @@ async def _initialize_database_backed_modules(
         init_skill_result_module(db_connection)
         init_html_preview_click_module(db_connection)
         await init_scenario_preset_module(db_connection)
+        await initialize_chat_sharing_module(db_connection)
         logger.info(
             "Greeting, FeaturedCase, Feedback, SkillResult, HTML preview click "
-            "and ScenarioPreset modules initialized",
+            "ScenarioPreset and ChatSharing modules initialized",
         )
 
         from .workspace.tenant_init_source_store import (
