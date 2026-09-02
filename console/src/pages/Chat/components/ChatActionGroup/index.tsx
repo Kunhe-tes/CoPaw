@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "@agentscope-ai/design";
 import { Button, Checkbox, Flex, Tooltip, message } from "antd";
@@ -20,12 +20,20 @@ interface ChatActionGroupProps {
   chatId?: string;
 }
 
+interface ChatAreaBounds {
+  left: number;
+  width: number;
+}
+
 const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
   const shareSelection = useChatShareSelection();
   const { close } = shareSelection;
   const selectedTurnIdsRef = useRef(shareSelection.selectedTurnIds);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
+  const [chatAreaBounds, setChatAreaBounds] = useState<ChatAreaBounds | null>(
+    null,
+  );
 
   useEffect(() => {
     close();
@@ -34,6 +42,33 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
   useEffect(() => {
     selectedTurnIdsRef.current = shareSelection.selectedTurnIds;
   }, [shareSelection.selectedTurnIds]);
+
+  useLayoutEffect(() => {
+    if (!shareSelection.active) {
+      setChatAreaBounds(null);
+      return;
+    }
+    const chatArea = document.querySelector<HTMLElement>(
+      "[data-chat-messages-area]",
+    );
+    if (!chatArea) return;
+
+    const updateBounds = () => {
+      const { left, width } = chatArea.getBoundingClientRect();
+      setChatAreaBounds({ left, width });
+    };
+    updateBounds();
+    window.addEventListener("resize", updateBounds);
+    const resizeObserver =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(updateBounds);
+    resizeObserver?.observe(chatArea);
+    return () => {
+      window.removeEventListener("resize", updateBounds);
+      resizeObserver?.disconnect();
+    };
+  }, [shareSelection.active]);
 
   const openShare = async () => {
     if (!chatId) {
@@ -114,7 +149,20 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
   const allSelected = selectionState === "all";
 
   const shareToolbar = shareSelection.active ? (
-    <div className={styles.toolbar} role="region" aria-label="分享选择操作">
+    <div
+      className={styles.toolbar}
+      role="region"
+      aria-label="分享选择操作"
+      style={
+        chatAreaBounds
+          ? {
+              left: `${chatAreaBounds.left}px`,
+              width: `${chatAreaBounds.width}px`,
+              right: "auto",
+            }
+          : undefined
+      }
+    >
       <div className={styles.toolbarSelection}>
         <Checkbox
           checked={allSelected}

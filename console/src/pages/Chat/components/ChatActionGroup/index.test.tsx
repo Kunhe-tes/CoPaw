@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type React from "react";
 import { buildChatShareUrl } from "./shareUrl";
@@ -58,10 +58,19 @@ describe("ChatActionGroup share URL", () => {
 });
 
 describe("ChatActionGroup placement", () => {
-  it("mounts the active toolbar at document body level", async () => {
+  it("mounts the active toolbar at document body level and aligns it to chat width", async () => {
+    const chatArea = document.createElement("div");
+    chatArea.dataset.chatMessagesArea = "true";
+    chatArea.getBoundingClientRect = () =>
+      ({ left: 240, width: 900 } as DOMRect);
+    document.body.appendChild(chatArea);
+
     const { default: ChatActionGroup } = await import("./index");
     render(<ChatActionGroup chatId="chat-1" />);
     const toolbar = screen.getByRole("region", { name: "分享选择操作" });
     expect(toolbar.parentElement).toBe(document.body);
+    await waitFor(() =>
+      expect(toolbar).toHaveStyle({ left: "240px", width: "900px" }),
+    );
   });
 });
