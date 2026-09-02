@@ -1445,7 +1445,7 @@ The bounded model input budget available to a Main Agent turn. A **Context Windo
 _Avoid_: token bill, monthly quota, historical usage
 
 **Persisted Context Occupancy**:
-An estimate of how much of the **Context Window** is occupied by the persisted state and fixed runtime context that would actually enter the next Main Agent model input after any completed compaction. It includes system prompt, completed compressed summary, effective history messages, and compacted tool results; it excludes unsent composer text, already-compacted raw history, and tokens already billed by previous model calls.
+An estimate of how much of the **Context Window** is occupied by the persisted state and fixed runtime context that would actually enter the next Main Agent model input after any completed compaction. It includes system prompt and summary context, active tool definitions, effective history messages, and compacted tool results; it excludes unsent composer text, already-compacted raw history, and tokens already billed by previous model calls.
 _Avoid_: token usage, usage statistics, cost usage
 
 **Tool Call Status**:
@@ -2167,7 +2167,7 @@ Resolved as exposing absence for **File Read Truncation** as inheriting the hist
 Resolved as limited to the Source System Configuration page and runtime resolution for current user-facing controls. The Agent configuration page no longer exposes historical tool-result compaction controls, while existing Agent runtime configuration remains available as inherited baseline behavior.
 
 **"Current Session Context Usage"**:
-Resolved as **Persisted Context Occupancy**, meaning the estimated persisted session context divided by the configured **Context Window**. It excludes the current unsent composer text and does not mean cumulative token usage across completed calls.
+Resolved as **Persisted Context Occupancy**, meaning the estimated persisted session context divided by the configured **Context Window**. Its user-facing breakdown is System Context, Active Tool Definitions, and Online Conversation Messages. It excludes the current unsent composer text and does not mean cumulative token usage across completed calls.
 
 **"Context Window Capacity"**:
 Resolved as the Main Agent running configuration `max_input_length`, not provider-reported model metadata. The indicator follows Swe's runtime budget because compaction and fit checks are governed by that configuration.

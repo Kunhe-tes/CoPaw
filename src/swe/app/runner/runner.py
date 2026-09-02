@@ -37,6 +37,11 @@ from ..mcp.stdio_launcher import build_tenant_aware_stdio_launch_config
 from .command_dispatch import (
     _get_last_user_text,
 )
+from .context_usage import (
+    CONTEXT_USAGE_INVALID_STATE_KEY,
+    CONTEXT_USAGE_STATE_KEY,
+    capture_context_usage,
+)
 from .assistant_response import (
     project_candidate_assistant_response,
     replace_candidate_assistant_response,
@@ -5928,11 +5933,30 @@ class AgentRunner(Runner):
             return
 
         current_agent_state = agent.state_dict()
-        stripped_count = 0
-        deduped_external_approvals = 0
+        stripped_count = _strip_internal_follow_up_messages_from_state(
+            current_agent_state,
+        )
+        deduped_external_approvals = (
+            _dedupe_external_approval_messages_from_state(
+                current_agent_state,
+            )
+        )
+        context_usage_snapshot: dict[str, Any] | None = None
+        context_usage_capture_failed = False
+        try:
+            context_usage_snapshot = (
+                await capture_context_usage(agent, current_agent_state)
+            ).model_dump(mode="json")
+        except Exception:  # noqa: BLE001 - session persistence must continue
+            context_usage_capture_failed = True
+            logger.warning(
+                "Failed to capture context usage; preserving prior snapshot "
+                "(session_id=%s)",
+                session_id,
+                exc_info=True,
+            )
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
-            nonlocal stripped_count, deduped_external_approvals
             state_modules: dict[str, Any] = (
                 dict(existing_state)
                 if isinstance(existing_state, dict)
@@ -5947,6 +5971,17 @@ class AgentRunner(Runner):
                     )
                 )
             state_modules["agent"] = current_agent_state
+            if context_usage_snapshot is not None:
+                state_modules[CONTEXT_USAGE_STATE_KEY] = context_usage_snapshot
+                state_modules.pop(CONTEXT_USAGE_INVALID_STATE_KEY, None)
+            elif context_usage_capture_failed:
+                if isinstance(
+                    state_modules.get(CONTEXT_USAGE_STATE_KEY),
+                    dict,
+                ):
+                    state_modules[CONTEXT_USAGE_INVALID_STATE_KEY] = True
+                else:
+                    state_modules.pop(CONTEXT_USAGE_INVALID_STATE_KEY, None)
             if hook_overlay is not None:
                 state_modules["hook_overlay"] = hook_overlay.model_dump(
                     mode="json",
@@ -5954,14 +5989,6 @@ class AgentRunner(Runner):
                 )
             else:
                 state_modules.pop("hook_overlay", None)
-            stripped_count = _strip_internal_follow_up_messages_from_state(
-                state_modules["agent"],
-            )
-            deduped_external_approvals = (
-                _dedupe_external_approval_messages_from_state(
-                    state_modules["agent"],
-                )
-            )
             return state_modules
 
         if session_execution is not None:

@@ -17,6 +17,7 @@ import type {
   SubAgentRunSnapshot,
   GoalSnapshot,
 } from "../types";
+import type { ContextUsageSnapshot } from "../types/contextUsage";
 
 /** Response from POST /console/upload. url = filename only; agent_id from header. */
 export interface ChatUploadResponse {
@@ -265,6 +266,11 @@ export const chatApi = {
 
   getChat: (chatId: string) =>
     request<ChatHistory>(`/chats/${encodeURIComponent(chatId)}`),
+
+  getContextUsage: (chatId: string) =>
+    request<ContextUsageSnapshot>(
+      `/chats/${encodeURIComponent(chatId)}/context-usage`,
+    ),
 
   getChatHistory: (chatId: string, before?: string | null, limit = 50) => {
     const params = new URLSearchParams({ limit: String(limit) });
