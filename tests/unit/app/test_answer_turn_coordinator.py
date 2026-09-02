@@ -20,6 +20,7 @@ from swe.app.answer_turn.models import (
     TurnOutcome,
     TurnStatus,
 )
+from swe.app.runner.runner import AgentRunner
 
 
 def _coordinator(*, hard_cancel_delay: float = 5.0):
@@ -179,3 +180,82 @@ async def test_settle_persists_once_closes_stream_and_removes_active_turn():
     assert adapters["session"].calls == [(lease.identity, outcome)]
     assert adapters["stream"].close_calls == [lease.identity]
     assert await coordinator.status(lease.identity) is None
+
+
+@pytest.mark.asyncio
+async def test_recover_current_linearizes_terminal_snapshot_before_next_admission():
+    coordinator, _adapters = _coordinator()
+    snapshot_started = asyncio.Event()
+    release_snapshot = asyncio.Event()
+
+    async def terminal_snapshot():
+        snapshot_started.set()
+        await release_snapshot.wait()
+        return "snapshot"
+
+    recovery = asyncio.create_task(
+        coordinator.recover_current("chat-1", terminal_snapshot),
+    )
+    await snapshot_started.wait()
+
+    async def producer(_identity, _payload):
+        return None
+
+    admission = asyncio.create_task(
+        coordinator.start_or_attach("chat-1", {}, producer),
+    )
+    await asyncio.sleep(0)
+    assert admission.done() is False
+
+    release_snapshot.set()
+    assert await recovery == "snapshot"
+    lease = await admission
+    assert lease.is_new_run is True
+    await coordinator.settle(TurnOutcome.completed(lease.identity))
+
+
+@pytest.mark.asyncio
+async def test_recover_current_rejects_pending_settlement_before_snapshot():
+    coordinator, _adapters = _coordinator()
+
+    class _FailingSession(InMemorySession):
+        async def persist_outcome(self, _outcome):
+            raise OSError("disk unavailable")
+
+    coordinator.session = _FailingSession()
+    snapshot_called = False
+
+    async def producer(_identity, _payload):
+        return None
+
+    async def terminal_snapshot():
+        nonlocal snapshot_called
+        snapshot_called = True
+        return "unexpected"
+
+    lease = await coordinator.start_or_attach("chat-1", {}, producer)
+    await coordinator.settle(TurnOutcome.completed(lease.identity))
+    with pytest.raises(Exception, match="settlement"):
+        await coordinator.recover_current("chat-1", terminal_snapshot)
+    assert snapshot_called is False
+
+
+@pytest.mark.asyncio
+async def test_runner_persists_terminal_outcome_from_admission_location():
+    class _Session:
+        def __init__(self):
+            self.state = {"turn_states": {}}
+
+        async def mutate_session_state(self, _session_id, callback, user_id=""):
+            self.state = callback(self.state)
+
+    runner = AgentRunner(agent_id="agent-1")
+    runner.session = _Session()
+    identity = TurnIdentity.create(chat_id="chat-1", msgid="msg-1")
+    runner._answer_turn_locations[identity] = ("session-1", "user-1")
+
+    await runner.persist_outcome(TurnOutcome.completed(identity))
+
+    assert runner.session.state["turn_states"]["msg-1"]["status"] == (
+        "completed"
+    )

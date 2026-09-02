@@ -47,10 +47,11 @@ describe("tracingApi.getOverview", () => {
 
     await tracingApi.getOverview("2026-06-01", "2026-06-30", "100", {
       detail: "summary",
+      timeRange: "month",
     });
 
     expect(mocks.request).toHaveBeenCalledWith(
-      "/monitor/tracing/overview?start_date=2026-06-01&end_date=2026-06-30&bbk_ids=100&detail=summary",
+      "/monitor/tracing/overview?start_date=2026-06-01&end_date=2026-06-30&bbk_ids=100&detail=summary&time_range=month",
     );
   });
 });

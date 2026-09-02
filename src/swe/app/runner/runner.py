@@ -249,6 +249,16 @@ class _TurnPlan:
     turn_msgs: list[Any]
 
 
+@dataclass(frozen=True)
+class _QueryHandlerContext:
+    query: str | None
+    session_id: str
+    user_id: str
+    identity: TurnIdentity | None
+    turn_id: str
+    trace_fields: TraceFields | None
+
+
 @dataclass
 class _QueryTurnOutcome:
     """记录 agent 输出与完成态。"""
@@ -1495,7 +1505,6 @@ def _extract_assistant_response(
         return ""
 
     try:
-        # memory.content 是 list of (Msg, marks) tuples
         memory = agent.memory.content
         start = max(memory_start, 0)
         memory_total = len(memory) if isinstance(memory, list) else None
@@ -2842,15 +2851,6 @@ class _QueryAttemptInput:
     session_execution: Any | None = None
 
 
-@dataclass(frozen=True)
-class _QueryHandlerContext:
-    query: str | None
-    session_id: str
-    user_id: str
-    identity: TurnIdentity | None
-    trace_fields: TraceFields | None
-
-
 class AgentRunner(Runner):
     def __init__(
         self,
@@ -2883,6 +2883,7 @@ class AgentRunner(Runner):
             TurnIdentity,
             tuple[_QueryRuntime | None, Any],
         ] = {}
+        self._answer_turn_locations: dict[TurnIdentity, tuple[str, str]] = {}
         self._query_background_tasks: set[asyncio.Task[None]] = set()
         self.session: Any | None = None
         self._query_execution = QueryExecution(
@@ -2912,39 +2913,73 @@ class AgentRunner(Runner):
             task.cancel()
 
     async def persist_outcome(self, outcome: TurnOutcome) -> None:
-        """Persist the accepted Stop outcome through the session adapter."""
+        """Persist a terminal answer-turn outcome in the owning session."""
         runtime, session_execution = self._answer_turn_runtimes.get(
             outcome.identity,
             (None, None),
         )
-        if (
-            outcome.status != TurnStatus.CANCELLED
-            or session_execution is None
-            or not hasattr(session_execution, "state")
-        ):
-            return
+        locations = getattr(self, "_answer_turn_locations", {})
+        location = locations.get(outcome.identity)
+        if runtime is None and session_execution is None and location is None:
+            raise RuntimeError(
+                "answer turn persistence context is unavailable",
+            )
         from .session_lifecycle import (
             mark_stopped_agent_memory,
-            mark_stopped_turn_state,
+            mark_terminal_turn_state,
         )
 
-        try:
-            if runtime is not None:
-                mark_stopped_agent_memory(
-                    runtime.agent,
-                    outcome.identity.msgid,
-                )
-            mark_stopped_turn_state(
+        terminal_status = (
+            "stopped"
+            if outcome.status == TurnStatus.CANCELLED
+            else outcome.status.value
+        )
+        if outcome.status == TurnStatus.CANCELLED and runtime is not None:
+            mark_stopped_agent_memory(
+                runtime.agent,
+                outcome.identity.msgid,
+            )
+
+        if session_execution is not None and getattr(
+            session_execution,
+            "is_active",
+            True,
+        ):
+            mark_terminal_turn_state(
                 session_execution.state,
                 outcome.identity.msgid,
+                terminal_status,
             )
             await session_execution.commit_state(session_execution.state)
-        except Exception:
-            logger.exception(
-                "Failed to persist stopped answer turn chat_id=%s msgid=%s",
-                outcome.identity.chat_id,
+            return
+
+        session_id = str(
+            getattr(runtime, "session_id", "") or (location or ("", ""))[0],
+        )
+        user_id = str(
+            getattr(runtime, "user_id", "") or (location or ("", ""))[1],
+        )
+        if not session_id or self.session is None:
+            raise RuntimeError("answer turn persistence target is unavailable")
+
+        def mark_outcome(state: dict[str, Any]) -> dict[str, Any]:
+            mark_terminal_turn_state(
+                state,
                 outcome.identity.msgid,
+                terminal_status,
             )
+            return state
+
+        await self.session.mutate_session_state(
+            session_id,
+            mark_outcome,
+            user_id=user_id,
+        )
+
+    async def release_outcome(self, identity: TurnIdentity) -> None:
+        """Release the execution context after durable settlement succeeds."""
+        self._answer_turn_runtimes.pop(identity, None)
+        getattr(self, "_answer_turn_locations", {}).pop(identity, None)
 
     async def _report_answer_turn_outcome(
         self,
@@ -5559,17 +5594,53 @@ class AgentRunner(Runner):
         ):
             yield msg, last
 
-    def _build_query_trace_fields(
+    async def _stream_query_frames(
         self,
+        msgs,
+        *,
         request: AgentRequest,
-        identity: TurnIdentity | None,
+        query: str | None,
         session_id: str,
         user_id: str,
+    ):
+        """Yield query frames from the configured execution adapter."""
+        query_execution = getattr(self, "_query_execution", None)
+        if query_execution is not None:
+            async for frame in query_execution.stream(
+                QueryInvocation(request=request, msgs=tuple(msgs)),
+            ):
+                yield self._attach_trace_id_to_msg(
+                    frame.message,
+                    getattr(request, "trace_id", None),
+                ), frame.last
+            return
+        async for msg, last in self._stream_query_entry(
+            msgs,
+            request=request,
+            query=query,
+            session_id=session_id,
+            user_id=user_id,
+        ):
+            yield self._attach_trace_id_to_msg(
+                msg,
+                getattr(request, "trace_id", None),
+            ), last
+
+    def _build_query_trace_fields(
+        self,
+        request: AgentRequest | None,
+        *,
+        session_id: str,
+        user_id: str,
+        turn_id: str,
     ) -> TraceFields | None:
-        if getattr(request, "execution_origin", None) == "scheduled":
-            return None
-        turn_id = identity.turn_id if identity is not None else ""
-        if not all((user_id, session_id, turn_id, self.agent_id)):
+        if (
+            getattr(request, "execution_origin", None) == "scheduled"
+            or not user_id
+            or not session_id
+            or not turn_id
+            or not self.agent_id
+        ):
             return None
         return TraceFields(
             task_id=session_id,
@@ -5582,15 +5653,20 @@ class AgentRunner(Runner):
 
     def _prepare_query_handler_context(
         self,
-        msgs: list[Any],
-        request: AgentRequest,
+        msgs: Any,
+        request: AgentRequest | None,
     ) -> _QueryHandlerContext:
         query = _get_last_user_text(msgs)
         session_id = getattr(request, "session_id", "") or ""
         user_id = getattr(request, "user_id", "") or ""
+        channel_meta = getattr(request, "channel_meta", None) or {}
         identity = self._answer_turn_identity(request)
+        turn_id = identity.turn_id if identity is not None else ""
         if identity is not None:
-            channel_meta = getattr(request, "channel_meta", None) or {}
+            self._answer_turn_locations[identity] = (
+                str(session_id),
+                str(user_id),
+            )
             request.channel_meta = {
                 **channel_meta,
                 "turn_id": identity.turn_id,
@@ -5601,40 +5677,19 @@ class AgentRunner(Runner):
             session_id=session_id,
             user_id=user_id,
             identity=identity,
+            turn_id=turn_id,
             trace_fields=self._build_query_trace_fields(
                 request,
-                identity,
-                session_id,
-                user_id,
+                session_id=session_id,
+                user_id=user_id,
+                turn_id=turn_id,
             ),
         )
 
-    async def _stream_query_source(
+    async def _stream_query_handler_frames(
         self,
-        msgs: list[Any],
-        request: AgentRequest,
-        context: _QueryHandlerContext,
-    ):
-        query_execution = getattr(self, "_query_execution", None)
-        if query_execution is not None:
-            async for frame in query_execution.stream(
-                QueryInvocation(request=request, msgs=tuple(msgs)),
-            ):
-                yield frame.message, frame.last
-            return
-        async for msg, last in self._stream_query_entry(
-            msgs,
-            request=request,
-            query=context.query,
-            session_id=context.session_id,
-            user_id=context.user_id,
-        ):
-            yield msg, last
-
-    async def _stream_traced_query(
-        self,
-        msgs: list[Any],
-        request: AgentRequest,
+        msgs: Any,
+        request: AgentRequest | None,
         context: _QueryHandlerContext,
     ):
         with use_b3_trace_context(
@@ -5656,13 +5711,30 @@ class AgentRunner(Runner):
                         "agent.user_message",
                         context.query or "",
                     )
-                async for msg, last in self._stream_query_source(
+                async for msg, last in self._stream_query_frames(
                     msgs,
-                    request,
-                    context,
+                    request=request,
+                    query=context.query,
+                    session_id=context.session_id,
+                    user_id=context.user_id,
                 ):
-                    trace_id = getattr(request, "trace_id", None)
-                    yield self._attach_trace_id_to_msg(msg, trace_id), last
+                    yield msg, last
+
+    async def _settle_query_handler_outcome(
+        self,
+        identity: TurnIdentity | None,
+        status: str,
+        error: Exception | None = None,
+    ) -> None:
+        if identity is None:
+            return
+        if status == "cancelled":
+            outcome = TurnOutcome.cancelled(identity)
+        elif status == "failed":
+            outcome = TurnOutcome.failed(identity, error)
+        else:
+            outcome = TurnOutcome.completed(identity)
+        await self._report_answer_turn_outcome(identity, outcome)
 
     async def query_handler(
         self,
@@ -5681,36 +5753,33 @@ class AgentRunner(Runner):
         if identity is not None and task is not None:
             self._answer_turn_tasks[identity] = task
         try:
-            async for msg, last in self._stream_traced_query(
+            async for msg, last in self._stream_query_handler_frames(
                 msgs,
                 request,
                 context,
             ):
                 yield msg, last
         except asyncio.CancelledError:
-            if identity is not None:
-                await self._report_answer_turn_outcome(
-                    identity,
-                    TurnOutcome.cancelled(identity),
-                )
+            await self._settle_query_handler_outcome(
+                identity,
+                "cancelled",
+            )
             raise
         except Exception as exc:
-            if identity is not None:
-                await self._report_answer_turn_outcome(
-                    identity,
-                    TurnOutcome.failed(identity, exc),
-                )
+            await self._settle_query_handler_outcome(
+                identity,
+                "failed",
+                exc,
+            )
             raise
         else:
-            if identity is not None:
-                await self._report_answer_turn_outcome(
-                    identity,
-                    TurnOutcome.completed(identity),
-                )
+            await self._settle_query_handler_outcome(
+                identity,
+                "completed",
+            )
         finally:
             if identity is not None:
                 self._answer_turn_tasks.pop(identity, None)
-                self._answer_turn_runtimes.pop(identity, None)
 
     async def get_state_loaded(
         self,

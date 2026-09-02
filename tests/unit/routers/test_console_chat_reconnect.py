@@ -8,6 +8,16 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from src.swe.app.routers import console as console_router
+
+
+def test_console_stop_idle_response_is_a_fresh_legacy_payload() -> None:
+    first = console_router._console_stop_idle_response()
+    second = console_router._console_stop_idle_response()
+
+    assert first == {"stopped": False, "accepted": False, "status": "idle"}
+    assert first is not second
+
+
 from swe.app.answer_turn.models import StopClaim, TurnIdentity, TurnLease
 
 
@@ -39,6 +49,17 @@ class _FakeChatManager:
                 channel="console",
                 name="Existing Chat",
             )
+        return None
+
+    async def get_chat_by_session(
+        self,
+        session_id: str,
+        channel: str,
+        user_id: str | None = None,
+    ):
+        assert user_id in (None, "user-1")
+        if session_id == "session-existing" and channel == "console":
+            return await self.get_chat("chat-existing")
         return None
 
     async def get_chat_id_by_session(self, session_id: str, channel: str):
@@ -215,6 +236,134 @@ def test_console_chat_reconnect_accepts_chat_id_without_creating_new_chat(
         ]
 
     assert not chat_manager.get_or_create_calls
+
+
+def test_current_reconnect_returns_server_owned_turn_headers(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+
+    chat_manager = _FakeChatManager()
+    workspace = _workspace_with_tracker(chat_manager, _FakeTaskTracker())
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    with TestClient(app).stream(
+        "POST",
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json={
+            "reconnect": True,
+            "reconnect_mode": "current",
+            "chat_id": "chat-existing",
+            "session_id": "chat-existing",
+            "user_id": "user-1",
+            "channel": "console",
+        },
+    ) as response:
+        assert response.status_code == 200
+        assert response.headers["X-Swe-Chatid"] == "chat-existing"
+        assert response.headers["X-Swe-Sessionid"] == "session-existing"
+        assert response.headers["X-Swe-Msgid"] == "msg-1"
+
+
+def test_current_reconnect_falls_back_when_optional_chat_id_is_unknown(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+    chat_manager = _FakeChatManager()
+    workspace = _workspace_with_tracker(chat_manager, _FakeTaskTracker())
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+
+    response = TestClient(app).post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json={
+            "reconnect_mode": "current",
+            "chat_id": "unknown-chat-id",
+            "session_id": "session-existing",
+            "user_id": "user-1",
+            "channel": "console",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["X-Swe-Chatid"] == "chat-existing"
+
+
+def test_current_reconnect_returns_terminal_snapshot_event(
+    monkeypatch,
+) -> None:
+    app = FastAPI()
+    app.include_router(console_router.router)
+    chat_manager = _FakeChatManager()
+    workspace = _workspace_with_tracker(chat_manager, _FakeTaskTracker())
+
+    class _TerminalCoordinator:
+        async def attach(self, _chat_id):
+            return None
+
+    workspace.answer_turn_coordinator = _TerminalCoordinator()
+
+    async def _fake_get_agent_for_request(_request):
+        return workspace
+
+    async def _terminal_snapshot(_workspace, chat):
+        assert chat.id == "chat-existing"
+        return (
+            {"chat": {"id": chat.id}, "messages": []},
+            "msg-last",
+            "completed",
+        )
+
+    monkeypatch.setattr(
+        console_router,
+        "get_agent_for_request",
+        _fake_get_agent_for_request,
+    )
+    monkeypatch.setattr(
+        console_router,
+        "_current_recovery_terminal_snapshot",
+        _terminal_snapshot,
+        raising=False,
+    )
+
+    response = TestClient(app).post(
+        "/console/chat",
+        headers={"X-Source-Id": "src-a"},
+        json={
+            "reconnect_mode": "current",
+            "session_id": "chat-existing",
+            "user_id": "user-1",
+            "channel": "console",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.headers["X-Swe-Msgid"] == "msg-last"
+    assert response.text == (
+        "event: chat.snapshot\n"
+        'data: {"object": "chat_snapshot", "chat_id": "chat-existing", '
+        '"msgid": "msg-last", "turn_status": "completed", '
+        '"history": {"chat": {"id": "chat-existing"}, "messages": []}}\n\n'
+    )
 
 
 def test_console_chat_reconnect_with_agent_request_shape_does_not_start_run(

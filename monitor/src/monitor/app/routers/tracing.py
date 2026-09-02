@@ -153,6 +153,10 @@ async def get_overview(
         "full",
         description="返回明细级别；summary 跳过页面不展示的资源排行数据",
     ),
+    time_range: Literal["day", "week", "month", "custom"] = Query(
+        "day",
+        description="环比时间粒度",
+    ),
 ) -> OverviewStats:
     """获取运营概览统计.
 
@@ -176,6 +180,7 @@ async def get_overview(
         end,
         bbk_ids,
         include_resource_breakdown=detail == "full",
+        time_range=time_range,
     )
 
 

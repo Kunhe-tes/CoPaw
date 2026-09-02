@@ -68,6 +68,7 @@ from ..file_manager_execution import (
     run_file_manager_read,
 )
 from ..runner.context_references import MAX_CONTEXT_REFERENCES
+from ..answer_turn.coordinator import TurnSettlementPendingError
 from ..answer_turn.models import TurnIdentity, TurnStatus
 
 logger = logging.getLogger(__name__)
@@ -994,6 +995,151 @@ async def _attach_reconnect_queue(
     )
 
 
+def _current_recovery_chat_is_authorized(
+    chat: Any,
+    *,
+    sender_id: str,
+    channel_id: str,
+    identity: dict[str, str],
+) -> bool:
+    """Check a recovery target before revealing whether it has a live turn."""
+    if (
+        getattr(chat, "user_id", None) != sender_id
+        or getattr(chat, "channel", None) != channel_id
+    ):
+        return False
+    chat_meta = getattr(chat, "meta", None) or {}
+    for key in ("source_id", "agent_id"):
+        expected = identity.get(key)
+        stored = chat_meta.get(key)
+        if expected and stored and stored != expected:
+            return False
+    return True
+
+
+async def _get_authorized_recovery_chat(
+    manager: Any,
+    candidate_id: object,
+    *,
+    sender_id: str,
+    channel_id: str,
+    identity: dict[str, str],
+) -> Any | None:
+    """Load a candidate chat and hide unauthorized candidates."""
+    if not isinstance(candidate_id, str) or not candidate_id:
+        return None
+    chat = await manager.get_chat(candidate_id)
+    if chat is None or not _current_recovery_chat_is_authorized(
+        chat,
+        sender_id=sender_id,
+        channel_id=channel_id,
+        identity=identity,
+    ):
+        return None
+    return chat
+
+
+async def _resolve_current_recovery_chat(
+    workspace: Any,
+    *,
+    requested_chat_id: object,
+    session_id: str,
+    sender_id: str,
+    channel_id: str,
+    identity: dict[str, str],
+) -> Any | None:
+    """Resolve a recovery target without trusting an optional chat id."""
+    manager = workspace.chat_manager
+
+    for candidate_id in (requested_chat_id, session_id):
+        chat = await _get_authorized_recovery_chat(
+            manager,
+            candidate_id,
+            sender_id=sender_id,
+            channel_id=channel_id,
+            identity=identity,
+        )
+        if chat is not None:
+            return chat
+
+    chat = await manager.get_chat_by_session(
+        session_id,
+        channel_id,
+        sender_id,
+    )
+    if chat is not None and _current_recovery_chat_is_authorized(
+        chat,
+        sender_id=sender_id,
+        channel_id=channel_id,
+        identity=identity,
+    ):
+        return chat
+    return None
+
+
+async def _current_recovery_terminal_snapshot(
+    workspace: Any,
+    chat: Any,
+) -> tuple[dict[str, Any], str | None, str | None]:
+    """Build the durable terminal recovery payload for one selected Chat."""
+    from ..runner.api import _build_chat_history, _read_history_state
+
+    session = workspace.runner.session
+    history = await _build_chat_history(
+        chat,
+        session=session,
+        workspace=workspace,
+        status_override="idle",
+        non_blocking=True,
+    )
+    state = await _read_history_state(
+        session,
+        chat.session_id,
+        chat.user_id,
+    )
+    turn_states = state.get("turn_states")
+    if not isinstance(turn_states, dict):
+        return history.model_dump(mode="json"), None, None
+    for msgid, turn_state in reversed(tuple(turn_states.items())):
+        if not isinstance(turn_state, dict):
+            continue
+        if turn_state.get("chat_id") not in (None, chat.id):
+            continue
+        status = turn_state.get("status")
+        if not isinstance(status, str):
+            continue
+        if status == "admitted":
+
+            orphan_msgid = msgid
+
+            def reconcile_orphaned_turn(
+                state: dict[str, Any],
+                orphan_msgid: str = orphan_msgid,
+            ) -> dict[str, Any]:
+                states = state.get("turn_states")
+                if isinstance(states, dict) and isinstance(
+                    states.get(orphan_msgid),
+                    dict,
+                ):
+                    states[orphan_msgid]["status"] = "failed"
+                return state
+
+            await session.mutate_session_state(
+                chat.session_id,
+                reconcile_orphaned_turn,
+                user_id=chat.user_id,
+            )
+            status = "failed"
+        if status not in {"completed", "stopped", "cancelled", "failed"}:
+            continue
+        return (
+            history.model_dump(mode="json"),
+            msgid if isinstance(msgid, str) and msgid else None,
+            "stopped" if status == "cancelled" else status,
+        )
+    return history.model_dump(mode="json"), None, None
+
+
 def _console_chat_stream_headers(
     *,
     chat_id: str | None = None,
@@ -1013,7 +1159,132 @@ def _console_chat_stream_headers(
     return headers
 
 
-async def _start_new_chat(  # pylint: disable=too-many-statements
+def _build_console_chat_meta(
+    workspace: Any,
+    native_payload: dict[str, Any],
+) -> dict[str, Any]:
+    meta = (
+        {"agent_id": workspace.agent_id}
+        if getattr(workspace, "agent_id", None)
+        else {}
+    )
+    source_id = native_payload["meta"].get("source_id")
+    if source_id:
+        meta["source_id"] = source_id
+    return meta
+
+
+async def _get_or_create_console_chat(
+    workspace: Any,
+    session_id: str,
+    native_payload: dict[str, Any],
+) -> tuple[Any, str | None, bool]:
+    scenario_preset_id = native_payload["meta"].get("scenario_preset_id")
+    chat_meta = _build_console_chat_meta(workspace, native_payload)
+    if not scenario_preset_id:
+        chat = await workspace.chat_manager.get_or_create_chat(
+            session_id,
+            native_payload["sender_id"],
+            native_payload["channel_id"],
+            name=_derive_chat_name(native_payload),
+            meta=chat_meta or None,
+        )
+        return chat, None, False
+
+    from ..scenario_preset.router import get_service as get_scenario_service
+    from ..scenario_preset.runtime import initialize_scenario_snapshot
+
+    async def snapshot_factory(chat):
+        workspace_dir = getattr(workspace, "workspace_dir", None)
+        resource_root = (
+            Path(workspace_dir) / ".scenario_sessions" / chat.id
+            if workspace_dir is not None
+            else None
+        )
+        return await initialize_scenario_snapshot(
+            service=get_scenario_service(),
+            source_id=native_payload["meta"]["source_id"],
+            scenario_id=scenario_preset_id,
+            agent_id=getattr(workspace, "agent_id", None),
+            workspace_dir=workspace_dir,
+            agent_config=getattr(workspace, "config", None),
+            bbk_id=native_payload["meta"].get("bbk_id"),
+            session_resource_root=resource_root,
+        )
+
+    try:
+        chat, created = (
+            await workspace.chat_manager.get_or_create_scenario_chat(
+                session_id,
+                native_payload["sender_id"],
+                native_payload["channel_id"],
+                _derive_chat_name(native_payload),
+                chat_meta,
+                snapshot_factory,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="Scenario preset is no longer available",
+        ) from exc
+    return chat, scenario_preset_id, created
+
+
+def _validate_and_attach_scenario_snapshot(
+    workspace: Any,
+    chat: Any,
+    scenario_preset_id: str | None,
+    native_payload: dict[str, Any],
+) -> None:
+    if not scenario_preset_id:
+        return
+    from ..scenario_preset.runtime import get_scenario_snapshot
+
+    snapshot = get_scenario_snapshot(chat.meta)
+    if snapshot is None:
+        raise HTTPException(
+            status_code=409,
+            detail="Scenario selection is only available for a new chat",
+        )
+    if snapshot.get("scenario_id") != scenario_preset_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Scenario selection is locked for this chat",
+        )
+    if snapshot.get("agent_id") not in (None, workspace.agent_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Scenario chat is bound to another Agent",
+        )
+    native_payload["meta"]["scenario_preset_snapshot"] = snapshot
+    native_payload["meta"]["scenario_preset_snapshot_source"] = "chat_meta"
+
+
+async def _start_or_attach_console_turn(
+    coordinator: Any,
+    chat: Any,
+    native_payload: dict[str, Any],
+    console_channel: Any,
+    msgid: str,
+    before_start: Callable[[], None] | None,
+) -> Any:
+    if await coordinator.status(chat.id) == TurnStatus.STOPPING:
+        raise HTTPException(status_code=409, detail="Chat is stopping")
+    if chat.channel and chat.channel != "console":
+        native_payload["meta"]["session_channel"] = chat.channel
+    kwargs = {"msgid": msgid}
+    if before_start is not None:
+        kwargs["before_start"] = before_start
+    return await coordinator.start_or_attach(
+        chat.id,
+        native_payload,
+        _console_turn_producer(console_channel),
+        **kwargs,
+    )
+
+
+async def _start_new_chat(
     workspace,
     tracker,
     console_channel,
@@ -1025,113 +1296,30 @@ async def _start_new_chat(  # pylint: disable=too-many-statements
 ):
     """创建新会话并启动 stream，返回 (queue, run_key, msgid)。"""
     msgid = str(uuid.uuid4())
-    scenario_preset_id = native_payload["meta"].get("scenario_preset_id")
-    chat_meta = (
-        {"agent_id": workspace.agent_id}
-        if getattr(workspace, "agent_id", None)
-        else {}
+    chat, scenario_preset_id, created = await _get_or_create_console_chat(
+        workspace,
+        session_id,
+        native_payload,
     )
-    source_id = native_payload["meta"].get("source_id")
-    if source_id:
-        chat_meta["source_id"] = source_id
-    created = False
-    if scenario_preset_id:
-        from ..scenario_preset.router import (
-            get_service as get_scenario_service,
-        )
-        from ..scenario_preset.runtime import initialize_scenario_snapshot
-
-        async def snapshot_factory(chat):
-            workspace_dir = getattr(workspace, "workspace_dir", None)
-            resource_root = (
-                Path(workspace_dir) / ".scenario_sessions" / chat.id
-                if workspace_dir is not None
-                else None
-            )
-            return await initialize_scenario_snapshot(
-                service=get_scenario_service(),
-                source_id=native_payload["meta"]["source_id"],
-                scenario_id=scenario_preset_id,
-                agent_id=getattr(workspace, "agent_id", None),
-                workspace_dir=workspace_dir,
-                agent_config=getattr(workspace, "config", None),
-                bbk_id=native_payload["meta"].get("bbk_id"),
-                session_resource_root=resource_root,
-            )
-
-        try:
-            chat, created = (
-                await workspace.chat_manager.get_or_create_scenario_chat(
-                    session_id,
-                    native_payload["sender_id"],
-                    native_payload["channel_id"],
-                    _derive_chat_name(native_payload),
-                    chat_meta,
-                    snapshot_factory,
-                )
-            )
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=409,
-                detail="Scenario preset is no longer available",
-            ) from exc
-    else:
-        chat = await workspace.chat_manager.get_or_create_chat(
-            session_id,
-            native_payload["sender_id"],
-            native_payload["channel_id"],
-            name=_derive_chat_name(native_payload),
-            meta=chat_meta or None,
-        )
-    if scenario_preset_id:
-        from ..scenario_preset.runtime import (
-            get_scenario_snapshot,
-        )
-
-        snapshot = get_scenario_snapshot(chat.meta)
-        if snapshot is None:
-            raise HTTPException(
-                status_code=409,
-                detail="Scenario selection is only available for a new chat",
-            )
-        if snapshot.get("scenario_id") != scenario_preset_id:
-            raise HTTPException(
-                status_code=409,
-                detail="Scenario selection is locked for this chat",
-            )
-        if snapshot.get("agent_id") not in (None, workspace.agent_id):
-            raise HTTPException(
-                status_code=409,
-                detail="Scenario chat is bound to another Agent",
-            )
-        native_payload["meta"]["scenario_preset_snapshot"] = snapshot
-        native_payload["meta"]["scenario_preset_snapshot_source"] = "chat_meta"
+    _validate_and_attach_scenario_snapshot(
+        workspace,
+        chat,
+        scenario_preset_id,
+        native_payload,
+    )
     native_payload["meta"]["chat_id"] = chat.id
     coordinator = workspace.answer_turn_coordinator
     if coordinator is None:
         raise RuntimeError("answer-turn coordinator is not configured")
-    if await coordinator.status(chat.id) == TurnStatus.STOPPING:
-        raise HTTPException(status_code=409, detail="Chat is stopping")
-    # Inject session_channel from chat record so downstream (e.g. session-end
-    # push) can identify the session's original channel (e.g. zhaohu).
-    if chat.channel and chat.channel != "console":
-        native_payload["meta"]["session_channel"] = chat.channel
     try:
-        if before_start is None:
-            lease = await coordinator.start_or_attach(
-                chat.id,
-                native_payload,
-                _console_turn_producer(console_channel),
-                msgid=msgid,
-            )
-        else:
-            lease = await coordinator.start_or_attach(
-                chat.id,
-                native_payload,
-                _console_turn_producer(console_channel),
-                msgid=msgid,
-                before_start=before_start,
-            )
+        lease = await _start_or_attach_console_turn(
+            coordinator,
+            chat,
+            native_payload,
+            console_channel,
+            msgid,
+            before_start,
+        )
     except BaseException:
         if scenario_preset_id and created:
             await workspace.chat_manager.delete_chats([chat.id])
@@ -1237,6 +1425,8 @@ async def post_console_chat(
         else request_data.model_dump()
     )
     is_reconnect = request_mapping.get("reconnect") is True
+    is_current_reconnect = request_mapping.get("reconnect_mode") == "current"
+    is_reconnect = is_reconnect or is_current_reconnect
 
     if not is_reconnect:
         wplus_result, suppression_ctx = await _try_wplus_entry_intercept(
@@ -1259,6 +1449,7 @@ async def post_console_chat(
         identity=identity,
         request_mapping=request_mapping,
         is_reconnect=is_reconnect,
+        is_current_reconnect=is_current_reconnect,
         suppression_ctx=suppression_ctx,
     )
 
@@ -1690,6 +1881,152 @@ async def _try_wplus_entry_intercept(
     )
 
 
+async def _terminal_recovery_response(
+    workspace: Any,
+    chat: Any,
+) -> StreamingResponse:
+    """Build the SSE response used when a recovered turn already ended."""
+    history, msgid, turn_status = await _current_recovery_terminal_snapshot(
+        workspace,
+        chat,
+    )
+    snapshot = {
+        "object": "chat_snapshot",
+        "chat_id": chat.id,
+        "msgid": msgid,
+        "turn_status": turn_status,
+        "history": history,
+    }
+
+    async def terminal_event_generator() -> AsyncGenerator[str, None]:
+        yield (
+            "event: chat.snapshot\n"
+            f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
+        )
+
+    return StreamingResponse(
+        terminal_event_generator(),
+        media_type="text/event-stream",
+        headers=_console_chat_stream_headers(
+            chat_id=chat.id if msgid else None,
+            session_id=chat.session_id if msgid else "",
+            msgid=msgid,
+        ),
+    )
+
+
+async def _resolve_current_reconnect_target(
+    *,
+    workspace: Any,
+    native_payload: dict[str, Any],
+    session_id: str,
+    identity: dict[str, str],
+) -> tuple[asyncio.Queue, str, TurnIdentity, str] | StreamingResponse:
+    """Resolve a current reconnect to a live lease or terminal snapshot."""
+    chat = await _resolve_current_recovery_chat(
+        workspace,
+        requested_chat_id=native_payload.get("chat_id"),
+        session_id=session_id,
+        sender_id=native_payload["sender_id"],
+        channel_id=native_payload["channel_id"],
+        identity=identity,
+    )
+    if chat is None:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    coordinator = workspace.answer_turn_coordinator
+    recover_current = getattr(coordinator, "recover_current", None)
+    if recover_current is not None:
+        try:
+            selected = await recover_current(
+                chat.id,
+                lambda: _terminal_recovery_response(workspace, chat),
+            )
+        except TurnSettlementPendingError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Chat settlement is pending",
+                headers={"Retry-After": "1"},
+            ) from exc
+        if isinstance(selected, StreamingResponse):
+            return selected
+        lease = selected
+    else:
+        lease = await coordinator.attach(chat.id)
+    if lease is None:
+        status_reader = getattr(coordinator, "status", None)
+        coordinator_status = (
+            await status_reader(chat.id) if status_reader is not None else None
+        )
+        if coordinator_status is not None:
+            raise HTTPException(
+                status_code=503,
+                detail="Chat settlement is pending",
+                headers={"Retry-After": "1"},
+            )
+        settlement_pending = getattr(coordinator, "settlement_pending", None)
+        if settlement_pending is not None and await settlement_pending(
+            chat.id,
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail="Chat settlement is pending",
+                headers={"Retry-After": "1"},
+            )
+        return await _terminal_recovery_response(workspace, chat)
+    native_payload["meta"]["resolved_session_id"] = chat.session_id
+    return lease.queue, chat.id, lease.identity, lease.identity.msgid
+
+
+async def _start_console_stream_target(
+    *,
+    workspace: Any,
+    tracker: Any,
+    console_channel: Any,
+    session_id: str,
+    native_payload: dict[str, Any],
+    suppression_ctx: _SuppressionContext | None,
+) -> tuple[asyncio.Queue, str, TurnIdentity | None, str | None]:
+    """Start a new chat and apply suppression bookkeeping."""
+    before_start = _build_suppression_before_start(
+        suppression_ctx,
+        native_payload,
+    )
+    try:
+        queue, run_key, msgid, is_new_run = await _start_new_chat(
+            workspace,
+            tracker,
+            console_channel,
+            session_id,
+            native_payload,
+            before_start=before_start,
+            include_run_status=True,
+        )
+    except TurnSettlementPendingError as exc:
+        _release_suppression_on_failure(suppression_ctx, native_payload)
+        raise HTTPException(
+            status_code=503,
+            detail="Chat settlement is pending",
+            headers={"Retry-After": "1"},
+        ) from exc
+    except Exception:
+        _release_suppression_on_failure(suppression_ctx, native_payload)
+        raise
+    _validate_suppression_new_run(
+        suppression_ctx,
+        tracker,
+        run_key,
+        queue,
+        is_new_run,
+        native_payload,
+    )
+    return (
+        queue,
+        run_key,
+        native_payload["meta"].get("answer_turn_identity"),
+        msgid,
+    )
+
+
 async def _dispatch_console_stream(
     *,
     workspace: Any,
@@ -1699,14 +2036,27 @@ async def _dispatch_console_stream(
     identity: dict[str, str],
     request_mapping: dict[str, Any],
     is_reconnect: bool,
+    is_current_reconnect: bool = False,
     suppression_ctx: _SuppressionContext | None = None,
 ) -> StreamingResponse:
     """Execute the actual chat run and stream the response."""
     tracker = workspace.task_tracker
     msgid: str | None = None
-    stream_identity: TurnIdentity | None = None
 
-    if is_reconnect:
+    if is_current_reconnect:
+        current_target = await _resolve_current_reconnect_target(
+            workspace=workspace,
+            native_payload={
+                **native_payload,
+                "chat_id": request_mapping.get("chat_id"),
+            },
+            session_id=session_id,
+            identity=identity,
+        )
+        if isinstance(current_target, StreamingResponse):
+            return current_target
+        queue, run_key, stream_identity, msgid = current_target
+    elif is_reconnect:
         requested_msgid = native_payload.get("meta", {}).get("msgid")
         queue, run_key, stream_identity = await _attach_reconnect_queue(
             workspace,
@@ -1715,39 +2065,16 @@ async def _dispatch_console_stream(
             native_payload["channel_id"],
             requested_msgid if isinstance(requested_msgid, str) else None,
         )
-        if queue is None:
-            raise HTTPException(
-                status_code=404,
-                detail="No running chat for this session",
-            )
     else:
-        before_start = _build_suppression_before_start(
-            suppression_ctx,
-            native_payload,
-        )
-        try:
-            queue, run_key, msgid, is_new_run = await _start_new_chat(
-                workspace,
-                tracker,
-                console_channel,
-                session_id,
-                native_payload,
-                before_start=before_start,
-                include_run_status=True,
+        queue, run_key, stream_identity, msgid = (
+            await _start_console_stream_target(
+                workspace=workspace,
+                tracker=tracker,
+                console_channel=console_channel,
+                session_id=session_id,
+                native_payload=native_payload,
+                suppression_ctx=suppression_ctx,
             )
-            stream_identity = native_payload["meta"].get(
-                "answer_turn_identity",
-            )
-        except Exception:
-            _release_suppression_on_failure(suppression_ctx, native_payload)
-            raise
-        _validate_suppression_new_run(
-            suppression_ctx,
-            tracker,
-            run_key,
-            queue,
-            is_new_run,
-            native_payload,
         )
 
     async def event_generator() -> AsyncGenerator[str, None]:
@@ -1770,8 +2097,15 @@ async def _dispatch_console_stream(
         media_type="text/event-stream",
         headers=_console_chat_stream_headers(
             chat_id=run_key,
-            session_id=session_id,
-            msgid=msgid,
+            session_id=(
+                native_payload.get("meta", {}).get("resolved_session_id")
+                or session_id
+            ),
+            msgid=(
+                stream_identity.msgid
+                if is_current_reconnect and stream_identity is not None
+                else msgid
+            ),
         ),
     )
 
@@ -1883,6 +2217,61 @@ async def _interrupt_console_goal(
         )
 
 
+def _console_stop_idle_response() -> dict[str, Any]:
+    return {"stopped": False, "accepted": False, "status": "idle"}
+
+
+async def _resolve_console_stop_chat_id(
+    workspace: Any,
+    coordinator: Any,
+    *,
+    requested_chat_id: str | None,
+    session_id: str | None,
+    user_id: str,
+    source_id: str,
+) -> str | None:
+    if requested_chat_id is not None or not session_id:
+        return requested_chat_id
+    candidates = await workspace.chat_manager.list_chats(
+        user_id=user_id,
+        channel="console",
+    )
+    matches = [
+        chat
+        for chat in candidates
+        if chat.session_id == session_id
+        and (
+            not source_id
+            or str(
+                (getattr(chat, "meta", None) or {}).get("source_id") or "",
+            )
+            == source_id
+        )
+    ]
+    active_matches = [
+        chat
+        for chat in matches
+        if await coordinator.current_identity(chat.id) is not None
+    ]
+    return active_matches[0].id if len(active_matches) == 1 else None
+
+
+def _is_authorized_console_stop_chat(
+    chat: Any,
+    *,
+    user_id: str,
+    source_id: str,
+) -> bool:
+    if chat is None or getattr(chat, "channel", "console") != "console":
+        return False
+    chat_source_id = str(
+        (getattr(chat, "meta", None) or {}).get("source_id") or "",
+    ).strip()
+    return str(getattr(chat, "user_id", "")) == user_id and (
+        not chat_source_id or chat_source_id == source_id
+    )
+
+
 @router.post(
     "/chat/stop",
     status_code=200,
@@ -1907,59 +2296,34 @@ async def post_console_chat_stop(
         )
     target_chat_id = chat_id
     if target_chat_id is None and msgid is not None:
-        return {"stopped": False, "accepted": False, "status": "idle"}
+        return _console_stop_idle_response()
     request_user_id, request_source_id = _console_stop_request_identity(
         request,
     )
     if not request_user_id:
         logger.warning("Rejected Console Stop without caller identity")
-        return {"stopped": False, "accepted": False, "status": "idle"}
-    if target_chat_id is None and session_id:
-        candidates = await workspace.chat_manager.list_chats(
-            user_id=request_user_id,
-            channel="console",
-        )
-        matches = [
-            chat
-            for chat in candidates
-            if chat.session_id == session_id
-            and (
-                not request_source_id
-                or str(
-                    (getattr(chat, "meta", None) or {}).get("source_id") or "",
-                )
-                == request_source_id
-            )
-        ]
-        active_matches = [
-            chat
-            for chat in matches
-            if await coordinator.current_identity(chat.id) is not None
-        ]
-        if len(active_matches) != 1:
-            return {"stopped": False, "accepted": False, "status": "idle"}
-        target_chat_id = active_matches[0].id
+        return _console_stop_idle_response()
+    target_chat_id = await _resolve_console_stop_chat_id(
+        workspace,
+        coordinator,
+        requested_chat_id=target_chat_id,
+        session_id=session_id,
+        user_id=request_user_id,
+        source_id=request_source_id,
+    )
     if target_chat_id is None:
-        return {"stopped": False, "accepted": False, "status": "idle"}
+        return _console_stop_idle_response()
     chat = await workspace.chat_manager.get_chat(target_chat_id)
-    if chat is None or getattr(chat, "channel", "console") != "console":
+    if not _is_authorized_console_stop_chat(
+        chat,
+        user_id=request_user_id,
+        source_id=request_source_id,
+    ):
         logger.warning(
             "Rejected Console Stop target chat_id=%s",
             target_chat_id,
         )
-        return {"stopped": False, "accepted": False, "status": "idle"}
-    chat_meta = getattr(chat, "meta", None) or {}
-    chat_source_id = str(chat_meta.get("source_id") or "").strip()
-    if (
-        not request_user_id
-        or str(getattr(chat, "user_id", "")) != request_user_id
-        or (chat_source_id and chat_source_id != request_source_id)
-    ):
-        logger.warning(
-            "Rejected Console Stop ownership chat_id=%s",
-            target_chat_id,
-        )
-        return {"stopped": False, "accepted": False, "status": "idle"}
+        return _console_stop_idle_response()
     accepted, claimed_chat_id, claimed_msgid, status = (
         await _claim_console_stop(
             coordinator,
@@ -1968,7 +2332,7 @@ async def post_console_chat_stop(
         )
     )
     if not accepted:
-        return {"stopped": False, "accepted": False, "status": "idle"}
+        return _console_stop_idle_response()
     return {
         "stopped": True,
         "accepted": True,

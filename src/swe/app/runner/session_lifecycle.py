@@ -64,8 +64,12 @@ def discard_admitted_user_anchor(agent: Any, turn_id: str | None) -> bool:
     return len(memory.content) != original_len
 
 
-def mark_stopped_turn_state(state: dict[str, Any], turn_id: str) -> None:
-    """Record terminal Stop status and annotate the last assistant output."""
+def mark_terminal_turn_state(
+    state: dict[str, Any],
+    turn_id: str,
+    status: str,
+) -> None:
+    """Record one public terminal answer-turn status in the durable state."""
     turn_states = state.setdefault(TURN_STATES_KEY, {})
     if not isinstance(turn_states, dict):
         turn_states = {}
@@ -74,14 +78,15 @@ def mark_stopped_turn_state(state: dict[str, Any], turn_id: str) -> None:
     if not isinstance(turn_state, dict):
         turn_state = {}
         turn_states[turn_id] = turn_state
-    turn_state["status"] = "stopped"
-    memory_state = (state.get("agent") or {}).get("memory") or {}
-    content = (
-        memory_state.get("content") if isinstance(memory_state, dict) else None
-    )
-    if not isinstance(content, list):
-        return
-    anchor_index = next(
+    turn_state["status"] = status
+
+
+def _find_persisted_turn_anchor(
+    content: list[Any],
+    turn_id: str,
+) -> int | None:
+    """Return the user-anchor index for a persisted turn."""
+    return next(
         (
             index
             for index, entry in enumerate(content)
@@ -93,8 +98,13 @@ def mark_stopped_turn_state(state: dict[str, Any], turn_id: str) -> None:
         ),
         None,
     )
-    if anchor_index is None:
-        return
+
+
+def _mark_persisted_assistant_stopped(
+    content: list[Any],
+    anchor_index: int,
+) -> None:
+    """Annotate the latest persisted assistant message after the anchor."""
     for entry in reversed(content[anchor_index + 1 :]):
         if (
             not isinstance(entry, list)
@@ -111,6 +121,21 @@ def mark_stopped_turn_state(state: dict[str, Any], turn_id: str) -> None:
             message["metadata"] = metadata
         metadata["turn_status"] = "stopped"
         return
+
+
+def mark_stopped_turn_state(state: dict[str, Any], turn_id: str) -> None:
+    """Record terminal Stop status and annotate the last assistant output."""
+    mark_terminal_turn_state(state, turn_id, "stopped")
+    memory_state = (state.get("agent") or {}).get("memory") or {}
+    content = (
+        memory_state.get("content") if isinstance(memory_state, dict) else None
+    )
+    if not isinstance(content, list):
+        return
+    anchor_index = _find_persisted_turn_anchor(content, turn_id)
+    if anchor_index is None:
+        return
+    _mark_persisted_assistant_stopped(content, anchor_index)
 
 
 def mark_stopped_agent_memory(agent: Any, turn_id: str | None) -> bool:

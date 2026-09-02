@@ -14,6 +14,8 @@ import {
   MessageCircleMore,
   RotateCw,
   Sparkles,
+  TrendingDown,
+  TrendingUp,
   UserRound,
   Users,
 } from "lucide-react";
@@ -42,9 +44,11 @@ import {
   getScopedBranchFilter,
 } from "../../../utils/branchScope";
 import {
+  formatChange,
   formatNumber,
   formatPercent,
   formatTokens,
+  toChangeDirection,
   truncateName,
   type BreakdownItem,
   type OverviewMetricCard,
@@ -99,6 +103,7 @@ function buildMetricCards(
   overviewStats: OverviewStats | null,
   taskStatusSummary: TaskStatusSummary | null,
 ): OverviewMetricCard[] {
+  const growthStats = overviewStats?.growth_stats;
   return [
     {
       key: "users",
@@ -118,6 +123,8 @@ function buildMetricCards(
           </span>
         </span>
       ),
+      changeText: formatChange(growthStats?.userGrowth),
+      changeDirection: toChangeDirection(growthStats?.userGrowth),
       accentColor: METRIC_ACCENT_COLORS[0],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.users),
     },
@@ -125,6 +132,8 @@ function buildMetricCards(
       key: "sessions",
       title: "总会话数",
       valueText: formatNumber(overviewStats?.total_sessions ?? 0),
+      changeText: formatChange(growthStats?.sessionGrowth),
+      changeDirection: toChangeDirection(growthStats?.sessionGrowth),
       accentColor: METRIC_ACCENT_COLORS[1],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.sessions),
     },
@@ -144,6 +153,8 @@ function buildMetricCards(
           </span>
         </span>
       ),
+      changeText: formatChange(growthStats?.cronGrowth),
+      changeDirection: toChangeDirection(growthStats?.cronGrowth),
       accentColor: METRIC_ACCENT_COLORS[2],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.cron_tasks),
     },
@@ -151,6 +162,8 @@ function buildMetricCards(
       key: "tokens",
       title: "资源消耗",
       valueText: formatTokens(overviewStats?.total_tokens ?? 0),
+      changeText: formatChange(growthStats?.tokensGrowth),
+      changeDirection: toChangeDirection(growthStats?.tokensGrowth),
       accentColor: METRIC_ACCENT_COLORS[3],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.tokens),
     },
@@ -174,6 +187,8 @@ function buildMetricCards(
           </span>
         </span>
       ),
+      changeText: formatChange(growthStats?.planCustomersGrowth),
+      changeDirection: toChangeDirection(growthStats?.planCustomersGrowth),
       accentColor: METRIC_ACCENT_COLORS[4],
       breakdown: mapBreakdown(overviewStats?.branch_breakdown?.customers),
     },
@@ -778,7 +793,7 @@ export default function BusinessOverviewPage() {
           startDateText,
           endDateText,
           effectiveBbkIds?.join(","),
-          { detail: "summary" },
+          { detail: "summary", timeRange },
         ),
         isSingleDay
           ? tracingApi.getHourlyTrend(
@@ -1240,6 +1255,20 @@ export default function BusinessOverviewPage() {
                     <div className={styles.metricText}>
                       <div className={styles.metricTitle}>{card.title}</div>
                       <div className={styles.metricValue}>{card.valueText}</div>
+                      <div
+                        className={
+                          card.changeDirection === "up"
+                            ? styles.metricChangeUp
+                            : card.changeDirection === "down"
+                            ? styles.metricChangeDown
+                            : styles.metricChangeFlat
+                        }
+                      >
+                        环比
+                        {card.changeDirection === "up" && <TrendingUp size={14} />}
+                        {card.changeDirection === "down" && <TrendingDown size={14} />}
+                        {card.changeText}
+                      </div>
                     </div>
                   </div>
                   <div className={styles.breakdownTitle}>Top5分行</div>

@@ -17,6 +17,23 @@ from swe.app.runner.query_execution import (
 from swe.app.runner.runner import AgentRunner, _QueryPreflight
 
 
+def test_query_handler_context_prepares_trace_identity_metadata(
+    tmp_path,
+) -> None:
+    runner = AgentRunner(agent_id="test-agent", workspace_dir=tmp_path)
+    context = runner._prepare_query_handler_context(
+        [Msg(name="user", role="user", content="hello")],
+        SimpleNamespace(
+            session_id="session-1",
+            user_id="user-1",
+            channel_meta={},
+        ),
+    )
+    assert context.query == "hello"
+    assert context.session_id == "session-1"
+    assert context.trace_fields is None
+
+
 class _RecordingAdapter:
     def __init__(self) -> None:
         self.invocations: list[QueryInvocation] = []

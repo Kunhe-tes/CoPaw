@@ -125,6 +125,9 @@ class TestOverviewStatsDetail:
         service._get_top_tools = AsyncMock(return_value=[])
         service._get_top_skills = AsyncMock(return_value=[])
         service._get_mcp_stats = AsyncMock(return_value=([], []))
+        service._get_growth_stats = AsyncMock(
+            return_value={"userGrowth": 5, "planCustomersGrowth": 6},
+        )
         return service
 
     @pytest.mark.asyncio
@@ -145,6 +148,11 @@ class TestOverviewStatsDetail:
         assert result.total_tokens == 150
         assert result.plan_customers == 5
         assert result.branch_breakdown == OverviewBranchBreakdown()
+        assert result.growth_stats == {
+            "userGrowth": 5,
+            "planCustomersGrowth": 6,
+        }
+        service._get_growth_stats.assert_awaited_once()
         service._get_model_distribution.assert_not_awaited()
         service._get_top_tools.assert_not_awaited()
         service._get_top_skills.assert_not_awaited()

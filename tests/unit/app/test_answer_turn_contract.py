@@ -162,6 +162,86 @@ async def test_coordinator_stop_enters_stopping_until_settlement():
 
 
 @pytest.mark.asyncio
+async def test_submission_waits_for_terminal_outcome_persistence() -> None:
+    tracker = TaskTracker()
+    persistence_started = asyncio.Event()
+    release_persistence = asyncio.Event()
+
+    class _BlockingSession(InMemorySession):
+        async def persist_outcome(self, outcome):
+            persistence_started.set()
+            await release_persistence.wait()
+            await super().persist_outcome(outcome)
+
+    coordinator = AnswerTurnCoordinator(
+        stream=tracker,
+        execution=InMemoryExecution(),
+        session=_BlockingSession(),
+        goal=InMemoryGoal(),
+        subagent=InMemorySubagent(),
+        approval=InMemoryApproval(),
+    )
+
+    async def producer(_identity, _payload):
+        if False:
+            yield None
+
+    first = await coordinator.start_or_attach("chat-1", {}, producer)
+    settlement = asyncio.create_task(
+        coordinator.settle(TurnOutcome.completed(first.identity)),
+    )
+    await asyncio.wait_for(persistence_started.wait(), timeout=1)
+
+    following = asyncio.create_task(
+        coordinator.start_or_attach("chat-1", {}, producer),
+    )
+    await asyncio.sleep(0)
+    assert following.done() is False
+
+    release_persistence.set()
+    await settlement
+    assert (await following).is_new_run is True
+
+
+@pytest.mark.asyncio
+async def test_failed_settlement_blocks_following_submission_until_retry() -> (
+    None
+):
+    tracker = TaskTracker()
+    attempts = 0
+
+    class _FlakySession(InMemorySession):
+        async def persist_outcome(self, outcome):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise OSError("disk unavailable")
+            await super().persist_outcome(outcome)
+
+    coordinator = AnswerTurnCoordinator(
+        stream=tracker,
+        execution=InMemoryExecution(),
+        session=_FlakySession(),
+        goal=InMemoryGoal(),
+        subagent=InMemorySubagent(),
+        approval=InMemoryApproval(),
+    )
+
+    async def producer(_identity, _payload):
+        if False:
+            yield None
+
+    first = await coordinator.start_or_attach("chat-1", {}, producer)
+    await coordinator.settle(TurnOutcome.completed(first.identity))
+
+    with pytest.raises(Exception, match="settlement"):
+        await coordinator.start_or_attach("chat-1", {}, producer)
+
+    await asyncio.sleep(0.2)
+    assert attempts >= 2
+
+
+@pytest.mark.asyncio
 async def test_stop_with_mismatched_msgid_leaves_the_active_turn_running():
     tracker = TaskTracker()
     coordinator = _coordinator(tracker)

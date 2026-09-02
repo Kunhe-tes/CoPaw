@@ -467,6 +467,76 @@ class BaseChannel(ABC):
                 f"This should not happen with UnifiedQueueManager.",
             )
 
+    def _prepare_stream_context(
+        self,
+        identity: TurnIdentity,
+        payload: Any,
+    ) -> tuple["AgentRequest", dict[str, Any], str]:
+        """Normalize payload metadata before starting the process stream."""
+        if isinstance(payload, dict):
+            payload = {
+                **payload,
+                "meta": {
+                    **(payload.get("meta") or {}),
+                    "answer_turn_identity": identity,
+                    "msgid": identity.msgid,
+                },
+            }
+        else:
+            meta = dict(getattr(payload, "channel_meta", None) or {})
+            meta.update(answer_turn_identity=identity, msgid=identity.msgid)
+            setattr(payload, "channel_meta", meta)
+        request = self._payload_to_request(payload)
+        if isinstance(payload, dict):
+            send_meta = dict(payload.get("meta") or {})
+            if payload.get("session_webhook"):
+                send_meta["session_webhook"] = payload["session_webhook"]
+        else:
+            send_meta = getattr(request, "channel_meta", None) or {}
+        bot_prefix = getattr(self, "bot_prefix", None) or getattr(
+            self,
+            "_bot_prefix",
+            "",
+        )
+        if bot_prefix and "bot_prefix" not in send_meta:
+            send_meta = {**send_meta, "bot_prefix": bot_prefix}
+        return request, send_meta, self.get_to_handle_from_request(request)
+
+    @staticmethod
+    def _serialize_stream_event(event: Any) -> str:
+        """Serialize one process event to an SSE data payload."""
+        import json
+
+        if hasattr(event, "model_dump_json"):
+            return event.model_dump_json()
+        if hasattr(event, "json"):
+            return event.json()
+        return json.dumps({"text": str(event)})
+
+    async def _handle_stream_event(
+        self,
+        request: "AgentRequest",
+        event: Any,
+        *,
+        to_handle: str,
+        send_meta: dict[str, Any],
+    ) -> Any:
+        """Dispatch callbacks and return the latest response event."""
+        obj = getattr(event, "object", None)
+        status = getattr(event, "status", None)
+        if obj == "message" and status == RunStatus.Completed:
+            await self.on_event_message_completed(
+                request,
+                to_handle,
+                event,
+                send_meta,
+            )
+            return None
+        if obj == "response":
+            await self.on_event_response(request, event)
+            return event
+        return None
+
     async def _stream_with_tracker(
         self,
         identity: TurnIdentity,
@@ -483,42 +553,10 @@ class BaseChannel(ABC):
         Yields:
             SSE-formatted event strings
         """
-        import json
-
-        if isinstance(payload, dict):
-            payload = {
-                **payload,
-                "meta": {
-                    **(payload.get("meta") or {}),
-                    "answer_turn_identity": identity,
-                    "msgid": identity.msgid,
-                },
-            }
-        else:
-            meta = dict(getattr(payload, "channel_meta", None) or {})
-            meta.update(
-                answer_turn_identity=identity,
-                msgid=identity.msgid,
-            )
-            setattr(payload, "channel_meta", meta)
-        request = self._payload_to_request(payload)
-
-        if isinstance(payload, dict):
-            send_meta = dict(payload.get("meta") or {})
-            if payload.get("session_webhook"):
-                send_meta["session_webhook"] = payload["session_webhook"]
-        else:
-            send_meta = getattr(request, "channel_meta", None) or {}
-
-        bot_prefix = getattr(self, "bot_prefix", None) or getattr(
-            self,
-            "_bot_prefix",
-            "",
+        request, send_meta, to_handle = self._prepare_stream_context(
+            identity,
+            payload,
         )
-        if bot_prefix and "bot_prefix" not in send_meta:
-            send_meta = {**send_meta, "bot_prefix": bot_prefix}
-
-        to_handle = self.get_to_handle_from_request(request)
 
         await self._before_consume_process(request)
 
@@ -527,28 +565,15 @@ class BaseChannel(ABC):
         try:
             process_iterator = self._process(request)
             async for event in process_iterator:
-                if hasattr(event, "model_dump_json"):
-                    data = event.model_dump_json()
-                elif hasattr(event, "json"):
-                    data = event.json()
-                else:
-                    data = json.dumps({"text": str(event)})
-
-                yield f"data: {data}\n\n"
-
-                obj = getattr(event, "object", None)
-                status = getattr(event, "status", None)
-
-                if obj == "message" and status == RunStatus.Completed:
-                    await self.on_event_message_completed(
-                        request,
-                        to_handle,
-                        event,
-                        send_meta,
-                    )
-                elif obj == "response":
-                    last_response = event
-                    await self.on_event_response(request, event)
+                yield f"data: {self._serialize_stream_event(event)}\n\n"
+                response = await self._handle_stream_event(
+                    request,
+                    event,
+                    to_handle=to_handle,
+                    send_meta=send_meta,
+                )
+                if response is not None:
+                    last_response = response
 
             err_msg = self._get_response_error_message(last_response)
             if err_msg:

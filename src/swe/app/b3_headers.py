@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
 HEADER_PREFIX = "x-header-"
@@ -18,8 +17,6 @@ B3_REQUIRED_HEADER_NAMES = (
     B3_SPAN_ID_HEADER,
     B3_SAMPLED_HEADER,
 )
-_B3_TRACE_ID_PATTERN = re.compile(r"^[0-9a-fA-F]{16}(?:[0-9a-fA-F]{16})?$")
-_B3_SPAN_ID_PATTERN = re.compile(r"^[0-9a-fA-F]{16}$")
 _B3_SAMPLED_VALUES = frozenset({"0", "1", "true", "false"})
 B3_HEADER_NAMES = {
     "x-b3-businessid": "X-B3-BusinessId",
@@ -63,7 +60,7 @@ def extract_b3_trace_id(headers: Any) -> str | None:
 
 
 def extract_b3_context(headers: Any) -> dict[str, str] | None:
-    """Return a complete, valid B3 parent context when one is supplied."""
+    """Return a complete B3 parent context when one is supplied."""
     b3_headers = extract_b3_headers(headers)
     present_headers = {
         name: b3_headers[name]
@@ -74,15 +71,7 @@ def extract_b3_context(headers: Any) -> dict[str, str] | None:
         return None
     if len(present_headers) != len(B3_REQUIRED_HEADER_NAMES):
         raise ValueError("Incomplete B3 trace context")
-
-    trace_id = present_headers[B3_TRACE_ID_HEADER]
-    span_id = present_headers[B3_SPAN_ID_HEADER]
-    sampled = present_headers[B3_SAMPLED_HEADER]
-    if not _B3_TRACE_ID_PATTERN.fullmatch(trace_id) or int(trace_id, 16) == 0:
-        raise ValueError("Invalid X-B3-Traceid")
-    if not _B3_SPAN_ID_PATTERN.fullmatch(span_id) or int(span_id, 16) == 0:
-        raise ValueError("Invalid X-B3-Spanid")
-    if sampled.lower() not in _B3_SAMPLED_VALUES:
+    if present_headers[B3_SAMPLED_HEADER].lower() not in _B3_SAMPLED_VALUES:
         raise ValueError("Invalid X-B3-Sampled")
     return present_headers
 

@@ -69,6 +69,27 @@ describe("SessionApi identity mapping", () => {
     runtimeWindow.__env__ = {};
   });
 
+  it("converts a terminal recovery snapshot into chat cards", () => {
+    const sessionApi = new SessionApi();
+    const messages = sessionApi.applyChatSnapshot("chat-1", {
+      messages: [
+        {
+          id: "user-1",
+          role: "user",
+          content: [{ type: "text", text: "hello" }],
+        },
+      ],
+    });
+
+    expect(messages).toHaveLength(1);
+    expect(messages?.[0]).toMatchObject({
+      id: "user-1",
+      role: "user",
+      history: true,
+      cards: [{ code: "AgentScopeRuntimeRequestCard" }],
+    });
+  });
+
   it("keeps the logical session id stable after the first reply resolves a real chat id", async () => {
     const sessionApi = new SessionApi();
 

@@ -1,4 +1,7 @@
-import { sleep } from "@/components/agentscope-chat";
+import {
+  sleep,
+  type IAgentScopeRuntimeWebUIMessage,
+} from "@/components/agentscope-chat";
 import { useCallback, useEffect, useRef } from "react";
 import { useContextSelector } from "use-context-selector";
 import { ChatAnywhereInputContext } from "../../Context/ChatAnywhereInputContext";
@@ -13,6 +16,7 @@ import useChatRequest from "./useChatRequest";
 import useChatSessionHandler from "./useChatSessionHandler";
 import useSuggestionsPolling from "./useSuggestionsPolling";
 import { useChatAnywhereOptions } from "../../Context/ChatAnywhereOptionsContext";
+import { ChatAnywhereMessagesContext } from "../../Context/ChatAnywhereMessagesContext";
 import ReactDOM from "react-dom";
 import {
   FollowUpSubmitCoordinator,
@@ -51,7 +55,15 @@ export default function useChatController() {
     ChatAnywhereSessionsContext,
     (v) => v.currentSessionId,
   );
+  const setSessionNotFound = useContextSelector(
+    ChatAnywhereSessionsContext,
+    (v) => v.setSessionNotFound,
+  );
   const sessionApi = useChatAnywhereOptions((v) => v.session.api);
+  const setMessages = useContextSelector(
+    ChatAnywhereMessagesContext,
+    (v) => v.setMessages,
+  );
 
   const currentQARef = useRef<CurrentQARef["current"]>({});
   const followUpCoordinatorRef = useRef<FollowUpSubmitCoordinator | null>(null);
@@ -63,6 +75,76 @@ export default function useChatController() {
 
   // 会话处理
   const sessionHandler = useChatSessionHandler();
+
+  const applyRecoverySnapshot = useCallback(
+    async (history: unknown, owner: ChatRequestOwner) => {
+      const runtimeSessionApi = sessionApi as
+        | {
+            applyChatSnapshot?: (
+              sessionId: string,
+              history: unknown,
+            ) => IAgentScopeRuntimeWebUIMessage[] | undefined;
+          }
+        | undefined;
+      const messages = runtimeSessionApi?.applyChatSnapshot?.(
+        owner.sessionId,
+        history,
+      );
+      const ownerIsActive = isActiveChatRequestOwner(
+        currentQARef.current.activeRequestOwner,
+        owner,
+      );
+      if (!ownerIsActive) {
+        return;
+      }
+      if (messages) {
+        setMessages(messages);
+      } else {
+        await sessionHandler.refreshSession(owner.sessionId, false);
+      }
+      if (
+        !isActiveChatRequestOwner(
+          currentQARef.current.activeRequestOwner,
+          owner,
+        )
+      ) {
+        return;
+      }
+      setSessionNotFound?.(false);
+      currentQARef.current.activeRequestOwner = undefined;
+      currentQARef.current.abortController = undefined;
+      currentQARef.current.response = undefined;
+      setLoading(false);
+    },
+    [sessionApi, sessionHandler, setLoading, setMessages, setSessionNotFound],
+  );
+
+  const recoverAfterNotFound = useCallback(
+    async (owner: ChatRequestOwner) => {
+      const refreshed = await sessionHandler.refreshSession(
+        owner.sessionId,
+        false,
+      );
+      const ownerIsActive = isActiveChatRequestOwner(
+        currentQARef.current.activeRequestOwner,
+        owner,
+      );
+      if (
+        !refreshed &&
+        ownerIsActive &&
+        sessionHandler.getCurrentSessionId() === owner.sessionId
+      ) {
+        setSessionNotFound?.(true);
+      }
+      if (ownerIsActive) {
+        currentQARef.current.activeRequestOwner = undefined;
+        currentQARef.current.abortController = undefined;
+        currentQARef.current.response = undefined;
+        setLoading(false);
+      }
+    },
+    [sessionHandler, setLoading, setSessionNotFound],
+  );
 
   // 建议轮询
   const { pollSuggestions } = useSuggestionsPolling({
@@ -117,6 +199,8 @@ export default function useChatController() {
     hasMessage: messageHandler.hasMessage,
     getCurrentSessionId: sessionHandler.getCurrentSessionId,
     onFinish: (owner) => finishResponse("finished", owner),
+    applyRecoverySnapshot,
+    recoverAfterNotFound,
   });
 
   const createRequestOwner = useCallback(
