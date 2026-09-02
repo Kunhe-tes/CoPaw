@@ -79,6 +79,7 @@ import styles from "./index.module.less";
 import { Form } from "@agentscope-ai/design";
 // import ChatActionGroup from "./components/ChatActionGroup";
 import ChatHeaderTitle from "./components/ChatHeaderTitle";
+import ChatActionGroup from "./components/ChatActionGroup";
 import ChatSessionInitializer from "./components/ChatSessionInitializer";
 import SubAgentRunMonitor from "./components/SubAgentRunMonitor";
 import GoalMonitor from "./components/GoalMonitor";
@@ -2331,7 +2332,7 @@ export default function ChatPage() {
             <span style={{ flex: 1 }} />
             {!isContentOnly && <FileManager />}
             {!isContentOnly && <ModelSelector />}
-            {/* <ChatActionGroup /> */}
+            {!isContentOnly && <ChatActionGroup chatId={chatId} />}
           </>
         ),
       },
