@@ -9,6 +9,13 @@ type ToolStatusData = {
   [key: string]: unknown;
 };
 
+type ResolveToolStatusOptions = {
+  messageStatus: AgentScopeRuntimeRunStatus;
+  hasOutputContent?: boolean;
+  inputData?: ToolStatusData;
+  outputData?: ToolStatusData;
+};
+
 function getToolGovernance(
   data?: ToolStatusData,
 ): ToolGovernanceValue | undefined {
@@ -31,27 +38,35 @@ function getToolStatus(data?: ToolStatusData): ToolStatusValue | undefined {
   return undefined;
 }
 
+export function resolveToolGovernanceStatus({
+  hasOutputContent = false,
+  inputData,
+  outputData,
+}: Omit<ResolveToolStatusOptions, "messageStatus">):
+  | ToolGovernanceValue
+  | undefined {
+  return (
+    getToolGovernance(outputData) ||
+    (hasOutputContent ? undefined : getToolGovernance(inputData))
+  );
+}
+
 export function resolveToolMessageStatus({
   messageStatus,
   hasOutputContent = false,
   inputData,
   outputData,
-}: {
-  messageStatus: AgentScopeRuntimeRunStatus;
-  hasOutputContent?: boolean;
-  inputData?: ToolStatusData;
-  outputData?: ToolStatusData;
-}): AgentScopeRuntimeRunStatus {
+}: ResolveToolStatusOptions): AgentScopeRuntimeRunStatus {
   const outputToolStatus = getToolStatus(outputData);
-  const outputGovernance = getToolGovernance(outputData);
   const inputToolStatus = hasOutputContent
     ? undefined
     : getToolStatus(inputData);
-  const inputGovernance = hasOutputContent
-    ? undefined
-    : getToolGovernance(inputData);
-  const toolStatus =
-    outputGovernance || outputToolStatus || inputGovernance || inputToolStatus;
+  const governance = resolveToolGovernanceStatus({
+    hasOutputContent,
+    inputData,
+    outputData,
+  });
+  const toolStatus = governance || outputToolStatus || inputToolStatus;
 
   switch (toolStatus) {
     case "running":

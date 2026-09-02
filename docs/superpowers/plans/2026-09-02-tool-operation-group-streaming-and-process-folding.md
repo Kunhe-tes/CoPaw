@@ -163,3 +163,9 @@ Extend the existing Console-only operation-group presentation so a group appears
 - Copy only trusted Tool Guard governance markers into internal message metadata keyed by tool call ID before the adapter rebuilds tool-result blocks.
 - Consume and remove that private metadata at the Runner stream boundary, then reuse the existing `tool_governance` projection for pending, rejected and blocked states.
 - Keep ordinary tool output untrusted: `error_type` text alone must not create a governance status.
+
+## Follow-up: render live approval state without a session refresh
+
+- Keep Tool Governance Status separate from execution loading: pending and blocked states stop the spinner and use explicit governance badges on the original Tool card.
+- Synchronously mount a newly created assistant response before starting its SSE request so the mounted-response guard cannot discard fast Tool Guard frames.
+- Cover the exact live sequence where an assistant message first carries `approval_action` metadata and its text content follows in a later content frame; the current response must immediately contain both the response card and approval action card.

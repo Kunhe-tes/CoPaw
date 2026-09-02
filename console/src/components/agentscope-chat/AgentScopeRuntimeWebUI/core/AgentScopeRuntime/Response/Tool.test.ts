@@ -244,7 +244,7 @@ describe("tool call title", () => {
     );
   });
 
-  it("uses governance without treating pending approval as failed", () => {
+  it("renders pending governance without keeping the tool loading", () => {
     render(
       React.createElement(Tool, {
         data: toolMessage({ governance: "pending" }),
@@ -253,11 +253,28 @@ describe("tool call title", () => {
 
     expect(screen.getByTestId("tool-call")).toHaveAttribute(
       "data-msg-status",
-      AgentScopeRuntimeRunStatus.InProgress,
+      "pending",
     );
     expect(screen.getByTestId("tool-call")).toHaveAttribute(
       "data-loading",
-      "true",
+      "false",
+    );
+  });
+
+  it("renders blocked governance distinctly from a rejection", () => {
+    render(
+      React.createElement(Tool, {
+        data: toolMessage({ governance: "blocked" }),
+      }),
+    );
+
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-msg-status",
+      "blocked",
+    );
+    expect(screen.getByTestId("tool-call")).toHaveAttribute(
+      "data-loading",
+      "false",
     );
   });
 
