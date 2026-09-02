@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildShareTurns,
   getDefaultSelectedTurnIds,
+  getShareSelectionState,
   toggleTurnSelection,
 } from "./shareSelection";
 
@@ -12,6 +13,13 @@ const message = (id: string, role: string) => ({
 });
 
 describe("share selection turn rules", () => {
+  it("derives all, partial, and empty toolbar selection states", () => {
+    expect(getShareSelectionState(0, 0)).toBe("empty");
+    expect(getShareSelectionState(3, 0)).toBe("none");
+    expect(getShareSelectionState(3, 1)).toBe("partial");
+    expect(getShareSelectionState(3, 3)).toBe("all");
+  });
+
   it("groups each user input with every following output before the next input", () => {
     const turns = buildShareTurns(
       [

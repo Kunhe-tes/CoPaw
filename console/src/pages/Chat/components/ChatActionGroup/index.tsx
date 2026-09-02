@@ -1,8 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { IconButton } from "@agentscope-ai/design";
-import { SparkNewChatFill } from "@agentscope-ai/icons";
-import { useChatAnywhereSessions } from "@/components/agentscope-chat";
-import { useTranslation } from "react-i18next";
 import { Button, Checkbox, Flex, Tooltip, message } from "antd";
 import {
   CloseOutlined,
@@ -13,6 +10,7 @@ import {
 import { chatApi } from "@/api/modules/chat";
 import type { ChatShareOptions } from "@/api/types";
 import { buildChatShareUrl } from "./shareUrl";
+import { getShareSelectionState } from "./shareSelection";
 import { useChatShareSelection } from "../../chatShareContext";
 import { copyToClipboard } from "@/utils/clipboard";
 import styles from "./index.module.less";
@@ -22,15 +20,19 @@ interface ChatActionGroupProps {
 }
 
 const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
-  const { t } = useTranslation();
-  const { createSession } = useChatAnywhereSessions();
   const shareSelection = useChatShareSelection();
+  const { close } = shareSelection;
+  const selectedTurnIdsRef = useRef(shareSelection.selectedTurnIds);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
 
   useEffect(() => {
-    shareSelection.close();
-  }, [chatId, shareSelection.close]);
+    close();
+  }, [chatId, close]);
+
+  useEffect(() => {
+    selectedTurnIdsRef.current = shareSelection.selectedTurnIds;
+  }, [shareSelection.selectedTurnIds]);
 
   const openShare = async () => {
     if (!chatId) {
@@ -53,12 +55,21 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
   const getShareUrl = async () => {
     if (shareSelection.shareUrl) return shareSelection.shareUrl;
     if (!chatId || shareSelection.selectedTurnIds.length === 0) return null;
+    const selectedTurnIds = [...shareSelection.selectedTurnIds];
     setGenerating(true);
     try {
       const result = await chatApi.createChatShare(
         chatId,
-        shareSelection.selectedTurnIds,
+        selectedTurnIds,
       );
+      if (
+        selectedTurnIdsRef.current.length !== selectedTurnIds.length ||
+        selectedTurnIdsRef.current.some(
+          (turnId, index) => turnId !== selectedTurnIds[index],
+        )
+      ) {
+        return null;
+      }
       const url = buildChatShareUrl(result.share_path);
       shareSelection.setShareUrl(url);
       return url;
@@ -79,7 +90,7 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
       const copied = await copyToClipboard(url);
       if (!copied) throw new Error("clipboard unavailable");
       message.success("分享链接已复制");
-      shareSelection.close();
+      close();
     } catch {
       message.error("复制分享链接失败");
     }
@@ -88,24 +99,22 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
   const openShareUrl = async () => {
     const url = await getShareUrl();
     if (!url) return;
-    window.open(url, "_blank", "noopener,noreferrer");
-    shareSelection.close();
+    const opened = window.open(url, "_blank", "noopener,noreferrer");
+    if (!opened) {
+      message.error("浏览器阻止了新窗口，请允许弹窗后重试");
+      return;
+    }
+    close();
   };
 
   const selectableCount = shareSelection.selectableTurnIds.length;
   const selectedCount = shareSelection.selectedTurnIds.length;
-  const allSelected = selectableCount > 0 && selectedCount === selectableCount;
+  const selectionState = getShareSelectionState(selectableCount, selectedCount);
+  const allSelected = selectionState === "all";
 
   return (
     <>
       <Flex gap={8} align="center">
-        <Tooltip title={t("chat.newChatTooltip")} mouseEnterDelay={0.5}>
-          <IconButton
-            bordered={false}
-            icon={<SparkNewChatFill />}
-            onClick={() => createSession()}
-          />
-        </Tooltip>
         <Tooltip title="分享会话" mouseEnterDelay={0.5}>
           <IconButton
             bordered={false}
@@ -120,7 +129,7 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
           <div className={styles.toolbarSelection}>
             <Checkbox
               checked={allSelected}
-              indeterminate={selectedCount > 0 && !allSelected}
+              indeterminate={selectionState === "partial"}
               disabled={selectableCount === 0}
               onChange={(event) =>
                 shareSelection.selectAll(event.target.checked)
@@ -128,15 +137,11 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
             >
               全选
             </Checkbox>
-            <span className={styles.count}>
-              {selectableCount === 0
-                ? "暂无可分享的完整回答轮次"
-                : `已选 ${selectedCount} / ${selectableCount} 轮`}
-            </span>
           </div>
           <div className={styles.toolbarActions}>
             <Button
-              type="primary"
+              type="text"
+              className={styles.toolbarAction}
               icon={<LinkOutlined />}
               loading={generating}
               disabled={selectedCount === 0}
@@ -145,6 +150,8 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
               复制链接
             </Button>
             <Button
+              type="text"
+              className={styles.toolbarAction}
               icon={<GlobalOutlined />}
               loading={generating}
               disabled={selectedCount === 0}
@@ -152,13 +159,17 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
             >
               浏览器打开
             </Button>
-            <Button
-              type="text"
-              aria-label="退出分享模式"
-              icon={<CloseOutlined />}
-              onClick={shareSelection.close}
-            />
           </div>
+          {selectableCount === 0 ? (
+            <span className={styles.emptyState}>暂无可分享内容</span>
+          ) : null}
+          <Button
+            className={styles.toolbarClose}
+            type="text"
+            aria-label="退出分享模式"
+            icon={<CloseOutlined />}
+            onClick={close}
+          />
         </div>
       ) : null}
     </>

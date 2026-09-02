@@ -11,6 +11,18 @@ export interface ShareTurn {
   selectable: boolean;
 }
 
+export type ShareSelectionState = "empty" | "none" | "partial" | "all";
+
+export function getShareSelectionState(
+  selectableCount: number,
+  selectedCount: number,
+): ShareSelectionState {
+  if (selectableCount === 0) return "empty";
+  if (selectedCount === 0) return "none";
+  if (selectedCount === selectableCount) return "all";
+  return "partial";
+}
+
 export function getShareMessageId(message: Record<string, unknown>): string {
   const metadata = message.metadata;
   if (metadata && typeof metadata === "object") {

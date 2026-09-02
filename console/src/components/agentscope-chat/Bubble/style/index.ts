@@ -40,7 +40,7 @@ export default createGlobalStyle`
 .swe-bubble-share-checkbox {
   position: absolute;
   top: 50%;
-  left: 0;
+  left: -24px;
   z-index: 1;
   transform: translateY(-50%);
 }
@@ -51,8 +51,14 @@ export default createGlobalStyle`
   border-radius: 5px;
 }
 
+.swe-chat-share-active .swe-bubble-share-checkbox .ant-checkbox-checked .ant-checkbox-inner,
+.swe-chat-share-active .swe-bubble-share-checkbox .ant-checkbox-indeterminate .ant-checkbox-inner {
+  border-color: #3769fc;
+  background-color: #3769fc;
+}
+
 .swe-chat-share-active [class*="-bubble-list-scroll"] {
-  padding-bottom: 96px;
+  padding-bottom: calc(112px + env(safe-area-inset-bottom));
 }
 
 .${(p) => p.theme.prefixCls}-bubble {

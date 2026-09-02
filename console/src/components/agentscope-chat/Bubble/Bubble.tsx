@@ -64,6 +64,7 @@ const Bubble: React.FC<BubbleProps> = (props) => {
   const shareChecked = Boolean(
     turnId && shareSelection.selectedTurnIds.includes(turnId),
   );
+  const canRenderShareCheckbox = role === "user" || role === "assistant";
 
   const mergedCls = classnames(
     prefixCls,
@@ -142,7 +143,7 @@ const Bubble: React.FC<BubbleProps> = (props) => {
       <Style />
       <AvatarStyle />
       <div style={style} className={mergedCls} id={id} data-role={role}>
-        {turnId ? (
+        {turnId && canRenderShareCheckbox ? (
           <Checkbox
             className="swe-bubble-share-checkbox"
             aria-label={`选择分享轮次 ${turnId}`}
