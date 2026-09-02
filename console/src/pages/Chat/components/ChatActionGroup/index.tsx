@@ -1,12 +1,12 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { IconButton } from "@agentscope-ai/design";
+import { SparkShareLine } from "@agentscope-ai/icons";
 import { Button, Checkbox, Flex, Tooltip, message } from "antd";
 import {
   CloseOutlined,
   GlobalOutlined,
   LinkOutlined,
-  ShareAltOutlined,
 } from "@ant-design/icons";
 import { chatApi } from "@/api/modules/chat";
 import type { ChatShareOptions } from "@/api/types";
@@ -214,7 +214,7 @@ const ChatActionGroup: React.FC<ChatActionGroupProps> = ({ chatId }) => {
         <Tooltip title="分享会话" mouseEnterDelay={0.5}>
           <IconButton
             bordered={false}
-            icon={<ShareAltOutlined />}
+            icon={<SparkShareLine />}
             loading={loading}
             onClick={() => void openShare()}
           />

@@ -51,6 +51,10 @@ export default createGlobalStyle`
   border-radius: 5px;
 }
 
+.swe-chat-share-active [class$="-bubble-list"] {
+  padding-left: 24px;
+}
+
 .swe-chat-share-active .swe-bubble-share-checkbox .ant-checkbox-checked .ant-checkbox-inner,
 .swe-chat-share-active .swe-bubble-share-checkbox .ant-checkbox-indeterminate .ant-checkbox-inner {
   border-color: #3769fc;

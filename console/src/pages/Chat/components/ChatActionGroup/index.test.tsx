@@ -28,6 +28,10 @@ vi.mock("@agentscope-ai/design", () => ({
   ),
 }));
 
+vi.mock("@agentscope-ai/icons", () => ({
+  SparkShareLine: () => <span aria-label="spark-share-line" />,
+}));
+
 describe("ChatActionGroup turn selection", () => {
   it("only enables turns with an authoritative completed status", () => {
     const statuses = { completed: "completed", running: "running" };
@@ -69,6 +73,7 @@ describe("ChatActionGroup placement", () => {
     render(<ChatActionGroup chatId="chat-1" />);
     const toolbar = screen.getByRole("region", { name: "分享选择操作" });
     expect(toolbar.parentElement).toBe(document.body);
+    expect(screen.getByLabelText("spark-share-line")).toBeInTheDocument();
     await waitFor(() =>
       expect(toolbar).toHaveStyle({ left: "240px", width: "900px" }),
     );
