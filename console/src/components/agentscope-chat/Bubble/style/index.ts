@@ -51,6 +51,7 @@ export default createGlobalStyle`
   border-radius: 5px;
 }
 
+.swe-chat-share-active [class*="-bubble-list "],
 .swe-chat-share-active [class$="-bubble-list"] {
   padding-left: 24px;
 }
@@ -62,7 +63,7 @@ export default createGlobalStyle`
 }
 
 .swe-chat-share-active [class*="-bubble-list-scroll"] {
-  padding-bottom: calc(112px + env(safe-area-inset-bottom));
+  padding-bottom: calc(88px + env(safe-area-inset-bottom));
 }
 
 .${(p) => p.theme.prefixCls}-bubble {

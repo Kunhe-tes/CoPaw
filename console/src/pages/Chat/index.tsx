@@ -2332,8 +2332,8 @@ export default function ChatPage() {
             <ChatHeaderTitle />
             <span style={{ flex: 1 }} />
             {!isContentOnly && <FileManager />}
-            {!isContentOnly && <ModelSelector />}
             {!isContentOnly && <ChatActionGroup chatId={chatId} />}
+            {!isContentOnly && <ModelSelector />}
           </>
         ),
       },

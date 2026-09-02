@@ -8,8 +8,8 @@
   grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 16px;
-  min-height: 96px;
-  padding: 12px 24px calc(12px + env(safe-area-inset-bottom));
+  min-height: 72px;
+  padding: 8px 24px calc(8px + env(safe-area-inset-bottom));
   border-top: 1px solid rgba(229, 231, 235, 0.9);
   background: rgba(255, 255, 255, 0.96);
   box-shadow: 0 -12px 30px rgba(35, 31, 27, 0.08);
@@ -34,7 +34,7 @@
 .toolbarAction {
   display: flex;
   width: 88px;
-  height: 72px;
+  height: 56px;
   flex-direction: column;
   align-items: center;
   justify-content: center;
@@ -79,7 +79,7 @@
 @media (max-width: 640px) {
   .toolbar {
     gap: 8px;
-    min-height: 88px;
+    min-height: 68px;
     padding-right: 12px;
     padding-left: 12px;
   }
@@ -90,7 +90,7 @@
 
   .toolbarAction {
     width: 72px;
-    height: 68px;
+    height: 56px;
     font-size: 12px;
   }
 }
