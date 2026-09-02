@@ -97,7 +97,7 @@ def _turn_statuses(
         output = turn[1:]
         if not output:
             continue
-        output_statuses = {_message_turn_status(item) for item in output}
+        output_statuses = [_message_turn_status(item) for item in output]
         if "failed" in output_statuses:
             statuses[turn_id] = "failed"
         elif "stopping" in output_statuses or "running" in output_statuses:
@@ -107,7 +107,15 @@ def _turn_statuses(
                 if status in output_statuses
             )
         else:
-            statuses[turn_id] = "completed"
+            non_completed = next(
+                (
+                    status
+                    for status in output_statuses
+                    if status is not None and status != "completed"
+                ),
+                None,
+            )
+            statuses[turn_id] = non_completed or "completed"
     return statuses
 
 
@@ -253,6 +261,7 @@ async def get_chat_share(token: str) -> ChatShareSnapshot:
     service = get_service()
     try:
         payload = await service.get_snapshot(token)
+        snapshot = ChatShareSnapshot.model_validate(payload)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Share not found") from exc
     except (OSError, json.JSONDecodeError, ValueError) as exc:
@@ -265,4 +274,4 @@ async def get_chat_share(token: str) -> ChatShareSnapshot:
             status_code=503,
             detail="Chat sharing unavailable",
         ) from exc
-    return ChatShareSnapshot.model_validate(payload)
+    return snapshot

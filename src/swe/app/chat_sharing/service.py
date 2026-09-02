@@ -122,11 +122,12 @@ class ChatSharingService:
         record = await self.store.get(token)
         if record is None:
             raise KeyError("Share not found")
+        token_component = self._safe_component(token, "token")
         tenant_component = self._safe_component(record.tenant_id, "tenant")
-        expected_prefix = f"{tenant_component}/chat_shares/"
-        if not record.snapshot_key.startswith(expected_prefix):
+        expected_key = f"{tenant_component}/chat_shares/{token_component}.json"
+        if record.snapshot_key != expected_key:
             raise OSError("Invalid snapshot scope")
-        target = (self.snapshot_root / record.snapshot_key).resolve()
+        target = (self.snapshot_root / expected_key).resolve()
         try:
             target.relative_to(self.snapshot_root)
         except ValueError as exc:

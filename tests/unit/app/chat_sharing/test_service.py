@@ -157,6 +157,32 @@ async def test_snapshot_file_is_scoped_to_tenant(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_snapshot_lookup_rejects_tampered_cross_tenant_key(
+    tmp_path: Path,
+):
+    store = FakeShareStore()
+    service = ChatSharingService(store, tmp_path)
+    created = await service.create_snapshot(
+        chat_id="chat-1",
+        chat_name="Demo",
+        messages=[
+            _message("q1", "user", "hello"),
+            _message("a1", "assistant", "world"),
+        ],
+        selected_turn_ids=["q1"],
+        turn_statuses={"q1": "completed"},
+        creator_id="alice",
+        tenant_id="tenant-a",
+    )
+    store.records[created.token].snapshot_key = (
+        "tenant-a/chat_shares/../../tenant-b/secret.json"
+    )
+
+    with pytest.raises(OSError, match="scope"):
+        await service.get_snapshot(created.token)
+
+
+@pytest.mark.asyncio
 async def test_snapshot_keeps_tool_system_and_approval_messages(
     tmp_path: Path,
 ):

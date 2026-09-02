@@ -12,7 +12,9 @@ from swe.app.chat_sharing.router import (
     create_chat_share,
     get_chat_share_options,
     get_chat_share,
+    _turn_statuses,
 )
+from swe.app.runner.models import ChatMessage
 
 
 class FakeService:
@@ -134,6 +136,25 @@ async def test_share_options_returns_authoritative_turn_statuses(monkeypatch):
     assert [item["id"] for item in result.messages] == ["q1", "a1", "q2"]
 
 
+@pytest.mark.parametrize(
+    "status",
+    ["stopped", "cancelled", "error", "partial"],
+)
+def test_turn_status_fallback_does_not_promote_non_completed_output(status):
+    messages = [
+        _message("q1", "user", "first"),
+        _message("a1", "assistant", "answer"),
+    ]
+    messages[1]["metadata"]["turn_status"] = status
+
+    typed_messages = [
+        ChatMessage.model_validate(message) for message in messages
+    ]
+    assert _turn_statuses(typed_messages, {"turn_states": {}}) == {
+        "q1": status,
+    }
+
+
 @pytest.mark.asyncio
 async def test_create_chat_share_maps_storage_failure_to_503(monkeypatch):
     class FailingService(FakeService):
@@ -179,6 +200,20 @@ async def test_public_share_maps_access_audit_failure_to_503(monkeypatch):
             raise RuntimeError("database unavailable")
 
     monkeypatch.setattr(sharing_router, "_service", FailingReadService())
+
+    with pytest.raises(Exception) as exc_info:
+        await get_chat_share("token-1")
+
+    assert getattr(exc_info.value, "status_code", None) == 503
+
+
+@pytest.mark.asyncio
+async def test_public_share_maps_malformed_snapshot_to_503(monkeypatch):
+    class MalformedService(FakeService):
+        async def get_snapshot(self, token):
+            return {"chat_name": "Demo", "messages": "not-a-list"}
+
+    monkeypatch.setattr(sharing_router, "_service", MalformedService())
 
     with pytest.raises(Exception) as exc_info:
         await get_chat_share("token-1")
