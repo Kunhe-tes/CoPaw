@@ -232,6 +232,8 @@ def _add_main_agent_tools(
         tool_functions["submit_goal_turn_resolution"] = (
             create_submit_goal_turn_resolution_tool(request_context)
         )
+    if request_context.get("execution_origin") == "scheduled":
+        return
     goal_mode_enabled = bool(request_context.get("goal_mode_enabled"))
     if not goal_mode_enabled and not _plan_interaction_tools_enabled(
         plan_mode_enabled,

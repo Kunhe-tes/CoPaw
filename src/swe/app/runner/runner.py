@@ -3647,6 +3647,7 @@ class AgentRunner(Runner):
             "user_name": _request_user_name(request),
             "bbk_id": _request_bbk_id(request),
             "trace_id": getattr(request, "trace_id", None),
+            "execution_origin": getattr(request, "execution_origin", None),
             "_task_tracker": self._task_tracker,
             "cron_execution_key": getattr(
                 request,
