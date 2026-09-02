@@ -24,6 +24,17 @@ from .store import ChatShareStore
 
 router = APIRouter(tags=["chat-sharing"])
 _service: ChatSharingService | None = None
+_ANSWER_TURN_STATUSES = frozenset(
+    {
+        "admitting",
+        "running",
+        "stopping",
+        "completed",
+        "cancelled",
+        "stopped",
+        "failed",
+    },
+)
 
 
 class ChatShareCreateRequest(BaseModel):
@@ -72,7 +83,9 @@ def _message_turn_status(message: Any) -> str | None:
                 if isinstance(status, str) and status:
                     return status
     status = getattr(message, "status", None)
-    return status if isinstance(status, str) and status else None
+    if isinstance(status, str) and status in _ANSWER_TURN_STATUSES:
+        return status
+    return None
 
 
 def _turn_statuses(

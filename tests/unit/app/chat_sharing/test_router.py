@@ -155,6 +155,29 @@ def test_turn_status_fallback_does_not_promote_non_completed_output(status):
     }
 
 
+def test_turn_status_fallback_ignores_transport_message_status():
+    messages = [
+        _message("q1", "user", "first"),
+        _message("a1", "assistant", "answer"),
+    ]
+
+    typed_messages = [
+        ChatMessage.model_validate(message) for message in messages
+    ]
+
+    assert typed_messages[1].status == "created"
+    assert _turn_statuses(typed_messages, {"turn_states": {}}) == {
+        "q1": "completed",
+    }
+
+
+@pytest.mark.parametrize("status", ["completed", "failed", "running"])
+def test_message_turn_status_accepts_explicit_answer_status(status):
+    message = SimpleNamespace(metadata={}, status=status)
+
+    assert sharing_router._message_turn_status(message) == status
+
+
 @pytest.mark.asyncio
 async def test_create_chat_share_maps_storage_failure_to_503(monkeypatch):
     class FailingService(FakeService):
