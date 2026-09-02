@@ -39,6 +39,7 @@ from ...security.tenant_path_boundary import (
     TenantPathBoundaryError,
 )
 from ...security.python_runtime_path_guard import (
+    is_safe_active_skill_name,
     prepare_python_runtime_path_guard_env,
 )
 from ...security.process_limits import (
@@ -46,9 +47,9 @@ from ...security.process_limits import (
     resolve_current_process_limit_policy,
 )
 from .file_io import (
-    collect_created_workspace_skill_names,
     is_created_workspace_skill_write_target,
 )
+from ..skill_context_manager import get_skill_context_manager
 
 _SHELL_PRESERVED_BOUNDARY_ENV_KEYS = frozenset(
     {
@@ -596,6 +597,29 @@ def _resolve_shell_path_token(token: str, base_dir: Path) -> Path:
     return path_obj.resolve(strict=False)
 
 
+def _active_workspace_skill_write_roots(base_dir: Path) -> tuple[Path, ...]:
+    current_skill = get_skill_context_manager().current_skill
+    if not current_skill:
+        return ()
+
+    workspace_dir = get_current_tool_base_dir().resolve(strict=False)
+    try:
+        workspace_dir.relative_to(get_current_tenant_root().resolve())
+    except ValueError:
+        workspace_dir = base_dir.resolve(strict=False)
+
+    if not is_safe_active_skill_name(current_skill):
+        return (
+            workspace_dir / "skills",
+            workspace_dir / ".disabled_skills",
+        )
+
+    return (
+        workspace_dir / "skills" / current_skill,
+        workspace_dir / ".disabled_skills" / current_skill,
+    )
+
+
 def _append_shell_redirect_targets(
     tokens: list[str],
     destinations: list[str],
@@ -711,37 +735,50 @@ def _validate_workspace_skill_write_targets(
     except ValueError:
         workspace_dir = base_dir.resolve(strict=False)
 
-    created_skill_names = set(
-        collect_created_workspace_skill_names(workspace_dir),
-    )
+    current_skill = get_skill_context_manager().current_skill
+    active_skill_roots = _active_workspace_skill_write_roots(base_dir)
     for destination in _extract_shell_write_destinations(command):
         if not destination or destination in {".", ".."}:
             continue
         resolved = _resolve_shell_path_token(destination, base_dir)
+        if any(
+            resolved == root or resolved.is_relative_to(root)
+            for root in active_skill_roots
+        ):
+            if not is_safe_active_skill_name(current_skill):
+                return (
+                    "Error: Shell command writes directly into the workspace "
+                    "skill directory. Use the skill import or edit APIs so "
+                    f"security scanning runs: '{destination}'"
+                )
+            if is_created_workspace_skill_write_target(
+                resolved,
+                workspace_dir,
+                current_skill=current_skill,
+            ):
+                continue
+            return (
+                "Error: Shell command writes directly into the workspace "
+                "skill directory. Use the skill import or edit APIs so "
+                f"security scanning runs: '{destination}'"
+            )
         if not any(
             resolved == workspace_dir / root_name
             or resolved.is_relative_to(workspace_dir / root_name)
             for root_name in ("skills", ".disabled_skills")
         ):
             continue
-        if is_created_workspace_skill_write_target(resolved, workspace_dir):
+        if is_created_workspace_skill_write_target(
+            resolved,
+            workspace_dir,
+            current_skill=current_skill,
+        ):
             continue
-        for skill_name in created_skill_names:
-            for root_name in ("skills", ".disabled_skills"):
-                skill_root = workspace_dir / root_name / skill_name
-                if resolved == skill_root or resolved.is_relative_to(
-                    skill_root,
-                ):
-                    break
-            else:
-                continue
-            break
-        else:
-            return (
-                "Error: Shell command writes directly into the workspace "
-                "skill directory. Use the skill import or edit APIs so "
-                f"security scanning runs: '{destination}'"
-            )
+        return (
+            "Error: Shell command writes directly into the workspace "
+            "skill directory. Use the skill import or edit APIs so "
+            f"security scanning runs: '{destination}'"
+        )
     return None
 
 

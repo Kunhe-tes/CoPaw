@@ -411,6 +411,10 @@ class TestValidateShellPaths:
         tenant_dir = mock_working_dir / "test_tenant"
         workspace_dir = tenant_dir / "workspaces" / "agent_a"
         workspace_dir.mkdir(parents=True, exist_ok=True)
+        (workspace_dir / "skill.json").write_text(
+            '{"skills": {"uploaded": {"source": "marketplace:demo"}}}',
+            encoding="utf-8",
+        )
 
         with tenant_context(
             tenant_id="test_tenant",
@@ -504,6 +508,30 @@ class TestValidateShellPaths:
         assert result is not None
         assert "skills" in result
 
+    def test_new_workspace_skill_creation_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("new-skill")
+            try:
+                result = _validate_shell_paths(
+                    "mkdir -p skills/new-skill",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is None
+
     def test_created_workspace_skill_file_removal_allowed(
         self,
         mock_working_dir: Path,
@@ -553,6 +581,51 @@ class TestValidateShellPaths:
             )
 
         assert result is None
+
+    def test_new_workspace_skill_root_removal_allowed(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            context_manager = get_skill_context_manager()
+            context_manager.push_skill("new-skill")
+            try:
+                result = _validate_shell_paths(
+                    "rm -rf skills/new-skill",
+                    base_dir=workspace_dir,
+                )
+            finally:
+                context_manager.clear()
+
+        assert result is None
+
+    def test_existing_workspace_skill_root_without_manifest_denied(
+        self,
+        mock_working_dir: Path,
+    ):
+        tenant_dir = mock_working_dir / "test_tenant"
+        workspace_dir = tenant_dir / "workspaces" / "agent_a"
+        skill_dir = workspace_dir / "skills" / "received"
+        skill_dir.mkdir(parents=True, exist_ok=True)
+
+        with tenant_context(
+            tenant_id="test_tenant",
+            workspace_dir=workspace_dir,
+        ):
+            result = _validate_shell_paths(
+                "rm -rf skills/received",
+                base_dir=workspace_dir,
+            )
+
+        assert result is not None
+        assert "skills/received" in result
 
     def test_workspace_skill_root_chmod_denied(
         self,

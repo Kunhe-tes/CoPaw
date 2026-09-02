@@ -40,7 +40,6 @@ from __future__ import annotations
 
 import builtins
 import functools
-import inspect
 import io
 import os
 import pathlib
@@ -91,7 +90,6 @@ _TRUSTED_ALLOWED_PATHS = ()
 _TRUSTED_ENTRYPOINT_ROOTS = ()
 _TRUSTED_ENTRYPOINT_PATH = None
 _TRUSTED_SWE_ENTRYPOINT = False
-_CREATED_SKILL_ROOTS = ()
 _CHECKING_PATH = False
 
 
@@ -111,14 +109,45 @@ def _protected_skill_roots():
 
 
 def _is_created_skill_write_path(resolved):
-    return any(
-        resolved == root
-        or _is_relative_to(resolved, root)
-        for root in _CREATED_SKILL_ROOTS
-    )
+    workspace_dir = _ACTIVE_SKILL_BASE_DIR or _BASE_DIR
+    if workspace_dir is None:
+        return False
+
+    manifest_path = workspace_dir / "skill.json"
+    try:
+        import json
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, AttributeError, TypeError, ImportError):
+        manifest = {}
+
+    skills = manifest.get("skills", {})
+    if not isinstance(skills, dict):
+        skills = {}
+
+    for root_name in ("skills", ".disabled_skills"):
+        try:
+            relative_path = resolved.relative_to(workspace_dir / root_name)
+        except ValueError:
+            continue
+        if not relative_path.parts:
+            return False
+        skill_name = relative_path.parts[0]
+        if not _is_safe_active_skill_name(skill_name):
+            return False
+        skill_root = workspace_dir / root_name / skill_name
+        if skill_name not in skills and (
+            _ACTIVE_SKILL == skill_name or not skill_root.exists()
+        ):
+            return True
+        entry = skills.get(skill_name)
+        return isinstance(entry, dict) and entry.get("source") == "customized"
+    return False
 
 
 def _is_recursive_skill_parent_creation_path(resolved):
+    import inspect
+
     for frame_info in inspect.stack()[2:]:
         if frame_info.function != "mkdir":
             continue
@@ -129,10 +158,7 @@ def _is_recursive_skill_parent_creation_path(resolved):
             candidate_resolved = _resolve_without_guard(candidate, strict=False)
         except (OSError, RuntimeError):
             continue
-        if not any(
-            _is_relative_to(candidate_resolved, root)
-            for root in _CREATED_SKILL_ROOTS
-        ):
+        if not _is_created_skill_write_path(candidate_resolved):
             continue
         if _is_relative_to(candidate_resolved, resolved):
             return True
@@ -202,35 +228,6 @@ def _collect_env_paths(name):
         if resolved not in paths:
             paths.append(resolved)
     return tuple(paths)
-
-
-def _collect_created_skill_roots():
-    workspace_dir = _ACTIVE_SKILL_BASE_DIR or _BASE_DIR
-    if workspace_dir is None:
-        return ()
-    manifest_path = workspace_dir / "skill.json"
-    try:
-        import json
-
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, AttributeError, TypeError, ImportError):
-        return ()
-
-    skills = manifest.get("skills", {})
-    if not isinstance(skills, dict):
-        return ()
-
-    roots = []
-    for skill_name, entry in skills.items():
-        if not _is_safe_active_skill_name(skill_name):
-            continue
-        if not isinstance(entry, dict) or entry.get("source") != "customized":
-            continue
-        for root_name in ("skills", ".disabled_skills"):
-            root = workspace_dir / root_name / skill_name
-            if root not in roots:
-                roots.append(root)
-    return tuple(roots)
 
 
 def _fsdecode_path(path):
@@ -781,7 +778,7 @@ def install_from_env():
     global _INSTALLED, _TENANT_ROOT, _BASE_DIR, _RUNTIME_ALLOWED_ROOTS
     global _ACTIVE_SKILL, _ACTIVE_SKILL_BASE_DIR, _ACTIVE_SKILL_INVALID
     global _TRUSTED_ALLOWED_PATHS, _TRUSTED_ENTRYPOINT_ROOTS
-    global _TRUSTED_ENTRYPOINT_PATH, _TRUSTED_SWE_ENTRYPOINT, _CREATED_SKILL_ROOTS
+    global _TRUSTED_ENTRYPOINT_PATH, _TRUSTED_SWE_ENTRYPOINT
 
     if _INSTALLED:
         return
@@ -816,7 +813,6 @@ def install_from_env():
     _TRUSTED_ENTRYPOINT_ROOTS = _collect_env_paths(_TRUSTED_ENTRYPOINT_ROOTS_ENV)
     _TRUSTED_ENTRYPOINT_PATH = _resolve_trusted_swe_entrypoint()
     _TRUSTED_SWE_ENTRYPOINT = _TRUSTED_ENTRYPOINT_PATH is not None
-    _CREATED_SKILL_ROOTS = _collect_created_skill_roots()
 
     _install_function_wrappers()
     _install_pathlib_wrappers()
