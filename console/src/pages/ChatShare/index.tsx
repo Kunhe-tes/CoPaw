@@ -120,8 +120,21 @@ export default function ChatSharePage() {
         <Empty description="暂无分享内容" />
       ) : (
         <HtmlPreviewTrackingProvider value={{ disableEventRecording: true }}>
-          <AgentScopeRuntimeWebUIComposedProvider options={READONLY_OPTIONS} cards={READONLY_CARDS}>
-            <Bubble.List items={messages} order="asc" pagination={false} />
+          <AgentScopeRuntimeWebUIComposedProvider
+            options={READONLY_OPTIONS}
+            cards={READONLY_CARDS}
+          >
+            <div
+              className={styles.messageViewport}
+              data-testid="share-message-viewport"
+            >
+              <Bubble.List
+                classNames={{ wrapper: styles.messageList }}
+                items={messages}
+                order="asc"
+                pagination={false}
+              />
+            </div>
           </AgentScopeRuntimeWebUIComposedProvider>
         </HtmlPreviewTrackingProvider>
       )}
