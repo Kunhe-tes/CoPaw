@@ -18,6 +18,7 @@ class _Engine:
     def __init__(self, *, fail: bool = False) -> None:
         self.reload_count = 0
         self.fail = fail
+        self.enabled = True
 
     def reload_rules(self) -> None:
         self.reload_count += 1
@@ -63,6 +64,12 @@ async def test_watcher_reloads_changed_valid_file(tmp_path: Path) -> None:
 
     assert await watcher._check_once() is True
     assert engine.reload_count == 1
+    assert engine.enabled is False
+
+    save_config(_config(True), config_path)
+    assert await watcher._check_once() is True
+    assert engine.reload_count == 2
+    assert engine.enabled is True
     await watcher.stop()
 
 

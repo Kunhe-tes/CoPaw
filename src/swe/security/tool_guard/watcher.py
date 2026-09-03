@@ -23,23 +23,22 @@ def _file_fingerprint(path: Path) -> tuple[int, int, int] | None:
     return (stat.st_mtime_ns, stat.st_size, stat.st_ino)
 
 
-def _tool_guard_config_is_valid(path: Path) -> bool:
-    """Validate the security section before applying a polled update."""
+def _load_tool_guard_config(path: Path) -> ToolGuardConfig | None:
+    """Load and validate the Tool Guard section from a config file."""
     try:
         with path.open(encoding="utf-8") as file:
             data: Any = json.load(file)
         if not isinstance(data, dict):
-            return False
+            return None
         security = data.get("security", {})
         if not isinstance(security, dict):
-            return False
+            return None
         tool_guard = security.get("tool_guard", {})
         if not isinstance(tool_guard, dict):
-            return False
-        ToolGuardConfig.model_validate(tool_guard)
+            return None
+        return ToolGuardConfig.model_validate(tool_guard)
     except (OSError, ValueError, TypeError):
-        return False
-    return True
+        return None
 
 
 class ToolGuardConfigWatcher:
@@ -101,11 +100,13 @@ class ToolGuardConfigWatcher:
         fingerprint = _file_fingerprint(self._config_path)
         if fingerprint is None or fingerprint == self._last_fingerprint:
             return False
-        if not _tool_guard_config_is_valid(self._config_path):
+        tool_guard_config = _load_tool_guard_config(self._config_path)
+        if tool_guard_config is None:
             return False
         try:
             self._engine.reload_rules()
         except Exception:
             return False
+        self._engine.enabled = tool_guard_config.enabled
         self._last_fingerprint = fingerprint
         return True
