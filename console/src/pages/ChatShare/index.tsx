@@ -14,7 +14,12 @@ import AgentScopeRuntimeResponseCard from "@/components/agentscope-chat/AgentSco
 import type {
   ChatRuntimeRequestCardData,
   ChatRuntimeResponseCardData,
+  ChatPlanInteractionCardData,
+  ChatPlanClarificationCardData,
+  ChatGoalProposalCardData,
 } from "../Chat/messageMeta";
+import { PlanReviewSnapshot } from "../Chat/components/PlanInteractionCards";
+import planStyles from "../Chat/components/PlanInteractionCards.module.less";
 import { HtmlPreviewTrackingProvider } from "@/components/agentscope-chat/HtmlPreviewTrackingContext";
 import { prepareShareMessages } from "./shareView";
 import styles from "./index.module.less";
@@ -35,18 +40,102 @@ const READONLY_OPTIONS = {
   api: { replaceMediaURL: (url: string) => url },
 } as unknown as IAgentScopeRuntimeWebUIOptions;
 
-function ReadOnlyStructuredCard(props: { code?: string; data?: unknown }) {
-  const record = props.data && typeof props.data === "object"
-    ? (props.data as { code?: unknown; data?: unknown })
-    : null;
-  const code = props.code || (typeof record?.code === "string" ? record.code : "会话记录");
-  const data = record && "data" in record ? record.data : props.data;
+function ReadOnlyStructuredCard(props: { code?: string }) {
   return (
     <section className={styles.structuredCard}>
-      <strong>{code}</strong>
-      <pre>{JSON.stringify(data ?? null, null, 2)}</pre>
+      <strong>{props.code || "会话记录"}</strong>
+      <span>该内容仅供查看，分享页不支持交互操作。</span>
     </section>
   );
+}
+
+function ReadOnlyPlanClarificationCard({
+  data,
+}: {
+  data: ChatPlanClarificationCardData;
+}) {
+  const fields = data.kind === "form" ? data.fields || [] : [];
+  const options = data.options || [];
+  return (
+    <section className={planStyles.planClarificationCard}>
+      <header className={planStyles.cardHeader}>
+        <div className={planStyles.cardHeading}>
+          <strong>{data.prompt}</strong>
+          <span>只读</span>
+        </div>
+      </header>
+      {data.kind !== "form" && options.length > 0 ? (
+        <div className={planStyles.choiceOptionsViewport}>
+          {options.map((option, index) => (
+            <div className={planStyles.optionRow} key={option.id}>
+              <span className={planStyles.optionNumber}>{index + 1}.</span>
+              <span className={planStyles.optionLabel}>{option.label}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {fields.map((field) => (
+        <section className={planStyles.reviewSection} key={field.id}>
+          <h4>{field.label}</h4>
+          {field.description ? (
+            <p className={planStyles.reviewStatus}>{field.description}</p>
+          ) : null}
+          {field.options?.map((option, index) => (
+            <div className={planStyles.optionRow} key={option.id}>
+              <span className={planStyles.optionNumber}>{index + 1}.</span>
+              <span className={planStyles.optionLabel}>{option.label}</span>
+            </div>
+          ))}
+        </section>
+      ))}
+    </section>
+  );
+}
+
+function ReadOnlyGoalProposalCard({
+  data,
+}: {
+  data: ChatGoalProposalCardData;
+}) {
+  return (
+    <section className={planStyles.goalProposalCard}>
+      <header className={planStyles.cardHeader}>
+        <div className={planStyles.cardHeading}>
+          <strong>Goal 合同草案</strong>
+          <span>只读</span>
+        </div>
+      </header>
+      <p className={planStyles.reviewSummary}>{data.objective}</p>
+      <section className={planStyles.reviewSection}>
+        <h4>完成标准</h4>
+        <ul>
+          {data.completion_criteria.map((item) => (
+            <li key={item.requirement}>{item.requirement}</li>
+          ))}
+        </ul>
+      </section>
+      <section className={planStyles.reviewSection}>
+        <h4>约束与边界</h4>
+        <p className={planStyles.reviewFeedbackSummary}>
+          {data.autonomy_boundary}
+        </p>
+      </section>
+    </section>
+  );
+}
+
+function ReadOnlyPlanInteractionCard({
+  data,
+}: {
+  data: ChatPlanInteractionCardData;
+}) {
+  if (data.card_type === "plan_review") {
+    return <PlanReviewSnapshot data={data} />;
+  }
+  if (data.card_type === "plan_clarification") {
+    return <ReadOnlyPlanClarificationCard data={data} />;
+  }
+  return <ReadOnlyGoalProposalCard data={data} />;
 }
 
 function ReadOnlyResponseCard(props: {
@@ -65,23 +154,15 @@ const READONLY_CARDS = {
     <RuntimeRequestCard {...props} />
   ),
   AgentScopeRuntimeResponseCard: ReadOnlyResponseCard,
-  ApprovalAction: (props: { data: unknown }) => (
-    <ReadOnlyStructuredCard code="审批记录" data={props.data} />
+  ApprovalAction: () => <ReadOnlyStructuredCard code="审批记录" />,
+  PlanInteraction: (props: { data: ChatPlanInteractionCardData }) => (
+    <ReadOnlyPlanInteractionCard data={props.data} />
   ),
-  PlanInteraction: (props: { data: unknown }) => (
-    <ReadOnlyStructuredCard code="计划记录" data={props.data} />
-  ),
-  TaskRunGroupCard: (props: { data: unknown }) => (
-    <ReadOnlyStructuredCard code="任务记录" data={props.data} />
-  ),
-  ResponseFeedback: (props: { data: unknown }) => (
-    <ReadOnlyStructuredCard code="反馈记录" data={props.data} />
-  ),
-  WPlusSopEntryProposal: (props: { data: unknown }) => (
-    <ReadOnlyStructuredCard code="SOP 记录" data={props.data} />
-  ),
-  ConversationCompactionBoundary: (props: { data: unknown }) => (
-    <ReadOnlyStructuredCard code="会话归档边界" data={props.data} />
+  TaskRunGroupCard: () => <ReadOnlyStructuredCard code="任务记录" />,
+  ResponseFeedback: () => null,
+  WPlusSopEntryProposal: () => <ReadOnlyStructuredCard code="SOP 记录" />,
+  ConversationCompactionBoundary: () => (
+    <ReadOnlyStructuredCard code="会话归档边界" />
   ),
   ReadOnlyStructuredCard,
 };
