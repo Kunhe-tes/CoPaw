@@ -40,11 +40,42 @@ const READONLY_OPTIONS = {
   api: { replaceMediaURL: (url: string) => url },
 } as unknown as IAgentScopeRuntimeWebUIOptions;
 
-function ReadOnlyStructuredCard(props: { code?: string }) {
+function serializeCardData(data: unknown): string {
+  if (typeof data === "string") return data;
+  if (data === undefined) return "";
+  try {
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return String(data);
+  }
+}
+
+export function ReadOnlyStructuredCard(props: {
+  code?: string;
+  data?: unknown;
+}) {
+  const wrappedData =
+    props.code === "ReadOnlyStructuredCard" &&
+    props.data &&
+    typeof props.data === "object" &&
+    "code" in props.data &&
+    "data" in props.data
+      ? (props.data as { code?: unknown; data?: unknown })
+      : null;
+  const code =
+    typeof wrappedData?.code === "string"
+      ? wrappedData.code
+      : props.code || "会话记录";
+  const payload = wrappedData ? wrappedData.data : props.data;
+  const serialized = serializeCardData(payload);
+
   return (
     <section className={styles.structuredCard}>
-      <strong>{props.code || "会话记录"}</strong>
+      <strong>{code}</strong>
       <span>该内容仅供查看，分享页不支持交互操作。</span>
+      {serialized ? (
+        <pre data-testid="readonly-structured-card-payload">{serialized}</pre>
+      ) : null}
     </section>
   );
 }
@@ -92,13 +123,17 @@ function ReadOnlyPlanClarificationCard({
   );
 }
 
-function ReadOnlyGoalProposalCard({
+export function ReadOnlyGoalProposalCard({
   data,
 }: {
   data: ChatGoalProposalCardData;
 }) {
   return (
-    <section className={planStyles.goalProposalCard}>
+    <section
+      className={`${planStyles.goalProposalCard} ${styles.readOnlyGoalProposalCard}`}
+      data-testid="readonly-goal-proposal-card"
+      data-scrollable="true"
+    >
       <header className={planStyles.cardHeader}>
         <div className={planStyles.cardHeading}>
           <strong>Goal 合同草案</strong>
@@ -109,8 +144,29 @@ function ReadOnlyGoalProposalCard({
       <section className={planStyles.reviewSection}>
         <h4>完成标准</h4>
         <ul>
-          {data.completion_criteria.map((item) => (
-            <li key={item.requirement}>{item.requirement}</li>
+          {data.completion_criteria.map((item, index) => (
+            <li key={`${item.requirement}-${index}`}>
+              <strong>{item.requirement}</strong>
+              <div>可观察断言：{item.observable_assertion}</div>
+              <div>验证方式：{item.verification_method}</div>
+              <div>预期结果：{item.expected_outcome}</div>
+            </li>
+          ))}
+        </ul>
+      </section>
+      <section className={planStyles.reviewSection}>
+        <h4>必须保留</h4>
+        <ul>
+          {data.constraints.must_preserve.map((item, index) => (
+            <li key={`preserve-${index}`}>{item}</li>
+          ))}
+        </ul>
+      </section>
+      <section className={planStyles.reviewSection}>
+        <h4>禁止操作</h4>
+        <ul>
+          {data.constraints.must_not_do.map((item, index) => (
+            <li key={`must-not-do-${index}`}>{item}</li>
           ))}
         </ul>
       </section>
@@ -154,15 +210,21 @@ const READONLY_CARDS = {
     <RuntimeRequestCard {...props} />
   ),
   AgentScopeRuntimeResponseCard: ReadOnlyResponseCard,
-  ApprovalAction: () => <ReadOnlyStructuredCard code="审批记录" />,
+  ApprovalAction: (props: { data: unknown }) => (
+    <ReadOnlyStructuredCard code="审批记录" data={props.data} />
+  ),
   PlanInteraction: (props: { data: ChatPlanInteractionCardData }) => (
     <ReadOnlyPlanInteractionCard data={props.data} />
   ),
-  TaskRunGroupCard: () => <ReadOnlyStructuredCard code="任务记录" />,
+  TaskRunGroupCard: (props: { data: unknown }) => (
+    <ReadOnlyStructuredCard code="任务记录" data={props.data} />
+  ),
   ResponseFeedback: () => null,
-  WPlusSopEntryProposal: () => <ReadOnlyStructuredCard code="SOP 记录" />,
-  ConversationCompactionBoundary: () => (
-    <ReadOnlyStructuredCard code="会话归档边界" />
+  WPlusSopEntryProposal: (props: { data: unknown }) => (
+    <ReadOnlyStructuredCard code="SOP 记录" data={props.data} />
+  ),
+  ConversationCompactionBoundary: (props: { data: unknown }) => (
+    <ReadOnlyStructuredCard code="会话归档边界" data={props.data} />
   ),
   ReadOnlyStructuredCard,
 };

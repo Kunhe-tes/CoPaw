@@ -90,4 +90,61 @@ describe("ChatSharePage message preparation", () => {
     });
     expect(screen.getByTestId("share-message-viewport")).toBeInTheDocument();
   });
+
+  it("renders every Goal contract field in the read-only card", async () => {
+    const { ReadOnlyGoalProposalCard } = await import(".");
+    render(
+      <ReadOnlyGoalProposalCard
+        data={{
+          card_type: "goal_proposal",
+          objective: "完成可审计的分享页",
+          completion_criteria: [
+            {
+              requirement: "页面可滚动",
+              observable_assertion: "滚动容器高度小于内容高度",
+              verification_method: "浏览器检查 scrollHeight",
+              expected_outcome: "所有消息均可访问",
+            },
+          ],
+          constraints: {
+            must_preserve: ["原会话视觉结构"],
+            must_not_do: ["启用交互操作"],
+          },
+          autonomy_boundary: "仅允许只读展示",
+        }}
+      />,
+    );
+
+    expect(screen.getByText("页面可滚动")).toBeInTheDocument();
+    expect(screen.getByText(/可观察断言：/)).toHaveTextContent(
+      "滚动容器高度小于内容高度",
+    );
+    expect(screen.getByText(/验证方式：/)).toHaveTextContent(
+      "浏览器检查 scrollHeight",
+    );
+    expect(screen.getByText(/预期结果：/)).toHaveTextContent(
+      "所有消息均可访问",
+    );
+    expect(screen.getByText("原会话视觉结构")).toBeInTheDocument();
+    expect(screen.getByText("启用交互操作")).toBeInTheDocument();
+    expect(screen.getByTestId("readonly-goal-proposal-card")).toHaveAttribute(
+      "data-scrollable",
+      "true",
+    );
+  });
+
+  it("keeps structured card payloads visible without enabling interactions", async () => {
+    const { ReadOnlyStructuredCard } = await import(".");
+    render(
+      <ReadOnlyStructuredCard
+        code="审批记录"
+        data={{ requestId: "approval-1", toolName: "shell", status: "pending" }}
+      />,
+    );
+
+    expect(screen.getByText("审批记录")).toBeInTheDocument();
+    expect(
+      screen.getByTestId("readonly-structured-card-payload"),
+    ).toHaveTextContent('"requestId": "approval-1"');
+  });
 });
