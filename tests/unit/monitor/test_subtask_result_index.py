@@ -43,6 +43,10 @@ class FakeDb:
                     "created_at": datetime(2026, 8, 16, 10, 0, 2),
                 },
             ],
+            [
+                {"bbk_id": "771", "skill_id": "skill-a"},
+                {"bbk_id": "771", "skill_id": "skill-b"},
+            ],
         ]
 
     async def fetch_all(self, sql, params=None):
@@ -111,6 +115,41 @@ def test_batch_update_indexes_success_execution_results():
     assert "template_id > 0" in subtask_sql
     assert "result_id IS NOT NULL" in subtask_sql
     assert "result_id <> ''" in subtask_sql
+
+    skill_config_sql, skill_config_params = db.fetch_all_calls[2]
+    assert "FROM swe_skill_config" in skill_config_sql
+    assert "bbk_id IN (%s)" in skill_config_sql
+    assert "customer_insight_enabled = 1" in skill_config_sql
+    assert skill_config_params == ("771",)
+
+
+def test_build_result_index_users_filters_by_enabled_skill_config():
+    db = FakeDb()
+    db.fetch_all_results = [
+        [
+            {"bbk_id": "771", "skill_id": "skill-a"},
+        ],
+    ]
+    rows = [
+        {
+            "first_bbk_id": "771",
+            "skill_id": "skill-a",
+            "custuid": "cust-1",
+            "bbk_org_id": "772",
+            "tenant_id": "01100129",
+        },
+        {
+            "first_bbk_id": "771",
+            "skill_id": "skill-b",
+            "custuid": "cust-2",
+            "bbk_org_id": "772",
+            "tenant_id": "01100129",
+        },
+    ]
+
+    users = asyncio.run(QueryService(db=db)._build_result_index_users(rows))
+
+    assert users == [{"custUid": "cust-1", "bbkId": "772"}]
 
 
 def test_batch_update_skips_result_index_row_with_invalid_bbk_id():

@@ -36,6 +36,7 @@ from ...security.tenant_path_boundary import (
     get_current_tool_base_dir,
     get_current_tenant_root,
 )
+from ..skill_context_manager import get_skill_context_manager
 
 logger = logging.getLogger(__name__)
 _FILE_WRITE_LOCKS: dict[str, asyncio.Lock] = {}
@@ -103,8 +104,14 @@ def _resolve_writable_file_path(file_path: str) -> str:
                 resolved_path=candidate,
             ) from exc
 
+        skill_parent_missing = not candidate.parent.exists() and any(
+            candidate.parent.is_relative_to(base_dir / root_name)
+            for root_name in ("skills", ".disabled_skills")
+        )
         candidate.parent.mkdir(parents=True, exist_ok=True)
         resolved = candidate
+        if skill_parent_missing:
+            return str(resolved)
     _raise_if_protected_skill_write_target(resolved, base_dir)
     return str(resolved)
 
@@ -112,22 +119,76 @@ def _resolve_writable_file_path(file_path: str) -> str:
 def _is_created_workspace_skill_write_target(
     target: Path,
     workspace_dir: Path,
+    *,
+    current_skill: str | None = None,
 ) -> bool:
-    try:
-        relative_path = target.relative_to(workspace_dir / "skills")
-    except ValueError:
-        return False
-    if not relative_path.parts:
+    relative_path = None
+    for root_name in ("skills", ".disabled_skills"):
+        try:
+            relative_path = target.relative_to(workspace_dir / root_name)
+            break
+        except ValueError:
+            continue
+    if relative_path is None or not relative_path.parts:
         return False
 
+    skill_name = relative_path.parts[0]
+    skill_root = workspace_dir / root_name / skill_name
     manifest_path = workspace_dir / "skill.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return False
+        return current_skill == skill_name or not skill_root.exists()
 
-    entry = manifest.get("skills", {}).get(relative_path.parts[0])
-    return isinstance(entry, dict) and entry.get("source") == "customized"
+    skills = manifest.get("skills", {})
+    if skill_name not in skills:
+        if current_skill == skill_name or not skill_root.exists():
+            return True
+
+    entry = skills.get(skill_name)
+    return not isinstance(entry, dict) or entry.get("source") == "customized"
+
+
+def _is_safe_workspace_skill_name(skill_name: str) -> bool:
+    if "\x00" in skill_name or "/" in skill_name or "\\" in skill_name:
+        return False
+    return skill_name not in {".", ".."}
+
+
+def is_created_workspace_skill_write_target(
+    target: Path,
+    workspace_dir: Path,
+    *,
+    current_skill: str | None = None,
+) -> bool:
+    return _is_created_workspace_skill_write_target(
+        target.resolve(strict=False),
+        workspace_dir.resolve(strict=False),
+        current_skill=current_skill,
+    )
+
+
+def collect_created_workspace_skill_names(
+    workspace_dir: Path,
+) -> tuple[str, ...]:
+    manifest_path = workspace_dir.resolve(strict=False) / "skill.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ()
+
+    skills = manifest.get("skills", {})
+    if not isinstance(skills, dict):
+        return ()
+
+    return tuple(
+        skill_name
+        for skill_name, entry in skills.items()
+        if isinstance(skill_name, str)
+        and _is_safe_workspace_skill_name(skill_name)
+        and isinstance(entry, dict)
+        and entry.get("source") == "customized"
+    )
 
 
 def _raise_if_protected_skill_write_target(
@@ -136,13 +197,15 @@ def _raise_if_protected_skill_write_target(
 ) -> None:
     resolved_target = target.resolve(strict=False)
     resolved_workspace = workspace_dir.resolve(strict=False)
+    current_skill = get_skill_context_manager().current_skill
     protected_roots = (
         resolved_workspace / "skills",
         resolved_workspace / ".disabled_skills",
     )
-    if _is_created_workspace_skill_write_target(
+    if is_created_workspace_skill_write_target(
         resolved_target,
         resolved_workspace,
+        current_skill=current_skill,
     ):
         return
     if any(
