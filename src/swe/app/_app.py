@@ -695,6 +695,12 @@ async def _start_lifespan_background_services(
     multi_agent_manager: MultiAgentManager,
 ) -> None:
     """启动生命周期内常驻的后台服务。"""
+    from ..security.tool_guard.watcher import ToolGuardConfigWatcher
+
+    tool_guard_watcher = ToolGuardConfigWatcher()
+    await tool_guard_watcher.start()
+    app.state.tool_guard_config_watcher = tool_guard_watcher
+
     await start_service_heartbeat()
     # get_monitor_sync_client().schedule_swe_cron_warmup(
     #     start_delay_seconds=5.0,
@@ -721,6 +727,10 @@ async def _shutdown_lifespan_resources(
     db_connection: Any | None,
 ) -> None:
     """按依赖顺序关闭生命周期资源。"""
+    tool_guard_watcher = getattr(app.state, "tool_guard_config_watcher", None)
+    if tool_guard_watcher is not None:
+        await tool_guard_watcher.stop()
+
     try:
         from ..agents.tools.background_process import (
             managed_background_process_manager,

@@ -3102,6 +3102,26 @@ _Avoid_: long-held paused connection, reconnect auto-resume, terminal-only closu
 The intercepted normal-completion signal from a Main Agent turn while Goal Mode remains in control. The runtime settles the turn and may continue, wait, verify, or finalize without emitting a terminal Chat completion event; only the Goal Finalization Turn completes the frontend response stream.
 _Avoid_: per-turn SSE completion, hidden loop recursion, duplicate assistant response
 
+**安全策略最终一致窗口**:
+安全策略写入共享配置文件后，各应用实例通过独立的文件轮询发现并加载新版本所允许的最长时间。本项目约定轮询周期为 30 秒；保存请求所在实例立即加载，其他实例最迟在下一次轮询时加载。轮询或加载失败时，实例继续使用最近一次成功加载的规则并静默重试。
+_Avoid_: 瞬时全局生效、严格同步提交、失败时清空规则
+
+**安全策略调用边界**:
+Tool Guard 在一次工具调用开始后固定使用该调用已选定的规则快照；策略 reload 只影响之后开始的工具调用，不中断或重判正在执行的调用。
+_Avoid_: 中途切换规则、强制终止工具调用、回溯重判
+
+**配置原子写入**:
+所有通过公共配置写入口保存的配置都以同目录临时文件完成写入后再原子替换目标文件，使读取方只能看到完整的旧版本或完整的新版本。
+_Avoid_: 直接截断目标文件、读取半写入 JSON、仅安全策略专用的写入语义
+
+**安全策略实例状态**:
+每个应用实例仅在内存中维护其最近一次成功加载的安全策略文件指纹；该状态不对外暴露、不记录日志，不参与策略决策或跨实例协调。
+_Avoid_: 以单实例状态宣称全局已生效、失败即覆盖有效规则、依赖中心化通知状态
+
+**安全策略轮询周期**:
+所有应用实例使用固定的 30 秒共享配置轮询周期，不通过环境变量或实例级配置覆盖，以保持各实例的一致传播上限。
+_Avoid_: 实例间不同轮询周期、动态缩短或延长传播承诺、依赖外部调度器
+
 ## Example Dialogue
 
 Developer: "When Plan Mode starts, should we create a SubAgent?"
