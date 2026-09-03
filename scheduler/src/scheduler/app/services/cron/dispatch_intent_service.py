@@ -798,17 +798,9 @@ class CronDispatchIntentService:
                         ),
                     )
                     stale_rows = list(await cur.fetchall())
-                    for row in stale_rows:
-                        retryable = int(
-                            _row_value(row, 5, "attempt_count") or 0,
-                        ) < int(
-                            _row_value(row, 6, "max_attempts")
-                            or DEFAULT_MAX_ATTEMPTS,
-                        )
-                        if retryable:
-                            retryable_rows.append(row)
-                        else:
-                            exhausted_rows.append(row)
+                    retryable_rows, exhausted_rows = _partition_stale_dispatched_rows(
+                        stale_rows,
+                    )
                     if retryable_rows:
                         retryable_ids = _positive_int_ids_from_rows(
                             retryable_rows,
@@ -860,33 +852,8 @@ class CronDispatchIntentService:
                 await conn.rollback()
                 raise
 
-        for row in retryable_rows:
-            await self._record_event_best_effort(
-                batch_id=str(_row_value(row, 1, "batch_id") or ""),
-                intent_id=int(_row_value(row, 0, "id") or 0),
-                event_type="stale_dispatch_requeued",
-                job_id=str(_row_value(row, 2, "job_id") or ""),
-                tenant_id=str(_row_value(row, 3, "tenant_id") or ""),
-                source_id=str(_row_value(row, 4, "source_id") or ""),
-                details={
-                    "error": "dispatch outcome unknown past stale timeout",
-                },
-            )
-        for row in exhausted_rows:
-            await self._record_event_best_effort(
-                batch_id=str(_row_value(row, 1, "batch_id") or ""),
-                intent_id=int(_row_value(row, 0, "id") or 0),
-                event_type="child_execution_missing_failed",
-                job_id=str(_row_value(row, 2, "job_id") or ""),
-                tenant_id=str(_row_value(row, 3, "tenant_id") or ""),
-                source_id=str(_row_value(row, 4, "source_id") or ""),
-                details={
-                    "error": (
-                        "dispatch accepted but no execution record "
-                        "before stale timeout"
-                    ),
-                },
-            )
+        await self._record_retryable_dispatched_events(retryable_rows)
+        await self._record_exhausted_dispatched_events(exhausted_rows)
         await self._refresh_batch_counts_for_rows(
             [*retryable_rows, *exhausted_rows],
             updated_at=now_utc,
@@ -1218,6 +1185,23 @@ class CronDispatchIntentService:
             """,
             (lock_owner, normalized_now, *ids),
         )
+
+    async def _record_retryable_dispatched_events(
+        self,
+        retryable_rows: list[Any],
+    ) -> None:
+        for row in retryable_rows:
+            await self._record_event_best_effort(
+                batch_id=str(_row_value(row, 1, "batch_id") or ""),
+                intent_id=int(_row_value(row, 0, "id") or 0),
+                event_type="stale_dispatch_requeued",
+                job_id=str(_row_value(row, 2, "job_id") or ""),
+                tenant_id=str(_row_value(row, 3, "tenant_id") or ""),
+                source_id=str(_row_value(row, 4, "source_id") or ""),
+                details={
+                    "error": "dispatch outcome unknown past stale timeout",
+                },
+            )
 
     async def _record_exhausted_dispatched_events(
         self,
@@ -1987,6 +1971,23 @@ def _positive_int_ids_from_rows(rows: Iterable[Any]) -> list[int]:
         if intent_id > 0:
             ids.append(intent_id)
     return ids
+
+
+def _partition_stale_dispatched_rows(
+    rows: Iterable[Any],
+) -> tuple[list[Any], list[Any]]:
+    retryable_rows: list[Any] = []
+    exhausted_rows: list[Any] = []
+    for row in rows:
+        attempt_count = int(_row_value(row, 5, "attempt_count") or 0)
+        max_attempts = int(
+            _row_value(row, 6, "max_attempts") or DEFAULT_MAX_ATTEMPTS,
+        )
+        if attempt_count < max_attempts:
+            retryable_rows.append(row)
+        else:
+            exhausted_rows.append(row)
+    return retryable_rows, exhausted_rows
 
 
 def _unique_batch_ids(rows: Iterable[Any]) -> list[str]:
