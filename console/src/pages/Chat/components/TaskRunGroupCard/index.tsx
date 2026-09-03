@@ -22,6 +22,7 @@ import RuntimeResponseCard, {
   RuntimeResponseFeedbackCard,
 } from "../RuntimeResponseCard";
 import type { ResponseFeedbackTaskMeta } from "../ResponseFeedbackCard";
+import { FilePreviewPresentationProvider } from "@/components/agentscope-chat/FilePreviewPresentationContext";
 
 const MARKDOWN_LINK_PATTERN = /!?\[([^\]]*)\]\(([^)]+)\)/g;
 const PLAIN_URL_PATTERN = /https?:\/\/[^\s<>"']+/g;
@@ -500,17 +501,19 @@ export default function TaskRunGroupCard(props: {
         <div style={{ flex: 1, borderTop: "1px solid rgba(0, 0, 0, 0.12)" }} />
       </div>
       {resultExpanded && (
-        <NestedTaskRunMessages
-          chatId={props.chatId}
-          messages={finalMessages}
-          sessionId={props.sessionId}
-          showFeedback
-          task={props.task}
-          feedbackLookup={props.feedbackLookup}
-          loadingFeedback={props.loadingFeedback}
-          onFeedbackSaved={props.onFeedbackSaved}
-          onExternalApprovalResolved={props.onExternalApprovalResolved}
-        />
+        <FilePreviewPresentationProvider value="modal">
+          <NestedTaskRunMessages
+            chatId={props.chatId}
+            messages={finalMessages}
+            sessionId={props.sessionId}
+            showFeedback
+            task={props.task}
+            feedbackLookup={props.feedbackLookup}
+            loadingFeedback={props.loadingFeedback}
+            onFeedbackSaved={props.onFeedbackSaved}
+            onExternalApprovalResolved={props.onExternalApprovalResolved}
+          />
+        </FilePreviewPresentationProvider>
       )}
       {resultExpanded && hasSteps && (
         <div
@@ -545,14 +548,18 @@ export default function TaskRunGroupCard(props: {
                 paddingLeft: 16,
               }}
             >
-              <NestedTaskRunMessages
-                messages={stepMessages}
-                showFeedback={false}
-                feedbackLookup={props.feedbackLookup}
-                loadingFeedback={props.loadingFeedback}
-                onFeedbackSaved={props.onFeedbackSaved}
-                onExternalApprovalResolved={props.onExternalApprovalResolved}
-              />
+              <FilePreviewPresentationProvider value="modal">
+                <NestedTaskRunMessages
+                  messages={stepMessages}
+                  showFeedback={false}
+                  feedbackLookup={props.feedbackLookup}
+                  loadingFeedback={props.loadingFeedback}
+                  onFeedbackSaved={props.onFeedbackSaved}
+                  onExternalApprovalResolved={
+                    props.onExternalApprovalResolved
+                  }
+                />
+              </FilePreviewPresentationProvider>
             </div>
           )}
         </div>

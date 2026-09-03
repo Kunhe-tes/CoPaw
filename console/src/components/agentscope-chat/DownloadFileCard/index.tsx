@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { message, Spin } from "antd";
 import { SparkDownloadLine } from "@agentscope-ai/icons";
 import FilePreviewModal from "../FilePreviewModal";
+import FilePreviewDrawer from "../FilePreviewDrawer";
+import { useFilePreviewPresentation } from "../FilePreviewPresentationContext";
 import {
   extractDecodedFileNameFromUrl,
   extractResultIdFromUrl,
@@ -106,6 +108,7 @@ function DownloadFileCard(props: DownloadFileCardProps) {
   const [isDownloadingGenerating, setIsDownloadingGenerating] = useState(false);
   const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const { renderTemplate } = useDynamicRender();
+  const previewPresentation = useFilePreviewPresentation();
 
 
   // Extract filename from URL if not provided
@@ -297,6 +300,8 @@ function DownloadFileCard(props: DownloadFileCardProps) {
   }, []);
 
   const hintText = fileType === "previewable" ? "点击预览" : "不支持预览";
+  const PreviewComponent =
+    previewPresentation === "drawer" ? FilePreviewDrawer : FilePreviewModal;
 
   return (
     <>
@@ -335,7 +340,7 @@ function DownloadFileCard(props: DownloadFileCardProps) {
           </div>
         )}
       </div>
-      <FilePreviewModal
+      <PreviewComponent
         open={previewOpen}
         onClose={() => setPreviewOpen(false)}
         fileUrl={url}

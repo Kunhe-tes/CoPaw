@@ -195,6 +195,7 @@ def _finding_to_dict(f: Finding) -> dict[str, Any]:
         "file_path": f.file_path,
         "line_number": f.line_number,
         "rule_id": f.rule_id,
+        "analyzer": f.analyzer,
     }
 
 
@@ -203,6 +204,9 @@ def _record_blocked_skill(
     skill_dir: Path,
     *,
     action: str = "blocked",
+    source_id: str = "",
+    user_id: str = "",
+    bbk_id: str = "",
 ) -> None:
     """Submit a scan alert to the database-backed history recorder."""
     record = BlockedSkillRecord(
@@ -212,6 +216,9 @@ def _record_blocked_skill(
         findings=[_finding_to_dict(f) for f in result.findings],
         content_hash=compute_skill_content_hash(skill_dir),
         action=action,
+        source_id=source_id,
+        user_id=user_id,
+        bbk_id=bbk_id,
     )
     recorder = _history_recorder
     if recorder is None:
@@ -453,6 +460,9 @@ def scan_skill_directory(
     timeout: float | None = None,
     _direct: bool = False,
     _cache_result: bool = True,
+    source_id: str = "",
+    user_id: str = "",
+    bbk_id: str = "",
 ) -> ScanResult | None:
     """Scan a skill directory and optionally block on unsafe results.
 
@@ -565,9 +575,23 @@ def scan_skill_directory(
     if not result.is_safe:
         should_block = block if block is not None else (mode == "block")
         if should_block:
-            _record_blocked_skill(result, resolved, action="blocked")
+            _record_blocked_skill(
+                result,
+                resolved,
+                action="blocked",
+                source_id=source_id,
+                user_id=user_id,
+                bbk_id=bbk_id,
+            )
             raise SkillScanError(result)
-        _record_blocked_skill(result, resolved, action="warned")
+        _record_blocked_skill(
+            result,
+            resolved,
+            action="warned",
+            source_id=source_id,
+            user_id=user_id,
+            bbk_id=bbk_id,
+        )
         logger.warning(
             "Skill '%s' has %d security finding(s) (max severity: %s) "
             "but blocking is disabled – proceeding anyway.",

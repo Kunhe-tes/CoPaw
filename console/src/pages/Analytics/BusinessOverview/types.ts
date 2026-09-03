@@ -38,6 +38,8 @@ export interface OverviewMetricCard {
   key: string;
   title: string;
   valueText: ReactNode;
+  changeText: string;
+  changeDirection: "up" | "down" | "flat";
   accentColor: string;
   breakdown: BreakdownItem[] | null;
 }
@@ -100,6 +102,30 @@ export function formatPercent(value: number | undefined | null): string {
   const numberValue =
     typeof value === "number" && !Number.isNaN(value) ? value : 0;
   return `${numberValue.toFixed(1)}%`;
+}
+
+export function formatChange(value: number | undefined | null): string {
+  if (value === null || value === undefined) {
+    return "--";
+  }
+  const numberValue =
+    typeof value === "number" && !Number.isNaN(value) ? value : 0;
+  return `${numberValue > 0 ? "+" : ""}${numberValue.toFixed(1)}%`;
+}
+
+export function toChangeDirection(
+  value: number | undefined | null,
+): "up" | "down" | "flat" {
+  if (value === null || value === undefined) {
+    return "flat";
+  }
+  if (value > 0) {
+    return "up";
+  }
+  if (value < 0) {
+    return "down";
+  }
+  return "flat";
 }
 
 export function truncateName(name: string, maxLength = 20): string {

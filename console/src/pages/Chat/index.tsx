@@ -195,6 +195,7 @@ import { isChatTaskProgressEnabled } from "./taskProgressConfig";
 import GlobalVoiceRecorder from "@/components/GlobalVoiceRecorder";
 import { shouldShowGlobalVoiceRecorder } from "@/components/GlobalVoiceRecorder/presentation";
 import { shouldRouteGoalRequestAsSteering } from "./goalSteeringRouting";
+import { FilePreviewPresentationProvider } from "@/components/agentscope-chat/FilePreviewPresentationContext";
 
 const CHAT_ATTACHMENT_MAX_MB = 10;
 const TASK_RUNNING_POLL_MS = 30_000;
@@ -2614,7 +2615,13 @@ export default function ChatPage() {
                           }
                           style={{ height: "100%", width: "100%" }}
                         >
-                          <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                          <FilePreviewPresentationProvider
+                            value={
+                              feedbackTask?.cronTaskId ? "modal" : "drawer"
+                            }
+                          >
+                            <AgentScopeRuntimeWebUILayout ref={chatRef} />
+                          </FilePreviewPresentationProvider>
                         </div>
                       </GlobalVoiceRecorder>
                     </ChatPlanReviewRenderProvider>
