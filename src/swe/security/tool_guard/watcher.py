@@ -107,6 +107,10 @@ class ToolGuardConfigWatcher:
             self._engine.reload_rules()
         except Exception:
             return False
-        self._engine.enabled = tool_guard_config.enabled
+        # Keep the engine's documented precedence: an explicit environment
+        # override wins over the file value on every reload.
+        from .engine import _guard_enabled
+
+        self._engine.enabled = _guard_enabled()
         self._last_fingerprint = fingerprint
         return True
