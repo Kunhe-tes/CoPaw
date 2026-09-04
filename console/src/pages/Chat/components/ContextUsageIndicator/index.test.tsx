@@ -26,18 +26,22 @@ const availableSnapshot: ContextUsageSnapshot = {
 describe("ContextUsageIndicator", () => {
   afterEach(cleanup);
 
-  it("keeps a stable accessible trigger for available and unavailable states", () => {
+  it("hides until a snapshot is available and hides again for a new chat", () => {
     const refresh = vi.fn();
     const { rerender } = render(
       <ContextUsageIndicator error={false} refresh={refresh} />,
     );
 
-    const unavailable = screen.getByRole("button", {
-      name: /上下文占用.*暂无数据/,
-    });
-    expect(unavailable).toHaveTextContent(/上下文\s*--/);
-    expect(unavailable).toHaveAttribute("aria-haspopup", "dialog");
-    expect(unavailable).toHaveAttribute("aria-expanded", "false");
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+
+    rerender(
+      <ContextUsageIndicator
+        snapshot={{ available: false }}
+        error={false}
+        refresh={refresh}
+      />,
+    );
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
 
     rerender(
       <ContextUsageIndicator
@@ -50,6 +54,9 @@ describe("ContextUsageIndicator", () => {
     expect(
       screen.getByRole("button", { name: /上下文占用 27%/ }),
     ).toBeVisible();
+
+    rerender(<ContextUsageIndicator error={false} refresh={refresh} />);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
   });
 
   it("shows estimated totals, progress semantics, and all three categories", async () => {
@@ -81,7 +88,9 @@ describe("ContextUsageIndicator", () => {
     expect(screen.getByText(/18,700/)).toBeInTheDocument();
     expect(screen.getAllByText(/240/).length).toBeGreaterThan(0);
     expect(screen.getByText(/247,060/)).toBeInTheDocument();
-    expect(screen.getByText(/估算值，不是模型供应商账单/)).toBeInTheDocument();
+    expect(
+      screen.queryByText(/估算值，不是模型供应商账单/),
+    ).not.toBeInTheDocument();
   });
 
   it("keeps the last value while exposing the shared error state", async () => {
@@ -99,13 +108,11 @@ describe("ContextUsageIndicator", () => {
     ).toBeInTheDocument();
   });
 
-  it("retries an unavailable error through the shared controller", async () => {
+  it("stays hidden when the initial snapshot request fails", () => {
     const refresh = vi.fn();
     render(<ContextUsageIndicator error refresh={refresh} />);
 
-    fireEvent.click(screen.getByRole("button", { name: /上下文占用/ }));
-    fireEvent.click(await screen.findByRole("button", { name: "重试" }));
-
-    expect(refresh).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button")).not.toBeInTheDocument();
+    expect(refresh).not.toHaveBeenCalled();
   });
 });

@@ -1,12 +1,11 @@
 .trigger {
   display: inline-flex;
-  min-width: 92px;
-  max-width: min(172px, calc(100vw - 108px));
+  width: 28px;
+  flex: none;
   height: 28px;
   align-items: center;
   justify-content: center;
-  gap: 4px;
-  padding: 0 8px;
+  padding: 0;
   overflow: hidden;
   color: #4d5a70;
   font: inherit;
@@ -32,20 +31,23 @@
   }
 }
 
-.percentage {
-  flex: none;
-  color: inherit;
-  font-weight: 600;
-  font-variant-numeric: tabular-nums;
+.ring {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke-width: 3px;
 }
 
-.compactStatus {
-  overflow: hidden;
-  text-overflow: ellipsis;
+.ringTrack {
+  stroke: #e8edf5;
 }
 
-.unavailable {
-  color: #758196;
+.ringFill {
+  stroke: currentColor;
+}
+
+.trigger.normal {
+  color: var(--console-conversation-primary, #3769fc);
 }
 
 .normal {
@@ -142,9 +144,7 @@
   font-size: 11px;
 }
 
-.notice,
-.disclosure,
-.guidance {
+.notice {
   margin: 10px 0 0;
   color: #657188;
   font-size: 12px;
@@ -156,15 +156,6 @@
 }
 
 @media (max-width: 520px) {
-  .trigger {
-    min-width: 76px;
-    padding-inline: 6px;
-  }
-
-  .compactStatus {
-    display: none;
-  }
-
   .fullValue {
     display: none;
   }

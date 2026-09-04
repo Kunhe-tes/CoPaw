@@ -5,6 +5,7 @@ import {
   IAgentScopeRuntimeWebUIOptions,
   type IAgentScopeRuntimeWebUISenderOptions,
   type IAgentScopeRuntimeWebUIRef,
+  type IChatInputProps,
   useChatAnywhereSessions,
   useChatAnywhereSessionsState,
 } from "@/components/agentscope-chat";
@@ -16,6 +17,7 @@ import { useContextUsageController } from "./components/ContextUsageIndicator/us
 // ==================== 组件引入方式变更结束 ====================
 import {
   Children,
+  cloneElement,
   useCallback,
   useEffect,
   useMemo,
@@ -2198,7 +2200,6 @@ export default function ChatPage() {
       activeGoalModeControl,
       activeExpertControl,
       senderConfig?.prefix,
-      contextUsageIndicator,
     ]).filter(Boolean);
 
     const { beforeSubmit: handleSkillMentionsBeforeSubmit, skillMentions } =
@@ -2398,7 +2399,14 @@ export default function ChatPage() {
         ),
         renderComposer: (defaultComposer) => (
           <ActivePlanInteractionComposer
-            defaultComposer={defaultComposer}
+            defaultComposer={cloneElement<IChatInputProps>(defaultComposer, {
+              actions: (defaultActions) => (
+                <div className={styles.composerActions}>
+                  {contextUsageIndicator}
+                  {defaultActions}
+                </div>
+              ),
+            })}
             onContinueModifying={handleContinueModifyingPlan}
             onPlanModeDecision={handlePlanModeDecision}
           />

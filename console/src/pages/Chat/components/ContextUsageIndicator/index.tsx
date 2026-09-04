@@ -14,14 +14,6 @@ const STATUS_LABELS: Record<ContextUsageStatus, string> = {
   emergency: "紧急",
   overflow: "已超出上限",
 };
-
-const TRIGGER_STATUS_LABELS: Partial<Record<ContextUsageStatus, string>> = {
-  governance: "注意",
-  active: "压缩",
-  emergency: "紧急",
-  overflow: "超限",
-};
-
 export interface ContextUsageIndicatorProps {
   snapshot?: ContextUsageSnapshot;
   error: boolean;
@@ -50,31 +42,11 @@ function getPercentage(snapshot: ContextUsageAvailableSnapshot): number {
 
 function ContextUsageDetails({
   error,
-  refresh,
   snapshot,
 }: {
   error: boolean;
-  refresh: () => void;
-  snapshot?: ContextUsageSnapshot;
+  snapshot: ContextUsageAvailableSnapshot;
 }) {
-  if (!snapshot?.available) {
-    return (
-      <div className={styles.details} role="dialog" aria-label="上下文占用详情">
-        <div className={styles.title}>上下文占用</div>
-        <p className={styles.guidance}>
-          {error
-            ? "暂时无法获取，请稍后打开重试。"
-            : "尚无可用快照，发送一条消息后再查看。"}
-        </p>
-        {error ? (
-          <button type="button" onClick={refresh}>
-            重试
-          </button>
-        ) : null}
-      </div>
-    );
-  }
-
   const percentage = getPercentage(snapshot);
   const progressPercentage = Math.min(percentage, 100);
   const categories = [
@@ -90,7 +62,7 @@ function ContextUsageDetails({
           <div className={styles.title}>上下文占用</div>
           <div className={styles.total}>
             约 {formatCompactTokens(snapshot.used_tokens)} /{" "}
-            {formatCompactTokens(snapshot.max_tokens)}
+            {formatCompactTokens(snapshot.max_tokens)} · {percentage}%
           </div>
         </div>
         <span className={`${styles.status} ${styles[snapshot.status]}`}>
@@ -139,7 +111,6 @@ function ContextUsageDetails({
       {error ? (
         <p className={styles.notice}>刷新失败，继续显示上次结果。</p>
       ) : null}
-      <p className={styles.disclosure}>估算值，不是模型供应商账单。</p>
     </div>
   );
 }
@@ -147,51 +118,47 @@ function ContextUsageDetails({
 export default function ContextUsageIndicator({
   snapshot,
   error,
-  refresh,
 }: ContextUsageIndicatorProps) {
   const [open, setOpen] = useState(false);
-  const available = snapshot?.available === true;
-  const percentage = available ? getPercentage(snapshot) : null;
-  const statusLabel = available ? STATUS_LABELS[snapshot.status] : "暂无数据";
-  const compactStatus = available
-    ? TRIGGER_STATUS_LABELS[snapshot.status]
-    : undefined;
+  if (!snapshot?.available) return null;
+
+  const percentage = getPercentage(snapshot);
+  const statusLabel = STATUS_LABELS[snapshot.status];
+  const ringPercentage = Math.min(100, Math.max(0, snapshot.usage_ratio * 100));
 
   return (
     <Popover
-      content={
-        <ContextUsageDetails
-          snapshot={snapshot}
-          error={error}
-          refresh={refresh}
-        />
-      }
-      trigger="click"
-      placement="topLeft"
+      content={<ContextUsageDetails snapshot={snapshot} error={error} />}
+      trigger={["hover", "click"]}
+      placement="topRight"
       open={open}
       onOpenChange={setOpen}
       overlayClassName={styles.popover}
     >
       <button
         type="button"
-        className={`${styles.trigger} ${
-          available ? styles[snapshot.status] : styles.unavailable
-        }`}
-        aria-label={
-          available
-            ? `上下文占用 ${percentage}%，状态${statusLabel}`
-            : "上下文占用，暂无数据"
-        }
+        className={`${styles.trigger} ${styles[snapshot.status]}`}
+        aria-label={`上下文占用 ${percentage}%，状态${statusLabel}`}
         aria-haspopup="dialog"
         aria-expanded={open}
       >
-        <span>上下文</span>
-        <span className={styles.percentage}>
-          {percentage === null ? "--" : `${percentage}%`}
-        </span>
-        {compactStatus ? (
-          <span className={styles.compactStatus}>· {compactStatus}</span>
-        ) : null}
+        <svg
+          className={styles.ring}
+          viewBox="0 0 20 20"
+          aria-hidden="true"
+          focusable="false"
+        >
+          <circle className={styles.ringTrack} cx="10" cy="10" r="7" />
+          <circle
+            className={styles.ringFill}
+            cx="10"
+            cy="10"
+            r="7"
+            pathLength="100"
+            strokeDasharray={`${ringPercentage} 100`}
+            transform="rotate(-90 10 10)"
+          />
+        </svg>
       </button>
     </Popover>
   );
