@@ -18,6 +18,42 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_RETRY_DELAY_SECONDS = 300
 DEFAULT_DISPATCHED_STALE_SECONDS = 7800
+EXECUTION_SCAN_LIMIT = 200
+SUBTASK_EXECUTION_FAILED = "子任务执行失败"
+SUBTASK_STATUS_TIMEOUT = "获取子任务状态超时"
+DISPATCH_OUTCOME_UNKNOWN = "dispatch outcome unknown past stale timeout"
+EXECUTION_RECORD_MISSING = (
+    "dispatch accepted but no execution record before stale timeout"
+)
+
+# Correlate with the current attempt, including the runtime job and tenant.
+_CURRENT_EXECUTION_IDENTITY_SQL = """
+    e.dispatch_intent_id = swe_cron_dispatch_intents.id
+    AND e.dispatch_batch_id = swe_cron_dispatch_intents.batch_id
+    AND e.dispatch_attempt = swe_cron_dispatch_intents.attempt_count
+    AND e.job_id = swe_cron_dispatch_intents.job_id
+    AND e.tenant_id = swe_cron_dispatch_intents.tenant_id
+"""
+_TERMINAL_EXECUTION_SQL = """
+    (
+        e.status IN ('error', 'failed', 'cancelled', 'timeout', 'skipped')
+        OR (e.status = 'success' AND e.async_status IN ('success', 'error'))
+    )
+"""
+_HAS_TERMINAL_EXECUTION_SQL = f"""
+    EXISTS (
+        SELECT 1 FROM swe_cron_executions e
+        WHERE {_CURRENT_EXECUTION_IDENTITY_SQL}
+          AND {_TERMINAL_EXECUTION_SQL}
+    )
+"""
+_HAS_SUCCESSFUL_AGENT_SQL = f"""
+    EXISTS (
+        SELECT 1 FROM swe_cron_executions e
+        WHERE {_CURRENT_EXECUTION_IDENTITY_SQL}
+          AND e.status = 'success'
+    )
+"""
 VIEWER_HEAT_LOOKBACK_DAYS = 30
 VIEWER_FAST_READ_BUCKET_SECONDS = (
     2 * 60 * 60,
@@ -754,6 +790,81 @@ class CronDispatchIntentService:
             return []
         return await self._fetch_claimed_intents(lock_owner, ids)
 
+    async def reconcile_dispatched_executions(
+        self,
+        *,
+        now_utc: datetime,
+        retry_delay_seconds: int = DEFAULT_RETRY_DELAY_SECONDS,
+        source_ids: list[str] | None = None,
+        provider_id: str = DEFAULT_PROVIDER_ID,
+        model_id: str = DEFAULT_MODEL_ID,
+    ) -> int:
+        """Settle current attempts from persisted Agent and subtask results."""
+        scope_filter_clause, scope_filter_params = _build_scope_filter(
+            source_ids=source_ids,
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        rows = await get_db_connection().fetch_all(
+            f"""
+            SELECT swe_cron_dispatch_intents.id,
+                   swe_cron_dispatch_intents.batch_id,
+                   swe_cron_dispatch_intents.job_id,
+                   swe_cron_dispatch_intents.tenant_id,
+                   swe_cron_dispatch_intents.source_id,
+                   swe_cron_dispatch_intents.attempt_count,
+                   e.id AS execution_id, e.status AS agent_status,
+                   e.async_status, e.error_message
+            FROM swe_cron_dispatch_intents
+            JOIN swe_cron_executions e ON {_CURRENT_EXECUTION_IDENTITY_SQL}
+            WHERE swe_cron_dispatch_intents.status = 'dispatched'
+              AND {_TERMINAL_EXECUTION_SQL}
+              {scope_filter_clause}
+            ORDER BY swe_cron_dispatch_intents.id, e.id DESC
+            LIMIT %s
+            """,
+            (*scope_filter_params, EXECUTION_SCAN_LIMIT),
+        )
+        updated_rows: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for row in rows:
+            intent_id = int(row["id"])
+            if intent_id in seen:
+                continue
+            seen.add(intent_id)
+            status = str(row["agent_status"]).lower()
+            error = str(row.get("error_message") or "")
+            if status == "success" and row["async_status"] == "error":
+                status, error = "error", SUBTASK_EXECUTION_FAILED
+            if await self.complete_from_execution(
+                intent_id=intent_id,
+                execution_id=int(row["execution_id"]),
+                status=status,
+                completed_at=now_utc,
+                error=error,
+                retry_delay_seconds=retry_delay_seconds,
+                expected_batch_id=row["batch_id"],
+                expected_job_id=row["job_id"],
+                expected_tenant_id=row["tenant_id"],
+                expected_source_id=row["source_id"],
+                expected_attempt_count=int(row["attempt_count"]),
+            ):
+                updated_rows.append(row)
+                logger.info(
+                    "scheduler_dispatch_task_finished intent_id=%s batch_id=%s "
+                    "job_id=%s status=%s",
+                    intent_id,
+                    row["batch_id"],
+                    row["job_id"],
+                    status,
+                )
+        if updated_rows:
+            await self._refresh_batch_counts_for_rows(
+                updated_rows,
+                updated_at=now_utc,
+            )
+        return len(updated_rows)
+
     async def recover_stale_dispatched_intents(
         self,
         *,
@@ -784,11 +895,13 @@ class CronDispatchIntentService:
                     await cur.execute(
                         f"""
                         SELECT id, batch_id, job_id, tenant_id, source_id,
-                               attempt_count, max_attempts
+                               attempt_count, max_attempts,
+                               {_HAS_SUCCESSFUL_AGENT_SQL} AS awaiting_subtask
                         FROM swe_cron_dispatch_intents
                         WHERE status = 'dispatched'
                           AND locked_at IS NOT NULL
                           AND locked_at < %s
+                          AND NOT {_HAS_TERMINAL_EXECUTION_SQL}
                           {scope_filter_clause}
                         FOR UPDATE
                         """,
@@ -798,8 +911,10 @@ class CronDispatchIntentService:
                         ),
                     )
                     stale_rows = list(await cur.fetchall())
-                    retryable_rows, exhausted_rows = _partition_stale_dispatched_rows(
-                        stale_rows,
+                    retryable_rows, exhausted_rows = (
+                        _partition_stale_dispatched_rows(
+                            stale_rows,
+                        )
                     )
                     if retryable_rows:
                         retryable_ids = _positive_int_ids_from_rows(
@@ -815,12 +930,16 @@ class CronDispatchIntentService:
                                 due_at = %s,
                                 lock_owner = '',
                                 locked_at = NULL,
-                                error_message = %s
+                                error_message = CASE
+                                    WHEN {_HAS_SUCCESSFUL_AGENT_SQL} THEN %s
+                                    ELSE %s
+                                END
                             WHERE id IN ({placeholders})
                             """,
                             (
                                 normalized_now,
-                                "dispatch outcome unknown past stale timeout",
+                                SUBTASK_STATUS_TIMEOUT,
+                                DISPATCH_OUTCOME_UNKNOWN,
                                 *retryable_ids,
                             ),
                         )
@@ -837,13 +956,17 @@ class CronDispatchIntentService:
                                 lock_owner = '',
                                 locked_at = NULL,
                                 completed_at = %s,
-                                error_message = %s
+                                error_message = CASE
+                                    WHEN {_HAS_SUCCESSFUL_AGENT_SQL} THEN %s
+                                    ELSE %s
+                                END
                             WHERE id IN ({placeholders})
                             """,
                             (
                                 normalized_now,
                                 normalized_now,
-                                "dispatch accepted but no execution record before stale timeout",
+                                SUBTASK_STATUS_TIMEOUT,
+                                EXECUTION_RECORD_MISSING,
                                 *exhausted_ids,
                             ),
                         )
@@ -951,12 +1074,15 @@ class CronDispatchIntentService:
     ) -> list[Any]:
         await cur.execute(
             f"""
-            SELECT id, batch_id, job_id, tenant_id, source_id
+            SELECT id, batch_id, job_id, tenant_id, source_id,
+                   attempt_count, max_attempts,
+                   {_HAS_SUCCESSFUL_AGENT_SQL} AS awaiting_subtask
             FROM swe_cron_dispatch_intents
             WHERE status = 'dispatched'
               AND locked_at IS NOT NULL
               AND locked_at < %s
               AND attempt_count >= max_attempts
+              AND NOT {_HAS_TERMINAL_EXECUTION_SQL}
               {scope_filter_clause}
             FOR UPDATE
             """,
@@ -983,13 +1109,17 @@ class CronDispatchIntentService:
                 lock_owner = '',
                 locked_at = NULL,
                 completed_at = %s,
-                error_message = %s
+                error_message = CASE
+                    WHEN {_HAS_SUCCESSFUL_AGENT_SQL} THEN %s
+                    ELSE %s
+                END
             WHERE id IN ({placeholders})
             """,
             (
                 normalized_now,
                 normalized_now,
-                "dispatch accepted but no execution record before stale timeout",
+                SUBTASK_STATUS_TIMEOUT,
+                EXECUTION_RECORD_MISSING,
                 *exhausted_ids,
             ),
         )
@@ -1025,6 +1155,7 @@ class CronDispatchIntentService:
                     AND locked_at IS NOT NULL
                     AND locked_at < %s
                     AND attempt_count < max_attempts
+                    AND NOT {_HAS_TERMINAL_EXECUTION_SQL}
                 )
             )
               AND due_at <= %s
@@ -1110,6 +1241,7 @@ class CronDispatchIntentService:
                     AND locked_at IS NOT NULL
                     AND locked_at < %s
                     AND attempt_count < max_attempts
+                    AND NOT {_HAS_TERMINAL_EXECUTION_SQL}
                 )
             )
               AND due_at <= %s
@@ -1199,7 +1331,11 @@ class CronDispatchIntentService:
                 tenant_id=str(_row_value(row, 3, "tenant_id") or ""),
                 source_id=str(_row_value(row, 4, "source_id") or ""),
                 details={
-                    "error": "dispatch outcome unknown past stale timeout",
+                    "error": (
+                        SUBTASK_STATUS_TIMEOUT
+                        if _row_value(row, 7, "awaiting_subtask")
+                        else DISPATCH_OUTCOME_UNKNOWN
+                    ),
                 },
             )
 
@@ -1217,8 +1353,9 @@ class CronDispatchIntentService:
                 source_id=str(_row_value(row, 4, "source_id") or ""),
                 details={
                     "error": (
-                        "dispatch accepted but no execution record "
-                        "before stale timeout"
+                        SUBTASK_STATUS_TIMEOUT
+                        if _row_value(row, 7, "awaiting_subtask")
+                        else EXECUTION_RECORD_MISSING
                     ),
                 },
             )
@@ -1378,6 +1515,38 @@ class CronDispatchIntentService:
             details={"error": (error or "")[:2048]},
         )
         return True
+
+    async def accept_execution_feedback(
+        self,
+        *,
+        intent_id: int,
+        execution_id: int | None,
+        expected_batch_id: str,
+        expected_job_id: str,
+        expected_tenant_id: str,
+        expected_source_id: str | None,
+        expected_attempt_count: int | None,
+    ) -> bool:
+        """Validate a durable SWE receipt without treating it as completion."""
+        row = await get_db_connection().fetch_one(
+            """
+            SELECT batch_id, job_id, tenant_id, source_id, attempt_count
+            FROM swe_cron_dispatch_intents WHERE id = %s
+            """,
+            (intent_id,),
+        )
+        if not row:
+            return False
+        return await self._execution_feedback_matches(
+            row=row,
+            intent_id=intent_id,
+            execution_id=execution_id,
+            expected_batch_id=expected_batch_id,
+            expected_job_id=expected_job_id,
+            expected_tenant_id=expected_tenant_id,
+            expected_source_id=expected_source_id,
+            expected_attempt_count=expected_attempt_count,
+        )
 
     async def complete_from_execution(
         self,
@@ -2109,7 +2278,9 @@ def _build_execution_completion_transition(
         next_due_at=next_due_at,
         event_type=event_type,
         retry=retry,
-        error_message=(error or normalized_status or "")[:2048],
+        error_message=(
+            "" if success else (error or normalized_status or "")[:2048]
+        ),
     )
 
 
