@@ -86,13 +86,41 @@ function isReasoningMessage(message: IAgentScopeRuntimeMessage): boolean {
   return message.type === AgentScopeRuntimeMessageType.REASONING;
 }
 
+function hasBoundaryMetadata(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return (
+    Boolean(
+      record.approval_action ||
+        record.retry_status ||
+        record.plan_interaction_card,
+    ) || hasBoundaryMetadata(record.metadata)
+  );
+}
+
 function isInvisibleAssistantBoundary(
   message: IAgentScopeRuntimeMessage,
 ): boolean {
-  return (
-    message.type === AgentScopeRuntimeMessageType.MESSAGE &&
-    message.status === AgentScopeRuntimeRunStatus.InProgress &&
-    !message.content?.length
+  if (
+    message.type !== AgentScopeRuntimeMessageType.MESSAGE ||
+    message.role !== "assistant" ||
+    ![
+      AgentScopeRuntimeRunStatus.Created,
+      AgentScopeRuntimeRunStatus.InProgress,
+      AgentScopeRuntimeRunStatus.Completed,
+    ].includes(message.status) ||
+    message.code ||
+    message.message ||
+    hasBoundaryMetadata(message)
+  )
+    return false;
+
+  // A reasoning boundary can complete with newline-only text blocks.
+  return (message.content ?? []).every(
+    (block) =>
+      block.type === AgentScopeRuntimeContentType.TEXT &&
+      typeof block.text === "string" &&
+      !block.text.trim(),
   );
 }
 

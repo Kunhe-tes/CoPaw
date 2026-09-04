@@ -1,4 +1,5 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import Builder from "./Builder";
 import {
   AgentScopeRuntimeContentType,
   AgentScopeRuntimeMessageType,
@@ -13,6 +14,8 @@ import {
   getToolStepStatus,
   groupOperationMessages,
 } from "./operationGrouping";
+
+vi.mock("@/components/agentscope-chat", () => ({ uuid: () => "test-uuid" }));
 
 function toolMessage(options: {
   id: string;
@@ -354,6 +357,161 @@ describe("groupOperationMessages", () => {
     expect(groups).toHaveLength(1);
     expect(items).toEqual([groups[0]]);
     expect(groups[0].steps).toEqual([firstTool, reasoning, secondTool]);
+  });
+
+  it.each([
+    AgentScopeRuntimeRunStatus.Created,
+    AgentScopeRuntimeRunStatus.InProgress,
+    AgentScopeRuntimeRunStatus.Completed,
+  ])("ignores empty and whitespace-only assistant content in %s", (status) => {
+    for (const texts of [[], [""], ["\n\n\n", ""], [" \t\r\n"]]) {
+      const boundary = emptyMessage("blank");
+      boundary.status = status;
+      boundary.content = texts.map((text) => ({
+        type: AgentScopeRuntimeContentType.TEXT,
+        status,
+        text,
+      }));
+      const { items, groups } = groupOperationMessages([
+        toolMessage({ id: "t1", group: GROUP_A }),
+        boundary,
+        toolMessage({ id: "t2", group: GROUP_A }),
+      ]);
+      expect(groups).toHaveLength(1);
+      expect(items).toHaveLength(1);
+    }
+  });
+
+  it.each(["user", "system"])(
+    "preserves empty %s message boundaries",
+    (role) => {
+      const boundary = { ...emptyMessage("boundary"), role };
+      expect(
+        groupOperationMessages([
+          toolMessage({ id: "t1", group: GROUP_A }),
+          boundary,
+          toolMessage({ id: "t2", group: GROUP_A }),
+        ]).groups,
+      ).toHaveLength(2);
+    },
+  );
+
+  it.each([
+    AgentScopeRuntimeRunStatus.Failed,
+    AgentScopeRuntimeRunStatus.Canceled,
+    AgentScopeRuntimeRunStatus.Rejected,
+  ])("preserves an empty %s message", (status) => {
+    const boundary = { ...emptyMessage("boundary"), status };
+    expect(
+      groupOperationMessages([
+        toolMessage({ id: "t1", group: GROUP_A }),
+        boundary,
+        toolMessage({ id: "t2", group: GROUP_A }),
+      ]).groups,
+    ).toHaveLength(2);
+  });
+
+  it.each([
+    AgentScopeRuntimeContentType.IMAGE,
+    AgentScopeRuntimeContentType.FILE,
+    AgentScopeRuntimeContentType.REFUSAL,
+    AgentScopeRuntimeContentType.DATA,
+  ])("preserves %s blocks even without text", (type) => {
+    const boundary = emptyMessage("boundary");
+    boundary.content = [
+      { type, status: AgentScopeRuntimeRunStatus.Completed },
+    ] as IAgentScopeRuntimeMessage["content"];
+    expect(
+      groupOperationMessages([
+        toolMessage({ id: "t1", group: GROUP_A }),
+        boundary,
+        toolMessage({ id: "t2", group: GROUP_A }),
+      ]).groups,
+    ).toHaveLength(2);
+  });
+
+  it.each(["approval_action", "retry_status", "plan_interaction_card"])(
+    "preserves empty messages with direct or history-nested %s",
+    (key) => {
+      for (const metadata of [{ [key]: true }, { metadata: { [key]: true } }]) {
+        const boundary = { ...emptyMessage("boundary"), metadata };
+        const { items, groups } = groupOperationMessages([
+          toolMessage({ id: "t1", group: GROUP_A }),
+          boundary,
+          toolMessage({ id: "t2", group: GROUP_A }),
+        ]);
+        expect(groups).toHaveLength(2);
+        expect(items[1]).toEqual({ kind: "message", message: boundary });
+      }
+    },
+  );
+
+  it("keeps the SSE null -> whitespace -> completed boundary invisible", () => {
+    const builder = new Builder({
+      id: "response",
+      status: AgentScopeRuntimeRunStatus.InProgress,
+      created_at: 1,
+    });
+    const firstTool = toolMessage({
+      id: "glob",
+      callId: "call-glob",
+      toolName: "glob_search",
+      group: GROUP_A,
+    });
+    builder.handle(firstTool);
+    builder.handle(reasoningMessage("reason"));
+    const project = () =>
+      groupOperationMessages(Builder.mergeToolMessages(builder.data.output));
+    builder.handle({
+      ...emptyMessage("blank"),
+      content: null,
+    } as unknown as IAgentScopeRuntimeMessage);
+    expect(project().items).toHaveLength(1);
+    builder.handle({
+      object: "content",
+      type: AgentScopeRuntimeContentType.TEXT,
+      status: AgentScopeRuntimeRunStatus.InProgress,
+      delta: true,
+      msg_id: "blank",
+      text: "\n\n\n",
+    });
+    expect(project().items).toHaveLength(1);
+    builder.handle({
+      ...emptyMessage("blank"),
+      status: AgentScopeRuntimeRunStatus.Completed,
+      content: [
+        {
+          type: AgentScopeRuntimeContentType.TEXT,
+          status: AgentScopeRuntimeRunStatus.Completed,
+          text: "\n\n\n",
+        },
+        {
+          type: AgentScopeRuntimeContentType.TEXT,
+          status: AgentScopeRuntimeRunStatus.Completed,
+          text: "",
+        },
+      ],
+    });
+    builder.handle(
+      toolMessage({
+        id: "read-profile",
+        toolName: "read_file",
+        group: GROUP_A,
+      }),
+    );
+    builder.handle(
+      toolMessage({ id: "read-agents", toolName: "read_file", group: GROUP_A }),
+    );
+    expect(project().groups).toHaveLength(1);
+    expect(project().groups[0].steps.map((step) => step.id)).toEqual([
+      "glob",
+      "reason",
+      "read-profile",
+      "read-agents",
+    ]);
+    // A later real text update must restore the boundary, not stay suppressed.
+    builder.handle(textMessage("blank"));
+    expect(project().groups).toHaveLength(2);
   });
 
   it("keeps ungrouped tool messages as individual items (R16)", () => {
