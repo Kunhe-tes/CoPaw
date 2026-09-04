@@ -207,12 +207,20 @@ describe("FileManager", () => {
     expect(
       screen.getByRole("tab", { name: "当前会话文件 1" }),
     ).toHaveAttribute("aria-selected", "true");
-    expect(screen.getByLabelText("当前会话文件")).toHaveTextContent(
-      "投资简报.html",
-    );
+    expect(screen.queryByLabelText("当前会话文件")).not.toBeInTheDocument();
     expect(screen.getByTestId("session-file-preview")).toHaveTextContent(
       "投资简报.html",
     );
+    fireEvent.click(
+      screen.getByRole("button", { name: "展开会话文件列表" }),
+    );
+    expect(screen.getByLabelText("当前会话文件")).toHaveTextContent(
+      "投资简报.html",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "收起会话文件列表" }),
+    );
+    expect(screen.queryByLabelText("当前会话文件")).not.toBeInTheDocument();
   });
 
   it("permanently deletes a directory after confirmation without opening it", async () => {

@@ -15,6 +15,8 @@ import {
   DownloadOutlined,
   FolderOpenOutlined,
   HomeOutlined,
+  MenuFoldOutlined,
+  MenuUnfoldOutlined,
   MessageOutlined,
   SearchOutlined,
   UploadOutlined,
@@ -198,6 +200,7 @@ export default function FileManager({
   const [sessionFiles, setSessionFiles] = useState<ChatWorkspaceFile[]>([]);
   const [sessionPreview, setSessionPreview] =
     useState<ChatWorkspaceFile | null>(null);
+  const [sessionListCollapsed, setSessionListCollapsed] = useState(false);
 
   const currentDirectory = columns[1] || columns[0];
   const uploadReason = uploadDisabledReason(root);
@@ -235,6 +238,7 @@ export default function FileManager({
       });
       if (detail.action === "open") {
         setSessionPreview(file);
+        setSessionListCollapsed(true);
         setActiveTab("session");
         setOpen(true);
       }
@@ -856,15 +860,50 @@ export default function FileManager({
           <Tabs
             className={styles.workspaceTabs}
             activeKey={activeTab}
-            onChange={(key) => setActiveTab(key as WorkspaceTab)}
+            onChange={(key) => {
+              const nextTab = key as WorkspaceTab;
+              setActiveTab(nextTab);
+              if (nextTab === "session") setSessionListCollapsed(false);
+            }}
             tabBarExtraContent={
-              <Button
-                type="text"
-                className={styles.closeButton}
-                aria-label="关闭文件管理器"
-                icon={<CloseOutlined />}
-                onClick={() => executeOrGuard(() => setOpen(false))}
-              />
+              <div className={styles.drawerActions}>
+                {activeTab === "session" && sessionFiles.length > 0 && (
+                  <Tooltip
+                    title={
+                      sessionListCollapsed
+                        ? "展开会话文件列表"
+                        : "收起会话文件列表"
+                    }
+                  >
+                    <Button
+                      type="text"
+                      className={styles.sessionListToggle}
+                      aria-label={
+                        sessionListCollapsed
+                          ? "展开会话文件列表"
+                          : "收起会话文件列表"
+                      }
+                      icon={
+                        sessionListCollapsed ? (
+                          <MenuUnfoldOutlined />
+                        ) : (
+                          <MenuFoldOutlined />
+                        )
+                      }
+                      onClick={() =>
+                        setSessionListCollapsed((collapsed) => !collapsed)
+                      }
+                    />
+                  </Tooltip>
+                )}
+                <Button
+                  type="text"
+                  className={styles.closeButton}
+                  aria-label="关闭文件管理器"
+                  icon={<CloseOutlined />}
+                  onClick={() => executeOrGuard(() => setOpen(false))}
+                />
+              </div>
             }
             items={[
               {
@@ -1016,32 +1055,38 @@ export default function FileManager({
               </main>
             </>
           ) : (
-            <main className={styles.sessionContent}>
-              <section
-                className={styles.sessionFileList}
-                aria-label="当前会话文件"
-              >
-                {sessionFiles.length === 0 ? (
-                  <div className={styles.sessionEmpty}>
-                    <Empty description="当前会话还没有可预览的文件" />
-                  </div>
-                ) : (
-                  sessionFiles.map((file) => (
-                    <button
-                      key={file.fileUrl}
-                      type="button"
-                      className={styles.sessionFile}
-                      aria-pressed={sessionPreview?.fileUrl === file.fileUrl}
-                      onClick={() => setSessionPreview(file)}
-                    >
-                      <span className={styles.sessionFileName}>
-                        {file.fileName}
-                      </span>
-                      <span className={styles.sessionFileHint}>点击预览</span>
-                    </button>
-                  ))
-                )}
-              </section>
+            <main
+              className={`${styles.sessionContent} ${
+                sessionListCollapsed ? styles.sessionContentCollapsed : ""
+              }`}
+            >
+              {!sessionListCollapsed && (
+                <section
+                  className={styles.sessionFileList}
+                  aria-label="当前会话文件"
+                >
+                  {sessionFiles.length === 0 ? (
+                    <div className={styles.sessionEmpty}>
+                      <Empty description="当前会话还没有可预览的文件" />
+                    </div>
+                  ) : (
+                    sessionFiles.map((file) => (
+                      <button
+                        key={file.fileUrl}
+                        type="button"
+                        className={styles.sessionFile}
+                        aria-pressed={sessionPreview?.fileUrl === file.fileUrl}
+                        onClick={() => setSessionPreview(file)}
+                      >
+                        <span className={styles.sessionFileName}>
+                          {file.fileName}
+                        </span>
+                        <span className={styles.sessionFileHint}>点击预览</span>
+                      </button>
+                    ))
+                  )}
+                </section>
+              )}
               <section
                 className={styles.sessionPreview}
                 aria-label="会话文件预览"
