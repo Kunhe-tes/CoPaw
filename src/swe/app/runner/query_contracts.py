@@ -14,6 +14,18 @@ from ...agents.react_agent import SWEAgent
 from ...agents.skill_runtime_snapshot import WorkspaceSkillSnapshot
 
 
+@dataclass(frozen=True)
+class QueryPersistenceResult:
+    """描述一次查询的会话提交结果，供定时任务最终判定使用。"""
+
+    session_id: str
+    user_id: str
+    assistant_message_count: int
+    commit_attempted: bool
+    committed: bool
+    commit_error: str | None = None
+
+
 @dataclass
 class _QueryPreflight:
     """保存进入 Agent 主流程前已经解析出的请求状态。"""
@@ -77,6 +89,7 @@ class _QueryRuntime:
     session_execution: Any | None = None
     session_state_committed: bool = False
     session_state_commit_attempted: bool = False
+    persistence_result: QueryPersistenceResult | None = None
 
 
 @dataclass

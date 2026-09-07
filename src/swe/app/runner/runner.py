@@ -62,6 +62,7 @@ from .query_execution.admission import stream_admission
 from .query_execution.retry import load_retry_settings
 from .query_execution.adapters import LegacyQueryExecutionAdapter
 from .query_contracts import (
+    QueryPersistenceResult,
     _QueryPreflight,
     _QueryRuntime,
     _QueryRuntimeInputs,
@@ -146,11 +147,16 @@ from ...runtime_invocation_claims import runtime_invocation_claims_context
 from ..answer_turn.models import TurnIdentity, TurnOutcome, TurnStatus
 from ..source_system_config import is_chat_task_progress_enabled
 from ..source_system_config.runtime import get_current_source_system_config
+from ..cron_result_metrics import (
+    CRON_EXECUTION_KEY_CONFLICT_TOTAL,
+    increment_cron_result_metric,
+)
 
 if TYPE_CHECKING:
     from ...agents.memory import BaseMemoryManager
 
 logger = logging.getLogger(__name__)
+CRON_PERSISTENCE_RESULT_TTL_SECONDS = 60.0
 TASK_RUNS_STATE_KEY = "task_runs"
 _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
 _PLAN_MODE_META_KEY = "plan_mode_enabled"
@@ -526,6 +532,10 @@ def _build_task_run_record(
     *,
     memory_start: int,
     execution_key: str | None = None,
+    persistence_key: str | None = None,
+    job_id: str | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict[str, Any] | None:
     """根据本次新增消息构建任务运行元数据。"""
     if not memory_entries:
@@ -545,10 +555,31 @@ def _build_task_run_record(
         "memory_start": memory_start,
         "memory_end": memory_start + len(memory_entries),
         "preview_text": preview_text,
+        "input_hash": _task_run_input_hash(memory_entries),
     }
     if execution_key:
         record["execution_key"] = execution_key
+    if persistence_key:
+        record["persistence_key"] = persistence_key
+    if job_id:
+        record["job_id"] = job_id
+    if session_id:
+        record["session_id"] = session_id
+    if user_id:
+        record["user_id"] = user_id
     return record
+
+
+def _task_run_input_hash(memory_entries: list[Any]) -> str:
+    """为本次任务输入生成稳定指纹，辅助识别 execution key 冲突。"""
+    payload = []
+    for entry in memory_entries:
+        message = _extract_memory_entry_payload(entry)
+        if not message or message.get("role") != "user":
+            continue
+        payload.append(message.get("content"))
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _task_run_timestamps(
@@ -2776,6 +2807,10 @@ def _build_cron_append_state(
     current_agent_state: dict[str, Any],
     hook_overlay: HookSessionOverlay | None,
     execution_key: str | None = None,
+    persistence_key: str | None = None,
+    job_id: str | None = None,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[dict[str, Any], list[Any], list[Any], int, bool]:
     """构建只追加本次 request memory delta 的 cron session state。"""
     existing_memory = existing_state.get("agent", {}).get("memory", {}) or {}
@@ -2790,17 +2825,22 @@ def _build_cron_append_state(
     )
 
     task_runs = list(existing_state.get(TASK_RUNS_STATE_KEY, []) or [])
-    if execution_key and any(
-        isinstance(run, dict) and run.get("execution_key") == execution_key
-        for run in task_runs
-    ):
-        return (
-            existing_state,
-            existing_content,
-            current_content,
-            stripped_count,
-            False,
-        )
+    if execution_key:
+        current_hash = _task_run_input_hash(current_content)
+        for run in task_runs:
+            if not isinstance(run, dict) or run.get("execution_key") != execution_key:
+                continue
+            stored_hash = run.get("input_hash")
+            if stored_hash != current_hash:
+                increment_cron_result_metric(CRON_EXECUTION_KEY_CONFLICT_TOTAL)
+                raise RuntimeError("execution_key_conflict")
+            return (
+                existing_state,
+                existing_content,
+                current_content,
+                stripped_count,
+                False,
+            )
 
     merged_state = dict(existing_state)
     existing_agent = existing_state.get("agent")
@@ -2828,6 +2868,10 @@ def _build_cron_append_state(
         current_content,
         memory_start=len(existing_content),
         execution_key=execution_key or None,
+        persistence_key=persistence_key or None,
+        job_id=job_id,
+        session_id=session_id,
+        user_id=user_id,
     )
     if task_run is not None:
         task_runs.append(task_run)
@@ -2912,6 +2956,10 @@ class AgentRunner(Runner):
         ] = {}
         self._answer_turn_locations: dict[TurnIdentity, tuple[str, str]] = {}
         self._query_background_tasks: set[asyncio.Task[None]] = set()
+        self._cron_persistence_results: dict[
+            tuple[str, str, str],
+            tuple[float, QueryPersistenceResult],
+        ] = {}
         self.session: Any | None = None
         self._query_execution = QueryExecution(
             LegacyQueryExecutionAdapter(self),
@@ -2920,6 +2968,73 @@ class AgentRunner(Runner):
     def set_answer_turn_coordinator(self, coordinator: Any) -> None:
         """Attach the workspace-owned answer-turn coordinator."""
         self._answer_turn_coordinator = coordinator
+
+    def _record_query_persistence_result(
+        self,
+        request: AgentRequest,
+        result: QueryPersistenceResult,
+    ) -> None:
+        """记录 scheduled query 的会话提交结果，供 Cron 消费一次。"""
+        if getattr(request, "execution_origin", None) != "scheduled":
+            return
+        key = (
+            str(getattr(request, "session_id", "") or ""),
+            str(getattr(request, "user_id", "") or ""),
+            str(
+                getattr(request, "cron_persistence_key", "")
+                or getattr(request, "cron_execution_key", "")
+                or "",
+            ),
+        )
+        self._prune_expired_query_persistence_results()
+        self._cron_persistence_results[key] = (time.monotonic(), result)
+
+    def _prune_expired_query_persistence_results(self) -> None:
+        """Discard cleanup receipts whose Cron consumer cannot still need them."""
+        expires_before = time.monotonic() - CRON_PERSISTENCE_RESULT_TTL_SECONDS
+        expired_keys = [
+            key
+            for key, (
+                recorded_at,
+                _result,
+            ) in self._cron_persistence_results.items()
+            if recorded_at <= expires_before
+        ]
+        for key in expired_keys:
+            self._cron_persistence_results.pop(key, None)
+
+    def get_query_persistence_result(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        execution_key: str = "",
+    ) -> QueryPersistenceResult | None:
+        """消费指定 scheduled query 的会话提交结果。"""
+        self._prune_expired_query_persistence_results()
+        key = (str(session_id), str(user_id), str(execution_key or ""))
+        receipt = self._cron_persistence_results.pop(key, None)
+        return receipt[1] if receipt is not None else None
+
+    async def wait_for_query_persistence_result(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        execution_key: str = "",
+        timeout_seconds: float = 5.0,
+    ) -> QueryPersistenceResult | None:
+        """有界等待 scheduled query 的 finally 阶段提交回执。"""
+        deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
+        while True:
+            result = self.get_query_persistence_result(
+                session_id=session_id,
+                user_id=user_id,
+                execution_key=execution_key,
+            )
+            if result is not None or time.monotonic() >= deadline:
+                return result
+            await asyncio.sleep(0.01)
 
     @staticmethod
     def _answer_turn_identity(request: Any) -> TurnIdentity | None:
@@ -3740,6 +3855,7 @@ class AgentRunner(Runner):
                 "cron_execution_key",
                 None,
             ),
+            "cron_job_id": getattr(request, "cron_job_id", None),
             "current_user_text": current_user_text,
             "channel_manager": getattr(
                 getattr(self, "_workspace", None),
@@ -5299,8 +5415,8 @@ class AgentRunner(Runner):
         fallback_user_id: str = "",
         fallback_skip_history: bool = False,
         fallback_session_execution: Any = None,
-    ) -> None:
-        await query_cleanup.save_state_during_cleanup(
+    ) -> bool:
+        return await query_cleanup.save_state_during_cleanup(
             self,
             runtime=runtime,
             session_state_loaded=session_state_loaded,
@@ -5915,13 +6031,15 @@ class AgentRunner(Runner):
         user_id: str | None,
         hook_overlay: HookSessionOverlay | None = None,
         session_execution: Any = None,
-    ) -> None:
+    ) -> bool:
         """保存 cron 任务状态，保留旧历史并追加本轮新增消息。"""
         storage_session_id = _coerce_session_storage_id(session_id)
         storage_user_id = _coerce_session_storage_user_id(user_id)
         current_agent_state = agent.state_dict()
         request_context = getattr(agent, "_request_context", {}) or {}
         execution_key = request_context.get("cron_execution_key")
+        persistence_key = request_context.get("cron_persistence_key")
+        cron_job_id = request_context.get("cron_job_id")
         merge_stats: dict[str, Any] = {}
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
@@ -5936,6 +6054,10 @@ class AgentRunner(Runner):
                 current_agent_state,
                 hook_overlay,
                 execution_key=execution_key,
+                persistence_key=persistence_key,
+                job_id=cron_job_id,
+                session_id=storage_session_id,
+                user_id=storage_user_id,
             )
             merge_stats["existing_content"] = existing_content
             merge_stats["current_content"] = current_content
@@ -5943,9 +6065,11 @@ class AgentRunner(Runner):
             merge_stats["should_commit"] = should_commit
             return merged_state
 
+        committed = bool(merge_stats.get("should_commit", True))
         if session_execution is not None:
             merged_state = _merge(session_execution.state)
-            if merge_stats.get("should_commit", True):
+            committed = bool(merge_stats.get("should_commit", True))
+            if committed:
                 await session_execution.commit_state(merged_state)
         else:
             existing_state = await self.session.get_session_state_dict(
@@ -5954,7 +6078,8 @@ class AgentRunner(Runner):
                 allow_not_exist=True,
             )
             merged_state = _merge(existing_state)
-            if merge_stats.get("should_commit", True):
+            committed = bool(merge_stats.get("should_commit", True))
+            if committed:
                 await self.session.save_merged_state(
                     session_id=storage_session_id,
                     user_id=storage_user_id,
@@ -5970,6 +6095,7 @@ class AgentRunner(Runner):
             len(merge_stats.get("current_content", [])),
             merge_stats.get("stripped_count", 0),
         )
+        return committed
 
     async def _save_legacy_session_state(
         self,
@@ -6118,10 +6244,10 @@ class AgentRunner(Runner):
         hook_overlay: HookSessionOverlay | None = None,
         *,
         session_execution: Any = None,
-    ):
+    ) -> bool:
         """按请求类型保存 session state。"""
         if session_execution is None:
-            await session_lifecycle.save_job_session_state(
+            return await session_lifecycle.save_job_session_state(
                 self,
                 agent,
                 session_id,
@@ -6129,8 +6255,7 @@ class AgentRunner(Runner):
                 user_id,
                 hook_overlay,
             )
-            return
-        await session_lifecycle.save_job_session_state(
+        return await session_lifecycle.save_job_session_state(
             self,
             agent,
             session_id,

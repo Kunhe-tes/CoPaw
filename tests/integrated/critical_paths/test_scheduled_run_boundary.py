@@ -13,6 +13,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
 )
 
 from swe.app.crons.executor import CronExecutor
+from swe.app.runner.query_contracts import QueryPersistenceResult
 from swe.config.context import (
     get_current_effective_tenant_id,
     get_current_source_id,
@@ -44,6 +45,19 @@ class RecordingRunner:
             object="message",
             status=RunStatus.Completed,
             content=[TextContent(type=ContentType.TEXT, text=self.text)],
+        )
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+        )
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-critical",
+            user_id="user-critical",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
         )
 
 

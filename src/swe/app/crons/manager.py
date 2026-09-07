@@ -23,6 +23,11 @@ from ..b3_headers import PASSTHROUGH_HEADERS_META_KEY
 from ..channels.schema import DEFAULT_CHANNEL
 from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
+from ..cron_result_metrics import (
+    CRON_SESSION_ROUTE_MISMATCH_TOTAL,
+    get_cron_result_metrics,
+    increment_cron_result_metric,
+)
 from ...config.context import (
     canonicalize_scope_id,
     is_valid_identity_value,
@@ -44,6 +49,7 @@ from .auth_state import prefetch_auth_token
 from .cron_utils import compute_next_run_at, compute_next_run_times
 from .executor import CronExecutor
 from .models import CronJobSpec, CronJobState, CronTaskView, JobsFile
+from ..runner.models import ChatSpec
 from .repo.base import BaseJobRepository
 from .scheduler_adapter import SchedulerAdapter, NoopSchedulerAdapter
 from .monitor_sync_client import get_monitor_sync_client, MonitorSyncClient
@@ -634,6 +640,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 "Failed to register system jobs to external scheduler",
                 exc_info=True,
             )
+
+    @staticmethod
+    def get_result_metrics() -> dict[str, int]:
+        """返回定时任务结果一致性指标，供运行时诊断接口采集。"""
+        return get_cron_result_metrics()
 
     # ----- read/state -----
 
@@ -2166,7 +2177,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             or "",
             task_session_id,
             creator_user_id,
-            spec.name,
+            spec,
         )
         await self._update_task_chat(task_chat, spec, creator_user_id)
         self._apply_task_binding_defaults(meta)
@@ -2243,17 +2254,70 @@ class CronManager:  # pylint: disable=too-many-public-methods
         task_chat_id: str,
         task_session_id: str,
         creator_user_id: str,
-        task_name: str,
+        spec: CronJobSpec,
     ) -> Any:
         if task_chat_id:
             task_chat = await self._chat_manager.get_chat(task_chat_id)
             if task_chat is not None:
-                return task_chat
+                if self._task_chat_matches_binding(
+                    task_chat,
+                    task_session_id,
+                    creator_user_id,
+                    spec,
+                ):
+                    return task_chat
+                logger.warning(
+                    "Cron task chat binding mismatch; creating a new chat: "
+                    "chat_id=%s expected_session=%s actual_session=%s "
+                    "expected_user=%s actual_user=%s",
+                    task_chat_id,
+                    task_session_id,
+                    getattr(task_chat, "session_id", ""),
+                    creator_user_id,
+                    getattr(task_chat, "user_id", ""),
+                )
+                increment_cron_result_metric(CRON_SESSION_ROUTE_MISMATCH_TOTAL)
+                create_chat = getattr(self._chat_manager, "create_chat", None)
+                if callable(create_chat):
+                    return await create_chat(
+                        ChatSpec(
+                            session_id=task_session_id,
+                            user_id=creator_user_id,
+                            channel=DEFAULT_CHANNEL,
+                            name=spec.name,
+                        ),
+                    )
         return await self._chat_manager.get_or_create_chat(
             task_session_id,
             creator_user_id,
             DEFAULT_CHANNEL,
-            name=task_name,
+            name=spec.name,
+        )
+
+    @staticmethod
+    def _task_chat_matches_binding(
+        task_chat: Any,
+        task_session_id: str,
+        creator_user_id: str,
+        spec: CronJobSpec,
+    ) -> bool:
+        """确认可复用 chat 与任务的读取、写入路由完全一致。"""
+        if (
+            str(getattr(task_chat, "session_id", ""))
+            != str(task_session_id)
+            or str(getattr(task_chat, "user_id", ""))
+            != str(creator_user_id)
+        ):
+            return False
+        chat_meta = getattr(task_chat, "meta", {}) or {}
+        expected_route = {
+            "task_tenant_id": str(spec.tenant_id or ""),
+            "task_source_id": str(spec.source_id or ""),
+            "task_scope_id": str(spec.scope_id or ""),
+        }
+        return all(
+            str(chat_meta.get(key, "")) == expected
+            for key, expected in expected_route.items()
         )
 
     async def _update_task_chat(
@@ -2268,6 +2332,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
             "session_kind": "task",
             "task_job_id": spec.id,
             "creator_user_id": creator_user_id,
+            "task_tenant_id": str(spec.tenant_id or ""),
+            "task_source_id": str(spec.source_id or ""),
+            "task_scope_id": str(spec.scope_id or ""),
         }
         await self._chat_manager.update_chat(task_chat)
 
@@ -2579,8 +2646,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
         链接前缀与 ID 类型来自 zhaohu 渠道配置
         （session_end_push_link_prefix / session_end_push_link_id_type）：
-        - id_type=chat_id    -> {prefix}?chatId={job.id}
-        - id_type=session_id -> {prefix}?sessionId={job.meta.task_chat_id}
+        - id_type=chat_id    -> {prefix}?chatId={job.meta.task_chat_id}
+        - id_type=session_id -> {prefix}?sessionId={job.meta.task_session_id}
         前缀为空或对应 ID 值为空时返回空串（不附加链接）。
         """
         zhaohu_cfg = self._get_zhaohu_push_config()
@@ -2593,10 +2660,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
             or "session_id"
         )
         if id_type == "chat_id":
-            chat_id = str(getattr(job, "id", "") or "")
+            chat_id = str(
+                (getattr(job, "meta", None) or {}).get("task_chat_id", ""),
+            )
             return f"{prefix}{sep}chatId={chat_id}" if chat_id else ""
         session_id = (getattr(job, "meta", None) or {}).get(
-            "task_chat_id",
+            "task_session_id",
             "",
         ) or ""
         return f"{prefix}{sep}sessionId={session_id}" if session_id else ""
@@ -2670,7 +2739,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             )
             return
 
-        session_id = job.meta.get("task_chat_id")
+        session_id = job.meta.get("task_session_id")
         creator_id = job.meta.get("creator_user_id")
         if not creator_id:
             logger.info("Skip W+ push: job %s has no creator_user_id", job.id)
@@ -2757,8 +2826,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
             logger.debug("Skip notification: job %s is not agent type", job.id)
             return
 
-        session_id = job.meta.get("task_chat_id")
-        if not session_id:
+        task_session_id = job.meta.get("task_session_id")
+        if not task_session_id:
             logger.info("Skip notification: job %s has no session_id", job.id)
             return
         creator_id = job.meta.get("creator_user_id")
@@ -2767,7 +2836,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             "job_id=%s job_name=%s session_id=%s",
             job.id,
             job.name,
-            session_id,
+            task_session_id,
         )
 
         # 构建 meta，包含 link 和 summary
@@ -2776,7 +2845,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         # RMASSIST 使用 W+ 深链；其他来源从 zhaohu 配置生成跳转链接
         is_rmassist = job.source_id == "RMASSIST"
         if is_rmassist:
-            wplus_link = self._build_wplus_link(session_id)
+            wplus_link = self._build_wplus_link(task_session_id)
             logger.debug("Generated W+ link: %s", wplus_link)
             meta["link_url"] = wplus_link
             meta["link_text"] = "点击跳转小助claw版查看"
@@ -2790,7 +2859,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         await self.push_message(
             creator_id,
             job,
-            session_id,
+            task_session_id,
             meta,
             raise_on_error=raise_on_error,
         )
@@ -3258,6 +3327,15 @@ class CronManager:  # pylint: disable=too-many-public-methods
             executor_leader=executor_leader,
             execution_meta=execution_meta,
         )
+        chat_session_id = await self._get_task_chat_session_id(job)
+        self._log_final_execution_decision(
+            job,
+            exec_status=exec_status,
+            trace_id=trace_id,
+            error_message=error_message,
+            execution_meta=execution_meta,
+            chat_session_id=chat_session_id,
+        )
         logger.info(
             "cron execution finalized: job_id=%s exec_status=%s "
             "last_status=%s trace_id=%s duration_ms=%s output_preview_len=%s",
@@ -3269,6 +3347,73 @@ class CronManager:  # pylint: disable=too-many-public-methods
             len(output_preview or ""),
         )
 
+    async def _get_task_chat_session_id(self, job: CronJobSpec) -> str:
+        """Resolve the persisted task Chat session for final diagnostics."""
+        task_chat_id = str((job.meta or {}).get("task_chat_id") or "")
+        getter = getattr(self._chat_manager, "get_chat", None)
+        if not task_chat_id or not callable(getter):
+            return ""
+        try:
+            chat = await getter(task_chat_id)
+        except Exception:  # pylint: disable=broad-except
+            logger.warning(
+                "cron final decision could not load task chat: job_id=%s "
+                "task_chat_id=%s",
+                job.id,
+                task_chat_id,
+                exc_info=True,
+            )
+            return ""
+        return str(getattr(chat, "session_id", "") or "")
+
+    @staticmethod
+    def _log_final_execution_decision(
+        job: CronJobSpec,
+        *,
+        exec_status: str,
+        trace_id: str,
+        error_message: str,
+        execution_meta: Optional[Dict[str, Any]],
+        chat_session_id: str = "",
+    ) -> None:
+        """记录一次可关联 session 与终态的最终决策日志。"""
+        meta = job.meta or {}
+        request = job.request
+        diagnostics = execution_meta or {}
+        dispatch = diagnostics.get("cron_dispatch")
+        if not isinstance(dispatch, dict):
+            dispatch = {}
+        logger.info(
+            "cron final decision: job_id=%s trace_id=%s task_chat_id=%s "
+            "task_session_id=%s request_session_id=%s chat_session_id=%s "
+            "creator_user_id=%s tenant_id=%s source_id=%s scope_id=%s "
+            "execution_key=%s response_terminal_status=%s "
+            "completed_message_seen=%s assistant_message_count=%s "
+            "output_len=%s output_source=%s "
+            "session_state_commit_attempted=%s session_state_committed=%s "
+            "final_status=%s final_error_code=%s",
+            job.id,
+            trace_id,
+            meta.get("task_chat_id", ""),
+            meta.get("task_session_id", ""),
+            getattr(request, "session_id", "") if request is not None else "",
+            chat_session_id,
+            meta.get("creator_user_id", ""),
+            job.tenant_id or "",
+            job.source_id or "",
+            job.scope_id or "",
+            dispatch.get("cron_execution_key", dispatch.get("execution_key", "")),
+            diagnostics.get("response_terminal_status", ""),
+            diagnostics.get("completed_message_seen", False),
+            diagnostics.get("assistant_message_count", 0),
+            diagnostics.get("output_len", 0),
+            diagnostics.get("output_source", ""),
+            diagnostics.get("session_state_commit_attempted", False),
+            diagnostics.get("session_state_committed", False),
+            exec_status,
+            diagnostics.get("terminal_error_code") or error_message,
+        )
+
     # pylint: disable=too-many-statements
     async def _execute_once(
         self,
@@ -3277,8 +3422,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
         source_id: str | None = None,
         dispatch_meta: Optional[Dict[str, Any]] = None,
     ) -> None:
-        job = await self._ensure_persisted_task_binding(job)
         job = self._with_execution_source_identity(job, source_id)
+        job = await self._ensure_persisted_task_binding(job)
         dispatch_meta = dict(dispatch_meta or {})
         rt = self._rt.get(job.id)
         if not rt:
@@ -3324,16 +3469,19 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     input_snapshot = exec_result.input_snapshot
                     executor_leader = exec_result.executor_leader
                     execution_meta = exec_result.execution_meta
-                    st.last_status = "success"
+                    exec_status = exec_result.status
+                    st.last_status = exec_status
                     st.last_error = None
                     end_time = datetime.now(timezone.utc)
                     duration_ms = int(
                         (end_time - actual_time).total_seconds() * 1000,
                     )
-                    await self._handle_success_notifications(job)
+                    if exec_status == "success":
+                        await self._handle_success_notifications(job)
                     logger.info(
-                        "cron _execute_once: job_id=%s status=success trace_id=%s",
+                        "cron _execute_once: job_id=%s status=%s trace_id=%s",
                         job.id,
+                        exec_status,
                         trace_id[:20] if trace_id else "(empty)",
                     )
             except asyncio.CancelledError as exc:

@@ -23,7 +23,11 @@ from ...runtime_invocation_claims import runtime_invocation_claims_context
 from ...tracing.models import TraceStatus
 from ...tracing.agent_trace_sdk import global_tracer
 from ..agent_context import set_current_agent_id
-from .query_contracts import _QueryPreflight, _QueryRuntime
+from .query_contracts import (
+    QueryPersistenceResult,
+    _QueryPreflight,
+    _QueryRuntime,
+)
 from .retry_classifier import is_query_retryable
 
 logger = logging.getLogger(__name__)
@@ -92,7 +96,13 @@ class QueryAttemptOwner(Protocol):
 
     async def _cleanup_query_resources(self, **kwargs: Any) -> None: ...
 
-    async def _save_state_during_cleanup(self, **kwargs: Any) -> None: ...
+    async def _save_state_during_cleanup(self, **kwargs: Any) -> bool: ...
+
+    def _record_query_persistence_result(
+        self,
+        request: AgentRequest,
+        result: QueryPersistenceResult,
+    ) -> None: ...
 
     async def _cleanup_blocked_runtime_start(
         self,
@@ -627,8 +637,15 @@ async def _save_and_close_session_execution(
     fallback_agent = (
         retry_state.prev_agent if cleanup_runtime is None else None
     )
+    commit_attempted = False
+    committed = False
+    commit_error: str | None = None
+    assistant_message_count = 0
+    if cleanup_runtime is not None:
+        cleanup_runtime.session_state_commit_attempted = True
     try:
-        await owner._save_state_during_cleanup(
+        commit_attempted = True
+        save_result = await owner._save_state_during_cleanup(
             runtime=cleanup_runtime,
             session_state_loaded=cleanup_state_loaded,
             fallback_agent=fallback_agent,
@@ -639,18 +656,125 @@ async def _save_and_close_session_execution(
             ),
             fallback_session_execution=session_execution,
         )
+        # The built-in cleanup returns False for a no-op.  ``None`` is kept
+        # compatible with older test/custom owners that perform commit inline.
+        committed = (
+            bool(save_result)
+            if save_result is not None
+            else bool(cleanup_state_loaded)
+        )
+        if not committed:
+            commit_attempted = False
         if (
             cleanup_runtime is None
             and fallback_agent is None
             and session_execution.has_uncommitted_state
         ):
             await session_execution.commit_state(session_execution.state)
-    finally:
+            commit_attempted = True
+            committed = True
+        if committed:
+            assistant_message_count = _count_persisted_assistant_messages(
+                session_execution.state,
+                persistence_key=str(
+                    getattr(request, "cron_persistence_key", "") or "",
+                ),
+            )
+    except BaseException as exc:
+        commit_error = str(exc) or type(exc).__name__
+        result = QueryPersistenceResult(
+            session_id=str(session_id),
+            user_id=str(getattr(request, "user_id", "") or ""),
+            assistant_message_count=0,
+            commit_attempted=commit_attempted,
+            committed=False,
+            commit_error=commit_error,
+        )
         if cleanup_runtime is not None:
-            cleanup_runtime.session_state_commit_attempted = True
-        await session_execution.close()
+            cleanup_runtime.persistence_result = result
+        recorder = getattr(owner, "_record_query_persistence_result", None)
+        if callable(recorder):
+            recorder(request, result)
+        try:
+            await session_execution.close()
+        except BaseException:
+            logger.warning(
+                "Failed to close session execution after persistence failure",
+                exc_info=True,
+            )
+        raise
+    finally:
+        if committed:
+            await session_execution.close()
+    result = QueryPersistenceResult(
+        session_id=str(session_id),
+        user_id=str(getattr(request, "user_id", "") or ""),
+        assistant_message_count=assistant_message_count,
+        commit_attempted=commit_attempted,
+        committed=committed,
+        commit_error=(
+            commit_error
+            or (None if committed else "session_state_not_persisted")
+        ),
+    )
     if cleanup_runtime is not None:
-        cleanup_runtime.session_state_committed = True
+        cleanup_runtime.session_state_committed = committed
+        cleanup_runtime.persistence_result = result
+    recorder = getattr(owner, "_record_query_persistence_result", None)
+    if callable(recorder):
+        recorder(request, result)
+
+
+def _count_persisted_assistant_messages(
+    state: Any,
+    *,
+    persistence_key: str = "",
+) -> int:
+    """Count assistant messages committed by this query only."""
+    if not isinstance(state, dict):
+        return 0
+    agent = state.get("agent")
+    memory = agent.get("memory") if isinstance(agent, dict) else None
+    content = memory.get("content") if isinstance(memory, dict) else None
+    if not isinstance(content, list):
+        return 0
+    if persistence_key:
+        task_runs = state.get("task_runs")
+        if not isinstance(task_runs, list):
+            return 0
+        task_run = next(
+            (
+                run
+                for run in reversed(task_runs)
+                if isinstance(run, dict)
+                and run.get("persistence_key") == persistence_key
+            ),
+            None,
+        )
+        if task_run is None:
+            return 0
+        memory_start = task_run.get("memory_start")
+        memory_end = task_run.get("memory_end")
+        if (
+            not isinstance(memory_start, int)
+            or not isinstance(memory_end, int)
+            or memory_start < 0
+            or memory_end < memory_start
+            or memory_end > len(content)
+        ):
+            return 0
+        content = content[memory_start:memory_end]
+    count = 0
+    for entry in content:
+        message = entry[0] if isinstance(entry, (tuple, list)) and entry else entry
+        role = message.get("role") if isinstance(message, dict) else getattr(
+            message,
+            "role",
+            None,
+        )
+        if role == "assistant":
+            count += 1
+    return count
 
 
 async def stream_query_after_preflight(

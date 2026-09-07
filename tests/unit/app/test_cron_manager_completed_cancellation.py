@@ -11,6 +11,15 @@ import pytest
 from agentscope_runtime.engine.schemas.agent_schemas import RunStatus
 
 from swe.app.crons.manager import CronManager
+from swe.app.crons.executor import CronExecutor
+from swe.app.cron_result_metrics import (
+    CRON_EMPTY_MODEL_OUTPUT_TOTAL,
+    CRON_SESSION_COMMIT_FAILURE_TOTAL,
+    CRON_SESSION_ROUTE_MISMATCH_TOTAL,
+    get_cron_result_metrics,
+    reset_cron_result_metrics_for_test,
+)
+from swe.app.runner.query_contracts import QueryPersistenceResult
 from swe.app.crons.models import (
     CronJobRequest,
     CronJobSpec,
@@ -47,6 +56,64 @@ class _Runner:
             content=[SimpleNamespace(type="text", text="done output")],
         )
         await asyncio.sleep(30)
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+        )
+
+
+class _CommitConfirmedRunner(_Runner):
+    """模拟在取消后完成 session cleanup 的 Runner。"""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Completed,
+            content=[SimpleNamespace(type="text", text="done output")],
+        )
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+        )
+        await asyncio.sleep(30)
+
+    async def wait_for_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+        )
+
+
+class _EmptyCompletedCommitConfirmedRunner:
+    """模拟 response 完成但无输出时、cleanup 已提交的取消窗口。"""
+
+    def __init__(self) -> None:
+        self.response_completed = asyncio.Event()
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+        )
+        self.response_completed.set()
+        await asyncio.Event().wait()
+
+    async def wait_for_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=0,
+            commit_attempted=True,
+            committed=True,
+        )
 
 
 class _PendingRunner:
@@ -104,7 +171,7 @@ class _ResponseFailedRunner:
 
 
 class _ResponseCompletedEmptyRunner:
-    """模拟 Runtime 完成但没有 assistant message 的合法终态。"""
+    """模拟 Runtime 完成但没有 assistant message 的终态。"""
 
     async def stream_query(self, _req):
         for status in (
@@ -113,6 +180,214 @@ class _ResponseCompletedEmptyRunner:
             RunStatus.Completed,
         ):
             yield SimpleNamespace(object="response", status=status)
+
+
+class _MessageCompletedEmptyRunner:
+    """模拟 completed message 未携带任何可展示 assistant 文本。"""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Completed,
+            role="assistant",
+            content=[],
+        )
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+        )
+
+
+class _ResponseCompletedOutputRunner:
+    """模拟仅通过 response.output 返回 assistant 文本的 Runtime。"""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+            id="response-with-output",
+            output=[
+                SimpleNamespace(
+                    id="assistant-output-1",
+                    role="assistant",
+                    content=[
+                        SimpleNamespace(
+                            type="text",
+                            text="response output",
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+        )
+
+
+class _MessageCompletedOutputOnlyRunner:
+    """模拟只有 message/completed 而没有 response/completed 的异常流。"""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Completed,
+            id="assistant-message-only",
+            role="assistant",
+            content=[SimpleNamespace(type="text", text="message only")],
+        )
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+        )
+
+
+class _ResponseCompletedOutputWithoutPersistenceRunner(
+    _ResponseCompletedOutputRunner,
+):
+    """模拟没有 session 提交回执能力的旧 Runner。"""
+
+    get_query_persistence_result = None
+
+
+class _CommitFailedRunner(_ResponseCompletedOutputRunner):
+    """模拟 Runtime 已完成但 session commit 未确认。"""
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=False,
+            commit_error="disk write failed",
+        )
+
+
+class _CommitWithoutAssistantRunner(_ResponseCompletedOutputRunner):
+    """A receipt without persisted assistant content is not a success."""
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=0,
+            commit_attempted=True,
+            committed=True,
+        )
+
+
+class _OutputThenResponseFailedRunner:
+    """A failed response following text must not publish a task result."""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Completed,
+            role="assistant",
+            content=[SimpleNamespace(type="text", text="partial output")],
+        )
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Failed,
+            error=SimpleNamespace(code="model_error", message="failed"),
+        )
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+        )
+
+
+class _ResponseCancelledThenBlockedRunner:
+    """A Runtime terminal cancellation must not wait for a blocked iterator."""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Canceled,
+            error=SimpleNamespace(code="upstream_cancelled", message="cancelled"),
+        )
+        await asyncio.sleep(30)
+
+
+class _SequenceDeduplicatedOutputRunner(_ResponseCompletedOutputRunner):
+    """The Runtime may identify duplicate output only by sequence number."""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Completed,
+            sequence_number=7,
+            role="assistant",
+            content=[SimpleNamespace(type="text", text="sequence output")],
+        )
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+            output=[
+                SimpleNamespace(
+                    sequence_number=7,
+                    role="assistant",
+                    content=[
+                        SimpleNamespace(type="text", text="sequence output"),
+                    ],
+                ),
+            ],
+        )
+
+
+class _MessageAndResponseOutputRunner:
+    """模拟 message 与 response.output 重复承载同一 assistant 文本。"""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Completed,
+            id="assistant-output-1",
+            role="assistant",
+            content=[SimpleNamespace(type="text", text="deduplicated output")],
+        )
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+            id="response-with-duplicate-output",
+            output=[
+                SimpleNamespace(
+                    id="assistant-output-1",
+                    role="assistant",
+                    content=[
+                        SimpleNamespace(
+                            type="text",
+                            text="deduplicated output",
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+        )
 
 
 class _ResponseCancelledRunner:
@@ -157,6 +432,34 @@ class _ChannelManager:
 
     async def send_event(self, **kwargs) -> None:
         self.events.append(kwargs["event"])
+
+
+class _TaskChatManager:
+    def __init__(self, existing):
+        self.existing = existing
+        self.created: list[object] = []
+        self.updated: list[object] = []
+
+    async def get_chat(self, _chat_id):
+        return self.existing
+
+    async def get_or_create_chat(self, session_id, user_id, _channel, *, name):
+        chat = SimpleNamespace(
+            id="replacement-chat",
+            session_id=session_id,
+            user_id=user_id,
+            name=name,
+            meta={},
+        )
+        self.created.append(chat)
+        return chat
+
+    async def create_chat(self, chat):
+        self.created.append(chat)
+        return chat
+
+    async def update_chat(self, chat):
+        self.updated.append(chat)
 
 
 class _SlowSendChannelManager(_ChannelManager):
@@ -493,10 +796,10 @@ def test_weekend_notification_due_time_is_kept_by_default():
     assert record["suppress_notification"] is False
 
 
-def test_completed_agent_output_cancelled_before_stream_close_keeps_success(
+def test_completed_agent_output_cancelled_before_stream_close_is_cancelled(
     monkeypatch,
 ):
-    """Agent 已输出完成消息后被取消，最终状态仍应保留为成功。"""
+    """未确认 session 提交时，完成消息后的取消必须保持 cancelled。"""
     info_messages: list[str] = []
 
     def fake_executor_info(message, *args, **_kwargs) -> None:
@@ -545,17 +848,17 @@ def test_completed_agent_output_cancelled_before_stream_close_keeps_success(
 
     state = manager.get_state("job-cancel-after-output")
     assert len(channel_manager.events) == 1
-    assert state.last_status == "success"
-    assert state.last_error is None
-    assert monitor.records[-1]["status"] == "success"
+    assert state.last_status == "cancelled"
+    assert state.last_error == "Job was cancelled"
+    assert monitor.records[-1]["status"] == "cancelled"
     assert any(
-        "cancellation after completed output" in message
+        "cancelled before completion" in message
         for message in info_messages
     )
 
 
-def test_completed_agent_event_cancelled_during_send_keeps_success():
-    """Agent 完成事件发送过程中被取消，也应按已完成任务处理。"""
+def test_completed_agent_event_cancelled_during_send_is_cancelled():
+    """完成事件尚未发完且无提交回执时必须保持 cancelled。"""
 
     async def _run():
         job = _build_agent_job()
@@ -591,9 +894,61 @@ def test_completed_agent_event_cancelled_during_send_keeps_success():
 
     state = manager.get_state("job-cancel-after-output")
     assert len(channel_manager.events) == 1
-    assert state.last_status == "success"
-    assert state.last_error is None
-    assert monitor.records[-1]["status"] == "success"
+    assert state.last_status == "cancelled"
+    assert state.last_error == "Job was cancelled"
+    assert monitor.records[-1]["status"] == "cancelled"
+
+
+def test_completed_agent_cancelled_after_session_commit_keeps_success():
+    """取消时等待到已提交的 session，才能保留 success。"""
+
+    async def _run():
+        job = _build_agent_job()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_CommitConfirmedRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        task = asyncio.create_task(
+            manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            ),
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await task
+        return manager
+
+    manager = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "success"
+
+
+def test_empty_completed_agent_cancelled_after_commit_stays_cancelled():
+    """取消路径不得绕过 assistant 输出这个 success 前置条件。"""
+
+    async def _run():
+        job = _build_agent_job()
+        runner = _EmptyCompletedCommitConfirmedRunner()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=runner,
+            channel_manager=_ChannelManager(),
+        )
+        task = asyncio.create_task(
+            manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            ),
+        )
+        await runner.response_completed.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return manager
+
+    manager = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "cancelled"
 
 
 def test_agent_cancelled_before_completed_output_keeps_cancelled():
@@ -903,10 +1258,20 @@ def test_response_failed_marks_execution_with_terminal_error(
     )
 
 
-def test_response_completed_without_message_marks_execution_as_success(
+def test_response_completed_without_message_marks_execution_as_error(
     monkeypatch,
 ):
-    """Runtime 的 response/completed 是 Cron 成功终态，即使 output 为空。"""
+    """response/completed 没有 assistant 内容时不得记为普通成功。"""
+    reset_cron_result_metrics_for_test()
+    info_messages: list[str] = []
+
+    def fake_manager_info(message, *args, **_kwargs) -> None:
+        info_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        "swe.app.crons.manager.logger.info",
+        fake_manager_info,
+    )
     monkeypatch.setattr(
         "swe.app.crons.executor.CronExecutor._resolve_execution_model",
         lambda *_args: None,
@@ -923,18 +1288,488 @@ def test_response_completed_without_message_marks_execution_as_success(
         manager._monitor_sync_client = (
             monitor  # pylint: disable=protected-access
         )
-        await manager._execute_once(  # pylint: disable=protected-access
-            job,
-            is_manual=False,
-        )
+        with pytest.raises(RuntimeError, match="empty_model_output"):
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
         return manager, monitor
 
     manager, monitor = asyncio.run(_run())
 
-    assert (
-        manager.get_state("job-cancel-after-output").last_status == "success"
+    assert manager.get_state("job-cancel-after-output").last_status == "error"
+    assert monitor.records[-1]["status"] == "error"
+    assert monitor.records[-1]["error_message"].endswith("empty_model_output")
+    assert get_cron_result_metrics()[CRON_EMPTY_MODEL_OUTPUT_TOTAL] == 1
+    final_decisions = [
+        message
+        for message in info_messages
+        if message.startswith("cron final decision:")
+    ]
+    assert final_decisions
+    assert "response_terminal_status=completed" in final_decisions[-1]
+    assert "assistant_message_count=0" in final_decisions[-1]
+    assert "session_state_committed=False" in final_decisions[-1]
+    assert "final_error_code=empty_model_output" in final_decisions[-1]
+
+
+def test_final_decision_logs_generic_error_when_terminal_code_is_empty(
+    monkeypatch,
+):
+    """执行 key 冲突等 cleanup 异常不能在最终决策日志中丢失错误码。"""
+    info_messages: list[str] = []
+
+    def fake_manager_info(message, *args, **_kwargs) -> None:
+        info_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        "swe.app.crons.manager.logger.info",
+        fake_manager_info,
     )
+
+    CronManager._log_final_execution_decision(  # pylint: disable=protected-access
+        _build_agent_job(),
+        exec_status="error",
+        trace_id="trace-1",
+        error_message="execution_key_conflict",
+        execution_meta={"terminal_error_code": ""},
+    )
+
+    assert "final_error_code=execution_key_conflict" in info_messages[-1]
+
+
+def test_final_decision_logs_actual_task_chat_session_id(monkeypatch):
+    """Final diagnostics must not substitute a task session for the Chat value."""
+    info_messages: list[str] = []
+
+    def fake_manager_info(message, *args, **_kwargs) -> None:
+        info_messages.append(message % args if args else message)
+
+    monkeypatch.setattr(
+        "swe.app.crons.manager.logger.info",
+        fake_manager_info,
+    )
+
+    CronManager._log_final_execution_decision(  # pylint: disable=protected-access
+        _build_agent_job(),
+        exec_status="success",
+        trace_id="trace-1",
+        error_message="",
+        execution_meta=None,
+        chat_session_id="persisted-chat-session",
+    )
+
+    assert "chat_session_id=persisted-chat-session" in info_messages[-1]
+
+
+def test_task_binding_replaces_chat_with_mismatched_route():
+    """旧 chat 的 session、用户或 scope 不一致时必须新建正确绑定。"""
+    reset_cron_result_metrics_for_test()
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "tenant_id": "tenant-a",
+                "source_id": "source-a",
+                "scope_id": "tenant-a::source-a",
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_chat_id": "old-chat",
+                    "task_session_id": "session-a",
+                },
+            },
+        )
+        old_chat = SimpleNamespace(
+            id="old-chat",
+            session_id="wrong-session",
+            user_id="wrong-user",
+            meta={
+                "task_tenant_id": "tenant-b",
+                "task_source_id": "source-b",
+                "task_scope_id": "tenant-b::source-b",
+            },
+        )
+        chat_manager = _TaskChatManager(old_chat)
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_EmptyStreamRunner(),
+            channel_manager=_ChannelManager(),
+            chat_manager=chat_manager,
+        )
+        return await manager._ensure_task_binding(job), chat_manager
+
+    bound, chat_manager = asyncio.run(_run())
+    assert bound.meta["task_chat_id"] != "old-chat"
+    assert bound.meta["task_session_id"] == "session-a"
+    assert bound.request.user_id == "user-a"
+    assert bound.request.session_id == "session-a"
+    assert chat_manager.created[0].meta["task_scope_id"] == "tenant-a::source-a"
+    assert get_cron_result_metrics()[CRON_SESSION_ROUTE_MISMATCH_TOTAL] == 1
+
+
+def test_execution_result_keeps_runtime_diagnostics_with_model_metadata():
+    """模型选择元数据不能覆盖终态和 session 提交诊断。"""
+    executor = CronExecutor(runner=object(), channel_manager=object())
+
+    result = executor._build_execution_result(  # pylint: disable=protected-access
+        {
+            "trace_id": "trace-1",
+            "execution_meta": {
+                "assistant_message_count": 1,
+                "session_state_committed": True,
+            },
+        },
+        execution_meta={"effective_model_slot": {"model": "model-1"}},
+    )
+
+    assert result.execution_meta == {
+        "effective_model_slot": {"model": "model-1"},
+        "assistant_message_count": 1,
+        "session_state_committed": True,
+    }
+
+
+def test_response_completed_output_marks_execution_as_success(monkeypatch):
+    """response.completed.output 中的 assistant 文本应成为成功输出。"""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_ResponseCompletedOutputRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = monitor  # pylint: disable=protected-access
+        result = await manager._executor.execute(job)
+        await manager._execute_once(job, is_manual=False)  # pylint: disable=protected-access
+        return manager, monitor, result
+
+    manager, monitor, result = asyncio.run(_run())
+
+    assert manager.get_state("job-cancel-after-output").last_status == "success"
     assert monitor.records[-1]["status"] == "success"
+    assert result.output_preview == "response output"
+
+
+def test_message_completed_without_response_terminal_marks_execution_as_error(
+    monkeypatch,
+):
+    """message/completed 不是 Runtime 成功终态，即使输出已提交也必须报错。"""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_MessageCompletedOutputOnlyRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(RuntimeError, match="did not complete"):
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        return manager
+
+    manager = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "error"
+
+
+def test_response_completed_empty_output_rejects_legacy_allow_empty_output(
+    monkeypatch,
+):
+    """遗留 allow_empty_output 透传值不能改变空输出失败语义。"""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        job.request = job.request.model_copy(
+            update={"allow_empty_output": True},
+        )
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_ResponseCompletedEmptyRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(RuntimeError, match="empty_model_output"):
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        return manager
+
+    manager = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "error"
+
+
+def test_message_completed_without_text_marks_execution_as_empty_output_error(
+    monkeypatch,
+):
+    """完成消息无文本时不能因日志变量错误掩盖空输出状态。"""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_MessageCompletedEmptyRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(RuntimeError, match="empty_model_output"):
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+
+    asyncio.run(_run())
+
+
+def test_response_completed_with_uncommitted_session_marks_execution_as_error(
+    monkeypatch,
+):
+    """有输出但 session 提交失败时不得产生 success。"""
+    reset_cron_result_metrics_for_test()
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        monitor = _MonitorSyncClient()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_CommitFailedRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        manager._monitor_sync_client = monitor  # pylint: disable=protected-access
+        with pytest.raises(RuntimeError, match="session_state_commit"):
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        return manager, monitor
+
+    manager, monitor = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "error"
+    assert monitor.records[-1]["status"] == "error"
+    assert get_cron_result_metrics()[CRON_SESSION_COMMIT_FAILURE_TOTAL] == 1
+
+
+def test_response_completed_without_persisted_assistant_marks_execution_as_error(
+    monkeypatch,
+):
+    """The persistence receipt must confirm an assistant actually reached session."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        manager = CronManager(
+            repo=_Repo(_build_agent_job()),
+            runner=_CommitWithoutAssistantRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(RuntimeError, match="persisted_assistant_missing"):
+            await manager._execute_once(  # pylint: disable=protected-access
+                _build_agent_job(),
+                is_manual=False,
+            )
+
+    asyncio.run(_run())
+
+
+def test_failed_non_console_task_does_not_push_partial_output(monkeypatch):
+    """Console pushes are deferred until the execution has passed all gates."""
+    pushed: list[tuple[str, str]] = []
+
+    async def record_push(_self, session_id, text, _tenant_id):
+        pushed.append((session_id, text))
+
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._push_to_console",
+        record_push,
+    )
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(user_id="user-a", session_id="session-a"),
+                ),
+                "meta": {
+                    "task_chat_id": "chat-a",
+                    "task_session_id": "task-session-a",
+                },
+            },
+        )
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_OutputThenResponseFailedRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(RuntimeError, match="model_error"):
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+
+    asyncio.run(_run())
+    assert pushed == []
+
+
+def test_successful_non_console_task_pushes_to_task_session(monkeypatch):
+    """The transient Console notification is addressed by session ID, never chat ID."""
+    pushed: list[tuple[str, str]] = []
+
+    async def record_push(_self, session_id, text, _tenant_id):
+        pushed.append((session_id, text))
+
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._push_to_console",
+        record_push,
+    )
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(user_id="user-a", session_id="session-a"),
+                ),
+                "meta": {
+                    "task_chat_id": "chat-a",
+                    "task_session_id": "task-session-a",
+                },
+            },
+        )
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_ResponseCompletedOutputRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        await manager._execute_once(  # pylint: disable=protected-access
+            job,
+            is_manual=False,
+        )
+
+    asyncio.run(_run())
+    assert pushed == [("task-session-a", "response output")]
+
+
+def test_response_cancelled_terminal_does_not_become_timeout(monkeypatch):
+    """A terminal cancellation closes the iterator rather than waiting for timeout."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        manager = CronManager(
+            repo=_Repo(_build_agent_job()),
+            runner=_ResponseCancelledThenBlockedRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(
+                manager._execute_once(  # pylint: disable=protected-access
+                    _build_agent_job(),
+                    is_manual=False,
+                ),
+                timeout=0.2,
+            )
+
+    asyncio.run(_run())
+
+
+def test_sequence_number_deduplicates_message_and_response_output(monkeypatch):
+    """Sequence-only Runtime output is not duplicated in the stored preview."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        executor = CronExecutor(
+            runner=_SequenceDeduplicatedOutputRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        return await executor.execute(_build_agent_job())
+
+    assert asyncio.run(_run()).output_preview == "sequence output"
+
+
+def test_response_completed_without_persistence_receipt_marks_execution_as_error(
+    monkeypatch,
+):
+    """没有 session 回执接口时不能猜测提交成功。"""
+    reset_cron_result_metrics_for_test()
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_ResponseCompletedOutputWithoutPersistenceRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(RuntimeError, match="persistence_result_unavailable"):
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        return manager
+
+    manager = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "error"
+    assert get_cron_result_metrics()[CRON_SESSION_COMMIT_FAILURE_TOTAL] == 1
+
+
+def test_message_and_response_output_are_deduplicated(monkeypatch):
+    """message/completed 与 response.output 同一消息只应展示一次。"""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        job = _build_agent_job()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_MessageAndResponseOutputRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        return await manager._executor.execute(job)
+
+    result = asyncio.run(_run())
+    assert result.output_preview == "deduplicated output"
 
 
 def test_response_cancelled_closes_trace_once_with_terminal_reason(
