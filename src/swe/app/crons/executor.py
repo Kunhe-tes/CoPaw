@@ -719,16 +719,17 @@ class CronExecutor:
 
         # 返回执行结果
         output_preview = (job.text or "").strip()[:100]
+        execution_key = _build_cron_execution_key(
+            job_id=job.id,
+            target_session_id=target_session_id,
+            dispatch_meta=dispatch_meta,
+        )
         input_snapshot = (
             {
                 "text": (job.text or "").strip(),
                 **(
-                    {
-                        "cron_execution_key": str(
-                            dispatch_meta.get("cron_execution_key") or "",
-                        ),
-                    }
-                    if dispatch_meta.get("cron_execution_key")
+                    {"cron_execution_key": execution_key}
+                    if execution_key
                     else {}
                 ),
             }

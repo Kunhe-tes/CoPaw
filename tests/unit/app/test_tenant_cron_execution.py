@@ -526,6 +526,26 @@ async def test_execute_text_job_preserves_execution_key_in_snapshot() -> None:
     }
 
 
+@pytest.mark.asyncio
+async def test_execute_text_job_builds_key_from_scheduled_fire_time() -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+
+    result = await executor._execute_text_job(
+        job,
+        "user-a",
+        "session-a",
+        {"scheduled_fire_at": "2026-09-08T02:30:00Z"},
+    )
+
+    assert result["input_snapshot"]["cron_execution_key"] == (
+        "job-text:2026-09-08T02:30:00Z:session-a"
+    )
+
+
 class _Provider:
     def __init__(self, models: list[str]):
         self._models = set(models)
