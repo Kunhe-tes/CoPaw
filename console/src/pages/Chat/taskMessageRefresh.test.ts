@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { refreshTaskSessionWithRetry } from "./taskMessageRefresh";
+import type { CronJobSpecOutput } from "../../api/types";
+import {
+  refreshTaskSessionWithRetry,
+  shouldRefreshCurrentTaskMessages,
+} from "./taskMessageRefresh";
 
 describe("refreshTaskSessionWithRetry", () => {
   it("retries a transient session refresh failure", async () => {
@@ -19,5 +23,45 @@ describe("refreshTaskSessionWithRetry", () => {
 
     expect(refreshSession).toHaveBeenCalledTimes(2);
     expect(wait).toHaveBeenCalledOnce();
+  });
+});
+
+describe("shouldRefreshCurrentTaskMessages", () => {
+  it("refreshes when switching to a task with an existing result", () => {
+    const previousTask = {
+      id: "task-a",
+      task: { has_scheduled_result: true },
+    } as CronJobSpecOutput;
+    const currentTask = {
+      id: "task-b",
+      task: { has_scheduled_result: true },
+    } as CronJobSpecOutput;
+
+    expect(
+      shouldRefreshCurrentTaskMessages({ previousTask, currentTask }),
+    ).toBe(true);
+  });
+
+  it("does not refresh only because the unread count was cleared", () => {
+    const previousTask = {
+      id: "task-a",
+      task: {
+        has_scheduled_result: true,
+        last_scheduled_run_at: "2026-09-08T09:00:00Z",
+        unread_execution_count: 1,
+      },
+    } as CronJobSpecOutput;
+    const currentTask = {
+      id: "task-a",
+      task: {
+        has_scheduled_result: true,
+        last_scheduled_run_at: "2026-09-08T09:00:00Z",
+        unread_execution_count: 0,
+      },
+    } as CronJobSpecOutput;
+
+    expect(
+      shouldRefreshCurrentTaskMessages({ previousTask, currentTask }),
+    ).toBe(false);
   });
 });

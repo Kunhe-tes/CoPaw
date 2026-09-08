@@ -82,18 +82,23 @@ async def _run_and_capture_dispatch_meta(
 
 
 @pytest.mark.asyncio
-async def test_scheduled_run_injects_cron_job_id_without_dispatch_meta(
+async def test_scheduled_run_requires_an_execution_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    job, observed = await _run_and_capture_dispatch_meta(
-        monkeypatch,
-        is_manual=False,
-        dispatch_meta=None,
+    job = _build_agent_job()
+    manager = CronManager(
+        repo=SimpleNamespace(get_job=AsyncMock(return_value=job)),
+        runner=object(),
+        channel_manager=object(),
+    )
+    monkeypatch.setattr(
+        manager,
+        "_ensure_persisted_task_binding",
+        AsyncMock(return_value=job),
     )
 
-    assert observed == {
-        "passthrough_headers": {"cron_job_id": job.id},
-    }
+    with pytest.raises(RuntimeError, match="execution identity"):
+        await manager.run_job(job.id, is_manual=False)
 
 
 @pytest.mark.asyncio
@@ -116,6 +121,7 @@ async def test_scheduled_run_preserves_headers_overrides_cron_job_id_and_copies(
     )
 
     assert observed == {
+        "cron_is_manual": False,
         "passthrough_headers": {
             "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
             "cron_job_id": job.id,
@@ -149,7 +155,9 @@ async def test_run_preserves_persisted_headers_without_execution_meta(
         job=job,
     )
 
+    assert observed.pop("cron_execution_key").startswith(f"manual:{job.id}:")
     assert observed == {
+        "cron_is_manual": True,
         "passthrough_headers": {
             "Authorization": "Bearer persisted-token",
             "cron_job_id": job.id,
@@ -178,7 +186,10 @@ async def test_run_normalizes_cron_job_id_header_case_and_merges_copies(
         "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
         "Cron_Job_Id": "execution-untrusted-job-id",
     }
-    execution_meta = {"passthrough_headers": execution_headers}
+    execution_meta = {
+        "passthrough_headers": execution_headers,
+        "scheduled_fire_at": "2026-07-31T01:00:00Z",
+    }
     job = _build_agent_job()
     job.dispatch.meta = persisted_meta
 
@@ -190,12 +201,14 @@ async def test_run_normalizes_cron_job_id_header_case_and_merges_copies(
     )
 
     assert observed == {
+        "cron_is_manual": False,
         "passthrough_headers": {
             "authorization": "Bearer execution-token",
             "X-Shared": "execution",
             "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
             "cron_job_id": job.id,
         },
+        "scheduled_fire_at": "2026-07-31T01:00:00Z",
     }
     assert [
         key
@@ -218,6 +231,7 @@ async def test_run_normalizes_cron_job_id_header_case_and_merges_copies(
             "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
             "Cron_Job_Id": "execution-untrusted-job-id",
         },
+        "scheduled_fire_at": "2026-07-31T01:00:00Z",
     }
 
 
@@ -240,7 +254,9 @@ async def test_manual_run_preserves_headers_overrides_cron_job_id_and_copies(
         dispatch_meta=dispatch_meta,
     )
 
+    assert observed.pop("cron_execution_key").startswith(f"manual:{job.id}:")
     assert observed == {
+        "cron_is_manual": True,
         "passthrough_headers": {
             "X-B3-Traceid": "8267fd70bacf497704fec30eaa353979",
             "cron_job_id": job.id,

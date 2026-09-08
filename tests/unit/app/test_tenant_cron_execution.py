@@ -232,6 +232,7 @@ async def test_prepare_agent_execution_uses_b3_dispatch_meta(monkeypatch):
                     "X-B3-Spanid": "32befd146889a61a",
                 },
                 "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+                "scheduled_fire_at": "2026-09-08T06:00:00Z",
             },
         )
     )
@@ -933,7 +934,10 @@ def test_execute_aborts_agent_job_when_user_info_expired(monkeypatch):
                 job,
                 "user-a",
                 "session-a",
-                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+                {
+                    "workspace_dir": "/tmp/tenant-a/workspaces/beta",
+                    "cron_is_manual": True,
+                },
             ),
         )
 
@@ -977,7 +981,10 @@ def test_execute_allows_agent_job_when_user_info_missing(monkeypatch):
                 job,
                 "user-a",
                 "session-a",
-                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+                {
+                    "workspace_dir": "/tmp/tenant-a/workspaces/beta",
+                    "cron_is_manual": True,
+                },
             ),
         )
 
@@ -1026,7 +1033,10 @@ def test_execute_injects_auth_token_and_cookie_into_agent_request(monkeypatch):
                 job,
                 "user-a",
                 "session-a",
-                {"workspace_dir": "/tmp/tenant-a/workspaces/beta"},
+                {
+                    "workspace_dir": "/tmp/tenant-a/workspaces/beta",
+                    "cron_is_manual": True,
+                },
             ),
         )
 

@@ -137,6 +137,23 @@ def _dispatch_parent_scheduled_fire_at(
     return parsed.astimezone(timezone.utc)
 
 
+def _has_cron_execution_identity(dispatch_meta: dict[str, Any]) -> bool:
+    """Return whether the scheduler supplied a stable execution identity."""
+    if dispatch_meta.get("cron_execution_key") or dispatch_meta.get(
+        "execution_key",
+    ):
+        return True
+    if dispatch_meta.get("intent_id") and dispatch_meta.get("batch_id"):
+        return True
+    return bool(
+        dispatch_meta.get("scheduled_fire_at")
+        or dispatch_meta.get("fire_time")
+        or dispatch_meta.get("trigger_time")
+        or dispatch_meta.get("parent_scheduled_fire_at")
+        or dispatch_meta.get("external_execution_id"),
+    )
+
+
 def broadcast_dispatch_intents_enabled(job: Any | None) -> bool:
     meta = getattr(job, "meta", {}) or {}
     if not isinstance(meta, dict):
@@ -1841,6 +1858,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             return
         job = await self._ensure_persisted_task_binding(job)
         dispatch_meta = dict(dispatch_meta or {})
+        dispatch_meta["cron_is_manual"] = is_manual
         persisted_headers = (job.dispatch.meta or {}).get(
             PASSTHROUGH_HEADERS_META_KEY,
         )
@@ -1862,8 +1880,14 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 del passthrough_headers[header_name]
         passthrough_headers["cron_job_id"] = job.id
         dispatch_meta[PASSTHROUGH_HEADERS_META_KEY] = passthrough_headers
-        if is_manual and job.task_type == "text":
+        if is_manual:
             dispatch_meta["cron_execution_key"] = f"manual:{job.id}:{uuid4()}"
+        elif job.task_type in {"agent", "text"} and not (
+            _has_cron_execution_identity(dispatch_meta)
+        ):
+            raise RuntimeError(
+                "cron scheduled delivery requires execution identity",
+            )
         logger.info(
             "cron run_job: job_id=%s channel=%s task_type=%s is_manual=%s "
             "target_user_id=%s target_session_id=%s",

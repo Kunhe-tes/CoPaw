@@ -1796,9 +1796,10 @@ export default function ChatPage() {
     const previousTask = previousCurrentTaskRef.current;
     previousCurrentTaskRef.current = currentTask;
 
-    const shouldRefresh = Boolean(currentTask?.task?.has_scheduled_result)
-      && (!previousTask
-        || shouldRefreshCurrentTaskMessages({ previousTask, currentTask }));
+    const shouldRefresh = shouldRefreshCurrentTaskMessages({
+      previousTask,
+      currentTask,
+    });
     if (!shouldRefresh) return;
 
     let cancelled = false;
@@ -1813,7 +1814,6 @@ export default function ChatPage() {
     currentTask?.id,
     currentTask?.task?.has_scheduled_result,
     currentTask?.task?.last_scheduled_run_at,
-    currentTask?.task?.unread_execution_count,
   ]);
 
   // Show toast when task has no scheduled result yet

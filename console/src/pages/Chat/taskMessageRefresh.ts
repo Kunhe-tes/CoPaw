@@ -52,19 +52,17 @@ export function shouldRefreshCurrentTaskMessages({
   previousTask,
   currentTask,
 }: ShouldRefreshCurrentTaskMessagesOptions): boolean {
-  if (!previousTask || !currentTask) {
+  if (!currentTask?.task?.has_scheduled_result) {
     return false;
   }
 
-  if (previousTask.id !== currentTask.id) {
-    return false;
+  if (!previousTask || previousTask.id !== currentTask.id) {
+    return true;
   }
 
   return (
     previousTask.task?.last_scheduled_run_at !==
       currentTask.task?.last_scheduled_run_at ||
-    previousTask.task?.unread_execution_count !==
-      currentTask.task?.unread_execution_count ||
     previousTask.task?.has_scheduled_result !==
       currentTask.task?.has_scheduled_result
   );

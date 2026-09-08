@@ -58,13 +58,13 @@ def _build_cron_execution_key(
     No worker-local wall clock is used.  Manual runs pass no dispatch identity
     and therefore intentionally return an empty key.
     """
-    if dispatch_meta.get("cron_is_manual"):
-        return ""
     explicit = dispatch_meta.get("cron_execution_key") or dispatch_meta.get(
         "execution_key",
     )
     if explicit:
         return str(explicit)
+    if dispatch_meta.get("cron_is_manual"):
+        return ""
 
     intent_id = dispatch_meta.get("intent_id")
     batch_id = dispatch_meta.get("batch_id")
@@ -721,10 +721,7 @@ class CronExecutor:
                 execution_key,
                 target_user_id,
             )
-            if (
-                job.dispatch.channel == CONSOLE_CHANNEL
-                and delivery_completed is None
-            ):
+            if delivery_completed is None:
                 raise RuntimeError(
                     "cron text delivery persistence unavailable",
                 )
@@ -916,6 +913,19 @@ class CronExecutor:
                     or message.get("id") != message_id
                 ):
                     continue
+                content = message.get("content")
+                existing_text = (
+                    "".join(
+                        str(block.get("text") or "")
+                        for block in content
+                        if isinstance(block, dict)
+                        and block.get("type") == "text"
+                    )
+                    if isinstance(content, list)
+                    else ""
+                )
+                if existing_text != job.text.strip():
+                    raise RuntimeError("execution_key_conflict")
                 metadata = message.get("metadata")
                 existing_delivery_completed = bool(
                     (
@@ -2102,6 +2112,16 @@ class CronExecutor:
             target_session_id=req["session_id"],
             dispatch_meta=dispatch_meta or {},
         )
+        if (
+            not execution_key
+            and dispatch_meta
+            and not bool(
+                dispatch_meta.get("cron_is_manual"),
+            )
+        ):
+            raise RuntimeError(
+                "cron agent delivery requires execution identity",
+            )
         if execution_key:
             req["cron_execution_key"] = execution_key
         # 传递 source_id 用于 tracing 数据隔离
@@ -2380,6 +2400,8 @@ class CronExecutor:
             stream_state.idempotent_replay
             and not stream_state.output_delivery_receipt_supported
         ):
+            if job.dispatch.channel != CONSOLE_CHANNEL:
+                raise RuntimeError("cron output delivery receipt unavailable")
             return
 
         if (
