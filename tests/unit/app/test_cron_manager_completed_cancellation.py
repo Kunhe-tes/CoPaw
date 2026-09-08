@@ -678,6 +678,14 @@ class _ChannelManager:
         self.texts.append(kwargs)
 
 
+class _TaskSession:
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {}
+
+    async def mutate_session_state(self, *, mutator, **_kwargs) -> None:
+        self.state = mutator(self.state)
+
+
 class _TaskChatManager:
     def __init__(self, existing):
         self.existing = existing
@@ -2198,6 +2206,32 @@ def test_task_success_effects_deduplicate_the_execution_key() -> None:
 
     job = asyncio.run(_run())
     assert job.meta["task_unread_execution_count"] == 1
+
+
+def test_text_task_replay_does_not_duplicate_session_message() -> None:
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "session-a",
+                },
+            },
+        )
+        session = _TaskSession()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=SimpleNamespace(session=session),
+            channel_manager=_ChannelManager(),
+        )
+        await manager._record_task_execution_success(job, "execution-1")
+        await manager._record_task_execution_success(job, "execution-1")
+        return session.state
+
+    state = asyncio.run(_run())
+    assert len(state["task_messages"]) == 1
 
 
 def test_legacy_persistence_receipt_without_replay_field_still_succeeds(

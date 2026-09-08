@@ -445,14 +445,13 @@ async def test_execute_text_job_resolves_trace_identifiers(
     start_kwargs = trace_manager.start_trace.await_args.kwargs
     if is_batch:
         assert start_kwargs["trace_id"] != dispatch_meta["b3_trace_id"]
-        assert str(uuid.UUID(start_kwargs["trace_id"])) == start_kwargs[
-            "trace_id"
-        ]
+        assert (
+            str(uuid.UUID(start_kwargs["trace_id"]))
+            == start_kwargs["trace_id"]
+        )
     else:
         assert start_kwargs["trace_id"] == dispatch_meta["b3_trace_id"]
-    assert start_kwargs["b3_trace_id"] == (
-        "8267fd70bacf497704fec30eaa353979"
-    )
+    assert start_kwargs["b3_trace_id"] == ("8267fd70bacf497704fec30eaa353979")
     assert result["trace_id"] == start_kwargs["trace_id"]
 
 
@@ -504,6 +503,27 @@ async def test_execute_text_job_keeps_batch_id_when_precreate_fails(
     assert str(uuid.UUID(result["trace_id"])) == result["trace_id"]
     assert start_kwargs["b3_trace_id"] == b3_trace_id
     trace_manager.end_trace.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_execute_text_job_preserves_execution_key_in_snapshot() -> None:
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+
+    result = await executor._execute_text_job(
+        job,
+        "user-a",
+        "session-a",
+        {"cron_execution_key": "execution-123"},
+    )
+
+    assert result["input_snapshot"] == {
+        "text": "hello",
+        "cron_execution_key": "execution-123",
+    }
 
 
 class _Provider:

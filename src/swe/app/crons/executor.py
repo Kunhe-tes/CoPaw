@@ -261,6 +261,7 @@ class AgentStreamState:
     output_delivery_replay_supported: bool = False
     output_delivery_completed: bool = False
     output_delivery_receipt_supported: bool = False
+    terminal_notification_sent: bool = False
     completed_message_event: Any | None = field(default=None, repr=False)
     persisted_assistant_content: list[dict[str, Any]] = field(
         default_factory=list,
@@ -719,7 +720,20 @@ class CronExecutor:
         # 返回执行结果
         output_preview = (job.text or "").strip()[:100]
         input_snapshot = (
-            {"text": (job.text or "").strip()} if job.text else None
+            {
+                "text": (job.text or "").strip(),
+                **(
+                    {
+                        "cron_execution_key": str(
+                            dispatch_meta.get("cron_execution_key") or "",
+                        ),
+                    }
+                    if dispatch_meta.get("cron_execution_key")
+                    else {}
+                ),
+            }
+            if job.text
+            else None
         )
         return {
             "trace_id": internal_trace_id or "",
@@ -1049,6 +1063,7 @@ class CronExecutor:
                 stream_state.output_delivery_replay_supported
             ),
             "output_delivery_completed": stream_state.output_delivery_completed,
+            "terminal_notification_sent": stream_state.terminal_notification_sent,
             "terminal_error_code": stream_state.terminal_error_code,
         }
 
@@ -2196,6 +2211,7 @@ class CronExecutor:
             text=f"{prefix}: {detail}",
             meta=dispatch_meta,
         )
+        stream_state.terminal_notification_sent = True
 
     async def _deliver_persisted_agent_output(
         self,

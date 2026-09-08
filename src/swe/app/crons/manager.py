@@ -1955,6 +1955,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 task.get_name(),
                 repr(exc),
             )
+            execution_meta = getattr(exc, "cron_execution_meta", None)
+            if isinstance(execution_meta, dict) and execution_meta.get(
+                "terminal_notification_sent",
+            ):
+                return
             # Push error to the console for the frontend to display
             session_id = job.dispatch.target.session_id
             if session_id:
@@ -1984,6 +1989,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
         调用者必须已持有 self._lock。
         """
+        mutate = getattr(self._repo, "mutate_jobs_file", None)
+        if callable(mutate):
+            changed, result = await mutate(mutator)
+            return changed, result, 0
         jobs_file = await self._repo.load()
         changed, result = mutator(jobs_file)
         if not changed:
@@ -2383,11 +2392,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
 
         if job.task_type == "text":
             preview = (job.text or "").strip()
-            await self._append_text_task_message(
-                task_session_id,
-                creator_user_id,
-                preview,
-            )
         else:
             # 即使无法获取 preview，也应该继续更新任务执行记录
             # 因为自动暂停逻辑依赖未读计数更新
@@ -2398,22 +2402,23 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 )
             else:
                 preview = ""
-        mutate = getattr(self._repo, "mutate_jobs_file", None)
         apply_success = lambda jobs_file: self._apply_task_execution_success(
             jobs_file,
             job.id,
             preview,
             execution_key,
         )
-        if callable(mutate):
-            _, auto_paused = await mutate(apply_success)
-        else:
-            # Third-party repositories predating mutate_jobs_file retain the
-            # former process-local consistency behavior.
-            async with self._lock:
-                _, auto_paused, _ = await self._mutate_jobs_file_locked(
-                    apply_success,
-                )
+        async with self._lock:
+            changed, auto_paused, _ = await self._mutate_jobs_file_locked(
+                apply_success,
+            )
+        if changed and job.task_type == "text":
+            await self._append_text_task_message(
+                task_session_id,
+                creator_user_id,
+                preview,
+                execution_key,
+            )
         if auto_paused:
             ext_id = self._states.get(
                 job.id,
@@ -2455,6 +2460,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
         session_id: str,
         user_id: str,
         text: str,
+        execution_key: str = "",
     ) -> None:
         if not text or not getattr(self._runner, "session", None):
             return
@@ -2468,7 +2474,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
             )
         )
         task_message = {
-            "id": f"cron-text-{uuid4()}",
+            "id": (
+                f"cron-text-{execution_key}"
+                if execution_key
+                else f"cron-text-{uuid4()}"
+            ),
             "type": "message",
             "role": "assistant",
             "content": [
@@ -2491,6 +2501,12 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 if isinstance(raw_task_messages, list)
                 else []
             )
+            if any(
+                isinstance(message, dict)
+                and message.get("id") == task_message["id"]
+                for message in task_messages
+            ):
+                return merged_state
             task_messages.append(task_message)
             merged_state[TASK_MESSAGES_STATE_KEY] = task_messages
             return merged_state
