@@ -143,6 +143,48 @@ def test_internal_cron_callback_dispatches_job_param_tenant() -> None:
     )
 
 
+def test_internal_cron_callback_forwards_scheduler_execution_identity() -> (
+    None
+):
+    cron_manager = SimpleNamespace(run_job=AsyncMock())
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+    job_param = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "tenant_id": "runtime-scope",
+                "agent_id": "default",
+                "task_type": "job",
+                "job_id": "job-1",
+            },
+        ).encode(),
+    ).decode()
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "jobParam": job_param,
+            "logId": "scheduler-log-1",
+            "triggerTime": "2026-09-08T02:30:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    cron_manager.run_job.assert_awaited_once_with(
+        "job-1",
+        is_manual=False,
+        source_id=None,
+        dispatch_meta={
+            "scheduled_fire_at": "2026-09-08T02:30:00Z",
+            "external_execution_id": "scheduler-log-1",
+        },
+    )
+
+
 def test_internal_cron_callback_forwards_b3_headers_to_run_job() -> None:
     cron_manager = SimpleNamespace(run_job=AsyncMock())
     manager = SimpleNamespace(

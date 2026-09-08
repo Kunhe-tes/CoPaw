@@ -107,12 +107,37 @@ class JsonJobRepository(BaseJobRepository):
             signature, jobs_file = await asyncio.to_thread(self._load_sync)
             changed, result = mutator(jobs_file)
             if changed:
-                signature = await asyncio.to_thread(
-                    self._save_sync,
-                    jobs_file,
-                )
+                signature = await self._save_locked(jobs_file)
             self._set_snapshot(signature, jobs_file)
             return changed, result
+
+    async def _save_locked(self, jobs_file: JobsFile) -> _FileSignature:
+        """Keep the file lock until a started background write has ended."""
+        save_task = asyncio.create_task(
+            asyncio.to_thread(self._save_sync, jobs_file),
+        )
+        try:
+            return await asyncio.shield(save_task)
+        except asyncio.CancelledError:
+            await self._wait_for_thread_write(save_task)
+            raise
+
+    @staticmethod
+    async def _wait_for_thread_write(
+        save_task: asyncio.Task[_FileSignature],
+    ) -> None:
+        """Wait through repeated cancellation until the thread stops writing."""
+        while not save_task.done():
+            try:
+                await asyncio.shield(save_task)
+            except asyncio.CancelledError:
+                continue
+            except Exception:  # pragma: no cover - surfaced by normal path
+                return
+        try:
+            save_task.result()
+        except Exception:  # pragma: no cover - caller cancellation wins
+            return
 
     async def get_job(self, job_id: str) -> Optional[CronJobSpec]:
         """优先复用未失效快照中的 job 索引。"""

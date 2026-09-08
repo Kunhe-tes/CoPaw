@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -175,3 +176,46 @@ async def test_concurrent_mutations_apply_an_execution_key_once(
     persisted = await JsonJobRepository(path).load()
     assert persisted.jobs[0].meta["completed_keys"] == [execution_key]
     assert persisted.jobs[0].meta["unread_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_cancelled_mutation_keeps_file_lock_until_write_finishes(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "jobs.json"
+    _write_jobs(path, [_job("job-a")])
+    first_repo = JsonJobRepository(path)
+    second_repo = JsonJobRepository(path)
+    write_started = threading.Event()
+    allow_write = threading.Event()
+    original_save = first_repo._save_sync
+
+    def blocked_save(jobs_file: JobsFile):
+        write_started.set()
+        allow_write.wait(timeout=5)
+        return original_save(jobs_file)
+
+    monkeypatch.setattr(first_repo, "_save_sync", blocked_save)
+
+    def update_name(jobs_file: JobsFile) -> tuple[bool, None]:
+        job = jobs_file.jobs[0]
+        jobs_file.jobs[0] = job.model_copy(update={"name": "updated"})
+        return True, None
+
+    first_mutation = asyncio.create_task(
+        first_repo.mutate_jobs_file(update_name),
+    )
+    await asyncio.to_thread(write_started.wait, 5)
+    first_mutation.cancel()
+
+    second_mutation = asyncio.create_task(
+        second_repo.mutate_jobs_file(update_name),
+    )
+    await asyncio.sleep(0.1)
+    assert not second_mutation.done()
+
+    allow_write.set()
+    with pytest.raises(asyncio.CancelledError):
+        await first_mutation
+    await second_mutation
