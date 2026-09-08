@@ -1800,12 +1800,16 @@ export default function ChatPage() {
       previousTask,
       currentTask,
     });
-    if (!shouldRefresh) return;
+    if (!shouldRefresh || !chatId) return;
 
     let cancelled = false;
     void refreshTaskSessionWithRetry(
-      () => chatRef.current?.refreshSession?.() ?? Promise.resolve(false),
-      { shouldContinue: () => !cancelled },
+      (sessionId) =>
+        chatRef.current?.refreshSession?.(sessionId) ?? Promise.resolve(false),
+      {
+        sessionId: chatId,
+        shouldContinue: () => !cancelled,
+      },
     );
     return () => {
       cancelled = true;
@@ -1814,6 +1818,7 @@ export default function ChatPage() {
     currentTask?.id,
     currentTask?.task?.has_scheduled_result,
     currentTask?.task?.last_scheduled_run_at,
+    chatId,
   ]);
 
   // Show toast when task has no scheduled result yet
