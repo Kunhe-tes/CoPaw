@@ -775,7 +775,7 @@ class ChannelManager:
         session_id: str,
         event: Any,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         ch = await self.get_channel(channel)
         if not ch:
             raise KeyError(f"channel not found: {channel}")
@@ -789,7 +789,7 @@ class ChannelManager:
         )
         if bot_prefix and "bot_prefix" not in merged_meta:
             merged_meta["bot_prefix"] = bot_prefix
-        await ch.send_event(
+        return await ch.send_event(
             user_id=user_id,
             session_id=session_id,
             event=event,
@@ -804,7 +804,7 @@ class ChannelManager:
         session_id: str,
         text: str,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Send plain text to a specific channel
         (used for scheduled jobs like task_type='text').
         """
@@ -848,3 +848,4 @@ class ChannelManager:
             [TextContent(type=ContentType.TEXT, text=text)],
             merged_meta,
         )
+        return True

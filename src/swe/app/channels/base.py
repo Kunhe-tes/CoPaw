@@ -1378,7 +1378,7 @@ class BaseChannel(ABC):
         to_handle: str,
         message: Any,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """
         Send all content of a Message
         (text, image, video, audio, file, refusal).
@@ -1386,18 +1386,63 @@ class BaseChannel(ABC):
         multi-part sending.
         """
         parts = self._message_to_content_parts(message)
-        if not parts:
+        if not parts or not self._has_sendable_content(parts):
             logger.debug(
                 f"channel send_message_content: no parts for to_handle="
                 f"{to_handle}, skip send",
             )
-            return
+            return False
         logger.debug(
             f"channel send_message_content: to_handle={to_handle} "
             f"parts_count={len(parts)} "
             f"part_types={[getattr(p, 'type', None) for p in parts]}",
         )
         await self.send_content_parts(to_handle, parts, meta)
+        return True
+
+    @staticmethod
+    def _has_sendable_content(parts: List[OutgoingContentPart]) -> bool:
+        """Return whether rendered parts have text or supported media."""
+        for part in parts:
+            content_type = getattr(part, "type", None)
+            if (
+                content_type == ContentType.TEXT
+                and str(
+                    getattr(part, "text", "") or "",
+                ).strip()
+            ):
+                return True
+            if (
+                content_type == ContentType.REFUSAL
+                and str(
+                    getattr(part, "refusal", "") or "",
+                ).strip()
+            ):
+                return True
+            if content_type == ContentType.IMAGE and getattr(
+                part,
+                "image_url",
+                None,
+            ):
+                return True
+            if content_type == ContentType.VIDEO and getattr(
+                part,
+                "video_url",
+                None,
+            ):
+                return True
+            if content_type == ContentType.FILE and (
+                getattr(part, "file_url", None)
+                or getattr(part, "file_id", None)
+            ):
+                return True
+            if content_type == ContentType.AUDIO and getattr(
+                part,
+                "data",
+                None,
+            ):
+                return True
+        return False
 
     async def send_content_parts(
         self,
@@ -1548,7 +1593,7 @@ class BaseChannel(ABC):
         session_id: str,
         event: "Event",
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Send a runner Event to this channel (non-stream).
 
         We only send when event is a completed message, then reuse
@@ -1560,10 +1605,10 @@ class BaseChannel(ABC):
         status = getattr(event, "status", None)
 
         if obj != "message" or status != RunStatus.Completed:
-            return
+            return False
 
         to_handle = self.to_handle_from_target(
             user_id=user_id,
             session_id=session_id,
         )
-        await self.send_message_content(to_handle, event, meta)
+        return await self.send_message_content(to_handle, event, meta)

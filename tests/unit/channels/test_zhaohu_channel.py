@@ -107,7 +107,52 @@ async def test_send_rejects_unavailable_delivery_configuration(
     channel = _make_channel(**overrides)
 
     with pytest.raises(RuntimeError, match="zhaohu delivery unavailable"):
-        await channel.send("user-1", "scheduled output")
+        await channel.send(
+            "user-1",
+            "scheduled output",
+            {"cron_delivery_key": "cron:execution-1:output"},
+        )
+
+
+@pytest.mark.asyncio
+async def test_non_cron_send_keeps_unavailable_configuration_as_noop() -> None:
+    channel = _make_channel(push_url="")
+
+    await channel.send("user-1", "ordinary output")
+
+
+@pytest.mark.asyncio
+async def test_send_event_reports_unrenderable_message_as_unconfirmed() -> (
+    None
+):
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel._message_to_content_parts = MagicMock(return_value=[])
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
+
+
+@pytest.mark.asyncio
+async def test_send_event_reports_blank_text_as_unconfirmed() -> None:
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel._message_to_content_parts = MagicMock(
+        return_value=[TextContent(type=ContentType.TEXT, text="   ")],
+    )
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
 
 
 @pytest.mark.asyncio
@@ -139,7 +184,11 @@ async def test_send_rejects_non_successful_push_response(monkeypatch) -> None:
     channel = _make_channel()
 
     with pytest.raises(RuntimeError, match="returnCode=FAIL"):
-        await channel.send("user-1", "scheduled output")
+        await channel.send(
+            "user-1",
+            "scheduled output",
+            {"cron_delivery_key": "cron:execution-1:output"},
+        )
 
 
 @pytest.mark.asyncio

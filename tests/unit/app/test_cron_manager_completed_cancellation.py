@@ -671,11 +671,13 @@ class _ChannelManager:
         self.events: list[object] = []
         self.texts: list[dict[str, object]] = []
 
-    async def send_event(self, **kwargs) -> None:
+    async def send_event(self, **kwargs) -> bool:
         self.events.append(kwargs["event"])
+        return True
 
-    async def send_text(self, **kwargs) -> None:
+    async def send_text(self, **kwargs) -> bool:
         self.texts.append(kwargs)
+        return True
 
 
 class _TaskSession:
@@ -731,10 +733,11 @@ class _SlowSendChannelManager(_ChannelManager):
         super().__init__()
         self.send_started = send_started
 
-    async def send_event(self, **kwargs) -> None:
+    async def send_event(self, **kwargs) -> bool:
         self.events.append(kwargs["event"])
         self.send_started.set()
         await asyncio.sleep(30)
+        return True
 
 
 class _FailOnceChannelManager(_ChannelManager):
@@ -742,11 +745,19 @@ class _FailOnceChannelManager(_ChannelManager):
         super().__init__()
         self.send_attempts = 0
 
-    async def send_event(self, **kwargs) -> None:
+    async def send_event(self, **kwargs) -> bool:
         self.send_attempts += 1
         if self.send_attempts == 1:
             raise RuntimeError("channel unavailable")
-        await super().send_event(**kwargs)
+        return await super().send_event(**kwargs)
+
+
+class _UnconfirmedChannelManager(_ChannelManager):
+    """A channel that deliberately skips a final-message delivery."""
+
+    async def send_event(self, **kwargs) -> bool:
+        self.events.append(kwargs["event"])
+        return False
 
 
 class _MonitorSyncClient:
@@ -1976,8 +1987,8 @@ def test_failed_non_console_task_does_not_push_partial_output(monkeypatch):
     assert pushed == []
 
 
-def test_successful_non_console_task_pushes_to_task_session(monkeypatch):
-    """The transient Console notification is addressed by session ID, never chat ID."""
+def test_successful_non_console_task_uses_persisted_session_only(monkeypatch):
+    """Cron output must not rely on the transient Console notification store."""
     pushed: list[tuple[str, str]] = []
 
     async def record_push(_self, session_id, text, _tenant_id, **_kwargs):
@@ -2019,7 +2030,7 @@ def test_successful_non_console_task_pushes_to_task_session(monkeypatch):
         )
 
     asyncio.run(_run())
-    assert pushed == [("task-session-a", "response output")]
+    assert pushed == []
 
 
 def test_idempotent_replay_skips_duplicate_push_and_notification(monkeypatch):
@@ -2113,6 +2124,157 @@ def test_replay_retries_output_delivery_until_receipt_is_persisted(
     assert runner.delivery_marks == 1
     assert [event.object for event in channel_manager.events] == ["message"]
     assert channel_manager.events[0].content[0].text == "persisted output"
+
+
+def test_unconfirmed_external_delivery_is_not_recorded_as_success(
+    monkeypatch,
+):
+    """A skipped channel delivery must not produce a durable receipt."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        runner = _ReplayableDeliveryRunner()
+        executor = CronExecutor(
+            runner=runner,
+            channel_manager=_UnconfirmedChannelManager(),
+        )
+        job = _build_agent_job().model_copy(
+            update={
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+            },
+        )
+        with pytest.raises(RuntimeError, match="delivery not confirmed"):
+            await executor.execute(job)
+        return runner
+
+    runner = asyncio.run(_run())
+
+    assert runner.delivery_marks == 0
+
+
+def test_text_replay_uses_persisted_delivery_receipt(monkeypatch):
+    """Text jobs persist their result before an external send and replay once."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        session = _TaskSession()
+        channel_manager = _ChannelManager()
+        executor = CronExecutor(
+            runner=SimpleNamespace(session=session),
+            channel_manager=channel_manager,
+        )
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "request": None,
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "task-session-a",
+                },
+            },
+        )
+        await executor.execute(
+            job,
+            dispatch_meta={"cron_execution_key": "execution-1"},
+        )
+        await executor.execute(
+            job,
+            dispatch_meta={"cron_execution_key": "execution-1"},
+        )
+        return session.state, channel_manager
+
+    state, channel_manager = asyncio.run(_run())
+
+    assert len(state["task_messages"]) == 1
+    assert (
+        state["task_messages"][0]["metadata"]["output_delivery_completed"]
+        is True
+    )
+    assert len(channel_manager.texts) == 1
+
+
+def test_unconfirmed_text_delivery_keeps_persisted_retry_state() -> None:
+    class _UnconfirmedTextChannelManager(_ChannelManager):
+        async def send_text(self, **kwargs) -> bool:
+            self.texts.append(kwargs)
+            return False
+
+    async def _run():
+        session = _TaskSession()
+        executor = CronExecutor(
+            runner=SimpleNamespace(session=session),
+            channel_manager=_UnconfirmedTextChannelManager(),
+        )
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "request": None,
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "task-session-a",
+                },
+            },
+        )
+        with pytest.raises(RuntimeError, match="text delivery not confirmed"):
+            await executor.execute(
+                job,
+                dispatch_meta={"cron_execution_key": "execution-1"},
+            )
+        return session.state
+
+    state = asyncio.run(_run())
+
+    assert (
+        state["task_messages"][0]["metadata"]["output_delivery_completed"]
+        is False
+    )
+
+
+def test_blank_text_task_is_not_recorded_as_success() -> None:
+    async def _run():
+        executor = CronExecutor(
+            runner=SimpleNamespace(session=_TaskSession()),
+            channel_manager=_ChannelManager(),
+        )
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "   ",
+                "request": None,
+            },
+        )
+        with pytest.raises(RuntimeError, match="empty text output"):
+            await executor.execute(job)
+
+    asyncio.run(_run())
 
 
 def test_console_output_does_not_complete_external_delivery_receipt(

@@ -101,6 +101,11 @@ def _clean_payload(obj: Any) -> Any:
     return obj
 
 
+def _raise_cron_delivery_failure(meta: Optional[dict], detail: str) -> None:
+    if isinstance(meta, dict) and meta.get("cron_delivery_key"):
+        raise RuntimeError(f"{_DELIVERY_UNAVAILABLE_MESSAGE}: {detail}")
+
+
 def _build_approval_result_text(
     *,
     request_id: str,
@@ -2383,20 +2388,27 @@ class ZhaohuChannel(BaseChannel):
     ) -> None:
         """POST a Zhaohu push payload to the configured endpoint."""
         if not self.enabled:
-            raise RuntimeError(f"{_DELIVERY_UNAVAILABLE_MESSAGE}: disabled")
+            logger.warning("zhaohu send skipped: channel disabled")
+            _raise_cron_delivery_failure(meta, "disabled")
+            return
         if not self.push_url:
-            raise RuntimeError(
-                f"{_DELIVERY_UNAVAILABLE_MESSAGE}: push_url not configured",
+            logger.warning(
+                "zhaohu send skipped: push_url not configured for %s",
+                to_handle,
             )
+            _raise_cron_delivery_failure(meta, "push_url not configured")
+            return
         if (
             not self.sys_id
             or not self.robot_open_id
             or not to_handle
             or to_handle.strip() == ""
         ):
-            raise RuntimeError(
-                f"{_DELIVERY_UNAVAILABLE_MESSAGE}: identity not configured",
+            logger.warning(
+                "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
             )
+            _raise_cron_delivery_failure(meta, "identity not configured")
+            return
         payload = await self._build_push_payload(to_handle, text, meta or {})
         timeout = httpx.Timeout(self.request_timeout, connect=10.0)
         # 自定义SSL上下文
@@ -2420,10 +2432,15 @@ class ZhaohuChannel(BaseChannel):
         ]
         return_code = str(data.get("returnCode") or "")
         if return_code != "SUC0000":
-            raise RuntimeError(
-                "zhaohu delivery failed: "
-                f"returnCode={return_code or '(empty)'}",
+            detail = f"returnCode={return_code or '(empty)'}"
+            if isinstance(meta, dict) and meta.get("cron_delivery_key"):
+                raise RuntimeError(f"zhaohu delivery failed: {detail}")
+            logger.warning(
+                "zhaohu push failed: to=%s %s",
+                to_handle,
+                detail,
             )
+            return
         logger.info(
             "zhaohu push ok: to=%s returnCode=%s expMsgIds=%s",
             to_handle,
