@@ -2221,14 +2221,6 @@ async def list_jobs(
     ]
 
 
-@router.get("/result-metrics")
-async def get_result_metrics(
-    mgr: CronManager = Depends(get_cron_manager),
-) -> dict[str, int]:
-    """Return Cron result-consistency counters for this workspace."""
-    return mgr.get_result_metrics()
-
-
 @router.get(
     "/broadcast/tenants",
     response_model=BroadcastTenantListResponse,

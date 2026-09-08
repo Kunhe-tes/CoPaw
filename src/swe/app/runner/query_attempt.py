@@ -639,6 +639,7 @@ async def _save_and_close_session_execution(
     )
     commit_attempted = False
     committed = False
+    idempotent_replay = False
     commit_error: str | None = None
     assistant_message_count = 0
     if cleanup_runtime is not None:
@@ -665,6 +666,13 @@ async def _save_and_close_session_execution(
         )
         if not committed:
             commit_attempted = False
+            idempotent_replay = _has_persisted_cron_task_run(
+                getattr(session_execution, "state", None),
+                execution_key=str(
+                    getattr(request, "cron_execution_key", "") or "",
+                ),
+            )
+            committed = idempotent_replay
         if (
             cleanup_runtime is None
             and fallback_agent is None
@@ -678,6 +686,9 @@ async def _save_and_close_session_execution(
                 session_execution.state,
                 persistence_key=str(
                     getattr(request, "cron_persistence_key", "") or "",
+                ),
+                execution_key=str(
+                    getattr(request, "cron_execution_key", "") or "",
                 ),
             )
     except BaseException as exc:
@@ -703,9 +714,6 @@ async def _save_and_close_session_execution(
                 exc_info=True,
             )
         raise
-    finally:
-        if committed:
-            await session_execution.close()
     result = QueryPersistenceResult(
         session_id=str(session_id),
         user_id=str(getattr(request, "user_id", "") or ""),
@@ -716,6 +724,7 @@ async def _save_and_close_session_execution(
             commit_error
             or (None if committed else "session_state_not_persisted")
         ),
+        idempotent_replay=idempotent_replay,
     )
     if cleanup_runtime is not None:
         cleanup_runtime.session_state_committed = committed
@@ -723,12 +732,21 @@ async def _save_and_close_session_execution(
     recorder = getattr(owner, "_record_query_persistence_result", None)
     if callable(recorder):
         recorder(request, result)
+    if committed:
+        try:
+            await session_execution.close()
+        except Exception:
+            logger.warning(
+                "Failed to close session execution after confirmed persistence",
+                exc_info=True,
+            )
 
 
 def _count_persisted_assistant_messages(
     state: Any,
     *,
     persistence_key: str = "",
+    execution_key: str = "",
 ) -> int:
     """Count assistant messages committed by this query only."""
     if not isinstance(state, dict):
@@ -738,7 +756,7 @@ def _count_persisted_assistant_messages(
     content = memory.get("content") if isinstance(memory, dict) else None
     if not isinstance(content, list):
         return 0
-    if persistence_key:
+    if persistence_key or execution_key:
         task_runs = state.get("task_runs")
         if not isinstance(task_runs, list):
             return 0
@@ -747,7 +765,13 @@ def _count_persisted_assistant_messages(
                 run
                 for run in reversed(task_runs)
                 if isinstance(run, dict)
-                and run.get("persistence_key") == persistence_key
+                and (
+                    run.get("persistence_key") == persistence_key
+                    or (
+                        execution_key
+                        and run.get("execution_key") == execution_key
+                    )
+                )
             ),
             None,
         )
@@ -775,6 +799,24 @@ def _count_persisted_assistant_messages(
         if role == "assistant":
             count += 1
     return count
+
+
+def _has_persisted_cron_task_run(
+    state: Any,
+    *,
+    execution_key: str,
+) -> bool:
+    """Return whether this scheduled request already committed its task run."""
+    if not execution_key or not isinstance(state, dict):
+        return False
+    task_runs = state.get("task_runs")
+    return bool(
+        isinstance(task_runs, list)
+        and any(
+            isinstance(run, dict) and run.get("execution_key") == execution_key
+            for run in task_runs
+        )
+    )
 
 
 async def stream_query_after_preflight(

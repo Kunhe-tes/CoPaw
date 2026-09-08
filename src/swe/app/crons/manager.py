@@ -25,7 +25,6 @@ from ..tenant_context import bind_tenant_context
 from ..console_push_store import append as push_store_append
 from ..cron_result_metrics import (
     CRON_SESSION_ROUTE_MISMATCH_TOTAL,
-    get_cron_result_metrics,
     increment_cron_result_metric,
 )
 from ...config.context import (
@@ -640,11 +639,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 "Failed to register system jobs to external scheduler",
                 exc_info=True,
             )
-
-    @staticmethod
-    def get_result_metrics() -> dict[str, int]:
-        """返回定时任务结果一致性指标，供运行时诊断接口采集。"""
-        return get_cron_result_metrics()
 
     # ----- read/state -----
 
@@ -3424,6 +3418,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
     ) -> None:
         job = self._with_execution_source_identity(job, source_id)
         job = await self._ensure_persisted_task_binding(job)
+        job = self._with_execution_source_identity(job, source_id)
         dispatch_meta = dict(dispatch_meta or {})
         rt = self._rt.get(job.id)
         if not rt:
@@ -3469,14 +3464,16 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     input_snapshot = exec_result.input_snapshot
                     executor_leader = exec_result.executor_leader
                     execution_meta = exec_result.execution_meta
-                    exec_status = exec_result.status
+                    exec_status = getattr(exec_result, "status", "success")
                     st.last_status = exec_status
                     st.last_error = None
                     end_time = datetime.now(timezone.utc)
                     duration_ms = int(
                         (end_time - actual_time).total_seconds() * 1000,
                     )
-                    if exec_status == "success":
+                    if exec_status == "success" and not bool(
+                        (execution_meta or {}).get("idempotent_replay"),
+                    ):
                         await self._handle_success_notifications(job)
                     logger.info(
                         "cron _execute_once: job_id=%s status=%s trace_id=%s",

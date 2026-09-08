@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from agentscope_runtime.engine.schemas.agent_schemas import RunStatus
@@ -99,11 +100,11 @@ class _EmptyCompletedCommitConfirmedRunner:
         self.response_completed = asyncio.Event()
 
     async def stream_query(self, _req):
+        self.response_completed.set()
         yield SimpleNamespace(
             object="response",
             status=RunStatus.Completed,
         )
-        self.response_completed.set()
         await asyncio.Event().wait()
 
     async def wait_for_query_persistence_result(self, **_kwargs):
@@ -287,6 +288,34 @@ class _CommitWithoutAssistantRunner(_ResponseCompletedOutputRunner):
         )
 
 
+class _IdempotentReplayRunner(_ResponseCompletedOutputRunner):
+    """A duplicate scheduler delivery reuses an existing persisted task run."""
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=False,
+            committed=True,
+            idempotent_replay=True,
+        )
+
+
+class _LegacyPersistenceReceiptRunner(_ResponseCompletedOutputRunner):
+    """Older Runner adapters do not expose the replay receipt field."""
+
+    def get_query_persistence_result(self, **_kwargs):
+        return SimpleNamespace(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+            commit_error=None,
+        )
+
+
 class _OutputThenResponseFailedRunner:
     """A failed response following text must not publish a task result."""
 
@@ -321,6 +350,18 @@ class _ResponseCancelledThenBlockedRunner:
             object="response",
             status=RunStatus.Canceled,
             error=SimpleNamespace(code="upstream_cancelled", message="cancelled"),
+        )
+        await asyncio.sleep(30)
+
+
+class _MessageFailedThenBlockedRunner:
+    """A terminal message failure must not wait for a stuck iterator."""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Failed,
+            error=SimpleNamespace(code="model_error", message="failed"),
         )
         await asyncio.sleep(30)
 
@@ -424,6 +465,44 @@ class _ResponseTerminalFailureRunner:
                 else None
             ),
         )
+
+
+class _OuterSequenceDeduplicatedOutputRunner(_ResponseCompletedOutputRunner):
+    """Some Runtime adapters identify response output on the outer event."""
+
+    async def stream_query(self, _req):
+        yield SimpleNamespace(
+            object="message",
+            status=RunStatus.Completed,
+            sequence_number=8,
+            role="assistant",
+            content=[SimpleNamespace(type="text", text="outer sequence output")],
+        )
+        yield SimpleNamespace(
+            object="response",
+            status=RunStatus.Completed,
+            sequence_number=8,
+            output=[
+                SimpleNamespace(
+                    role="assistant",
+                    content=[
+                        SimpleNamespace(
+                            type="text",
+                            text="outer sequence output",
+                        ),
+                    ],
+                ),
+            ],
+        )
+
+
+class _ResponseCompletedThenBlockedRunner(_ResponseCompletedOutputRunner):
+    """A terminal response must not depend on tail stream EOF."""
+
+    async def stream_query(self, _req):
+        async for event in super().stream_query(_req):
+            yield event
+        await asyncio.sleep(30)
 
 
 class _ChannelManager:
@@ -924,8 +1003,8 @@ def test_completed_agent_cancelled_after_session_commit_keeps_success():
     assert manager.get_state("job-cancel-after-output").last_status == "success"
 
 
-def test_empty_completed_agent_cancelled_after_commit_stays_cancelled():
-    """取消路径不得绕过 assistant 输出这个 success 前置条件。"""
+def test_empty_completed_agent_is_rejected_before_late_cancellation():
+    """A completed response without output is terminally invalid."""
 
     async def _run():
         job = _build_agent_job()
@@ -942,13 +1021,12 @@ def test_empty_completed_agent_cancelled_after_commit_stays_cancelled():
             ),
         )
         await runner.response_completed.wait()
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
+        with pytest.raises(RuntimeError, match="empty_model_output"):
             await task
         return manager
 
     manager = asyncio.run(_run())
-    assert manager.get_state("job-cancel-after-output").last_status == "cancelled"
+    assert manager.get_state("job-cancel-after-output").last_status == "error"
 
 
 def test_agent_cancelled_before_completed_output_keeps_cancelled():
@@ -1681,6 +1759,79 @@ def test_successful_non_console_task_pushes_to_task_session(monkeypatch):
     assert pushed == [("task-session-a", "response output")]
 
 
+def test_idempotent_replay_skips_duplicate_push_and_notification(monkeypatch):
+    """A replay is successful without duplicating external side effects."""
+    pushed: list[tuple[str, str]] = []
+
+    async def record_push(_self, session_id, text, _tenant_id):
+        pushed.append((session_id, text))
+
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._push_to_console",
+        record_push,
+    )
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(user_id="user-a", session_id="session-a"),
+                ),
+                "meta": {
+                    "task_chat_id": "chat-a",
+                    "task_session_id": "task-session-a",
+                },
+            },
+        )
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=_IdempotentReplayRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        notifications = AsyncMock()
+        manager._handle_success_notifications = notifications
+        await manager._execute_once(  # pylint: disable=protected-access
+            job,
+            is_manual=False,
+        )
+        return manager, notifications
+
+    manager, notifications = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "success"
+    assert pushed == []
+    notifications.assert_not_awaited()
+
+
+def test_legacy_persistence_receipt_without_replay_field_still_succeeds(
+    monkeypatch,
+):
+    """Adding replay metadata must not break existing Runner adapters."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        manager = CronManager(
+            repo=_Repo(_build_agent_job()),
+            runner=_LegacyPersistenceReceiptRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        await manager._execute_once(  # pylint: disable=protected-access
+            _build_agent_job(),
+            is_manual=False,
+        )
+        return manager
+
+    manager = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "success"
+
+
 def test_response_cancelled_terminal_does_not_become_timeout(monkeypatch):
     """A terminal cancellation closes the iterator rather than waiting for timeout."""
     monkeypatch.setattr(
@@ -1695,6 +1846,31 @@ def test_response_cancelled_terminal_does_not_become_timeout(monkeypatch):
             channel_manager=_ChannelManager(),
         )
         with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(
+                manager._execute_once(  # pylint: disable=protected-access
+                    _build_agent_job(),
+                    is_manual=False,
+                ),
+                timeout=0.2,
+            )
+
+    asyncio.run(_run())
+
+
+def test_message_failed_terminal_does_not_become_timeout(monkeypatch):
+    """A terminal message failure closes a blocked iterator immediately."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        manager = CronManager(
+            repo=_Repo(_build_agent_job()),
+            runner=_MessageFailedThenBlockedRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(RuntimeError, match="model_error: failed"):
             await asyncio.wait_for(
                 manager._execute_once(  # pylint: disable=protected-access
                     _build_agent_job(),
@@ -1721,6 +1897,51 @@ def test_sequence_number_deduplicates_message_and_response_output(monkeypatch):
         return await executor.execute(_build_agent_job())
 
     assert asyncio.run(_run()).output_preview == "sequence output"
+
+
+def test_outer_sequence_number_deduplicates_message_and_response_output(
+    monkeypatch,
+):
+    """An outer response sequence identifies its single assistant output."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        executor = CronExecutor(
+            runner=_OuterSequenceDeduplicatedOutputRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        return await executor.execute(_build_agent_job())
+
+    assert asyncio.run(_run()).output_preview == "outer sequence output"
+
+
+def test_response_completed_terminal_does_not_wait_for_tail_stream(monkeypatch):
+    """A complete response produces success even when the iterator stalls."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        manager = CronManager(
+            repo=_Repo(_build_agent_job()),
+            runner=_ResponseCompletedThenBlockedRunner(),
+            channel_manager=_ChannelManager(),
+        )
+        await asyncio.wait_for(
+            manager._execute_once(  # pylint: disable=protected-access
+                _build_agent_job(),
+                is_manual=False,
+            ),
+            timeout=0.2,
+        )
+        return manager
+
+    manager = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "success"
 
 
 def test_response_completed_without_persistence_receipt_marks_execution_as_error(

@@ -360,19 +360,6 @@ def test_create_job_injects_request_tenant_id():
     assert response.json().get("model_slot") is None
 
 
-def test_result_metrics_returns_workspace_cron_counters():
-    manager = _Manager()
-    manager.get_result_metrics = lambda: {
-        "cron_empty_model_output_total": 2,
-    }
-    client = _build_client(manager)
-
-    response = client.get("/cron/result-metrics")
-
-    assert response.status_code == 200
-    assert response.json() == {"cron_empty_model_output_total": 2}
-
-
 def test_create_job_does_not_start_batch_dispatch_from_meta(monkeypatch):
     monkeypatch.setenv("SWE_CRON_DISPATCH_INTENTS_ENABLED", "1")
     manager = _Manager()

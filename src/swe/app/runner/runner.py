@@ -157,6 +157,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 CRON_PERSISTENCE_RESULT_TTL_SECONDS = 60.0
+CRON_PERSISTENCE_RESULT_MAX_ENTRIES = 256
 TASK_RUNS_STATE_KEY = "task_runs"
 _INTERNAL_FOLLOW_UP_METADATA_KEY = "swe_internal_follow_up"
 _PLAN_MODE_META_KEY = "plan_mode_enabled"
@@ -2987,7 +2988,14 @@ class AgentRunner(Runner):
             ),
         )
         self._prune_expired_query_persistence_results()
+        self._cron_persistence_results.pop(key, None)
         self._cron_persistence_results[key] = (time.monotonic(), result)
+        while (
+            len(self._cron_persistence_results)
+            > CRON_PERSISTENCE_RESULT_MAX_ENTRIES
+        ):
+            oldest_key = next(iter(self._cron_persistence_results))
+            self._cron_persistence_results.pop(oldest_key, None)
 
     def _prune_expired_query_persistence_results(self) -> None:
         """Discard cleanup receipts whose Cron consumer cannot still need them."""
@@ -3853,6 +3861,11 @@ class AgentRunner(Runner):
             "cron_execution_key": getattr(
                 request,
                 "cron_execution_key",
+                None,
+            ),
+            "cron_persistence_key": getattr(
+                request,
+                "cron_persistence_key",
                 None,
             ),
             "cron_job_id": getattr(request, "cron_job_id", None),

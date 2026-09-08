@@ -256,6 +256,7 @@ class AgentStreamState:
     output_source: str = ""
     session_state_commit_attempted: bool = False
     session_state_committed: bool = False
+    idempotent_replay: bool = False
     _output_event_keys: set[str] = field(default_factory=set, repr=False)
 
     @property
@@ -1034,6 +1035,7 @@ class CronExecutor:
             "output_source": stream_state.output_source,
             "session_state_commit_attempted": stream_state.session_state_commit_attempted,
             "session_state_committed": stream_state.session_state_committed,
+            "idempotent_replay": stream_state.idempotent_replay,
             "terminal_error_code": stream_state.terminal_error_code,
         }
 
@@ -1617,6 +1619,9 @@ class CronExecutor:
             result.commit_attempted,
         )
         stream_state.session_state_committed = bool(result.committed)
+        stream_state.idempotent_replay = bool(
+            getattr(result, "idempotent_replay", False),
+        )
         stream_state.persisted_assistant_message_count = int(
             result.assistant_message_count,
         )
@@ -1737,6 +1742,9 @@ class CronExecutor:
                 stream_state.session_state_committed = bool(
                     persistence_result.committed,
                 )
+                stream_state.idempotent_replay = bool(
+                    getattr(persistence_result, "idempotent_replay", False),
+                )
                 stream_state.persisted_assistant_message_count = int(
                     persistence_result.assistant_message_count,
                 )
@@ -1766,11 +1774,12 @@ class CronExecutor:
                     "persistence_result_unavailable",
                 )
 
-            await self._push_output_to_console(
-                job,
-                stream_state,
-                runtime_tenant_id,
-            )
+            if not stream_state.idempotent_replay:
+                await self._push_output_to_console(
+                    job,
+                    stream_state,
+                    runtime_tenant_id,
+                )
 
             result = self._build_agent_execution_result(
                 trace_id,
@@ -1994,10 +2003,14 @@ class CronExecutor:
                 event=event,
                 meta=dispatch_meta,
             )
-            if is_failed_response or is_cancelled_response:
-                # A Runtime response failure/cancellation is terminal.  Do not
-                # leave this execution waiting for a misbehaving iterator after
-                # the terminal event has already been delivered to the channel.
+            if (
+                is_completed_response
+                or is_failed_message
+                or is_failed_response
+                or is_cancelled_response
+            ):
+                # Runtime terminal events are sufficient to decide this Cron
+                # execution. Do not let a stalled tail iterator override them.
                 aclose = getattr(stream, "aclose", None)
                 if callable(aclose):
                     await aclose()
@@ -2171,6 +2184,12 @@ class CronExecutor:
                 key = f"id:{message_id}"
             elif getattr(message, "sequence_number", None) is not None:
                 key = f"sequence:{message.sequence_number}"
+            elif len(output) == 1 and getattr(
+                event,
+                "sequence_number",
+                None,
+            ) is not None:
+                key = f"sequence:{event.sequence_number}"
             else:
                 event_id = getattr(event, "id", None)
                 key = (
