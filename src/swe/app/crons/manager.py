@@ -2402,6 +2402,13 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 )
             else:
                 preview = ""
+        if job.task_type == "text":
+            await self._append_text_task_message(
+                task_session_id,
+                creator_user_id,
+                preview,
+                execution_key,
+            )
         apply_success = lambda jobs_file: self._apply_task_execution_success(
             jobs_file,
             job.id,
@@ -2411,13 +2418,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         async with self._lock:
             changed, auto_paused, _ = await self._mutate_jobs_file_locked(
                 apply_success,
-            )
-        if job.task_type == "text":
-            await self._append_text_task_message(
-                task_session_id,
-                creator_user_id,
-                preview,
-                execution_key,
             )
         if auto_paused:
             ext_id = self._states.get(

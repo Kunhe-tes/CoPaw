@@ -2090,7 +2090,17 @@ def test_replay_retries_output_delivery_until_receipt_is_persisted(
         runner = _ReplayableDeliveryRunner()
         channel_manager = _FailOnceChannelManager()
         executor = CronExecutor(runner=runner, channel_manager=channel_manager)
-        job = _build_agent_job()
+        job = _build_agent_job().model_copy(
+            update={
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+            },
+        )
         with pytest.raises(RuntimeError, match="channel unavailable"):
             await executor.execute(job)
         runner.idempotent_replay = True
@@ -2103,6 +2113,29 @@ def test_replay_retries_output_delivery_until_receipt_is_persisted(
     assert runner.delivery_marks == 1
     assert [event.object for event in channel_manager.events] == ["message"]
     assert channel_manager.events[0].content[0].text == "persisted output"
+
+
+def test_console_output_does_not_complete_external_delivery_receipt(
+    monkeypatch,
+):
+    """A process-local Console notification is not a durable delivery ack."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        runner = _ReplayableDeliveryRunner()
+        executor = CronExecutor(
+            runner=runner,
+            channel_manager=_ChannelManager(),
+        )
+        await executor.execute(_build_agent_job())
+        return runner
+
+    runner = asyncio.run(_run())
+
+    assert runner.delivery_marks == 0
 
 
 def test_legacy_replay_does_not_redeliver_without_delivery_schema(monkeypatch):
@@ -2261,13 +2294,15 @@ def test_text_task_replay_recovers_message_after_session_write_failure() -> (
             },
         )
         session = _FailOnceTaskSession()
+        repo = _Repo(job)
         manager = CronManager(
-            repo=_Repo(job),
+            repo=repo,
             runner=SimpleNamespace(session=session),
             channel_manager=_ChannelManager(),
         )
         with pytest.raises(RuntimeError, match="session unavailable"):
             await manager._record_task_execution_success(job, "execution-1")
+        assert not repo._job.meta.get("task_has_scheduled_result")
         await manager._record_task_execution_success(job, "execution-1")
         return session.state
 

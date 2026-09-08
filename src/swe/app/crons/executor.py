@@ -691,6 +691,14 @@ class CronExecutor:
             job.dispatch.channel,
             len(job.text or ""),
         )
+        execution_key = _build_cron_execution_key(
+            job_id=job.id,
+            target_session_id=target_session_id,
+            dispatch_meta=dispatch_meta,
+        )
+        delivery_meta = dict(dispatch_meta)
+        if execution_key:
+            delivery_meta["cron_delivery_key"] = f"cron:{execution_key}:output"
 
         # 保留抽出的 helper，同时继续传递 scope 级租户标识。
         requested_trace_id, b3_trace_id = _resolve_dispatch_trace_ids(
@@ -709,7 +717,7 @@ class CronExecutor:
                 job,
                 target_user_id,
                 target_session_id,
-                dispatch_meta,
+                delivery_meta,
                 runtime_tenant_id,
             )
         finally:
@@ -719,11 +727,6 @@ class CronExecutor:
 
         # 返回执行结果
         output_preview = (job.text or "").strip()[:100]
-        execution_key = _build_cron_execution_key(
-            job_id=job.id,
-            target_session_id=target_session_id,
-            dispatch_meta=dispatch_meta,
-        )
         input_snapshot = (
             {
                 "text": (job.text or "").strip(),
@@ -832,6 +835,9 @@ class CronExecutor:
                 task_session_id,
                 job.text.strip(),
                 runtime_tenant_id,
+                delivery_key=str(
+                    dispatch_meta.get("cron_delivery_key") or "",
+                ),
             )
 
     async def _end_trace_for_text_job(self, trace_id: Optional[str]) -> None:
@@ -2263,7 +2269,10 @@ class CronExecutor:
                 runtime_tenant_id,
                 delivery_key,
             )
-        if not (message_delivered or console_push_required):
+        external_delivery_confirmed = (
+            job.dispatch.channel != CONSOLE_CHANNEL and message_delivered
+        )
+        if not external_delivery_confirmed:
             return
         marker = getattr(
             self._runner,

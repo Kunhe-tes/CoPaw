@@ -527,6 +527,38 @@ async def test_execute_text_job_preserves_execution_key_in_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_execute_text_job_passes_stable_delivery_key_to_channel() -> (
+    None
+):
+    class _RecordingChannelManager(_ChannelManager):
+        def __init__(self) -> None:
+            self.texts: list[dict[str, object]] = []
+
+        async def send_text(self, **kwargs) -> None:
+            self.texts.append(kwargs)
+
+    channel_manager = _RecordingChannelManager()
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=channel_manager,
+    )
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+
+    await executor._execute_text_job(
+        job,
+        "user-a",
+        "session-a",
+        {"scheduled_fire_at": "2026-09-08T02:30:00Z"},
+    )
+
+    meta = channel_manager.texts[0]["meta"]
+    assert isinstance(meta, dict)
+    assert meta["cron_delivery_key"] == (
+        "cron:job-text:2026-09-08T02:30:00Z:session-a:output"
+    )
+
+
+@pytest.mark.asyncio
 async def test_execute_text_job_builds_key_from_scheduled_fire_time() -> None:
     executor = CronExecutor(
         runner=_Runner(),

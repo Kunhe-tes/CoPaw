@@ -39,6 +39,7 @@ _DEFAULT_NET = "DMZ"
 _DEFAULT_TIMEOUT = 15.0
 _APPROVAL_TEXT_LIMIT = 800
 _APPROVAL_INPUT_LIMIT = 600
+_DELIVERY_UNAVAILABLE_MESSAGE = "zhaohu delivery unavailable"
 
 # Message dedup: keep processed IDs for 5 minutes
 _DEDUP_TTL_SECONDS = 300
@@ -2382,23 +2383,20 @@ class ZhaohuChannel(BaseChannel):
     ) -> None:
         """POST a Zhaohu push payload to the configured endpoint."""
         if not self.enabled:
-            return
+            raise RuntimeError(f"{_DELIVERY_UNAVAILABLE_MESSAGE}: disabled")
         if not self.push_url:
-            logger.warning(
-                "zhaohu send skipped: push_url not configured for %s",
-                to_handle,
+            raise RuntimeError(
+                f"{_DELIVERY_UNAVAILABLE_MESSAGE}: push_url not configured",
             )
-            return
         if (
             not self.sys_id
             or not self.robot_open_id
             or not to_handle
             or to_handle.strip() == ""
         ):
-            logger.warning(
-                "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
+            raise RuntimeError(
+                f"{_DELIVERY_UNAVAILABLE_MESSAGE}: identity not configured",
             )
-            return
         payload = await self._build_push_payload(to_handle, text, meta or {})
         timeout = httpx.Timeout(self.request_timeout, connect=10.0)
         # 自定义SSL上下文
@@ -2420,10 +2418,16 @@ class ZhaohuChannel(BaseChannel):
             for item in body
             if isinstance(item, dict) and item.get("expMsgId")
         ]
+        return_code = str(data.get("returnCode") or "")
+        if return_code != "SUC0000":
+            raise RuntimeError(
+                "zhaohu delivery failed: "
+                f"returnCode={return_code or '(empty)'}",
+            )
         logger.info(
             "zhaohu push ok: to=%s returnCode=%s expMsgIds=%s",
             to_handle,
-            str(data.get("returnCode") or "(empty)"),
+            return_code,
             exp_msg_ids,
         )
 

@@ -20,6 +20,7 @@ from agentscope_runtime.engine.schemas.agent_schemas import (
     TextContent,
 )
 
+import swe.app.channels.zhaohu.channel as zhaohu_channel_module
 from swe.app.channels.zhaohu.channel import ZhaohuChannel
 
 # ---------------------------------------------------------------------------
@@ -88,6 +89,57 @@ def _make_completed_event(text: str) -> MagicMock:
     # Mock _message_to_content_parts behavior
     event.content = [TextContent(type=ContentType.TEXT, text=text)]
     return event
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"enabled": False},
+        {"push_url": ""},
+        {"sys_id": ""},
+        {"robot_open_id": ""},
+    ],
+)
+async def test_send_rejects_unavailable_delivery_configuration(
+    overrides,
+) -> None:
+    channel = _make_channel(**overrides)
+
+    with pytest.raises(RuntimeError, match="zhaohu delivery unavailable"):
+        await channel.send("user-1", "scheduled output")
+
+
+@pytest.mark.asyncio
+async def test_send_rejects_non_successful_push_response(monkeypatch) -> None:
+    class _Response:
+        content = b'{"returnCode":"FAIL"}'
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"returnCode": "FAIL"}
+
+    class _Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args) -> None:
+            return None
+
+        async def post(self, *_args, **_kwargs) -> _Response:
+            return _Response()
+
+    monkeypatch.setattr(
+        zhaohu_channel_module.httpx,
+        "AsyncClient",
+        lambda **_kwargs: _Client(),
+    )
+    channel = _make_channel()
+
+    with pytest.raises(RuntimeError, match="returnCode=FAIL"):
+        await channel.send("user-1", "scheduled output")
 
 
 @pytest.mark.asyncio
