@@ -752,7 +752,11 @@ class ConsoleChannel(BaseChannel):
         )
         sid = (meta or {}).get("session_id")
         if sid and text.strip():
-            await push_store_append(sid, text.strip())
+            await push_store_append(
+                sid,
+                text.strip(),
+                delivery_key=str((meta or {}).get("cron_delivery_key") or ""),
+            )
 
     async def send_content_parts(
         self,
@@ -768,7 +772,13 @@ class ConsoleChannel(BaseChannel):
         if sid:
             body = self._parts_to_text(parts, meta)
             if body.strip():
-                await push_store_append(sid, body.strip())
+                await push_store_append(
+                    sid,
+                    body.strip(),
+                    delivery_key=str(
+                        (meta or {}).get("cron_delivery_key") or "",
+                    ),
+                )
 
     # ── lifecycle ───────────────────────────────────────────────────
 

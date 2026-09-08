@@ -100,7 +100,9 @@ class _SnapshotAgent:
 
 
 @pytest.mark.asyncio
-async def test_session_cleanup_reports_commit_result_and_assistant_count() -> None:
+async def test_session_cleanup_reports_commit_result_and_assistant_count() -> (
+    None
+):
     """会话清理应向调用方报告提交结果与 assistant 数量。"""
     session = _RecordingSession()
     execution = _RecordingExecution(session)
@@ -146,7 +148,9 @@ async def test_session_cleanup_reports_commit_result_and_assistant_count() -> No
 
 
 @pytest.mark.asyncio
-async def test_session_cleanup_does_not_report_commit_when_cleanup_is_noop() -> None:
+async def test_session_cleanup_does_not_report_commit_when_cleanup_is_noop() -> (
+    None
+):
     """A skipped state save must not be reported as a committed session."""
     recorded: list[QueryPersistenceResult] = []
 
@@ -258,13 +262,15 @@ async def test_real_json_session_cleanup_commits_assistant_state(
             committed=True,
         ),
     ]
-    assert (await session.get_session_state_dict("session-1", "user-1"))["agent"][
-        "memory"
-    ]["content"] == [{"role": "assistant"}]
+    assert (await session.get_session_state_dict("session-1", "user-1"))[
+        "agent"
+    ]["memory"]["content"] == [{"role": "assistant"}]
 
 
 @pytest.mark.asyncio
-async def test_session_cleanup_counts_only_this_cron_persistence_receipt() -> None:
+async def test_session_cleanup_counts_only_this_cron_persistence_receipt() -> (
+    None
+):
     """An assistant from an older run cannot satisfy this run's receipt."""
     recorded: list[QueryPersistenceResult] = []
 
@@ -316,7 +322,9 @@ async def test_session_cleanup_counts_only_this_cron_persistence_receipt() -> No
 
 
 @pytest.mark.asyncio
-async def test_session_cleanup_records_commit_failure_when_close_also_fails() -> None:
+async def test_session_cleanup_records_commit_failure_when_close_also_fails() -> (
+    None
+):
     """关闭 session 失败不能吞掉已知的提交失败回执。"""
     recorded: list[QueryPersistenceResult] = []
 
@@ -410,7 +418,9 @@ async def test_session_cleanup_ignores_close_failure_after_commit() -> None:
 
 
 @pytest.mark.asyncio
-async def test_session_cleanup_reports_matching_task_run_as_idempotent_replay() -> None:
+async def test_session_cleanup_reports_matching_task_run_as_idempotent_replay() -> (
+    None
+):
     """A scheduler replay consumes its existing persisted assistant result."""
     recorded: list[QueryPersistenceResult] = []
 
@@ -431,7 +441,12 @@ async def test_session_cleanup_reports_matching_task_run_as_idempotent_replay() 
                 "memory": {
                     "content": [
                         {"role": "user", "content": "input"},
-                        {"role": "assistant", "content": "output"},
+                        {
+                            "role": "assistant",
+                            "content": [
+                                {"type": "text", "text": "persisted output"},
+                            ],
+                        },
                     ],
                 },
             },
@@ -440,8 +455,8 @@ async def test_session_cleanup_reports_matching_task_run_as_idempotent_replay() 
                     "execution_key": "execution-1",
                     "memory_start": 0,
                     "memory_end": 2,
+                    "cron_delivery_version": 1,
                     "output_delivery_completed": True,
-                    "success_effects_completed": True,
                 },
             ],
         },
@@ -470,8 +485,11 @@ async def test_session_cleanup_reports_matching_task_run_as_idempotent_replay() 
             commit_attempted=False,
             committed=True,
             idempotent_replay=True,
+            persisted_assistant_content=[
+                {"type": "text", "text": "persisted output"},
+            ],
+            output_delivery_replay_supported=True,
             output_delivery_completed=True,
-            success_effects_completed=True,
         ),
     ]
     execution.close.assert_awaited_once()
@@ -497,16 +515,22 @@ def test_agent_runner_returns_persistence_result_for_scheduled_query() -> None:
 
     runner._record_query_persistence_result(request, result)
 
-    assert runner.get_query_persistence_result(
-        session_id="session-1",
-        user_id="user-1",
-        execution_key="receipt-1",
-    ) == result
-    assert runner.get_query_persistence_result(
-        session_id="session-1",
-        user_id="user-1",
-        execution_key="receipt-1",
-    ) is None
+    assert (
+        runner.get_query_persistence_result(
+            session_id="session-1",
+            user_id="user-1",
+            execution_key="receipt-1",
+        )
+        == result
+    )
+    assert (
+        runner.get_query_persistence_result(
+            session_id="session-1",
+            user_id="user-1",
+            execution_key="receipt-1",
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -516,25 +540,21 @@ async def test_agent_runner_persists_cron_output_delivery_receipt(
     """Final output delivery is recorded in the persisted task-run state."""
     runner = AgentRunner()
     runner.session = SafeJSONSession(str(tmp_path))
-    async with runner.session.execution("session-1", user_id="user-1") as execution:
+    async with runner.session.execution(
+        "session-1",
+        user_id="user-1",
+    ) as execution:
         state = execution.state
         state["task_runs"] = [
             {
                 "execution_key": "execution-1",
                 "persistence_key": "receipt-1",
                 "output_delivery_completed": False,
-                "success_effects_completed": False,
             },
         ]
         await execution.commit_state(state)
 
     await runner.mark_cron_output_delivery_completed(
-        session_id="session-1",
-        user_id="user-1",
-        execution_key="execution-1",
-        persistence_key="receipt-1",
-    )
-    await runner.mark_cron_success_effects_completed(
         session_id="session-1",
         user_id="user-1",
         execution_key="execution-1",
@@ -546,7 +566,6 @@ async def test_agent_runner_persists_cron_output_delivery_receipt(
         user_id="user-1",
     )
     assert state["task_runs"][0]["output_delivery_completed"] is True
-    assert state["task_runs"][0]["success_effects_completed"] is True
 
 
 def test_agent_runner_discards_expired_persistence_result(
@@ -576,11 +595,14 @@ def test_agent_runner_discards_expired_persistence_result(
     runner._record_query_persistence_result(request, result)
     now["value"] = 161.0
 
-    assert runner.get_query_persistence_result(
-        session_id="session-1",
-        user_id="user-1",
-        execution_key="receipt-1",
-    ) is None
+    assert (
+        runner.get_query_persistence_result(
+            session_id="session-1",
+            user_id="user-1",
+            execution_key="receipt-1",
+        )
+        is None
+    )
     assert runner._cron_persistence_results == {}
 
 
@@ -618,7 +640,9 @@ def test_agent_runner_bounds_unconsumed_persistence_receipts(
     }
 
 
-def test_agent_runner_does_not_cache_regular_query_persistence_result() -> None:
+def test_agent_runner_does_not_cache_regular_query_persistence_result() -> (
+    None
+):
     """普通查询没有 Cron 消费者，不能把 cleanup 回执留在 Runner 中。"""
     runner = AgentRunner()
     result = QueryPersistenceResult(
@@ -637,10 +661,13 @@ def test_agent_runner_does_not_cache_regular_query_persistence_result() -> None:
 
     runner._record_query_persistence_result(request, result)
 
-    assert runner.get_query_persistence_result(
-        session_id="session-1",
-        user_id="user-1",
-    ) is None
+    assert (
+        runner.get_query_persistence_result(
+            session_id="session-1",
+            user_id="user-1",
+        )
+        is None
+    )
 
 
 class _RetryableError(RuntimeError):

@@ -26,6 +26,7 @@ from swe.app.crons.models import (
     CronJobSpec,
     DispatchSpec,
     DispatchTarget,
+    JobsFile,
     JobRuntimeSpec,
     ScheduleSpec,
 )
@@ -48,6 +49,12 @@ class _Repo:
     async def list_jobs(self) -> list[CronJobSpec]:
         return [self._job]
 
+    async def load(self) -> JobsFile:
+        return JobsFile(jobs=[self._job])
+
+    async def save(self, jobs_file: JobsFile) -> None:
+        self._job = jobs_file.jobs[0]
+
 
 class _Runner:
     async def stream_query(self, _req):
@@ -65,6 +72,9 @@ class _Runner:
             assistant_message_count=1,
             commit_attempted=True,
             committed=True,
+            persisted_assistant_content=[
+                {"type": "text", "text": "response output"},
+            ],
         )
 
 
@@ -259,6 +269,9 @@ class _ResponseCompletedOutputRunner:
             assistant_message_count=1,
             commit_attempted=True,
             committed=True,
+            persisted_assistant_content=[
+                {"type": "text", "text": "response output"},
+            ],
         )
 
 
@@ -340,14 +353,12 @@ class _ReplayableDeliveryRunner(_ResponseCompletedOutputRunner):
         self.idempotent_replay = False
         self.output_delivery_completed = False
         self.delivery_marks = 0
-        self.success_effects_completed = False
-        self.success_effects_marks = 0
 
     async def stream_query(self, _req):
         yield SimpleNamespace(
             object="message",
             status=RunStatus.Completed,
-            content=[SimpleNamespace(type="text", text="delivery output")],
+            content=[SimpleNamespace(type="text", text="replayed output")],
         )
         yield SimpleNamespace(object="response", status=RunStatus.Completed)
 
@@ -360,17 +371,38 @@ class _ReplayableDeliveryRunner(_ResponseCompletedOutputRunner):
             committed=True,
             commit_error=None,
             idempotent_replay=self.idempotent_replay,
+            output_delivery_replay_supported=True,
             output_delivery_completed=self.output_delivery_completed,
-            success_effects_completed=self.success_effects_completed,
+            persisted_assistant_content=[
+                {"type": "text", "text": "persisted output"},
+            ],
         )
 
     async def mark_cron_output_delivery_completed(self, **_kwargs):
         self.delivery_marks += 1
         self.output_delivery_completed = True
 
-    async def mark_cron_success_effects_completed(self, **_kwargs):
-        self.success_effects_marks += 1
-        self.success_effects_completed = True
+
+class _LegacyReplayDeliveryRunner(_ReplayableDeliveryRunner):
+    """An old task run has no durable output-delivery schema marker."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.idempotent_replay = True
+
+    def get_query_persistence_result(self, **_kwargs):
+        return SimpleNamespace(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=False,
+            committed=True,
+            idempotent_replay=True,
+            output_delivery_completed=False,
+            persisted_assistant_content=[
+                {"type": "text", "text": "persisted output"},
+            ],
+        )
 
 
 class _LegacyPersistenceReceiptRunner(_ResponseCompletedOutputRunner):
@@ -420,7 +452,10 @@ class _ResponseCancelledThenBlockedRunner:
         yield SimpleNamespace(
             object="response",
             status=RunStatus.Canceled,
-            error=SimpleNamespace(code="upstream_cancelled", message="cancelled"),
+            error=SimpleNamespace(
+                code="upstream_cancelled",
+                message="cancelled",
+            ),
         )
         await asyncio.sleep(30)
 
@@ -448,6 +483,7 @@ class _SequenceDeduplicatedOutputRunner(_ResponseCompletedOutputRunner):
             role="assistant",
             content=[SimpleNamespace(type="text", text="sequence output")],
         )
+
         yield SimpleNamespace(
             object="response",
             status=RunStatus.Completed,
@@ -459,6 +495,18 @@ class _SequenceDeduplicatedOutputRunner(_ResponseCompletedOutputRunner):
                         SimpleNamespace(type="text", text="sequence output"),
                     ],
                 ),
+            ],
+        )
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+            persisted_assistant_content=[
+                {"type": "text", "text": "sequence output"},
             ],
         )
 
@@ -547,8 +595,11 @@ class _OuterSequenceDeduplicatedOutputRunner(_ResponseCompletedOutputRunner):
             status=RunStatus.Completed,
             sequence_number=8,
             role="assistant",
-            content=[SimpleNamespace(type="text", text="outer sequence output")],
+            content=[
+                SimpleNamespace(type="text", text="outer sequence output"),
+            ],
         )
+
         yield SimpleNamespace(
             object="response",
             status=RunStatus.Completed,
@@ -563,6 +614,18 @@ class _OuterSequenceDeduplicatedOutputRunner(_ResponseCompletedOutputRunner):
                         ),
                     ],
                 ),
+            ],
+        )
+
+    def get_query_persistence_result(self, **_kwargs):
+        return QueryPersistenceResult(
+            session_id="session-a",
+            user_id="user-a",
+            assistant_message_count=1,
+            commit_attempted=True,
+            committed=True,
+            persisted_assistant_content=[
+                {"type": "text", "text": "outer sequence output"},
             ],
         )
 
@@ -606,9 +669,13 @@ class _ProgressThenCompletedRunner:
 class _ChannelManager:
     def __init__(self) -> None:
         self.events: list[object] = []
+        self.texts: list[dict[str, object]] = []
 
     async def send_event(self, **kwargs) -> None:
         self.events.append(kwargs["event"])
+
+    async def send_text(self, **kwargs) -> None:
+        self.texts.append(kwargs)
 
 
 class _TaskChatManager:
@@ -1041,8 +1108,7 @@ def test_completed_agent_output_cancelled_before_stream_close_is_cancelled(
     assert state.last_error == "Job was cancelled"
     assert monitor.records[-1]["status"] == "cancelled"
     assert any(
-        "cancelled before completion" in message
-        for message in info_messages
+        "cancelled before completion" in message for message in info_messages
     )
 
 
@@ -1110,7 +1176,9 @@ def test_completed_agent_cancelled_after_session_commit_keeps_success():
         return manager
 
     manager = asyncio.run(_run())
-    assert manager.get_state("job-cancel-after-output").last_status == "success"
+    assert (
+        manager.get_state("job-cancel-after-output").last_status == "success"
+    )
 
 
 def test_confirmed_cancelled_completion_forwards_final_message():
@@ -1138,8 +1206,12 @@ def test_confirmed_cancelled_completion_forwards_final_message():
 
     manager, channel_manager = asyncio.run(_run())
 
-    assert manager.get_state("job-cancel-after-output").last_status == "success"
-    assert [event.object for event in channel_manager.events].count("message") == 1
+    assert (
+        manager.get_state("job-cancel-after-output").last_status == "success"
+    )
+    assert [event.object for event in channel_manager.events].count(
+        "message",
+    ) == 1
 
 
 def test_empty_completed_agent_is_rejected_before_late_cancellation():
@@ -1475,6 +1547,9 @@ def test_response_failed_marks_execution_with_terminal_error(
         for message in info_messages
     )
     assert channel_manager.events[-1].status == RunStatus.Failed
+    assert len(channel_manager.texts) == 1
+    assert "model_call_failed" in channel_manager.texts[0]["text"]
+    assert "secret-token" not in channel_manager.texts[0]["text"]
 
 
 def test_response_completed_without_message_marks_execution_as_error(
@@ -1622,7 +1697,9 @@ def test_task_binding_replaces_chat_with_mismatched_route():
     assert bound.meta["task_session_id"] == "session-a"
     assert bound.request.user_id == "user-a"
     assert bound.request.session_id == "session-a"
-    assert chat_manager.created[0].meta["task_scope_id"] == "tenant-a::source-a"
+    assert (
+        chat_manager.created[0].meta["task_scope_id"] == "tenant-a::source-a"
+    )
     assert get_cron_result_metrics()[CRON_SESSION_ROUTE_MISMATCH_TOTAL] == 1
 
 
@@ -1630,15 +1707,17 @@ def test_execution_result_keeps_runtime_diagnostics_with_model_metadata():
     """模型选择元数据不能覆盖终态和 session 提交诊断。"""
     executor = CronExecutor(runner=object(), channel_manager=object())
 
-    result = executor._build_execution_result(  # pylint: disable=protected-access
-        {
-            "trace_id": "trace-1",
-            "execution_meta": {
-                "assistant_message_count": 1,
-                "session_state_committed": True,
+    result = (
+        executor._build_execution_result(  # pylint: disable=protected-access
+            {
+                "trace_id": "trace-1",
+                "execution_meta": {
+                    "assistant_message_count": 1,
+                    "session_state_committed": True,
+                },
             },
-        },
-        execution_meta={"effective_model_slot": {"model": "model-1"}},
+            execution_meta={"effective_model_slot": {"model": "model-1"}},
+        )
     )
 
     assert result.execution_meta == {
@@ -1658,21 +1737,36 @@ def test_response_completed_output_marks_execution_as_success(monkeypatch):
     async def _run():
         job = _build_agent_job()
         monitor = _MonitorSyncClient()
+        channel_manager = _ChannelManager()
         manager = CronManager(
             repo=_Repo(job),
             runner=_ResponseCompletedOutputRunner(),
-            channel_manager=_ChannelManager(),
+            channel_manager=channel_manager,
         )
-        manager._monitor_sync_client = monitor  # pylint: disable=protected-access
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
         result = await manager._executor.execute(job)
-        await manager._execute_once(job, is_manual=False)  # pylint: disable=protected-access
-        return manager, monitor, result
+        await manager._execute_once(
+            job,
+            is_manual=False,
+        )  # pylint: disable=protected-access
+        return manager, monitor, result, channel_manager
 
-    manager, monitor, result = asyncio.run(_run())
+    manager, monitor, result, channel_manager = asyncio.run(_run())
 
-    assert manager.get_state("job-cancel-after-output").last_status == "success"
+    assert (
+        manager.get_state("job-cancel-after-output").last_status == "success"
+    )
     assert monitor.records[-1]["status"] == "success"
     assert result.output_preview == "response output"
+    assert [event.object for event in channel_manager.events] == [
+        "message",
+        "message",
+    ]
+    assert {event.content[0].text for event in channel_manager.events} == {
+        "response output",
+    }
 
 
 def test_message_completed_without_response_terminal_marks_execution_as_error(
@@ -1775,7 +1869,9 @@ def test_response_completed_with_uncommitted_session_marks_execution_as_error(
             runner=_CommitFailedRunner(),
             channel_manager=_ChannelManager(),
         )
-        manager._monitor_sync_client = monitor  # pylint: disable=protected-access
+        manager._monitor_sync_client = (
+            monitor  # pylint: disable=protected-access
+        )
         with pytest.raises(RuntimeError, match="session_state_commit"):
             await manager._execute_once(  # pylint: disable=protected-access
                 job,
@@ -1817,7 +1913,7 @@ def test_failed_non_console_task_does_not_push_partial_output(monkeypatch):
     """Console pushes are deferred until the execution has passed all gates."""
     pushed: list[tuple[str, str]] = []
 
-    async def record_push(_self, session_id, text, _tenant_id):
+    async def record_push(_self, session_id, text, _tenant_id, **_kwargs):
         pushed.append((session_id, text))
 
     monkeypatch.setattr(
@@ -1834,7 +1930,10 @@ def test_failed_non_console_task_does_not_push_partial_output(monkeypatch):
             update={
                 "dispatch": DispatchSpec(
                     channel="zhaohu",
-                    target=DispatchTarget(user_id="user-a", session_id="session-a"),
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
                 ),
                 "meta": {
                     "task_chat_id": "chat-a",
@@ -1861,7 +1960,7 @@ def test_successful_non_console_task_pushes_to_task_session(monkeypatch):
     """The transient Console notification is addressed by session ID, never chat ID."""
     pushed: list[tuple[str, str]] = []
 
-    async def record_push(_self, session_id, text, _tenant_id):
+    async def record_push(_self, session_id, text, _tenant_id, **_kwargs):
         pushed.append((session_id, text))
 
     monkeypatch.setattr(
@@ -1878,7 +1977,10 @@ def test_successful_non_console_task_pushes_to_task_session(monkeypatch):
             update={
                 "dispatch": DispatchSpec(
                     channel="zhaohu",
-                    target=DispatchTarget(user_id="user-a", session_id="session-a"),
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
                 ),
                 "meta": {
                     "task_chat_id": "chat-a",
@@ -1921,7 +2023,10 @@ def test_idempotent_replay_skips_duplicate_push_and_notification(monkeypatch):
             update={
                 "dispatch": DispatchSpec(
                     channel="zhaohu",
-                    target=DispatchTarget(user_id="user-a", session_id="session-a"),
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
                 ),
                 "meta": {
                     "task_chat_id": "chat-a",
@@ -1944,13 +2049,17 @@ def test_idempotent_replay_skips_duplicate_push_and_notification(monkeypatch):
         return manager, notifications, channel_manager
 
     manager, notifications, channel_manager = asyncio.run(_run())
-    assert manager.get_state("job-cancel-after-output").last_status == "success"
+    assert (
+        manager.get_state("job-cancel-after-output").last_status == "success"
+    )
     assert pushed == []
     notifications.assert_not_awaited()
     assert channel_manager.events == []
 
 
-def test_replay_retries_output_delivery_until_receipt_is_persisted(monkeypatch):
+def test_replay_retries_output_delivery_until_receipt_is_persisted(
+    monkeypatch,
+):
     """A failed final-message delivery is retried once by the scheduler replay."""
     monkeypatch.setattr(
         "swe.app.crons.executor.CronExecutor._resolve_execution_model",
@@ -1973,17 +2082,62 @@ def test_replay_retries_output_delivery_until_receipt_is_persisted(monkeypatch):
     assert channel_manager.send_attempts == 2
     assert runner.delivery_marks == 1
     assert [event.object for event in channel_manager.events] == ["message"]
+    assert channel_manager.events[0].content[0].text == "persisted output"
 
 
-def test_recovered_replay_records_success_effects_once(monkeypatch):
-    """A replay that recovers output delivery also runs deferred success effects."""
+def test_legacy_replay_does_not_redeliver_without_delivery_schema(monkeypatch):
+    """Old task runs are skipped rather than replaying unknown side effects."""
     monkeypatch.setattr(
         "swe.app.crons.executor.CronExecutor._resolve_execution_model",
         lambda *_args: None,
     )
 
     async def _run():
-        job = _build_agent_job()
+        runner = _LegacyReplayDeliveryRunner()
+        channel_manager = _ChannelManager()
+        job = _build_agent_job().model_copy(
+            update={
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "session-a",
+                },
+            },
+        )
+        repo = _Repo(job)
+        manager = CronManager(
+            repo=repo,
+            runner=runner,
+            channel_manager=channel_manager,
+        )
+        await manager._execute_once(  # pylint: disable=protected-access
+            job,
+            is_manual=False,
+            dispatch_meta={"cron_execution_key": "execution-1"},
+        )
+        return runner, channel_manager, repo._job
+
+    runner, channel_manager, job = asyncio.run(_run())
+    assert channel_manager.events == []
+    assert runner.delivery_marks == 0
+    assert job.meta.get("task_unread_execution_count", 0) == 0
+
+
+def test_recovered_replay_records_success_effects_once(monkeypatch):
+    """A recovered replay applies task success effects once per execution key."""
+    monkeypatch.setattr(
+        "swe.app.crons.executor.CronExecutor._resolve_execution_model",
+        lambda *_args: None,
+    )
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "session-a",
+                },
+            },
+        )
         runner = _ReplayableDeliveryRunner()
         channel_manager = _FailOnceChannelManager()
         manager = CronManager(
@@ -1991,27 +2145,59 @@ def test_recovered_replay_records_success_effects_once(monkeypatch):
             runner=runner,
             channel_manager=channel_manager,
         )
-        notifications = AsyncMock()
-        manager._handle_success_notifications = notifications
         with pytest.raises(RuntimeError, match="channel unavailable"):
             await manager._execute_once(  # pylint: disable=protected-access
                 job,
                 is_manual=False,
+                dispatch_meta={"cron_execution_key": "execution-1"},
             )
         runner.idempotent_replay = True
         await manager._execute_once(  # pylint: disable=protected-access
             job,
             is_manual=False,
+            dispatch_meta={"cron_execution_key": "execution-1"},
         )
         await manager._execute_once(  # pylint: disable=protected-access
             job,
             is_manual=False,
+            dispatch_meta={"cron_execution_key": "execution-1"},
         )
-        return runner, notifications
+        return manager._repo._job
 
-    runner, notifications = asyncio.run(_run())
-    assert runner.success_effects_marks == 1
-    notifications.assert_awaited_once()
+    job = asyncio.run(_run())
+    assert job.meta["task_unread_execution_count"] == 1
+
+
+def test_task_success_effects_deduplicate_the_execution_key() -> None:
+    """A scheduler replay cannot increment task unread count twice."""
+
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "session-a",
+                },
+            },
+        )
+        repo = _Repo(job)
+        manager = CronManager(
+            repo=repo,
+            runner=SimpleNamespace(session=None),
+            channel_manager=_ChannelManager(),
+        )
+        await manager._record_task_execution_success(  # pylint: disable=protected-access
+            job,
+            "execution-1",
+        )
+        await manager._record_task_execution_success(  # pylint: disable=protected-access
+            job,
+            "execution-1",
+        )
+        return repo._job
+
+    job = asyncio.run(_run())
+    assert job.meta["task_unread_execution_count"] == 1
 
 
 def test_legacy_persistence_receipt_without_replay_field_still_succeeds(
@@ -2036,7 +2222,9 @@ def test_legacy_persistence_receipt_without_replay_field_still_succeeds(
         return manager
 
     manager = asyncio.run(_run())
-    assert manager.get_state("job-cancel-after-output").last_status == "success"
+    assert (
+        manager.get_state("job-cancel-after-output").last_status == "success"
+    )
 
 
 def test_response_cancelled_terminal_does_not_become_timeout(monkeypatch):
@@ -2125,7 +2313,9 @@ def test_outer_sequence_number_deduplicates_message_and_response_output(
     assert asyncio.run(_run()).output_preview == "outer sequence output"
 
 
-def test_response_completed_terminal_does_not_wait_for_tail_stream(monkeypatch):
+def test_response_completed_terminal_does_not_wait_for_tail_stream(
+    monkeypatch,
+):
     """A complete response produces success even when the iterator stalls."""
     monkeypatch.setattr(
         "swe.app.crons.executor.CronExecutor._resolve_execution_model",
@@ -2148,7 +2338,9 @@ def test_response_completed_terminal_does_not_wait_for_tail_stream(monkeypatch):
         return manager
 
     manager = asyncio.run(_run())
-    assert manager.get_state("job-cancel-after-output").last_status == "success"
+    assert (
+        manager.get_state("job-cancel-after-output").last_status == "success"
+    )
 
 
 def test_completed_cron_delivers_only_final_assistant_message(monkeypatch):
@@ -2188,7 +2380,10 @@ def test_response_completed_without_persistence_receipt_marks_execution_as_error
             runner=_ResponseCompletedOutputWithoutPersistenceRunner(),
             channel_manager=_ChannelManager(),
         )
-        with pytest.raises(RuntimeError, match="persistence_result_unavailable"):
+        with pytest.raises(
+            RuntimeError,
+            match="persistence_result_unavailable",
+        ):
             await manager._execute_once(  # pylint: disable=protected-access
                 job,
                 is_manual=False,

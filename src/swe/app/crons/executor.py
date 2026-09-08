@@ -8,7 +8,8 @@ import uuid
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from types import SimpleNamespace
+from typing import Any, Dict, NoReturn, Optional
 
 import httpx
 from agentscope_runtime.engine.schemas.agent_schemas import RunStatus
@@ -257,11 +258,14 @@ class AgentStreamState:
     session_state_commit_attempted: bool = False
     session_state_committed: bool = False
     idempotent_replay: bool = False
+    output_delivery_replay_supported: bool = False
     output_delivery_completed: bool = False
     output_delivery_receipt_supported: bool = False
-    success_effects_completed: bool = False
-    success_effects_receipt_supported: bool = False
     completed_message_event: Any | None = field(default=None, repr=False)
+    persisted_assistant_content: list[dict[str, Any]] = field(
+        default_factory=list,
+        repr=False,
+    )
     _output_event_keys: set[str] = field(default_factory=set, repr=False)
 
     @property
@@ -1041,11 +1045,10 @@ class CronExecutor:
             "session_state_commit_attempted": stream_state.session_state_commit_attempted,
             "session_state_committed": stream_state.session_state_committed,
             "idempotent_replay": stream_state.idempotent_replay,
-            "output_delivery_completed": stream_state.output_delivery_completed,
-            "success_effects_completed": stream_state.success_effects_completed,
-            "success_effects_receipt_supported": (
-                stream_state.success_effects_receipt_supported
+            "output_delivery_replay_supported": (
+                stream_state.output_delivery_replay_supported
             ),
+            "output_delivery_completed": stream_state.output_delivery_completed,
             "terminal_error_code": stream_state.terminal_error_code,
         }
 
@@ -1285,6 +1288,7 @@ class CronExecutor:
         job: CronJobSpec,
         stream_state: AgentStreamState,
         runtime_tenant_id: str,
+        delivery_key: str = "",
     ) -> None:
         """推送 Agent 输出到 console。
 
@@ -1305,6 +1309,7 @@ class CronExecutor:
                 task_session_id,
                 "\n".join(stream_state.output_parts),
                 runtime_tenant_id,
+                delivery_key=delivery_key,
             )
 
     async def _handle_agent_failed_after_stream(
@@ -1414,7 +1419,7 @@ class CronExecutor:
         stream_state: AgentStreamState,
         trace_id: Optional[str],
         error: str,
-    ) -> None:
+    ) -> NoReturn:
         """拒绝未确认会话提交的完成结果。"""
         error_msg = f"Agent execution failed: session_state_commit: {error}"
         increment_cron_result_metric(CRON_SESSION_COMMIT_FAILURE_TOTAL)
@@ -1636,6 +1641,17 @@ class CronExecutor:
             return
         if result is None:
             return
+        self._apply_persistence_result(stream_state, result)
+        if result.committed:
+            # 提交回执只会在 Runner 流 finally 完成后发出，因此可视为流已关闭。
+            stream_state.stream_returned = True
+
+    def _apply_persistence_result(
+        self,
+        stream_state: AgentStreamState,
+        result: Any,
+    ) -> None:
+        """Apply the persisted query receipt to the Cron stream state."""
         stream_state.session_state_commit_attempted = bool(
             result.commit_attempted,
         )
@@ -1643,24 +1659,103 @@ class CronExecutor:
         stream_state.idempotent_replay = bool(
             getattr(result, "idempotent_replay", False),
         )
+        stream_state.output_delivery_replay_supported = bool(
+            getattr(result, "output_delivery_replay_supported", False),
+        )
         stream_state.output_delivery_completed = bool(
             getattr(result, "output_delivery_completed", False),
         )
-        stream_state.output_delivery_receipt_supported = callable(
-            getattr(self._runner, "mark_cron_output_delivery_completed", None),
-        )
-        stream_state.success_effects_completed = bool(
-            getattr(result, "success_effects_completed", False),
-        )
-        stream_state.success_effects_receipt_supported = callable(
-            getattr(self._runner, "mark_cron_success_effects_completed", None),
+        stream_state.output_delivery_receipt_supported = (
+            callable(
+                getattr(
+                    self._runner,
+                    "mark_cron_output_delivery_completed",
+                    None,
+                ),
+            )
+            and stream_state.output_delivery_replay_supported
         )
         stream_state.persisted_assistant_message_count = int(
             result.assistant_message_count,
         )
-        if result.committed:
-            # 提交回执只会在 Runner 流 finally 完成后发出，因此可视为流已关闭。
-            stream_state.stream_returned = True
+        content = getattr(result, "persisted_assistant_content", None)
+        if isinstance(content, list):
+            stream_state.persisted_assistant_content = [
+                block for block in content if isinstance(block, dict)
+            ]
+        self._replace_final_message_with_persisted_content(stream_state)
+
+    @staticmethod
+    def _replace_final_message_with_persisted_content(
+        stream_state: AgentStreamState,
+    ) -> None:
+        """Make downstream delivery match the assistant content on disk."""
+        if not stream_state.persisted_assistant_content:
+            return
+        content = [
+            SimpleNamespace(**block)
+            for block in stream_state.persisted_assistant_content
+        ]
+        stream_state.completed_message_event = SimpleNamespace(
+            object="message",
+            status=RunStatus.Completed,
+            role="assistant",
+            content=content,
+        )
+        persisted_text = CronExecutor._extract_text_from_content(content)
+        if persisted_text:
+            stream_state.output_parts = [persisted_text]
+            stream_state.output_source = "persisted"
+
+    async def _confirm_agent_persistence_result(
+        self,
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+        trace_id: Optional[str],
+        req: Dict[str, Any],
+    ) -> None:
+        """Require a committed receipt and use its persisted assistant output."""
+        persistence_getter = getattr(
+            self._runner,
+            "get_query_persistence_result",
+            None,
+        )
+        if not callable(persistence_getter):
+            await self._handle_agent_session_commit_failure(
+                job,
+                stream_state,
+                trace_id,
+                "persistence_result_unavailable",
+            )
+
+        persistence_result = persistence_getter(
+            session_id=str(req.get("session_id") or ""),
+            user_id=str(req.get("user_id") or ""),
+            execution_key=str(req.get("cron_persistence_key") or ""),
+        )
+        if persistence_result is None:
+            await self._handle_agent_session_commit_failure(
+                job,
+                stream_state,
+                trace_id,
+                "persistence_result_unavailable",
+            )
+
+        self._apply_persistence_result(stream_state, persistence_result)
+        if not persistence_result.committed:
+            await self._handle_agent_session_commit_failure(
+                job,
+                stream_state,
+                trace_id,
+                persistence_result.commit_error or "commit_not_confirmed",
+            )
+        if persistence_result.assistant_message_count <= 0:
+            await self._handle_agent_session_commit_failure(
+                job,
+                stream_state,
+                trace_id,
+                "persisted_assistant_missing",
+            )
 
     async def _handle_agent_generic_exception(
         self,
@@ -1750,90 +1845,12 @@ class CronExecutor:
                     trace_id,
                 )
 
-            persistence_getter = getattr(
-                self._runner,
-                "get_query_persistence_result",
-                None,
+            await self._confirm_agent_persistence_result(
+                job,
+                stream_state,
+                trace_id,
+                req,
             )
-            if callable(persistence_getter):
-                persistence_result = persistence_getter(
-                    session_id=str(req.get("session_id") or ""),
-                    user_id=str(req.get("user_id") or ""),
-                    execution_key=str(req.get("cron_persistence_key") or ""),
-                )
-                if persistence_result is None:
-                    trace_ended = True
-                    await self._handle_agent_session_commit_failure(
-                        job,
-                        stream_state,
-                        trace_id,
-                        "persistence_result_unavailable",
-                    )
-                stream_state.session_state_commit_attempted = bool(
-                    persistence_result.commit_attempted,
-                )
-                stream_state.session_state_committed = bool(
-                    persistence_result.committed,
-                )
-                stream_state.idempotent_replay = bool(
-                    getattr(persistence_result, "idempotent_replay", False),
-                )
-                stream_state.output_delivery_completed = bool(
-                    getattr(
-                        persistence_result,
-                        "output_delivery_completed",
-                        False,
-                    ),
-                )
-                stream_state.output_delivery_receipt_supported = callable(
-                    getattr(
-                        self._runner,
-                        "mark_cron_output_delivery_completed",
-                        None,
-                    ),
-                )
-                stream_state.success_effects_completed = bool(
-                    getattr(
-                        persistence_result,
-                        "success_effects_completed",
-                        False,
-                    ),
-                )
-                stream_state.success_effects_receipt_supported = callable(
-                    getattr(
-                        self._runner,
-                        "mark_cron_success_effects_completed",
-                        None,
-                    ),
-                )
-                stream_state.persisted_assistant_message_count = int(
-                    persistence_result.assistant_message_count,
-                )
-                if not persistence_result.committed:
-                    trace_ended = True
-                    await self._handle_agent_session_commit_failure(
-                        job,
-                        stream_state,
-                        trace_id,
-                        persistence_result.commit_error
-                        or "commit_not_confirmed",
-                    )
-                if persistence_result.assistant_message_count <= 0:
-                    trace_ended = True
-                    await self._handle_agent_session_commit_failure(
-                        job,
-                        stream_state,
-                        trace_id,
-                        "persisted_assistant_missing",
-                    )
-            else:
-                trace_ended = True
-                await self._handle_agent_session_commit_failure(
-                    job,
-                    stream_state,
-                    trace_id,
-                    "persistence_result_unavailable",
-                )
 
             await self._deliver_persisted_agent_output(
                 job,
@@ -2019,7 +2036,10 @@ class CronExecutor:
             is_cancelled_response = self._is_cancelled_response_event(event)
             output_entries = self._extract_assistant_output_entries(event)
             for output_key, text, output_source in output_entries:
-                if output_key and output_key in stream_state._output_event_keys:
+                if (
+                    output_key
+                    and output_key in stream_state._output_event_keys
+                ):
                     continue
                 if output_key:
                     stream_state._output_event_keys.add(output_key)
@@ -2075,6 +2095,13 @@ class CronExecutor:
                     event=event,
                     meta=dispatch_meta,
                 )
+                await self._send_agent_terminal_text(
+                    job,
+                    target_user_id,
+                    target_session_id,
+                    dispatch_meta,
+                    stream_state,
+                )
             if (
                 is_completed_response
                 or is_failed_message
@@ -2118,17 +2145,21 @@ class CronExecutor:
         target_session_id: str,
         dispatch_meta: Dict[str, Any],
         stream_state: AgentStreamState,
+        delivery_key: str = "",
     ) -> bool:
         """Forward the single verified final assistant message, if present."""
         event = stream_state.completed_message_event
         if event is None:
             return False
+        delivery_meta = dict(dispatch_meta)
+        if delivery_key:
+            delivery_meta["cron_delivery_key"] = delivery_key
         await self._channel_manager.send_event(
             channel=job.dispatch.channel,
             user_id=target_user_id,
             session_id=target_session_id,
             event=event,
-            meta=dispatch_meta,
+            meta=delivery_meta,
         )
         stream_state.completed_message_event = None
         stream_state.completed_message_sent = True
@@ -2140,6 +2171,31 @@ class CronExecutor:
             stream_state.output_len,
         )
         return True
+
+    async def _send_agent_terminal_text(
+        self,
+        job: CronJobSpec,
+        target_user_id: str,
+        target_session_id: str,
+        dispatch_meta: Dict[str, Any],
+        stream_state: AgentStreamState,
+    ) -> None:
+        """Notify channels whose event protocol only accepts completed messages."""
+        sender = getattr(self._channel_manager, "send_text", None)
+        if not callable(sender):
+            return
+        if stream_state.response_cancelled_seen:
+            prefix = f"定时任务 [{job.name}] 已取消"
+        else:
+            prefix = f"定时任务 [{job.name}] 执行失败"
+        detail = stream_state.error_message or "模型未返回可用结果"
+        await sender(
+            channel=job.dispatch.channel,
+            user_id=target_user_id,
+            session_id=target_session_id,
+            text=f"{prefix}: {detail}",
+            meta=dispatch_meta,
+        )
 
     async def _deliver_persisted_agent_output(
         self,
@@ -2160,24 +2216,35 @@ class CronExecutor:
         ):
             return
 
+        delivery_identity = str(
+            req.get("cron_execution_key")
+            or req.get("cron_persistence_key")
+            or "",
+        )
+        delivery_key = (
+            f"cron:{delivery_identity}:output" if delivery_identity else ""
+        )
+
         message_delivered = await self._send_agent_stream_events(
             job,
             target_user_id,
             target_session_id,
             dispatch_meta,
             stream_state,
+            delivery_key,
         )
         task_session_id = str((job.meta or {}).get("task_session_id") or "")
         console_push_required = bool(
             job.dispatch.channel != CONSOLE_CHANNEL
             and stream_state.output_parts
-            and task_session_id
+            and task_session_id,
         )
         if console_push_required:
             await self._push_output_to_console(
                 job,
                 stream_state,
                 runtime_tenant_id,
+                delivery_key,
             )
         if not (message_delivered or console_push_required):
             return
@@ -2233,6 +2300,8 @@ class CronExecutor:
         session_id: str,
         text: str,
         tenant_id: str,
+        *,
+        delivery_key: str = "",
     ) -> None:
         """Push message to console channel for frontend notification."""
         if not session_id or not text:
@@ -2243,7 +2312,12 @@ class CronExecutor:
             len(text),
             tenant_id,
         )
-        await push_store_append(session_id, text.strip(), tenant_id=tenant_id)
+        await push_store_append(
+            session_id,
+            text.strip(),
+            tenant_id=tenant_id,
+            delivery_key=delivery_key,
+        )
 
     def _extract_text_from_event(self, event: Any) -> str:
         """Extract text content from a runner event.
@@ -2332,11 +2406,15 @@ class CronExecutor:
                 key = f"id:{message_id}"
             elif getattr(message, "sequence_number", None) is not None:
                 key = f"sequence:{message.sequence_number}"
-            elif len(output) == 1 and getattr(
-                event,
-                "sequence_number",
-                None,
-            ) is not None:
+            elif (
+                len(output) == 1
+                and getattr(
+                    event,
+                    "sequence_number",
+                    None,
+                )
+                is not None
+            ):
                 key = f"sequence:{event.sequence_number}"
             else:
                 event_id = getattr(event, "id", None)

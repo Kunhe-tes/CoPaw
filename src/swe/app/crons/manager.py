@@ -65,6 +65,8 @@ TASK_SESSION_CLEANUP_TASK_TYPE = "cleanup"
 AUTO_PAUSE_REASON = "auto_unread_threshold"
 MANUAL_PAUSE_REASON = "manual"
 TASK_MESSAGES_STATE_KEY = "task_messages"
+TASK_SUCCESS_EXECUTION_KEYS_META_KEY = "task_success_execution_keys"
+MAX_TASK_SUCCESS_EXECUTION_KEYS = 100
 _SYSTEM_JOB_IDS_FILE = "system_jobs.json"
 MAX_NOTIFICATION_DELAY_MINUTES = 7 * 24 * 60
 BROADCAST_SOURCE_JOB_ID_META_KEY = "broadcast_source_job_id"
@@ -2296,12 +2298,9 @@ class CronManager:  # pylint: disable=too-many-public-methods
         spec: CronJobSpec,
     ) -> bool:
         """确认可复用 chat 与任务的读取、写入路由完全一致。"""
-        if (
-            str(getattr(task_chat, "session_id", ""))
-            != str(task_session_id)
-            or str(getattr(task_chat, "user_id", ""))
-            != str(creator_user_id)
-        ):
+        if str(getattr(task_chat, "session_id", "")) != str(
+            task_session_id,
+        ) or str(getattr(task_chat, "user_id", "")) != str(creator_user_id):
             return False
         chat_meta = getattr(task_chat, "meta", {}) or {}
         expected_route = {
@@ -2368,7 +2367,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
             )
         return request, dispatch
 
-    async def _record_task_execution_success(self, job: CronJobSpec) -> None:
+    async def _record_task_execution_success(
+        self,
+        job: CronJobSpec,
+        execution_key: str = "",
+    ) -> None:
         creator_user_id = (job.meta or {}).get("creator_user_id")
         task_session_id = (job.meta or {}).get("task_session_id")
         if (
@@ -2395,29 +2398,37 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 )
             else:
                 preview = ""
-        async with self._lock:
-            _, auto_paused, _ = await self._mutate_jobs_file_locked(
-                lambda jobs_file: self._apply_task_execution_success(
-                    jobs_file,
-                    job.id,
-                    preview,
-                ),
-            )
-            if auto_paused:
-                ext_id = self._states.get(
-                    job.id,
-                    CronJobState(),
-                ).external_job_id
-                if ext_id and self._scheduler_adapter:
-                    await self._scheduler_adapter.pause_job(ext_id)
-                # 同步暂停状态到 Monitor 数据库
-                # 概览页面从 Monitor 读取任务状态，需要同步更新
-                updated_job = await self._repo.get_job(job.id)
-                if updated_job and self._monitor_sync_client is not None:
-                    await self._monitor_sync_client.sync_job(
-                        updated_job,
-                        agent_id=self._agent_id or "default",
-                    )
+        mutate = getattr(self._repo, "mutate_jobs_file", None)
+        apply_success = lambda jobs_file: self._apply_task_execution_success(
+            jobs_file,
+            job.id,
+            preview,
+            execution_key,
+        )
+        if callable(mutate):
+            _, auto_paused = await mutate(apply_success)
+        else:
+            # Third-party repositories predating mutate_jobs_file retain the
+            # former process-local consistency behavior.
+            async with self._lock:
+                _, auto_paused, _ = await self._mutate_jobs_file_locked(
+                    apply_success,
+                )
+        if auto_paused:
+            ext_id = self._states.get(
+                job.id,
+                CronJobState(),
+            ).external_job_id
+            if ext_id and self._scheduler_adapter:
+                await self._scheduler_adapter.pause_job(ext_id)
+            # 同步暂停状态到 Monitor 数据库
+            # 概览页面从 Monitor 读取任务状态，需要同步更新
+            updated_job = await self._repo.get_job(job.id)
+            if updated_job and self._monitor_sync_client is not None:
+                await self._monitor_sync_client.sync_job(
+                    updated_job,
+                    agent_id=self._agent_id or "default",
+                )
 
     @asynccontextmanager
     async def _task_session_write_lock(
@@ -2515,11 +2526,19 @@ class CronManager:  # pylint: disable=too-many-public-methods
         jobs_file: JobsFile,
         job_id: str,
         preview: str,
+        execution_key: str = "",
     ) -> tuple[bool, bool]:
         for index, job in enumerate(jobs_file.jobs):
             if job.id != job_id:
                 continue
             meta = dict(job.meta or {})
+            completed_keys = [
+                str(key)
+                for key in meta.get(TASK_SUCCESS_EXECUTION_KEYS_META_KEY, [])
+                if isinstance(key, str) and key
+            ]
+            if execution_key and execution_key in completed_keys:
+                return False, False
             meta["task_has_scheduled_result"] = True
             meta["task_last_scheduled_preview"] = preview[:10]
             unread_count = (
@@ -2527,6 +2546,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
             )
             meta["task_unread_execution_count"] = unread_count
             meta["task_last_scheduled_run_at"] = datetime.now(timezone.utc)
+            if execution_key:
+                meta[TASK_SUCCESS_EXECUTION_KEYS_META_KEY] = [
+                    *completed_keys[-(MAX_TASK_SUCCESS_EXECUTION_KEYS - 1) :],
+                    execution_key,
+                ]
             updated = job.model_copy(update={"meta": meta})
             auto_paused = False
             auto_pause_config = resolve_cron_unread_auto_pause_config(
@@ -3165,64 +3189,26 @@ class CronManager:  # pylint: disable=too-many-public-methods
     async def _handle_success_notifications(
         self,
         job: CronJobSpec,
+        execution_key: str = "",
     ) -> None:
         """处理任务成功执行后的通知和记录。
 
         Args:
             job: 任务定义
         """
-        # 通知用 shield 保护，避免任务取消时误标记状态
+        # The jobs-file update owns the idempotency receipt. Shield keeps a
+        # cancellation from interrupting that atomic update midway.
         try:
             await asyncio.shield(
-                self._record_task_execution_success(job),
+                self._record_task_execution_success(job, execution_key),
             )
         except asyncio.CancelledError:
             logger.info(
-                "cron task notification/record cancelled but task succeeded: "
+                "cron task notification/record cancelled before completion: "
                 "job_id=%s",
                 job.id,
             )
-
-    @staticmethod
-    def _should_record_success_effects(
-        exec_status: str,
-        execution_meta: Optional[Dict[str, Any]],
-    ) -> bool:
-        """Run task-success effects once, including a recovered replay."""
-        if exec_status != "success":
-            return False
-        meta = execution_meta or {}
-        if not meta.get("idempotent_replay"):
-            return True
-        return bool(
-            meta.get("success_effects_receipt_supported")
-            and not meta.get("success_effects_completed")
-        )
-
-    async def _mark_success_effects_completed(
-        self,
-        input_snapshot: Optional[Dict[str, Any]],
-    ) -> None:
-        """Persist task-success effects so a later replay does not repeat them."""
-        if not isinstance(input_snapshot, dict):
-            return
-        execution_key = str(input_snapshot.get("cron_execution_key") or "")
-        persistence_key = str(input_snapshot.get("cron_persistence_key") or "")
-        if not execution_key and not persistence_key:
-            return
-        marker = getattr(
-            self._runner,
-            "mark_cron_success_effects_completed",
-            None,
-        )
-        if not callable(marker):
-            return
-        await marker(
-            session_id=str(input_snapshot.get("session_id") or ""),
-            user_id=str(input_snapshot.get("user_id") or ""),
-            execution_key=execution_key,
-            persistence_key=persistence_key,
-        )
+            raise
 
     def _handle_cancelled_after_success(
         self,
@@ -3437,7 +3423,10 @@ class CronManager:  # pylint: disable=too-many-public-methods
             job.tenant_id or "",
             job.source_id or "",
             job.scope_id or "",
-            dispatch.get("cron_execution_key", dispatch.get("execution_key", "")),
+            dispatch.get(
+                "cron_execution_key",
+                dispatch.get("execution_key", ""),
+            ),
             diagnostics.get("response_terminal_status", ""),
             diagnostics.get("completed_message_seen", False),
             diagnostics.get("assistant_message_count", 0),
@@ -3512,16 +3501,28 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     duration_ms = int(
                         (end_time - actual_time).total_seconds() * 1000,
                     )
-                    if self._should_record_success_effects(
-                        exec_status,
-                        execution_meta,
-                    ):
-                        await self._handle_success_notifications(job)
-                        await self._mark_success_effects_completed(
-                            input_snapshot,
+                    if exec_status == "success":
+                        execution_key = str(
+                            (input_snapshot or {}).get(
+                                "cron_execution_key",
+                            )
+                            or "",
                         )
-                        if execution_meta is not None:
-                            execution_meta["success_effects_completed"] = True
+                        idempotent_replay = bool(
+                            (execution_meta or {}).get(
+                                "idempotent_replay",
+                            ),
+                        )
+                        replay_effects_supported = bool(
+                            (execution_meta or {}).get(
+                                "output_delivery_replay_supported",
+                            ),
+                        )
+                        if not idempotent_replay or replay_effects_supported:
+                            await self._handle_success_notifications(
+                                job,
+                                execution_key,
+                            )
                     logger.info(
                         "cron _execute_once: job_id=%s status=%s trace_id=%s",
                         job.id,

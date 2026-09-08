@@ -25,8 +25,11 @@ class QueryPersistenceResult:
     committed: bool
     commit_error: str | None = None
     idempotent_replay: bool = False
+    persisted_assistant_content: list[dict[str, Any]] = field(
+        default_factory=list,
+    )
+    output_delivery_replay_supported: bool = False
     output_delivery_completed: bool = False
-    success_effects_completed: bool = False
 
 
 @dataclass

@@ -8,10 +8,13 @@ import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional, TypeVar
 
 from .base import BaseJobRepository
 from ..models import CronJobSpec, JobsFile
+from ...runner.session_lock import AsyncSessionFileLock, get_session_lock_path
+
+_T = TypeVar("_T")
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,23 @@ class JsonJobRepository(BaseJobRepository):
         """在线程池中序列化、写入临时文件并替换 jobs.json。"""
         signature = await asyncio.to_thread(self._save_sync, jobs_file)
         self._set_snapshot(signature, jobs_file)
+
+    async def mutate_jobs_file(
+        self,
+        mutator: Callable[[JobsFile], tuple[bool, _T]],
+    ) -> tuple[bool, _T]:
+        """Atomically reload, mutate, and save jobs across worker processes."""
+        lock_path = get_session_lock_path(str(self._path))
+        async with AsyncSessionFileLock(lock_path):
+            signature, jobs_file = await asyncio.to_thread(self._load_sync)
+            changed, result = mutator(jobs_file)
+            if changed:
+                signature = await asyncio.to_thread(
+                    self._save_sync,
+                    jobs_file,
+                )
+            self._set_snapshot(signature, jobs_file)
+            return changed, result
 
     async def get_job(self, job_id: str) -> Optional[CronJobSpec]:
         """优先复用未失效快照中的 job 索引。"""

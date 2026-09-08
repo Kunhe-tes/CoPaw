@@ -2522,7 +2522,9 @@ class ZhaohuChannel(BaseChannel):
             },
             "msgCtlInfo": {
                 "configId": meta.get("config_id") or "",
-                "batchId": meta.get("batch_id") or "",
+                "batchId": (
+                    meta.get("cron_delivery_key") or meta.get("batch_id") or ""
+                ),
             },
             "msgContent": {
                 "summary": notification_summary,

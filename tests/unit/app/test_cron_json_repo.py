@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -142,3 +143,35 @@ async def test_invalid_jobs_file_raises_instead_of_returning_stale_cache(
 
     with pytest.raises(json.JSONDecodeError):
         await repo.get_job("job-a")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_mutations_apply_an_execution_key_once(
+    tmp_path,
+) -> None:
+    path = tmp_path / "jobs.json"
+    _write_jobs(path, [_job("job-a")])
+    first_repo = JsonJobRepository(path)
+    second_repo = JsonJobRepository(path)
+    execution_key = "execution-123"
+
+    def record_success(jobs_file: JobsFile) -> tuple[bool, bool]:
+        job = jobs_file.jobs[0]
+        meta = dict(job.meta or {})
+        completed_keys = list(meta.get("completed_keys", []))
+        if execution_key in completed_keys:
+            return False, False
+        meta["completed_keys"] = [*completed_keys, execution_key]
+        meta["unread_count"] = int(meta.get("unread_count", 0)) + 1
+        jobs_file.jobs[0] = job.model_copy(update={"meta": meta})
+        return True, True
+
+    results = await asyncio.gather(
+        first_repo.mutate_jobs_file(record_success),
+        second_repo.mutate_jobs_file(record_success),
+    )
+
+    assert [result[1] for result in results].count(True) == 1
+    persisted = await JsonJobRepository(path).load()
+    assert persisted.jobs[0].meta["completed_keys"] == [execution_key]
+    assert persisted.jobs[0].meta["unread_count"] == 1

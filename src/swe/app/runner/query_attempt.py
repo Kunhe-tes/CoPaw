@@ -642,8 +642,9 @@ async def _save_and_close_session_execution(
     idempotent_replay = False
     commit_error: str | None = None
     assistant_message_count = 0
+    persisted_assistant_content: list[dict[str, Any]] = []
+    output_delivery_replay_supported = False
     output_delivery_completed = False
-    success_effects_completed = False
     if cleanup_runtime is not None:
         cleanup_runtime.session_state_commit_attempted = True
     try:
@@ -693,14 +694,16 @@ async def _save_and_close_session_execution(
                     getattr(request, "cron_execution_key", "") or "",
                 ),
             )
-            success_effects_completed = _is_cron_success_effects_completed(
-                session_execution.state,
-                persistence_key=str(
-                    getattr(request, "cron_persistence_key", "") or "",
-                ),
-                execution_key=str(
-                    getattr(request, "cron_execution_key", "") or "",
-                ),
+            output_delivery_replay_supported = (
+                _is_cron_output_delivery_replay_supported(
+                    session_execution.state,
+                    persistence_key=str(
+                        getattr(request, "cron_persistence_key", "") or "",
+                    ),
+                    execution_key=str(
+                        getattr(request, "cron_execution_key", "") or "",
+                    ),
+                )
             )
             assistant_message_count = _count_persisted_assistant_messages(
                 session_execution.state,
@@ -710,6 +713,17 @@ async def _save_and_close_session_execution(
                 execution_key=str(
                     getattr(request, "cron_execution_key", "") or "",
                 ),
+            )
+            persisted_assistant_content = (
+                _get_persisted_cron_assistant_content(
+                    session_execution.state,
+                    persistence_key=str(
+                        getattr(request, "cron_persistence_key", "") or "",
+                    ),
+                    execution_key=str(
+                        getattr(request, "cron_execution_key", "") or "",
+                    ),
+                )
             )
     except BaseException as exc:
         commit_error = str(exc) or type(exc).__name__
@@ -745,8 +759,9 @@ async def _save_and_close_session_execution(
             or (None if committed else "session_state_not_persisted")
         ),
         idempotent_replay=idempotent_replay,
+        persisted_assistant_content=persisted_assistant_content,
+        output_delivery_replay_supported=output_delivery_replay_supported,
         output_delivery_completed=output_delivery_completed,
-        success_effects_completed=success_effects_completed,
     )
     if cleanup_runtime is not None:
         cleanup_runtime.session_state_committed = committed
@@ -799,15 +814,65 @@ def _count_persisted_assistant_messages(
         content = content[memory_start:memory_end]
     count = 0
     for entry in content:
-        message = entry[0] if isinstance(entry, (tuple, list)) and entry else entry
-        role = message.get("role") if isinstance(message, dict) else getattr(
-            message,
-            "role",
-            None,
+        message = (
+            entry[0] if isinstance(entry, (tuple, list)) and entry else entry
+        )
+        role = (
+            message.get("role")
+            if isinstance(message, dict)
+            else getattr(
+                message,
+                "role",
+                None,
+            )
         )
         if role == "assistant":
             count += 1
     return count
+
+
+def _get_persisted_cron_assistant_content(
+    state: Any,
+    *,
+    persistence_key: str = "",
+    execution_key: str = "",
+) -> list[dict[str, Any]]:
+    """Return the final persisted assistant content for this Cron run."""
+    if not isinstance(state, dict):
+        return []
+    agent = state.get("agent")
+    memory = agent.get("memory") if isinstance(agent, dict) else None
+    entries = memory.get("content") if isinstance(memory, dict) else None
+    if not isinstance(entries, list):
+        return []
+    task_run = _get_persisted_cron_task_run(
+        state,
+        persistence_key=persistence_key,
+        execution_key=execution_key,
+    )
+    if task_run is None:
+        return []
+    memory_start = task_run.get("memory_start")
+    memory_end = task_run.get("memory_end")
+    if (
+        not isinstance(memory_start, int)
+        or not isinstance(memory_end, int)
+        or memory_start < 0
+        or memory_end < memory_start
+        or memory_end > len(entries)
+    ):
+        return []
+    for entry in reversed(entries[memory_start:memory_end]):
+        message = (
+            entry[0] if isinstance(entry, (tuple, list)) and entry else entry
+        )
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        return [block for block in content if isinstance(block, dict)]
+    return []
 
 
 def _is_cron_output_delivery_completed(
@@ -825,19 +890,19 @@ def _is_cron_output_delivery_completed(
     return bool(task_run and task_run.get("output_delivery_completed"))
 
 
-def _is_cron_success_effects_completed(
+def _is_cron_output_delivery_replay_supported(
     state: Any,
     *,
     persistence_key: str = "",
     execution_key: str = "",
 ) -> bool:
-    """Return the durable success-effects receipt for this scheduled query."""
+    """Only task runs created with a durable delivery record may replay it."""
     task_run = _get_persisted_cron_task_run(
         state,
         persistence_key=persistence_key,
         execution_key=execution_key,
     )
-    return bool(task_run and task_run.get("success_effects_completed"))
+    return bool(task_run and task_run.get("cron_delivery_version") == 1)
 
 
 def _get_persisted_cron_task_run(
@@ -860,8 +925,7 @@ def _get_persisted_cron_task_run(
             and (
                 run.get("persistence_key") == persistence_key
                 or (
-                    execution_key
-                    and run.get("execution_key") == execution_key
+                    execution_key and run.get("execution_key") == execution_key
                 )
             )
         ),
@@ -883,7 +947,7 @@ def _has_persisted_cron_task_run(
         and any(
             isinstance(run, dict) and run.get("execution_key") == execution_key
             for run in task_runs
-        )
+        ),
     )
 
 
