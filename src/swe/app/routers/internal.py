@@ -196,6 +196,7 @@ def _build_dispatch_callback_meta(
             "batch_id": batch_id,
             "dispatch_attempt": dispatch_attempt,
             **context,
+            **(_callback_execution_meta(params) or {}),
         }
     return _callback_execution_meta(params)
 

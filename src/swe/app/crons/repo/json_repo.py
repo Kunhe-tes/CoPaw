@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from ..models import CronJobSpec, JobsFile
 from ...runner.session_lock import AsyncSessionFileLock, get_session_lock_path
 
 _T = TypeVar("_T")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -119,25 +121,32 @@ class JsonJobRepository(BaseJobRepository):
         try:
             return await asyncio.shield(save_task)
         except asyncio.CancelledError:
-            await self._wait_for_thread_write(save_task)
+            write_error = await self._wait_for_thread_write(save_task)
+            if write_error is not None:
+                logger.error(
+                    "cancelled cron jobs write failed: path=%s error=%r",
+                    self._path,
+                    write_error,
+                )
             raise
 
     @staticmethod
     async def _wait_for_thread_write(
         save_task: asyncio.Task[_FileSignature],
-    ) -> None:
+    ) -> Exception | None:
         """Wait through repeated cancellation until the thread stops writing."""
         while not save_task.done():
             try:
                 await asyncio.shield(save_task)
             except asyncio.CancelledError:
                 continue
-            except Exception:  # pragma: no cover - surfaced by normal path
-                return
+            except Exception as exc:  # pragma: no cover - result below
+                return exc
         try:
             save_task.result()
-        except Exception:  # pragma: no cover - caller cancellation wins
-            return
+        except Exception as exc:  # pragma: no cover - caller cancellation wins
+            return exc
+        return None
 
     async def get_job(self, job_id: str) -> Optional[CronJobSpec]:
         """优先复用未失效快照中的 job 索引。"""

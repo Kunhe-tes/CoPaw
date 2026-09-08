@@ -219,3 +219,42 @@ async def test_cancelled_mutation_keeps_file_lock_until_write_finishes(
     with pytest.raises(asyncio.CancelledError):
         await first_mutation
     await second_mutation
+
+
+@pytest.mark.asyncio
+async def test_cancelled_mutation_logs_background_write_failure(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "jobs.json"
+    _write_jobs(path, [_job("job-a")])
+    repo = JsonJobRepository(path)
+    write_started = threading.Event()
+    allow_write = threading.Event()
+    logged_errors: list[str] = []
+
+    def failed_save(_jobs_file: JobsFile):
+        write_started.set()
+        allow_write.wait(timeout=5)
+        raise OSError("disk full")
+
+    monkeypatch.setattr(repo, "_save_sync", failed_save)
+    monkeypatch.setattr(
+        json_repo_module.logger,
+        "error",
+        lambda message, *args: logged_errors.append(message % args),
+    )
+
+    def update_name(jobs_file: JobsFile) -> tuple[bool, None]:
+        job = jobs_file.jobs[0]
+        jobs_file.jobs[0] = job.model_copy(update={"name": "updated"})
+        return True, None
+
+    mutation = asyncio.create_task(repo.mutate_jobs_file(update_name))
+    await asyncio.to_thread(write_started.wait, 5)
+    mutation.cancel()
+    allow_write.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await mutation
+    assert "cancelled cron jobs write failed" in logged_errors[0]

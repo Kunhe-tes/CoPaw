@@ -473,6 +473,7 @@ def test_dispatch_service_callback_runs_batch_managed_child(
             "dispatch_intent_id": 7,
             "dispatch_batch_id": "batch-1",
             "dispatch_attempt": 2,
+            "execution_key": "child-1:batch-1:1",
         },
     )
 
@@ -496,6 +497,7 @@ def test_dispatch_service_callback_runs_batch_managed_child(
             "parent_scheduled_fire_at": "",
             "provider_id": "default",
             "model_id": "default",
+            "cron_execution_key": "child-1:batch-1:1",
         },
     )
 
