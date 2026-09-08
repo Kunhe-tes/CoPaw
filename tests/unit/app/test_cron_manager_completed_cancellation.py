@@ -686,6 +686,18 @@ class _TaskSession:
         self.state = mutator(self.state)
 
 
+class _FailOnceTaskSession(_TaskSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self._failed = False
+
+    async def mutate_session_state(self, *, mutator, **_kwargs) -> None:
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("session unavailable")
+        await super().mutate_session_state(mutator=mutator)
+
+
 class _TaskChatManager:
     def __init__(self, existing):
         self.existing = existing
@@ -2227,6 +2239,35 @@ def test_text_task_replay_does_not_duplicate_session_message() -> None:
             channel_manager=_ChannelManager(),
         )
         await manager._record_task_execution_success(job, "execution-1")
+        await manager._record_task_execution_success(job, "execution-1")
+        return session.state
+
+    state = asyncio.run(_run())
+    assert len(state["task_messages"]) == 1
+
+
+def test_text_task_replay_recovers_message_after_session_write_failure() -> (
+    None
+):
+    async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "session-a",
+                },
+            },
+        )
+        session = _FailOnceTaskSession()
+        manager = CronManager(
+            repo=_Repo(job),
+            runner=SimpleNamespace(session=session),
+            channel_manager=_ChannelManager(),
+        )
+        with pytest.raises(RuntimeError, match="session unavailable"):
+            await manager._record_task_execution_success(job, "execution-1")
         await manager._record_task_execution_success(job, "execution-1")
         return session.state
 

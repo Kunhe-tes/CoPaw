@@ -2412,7 +2412,7 @@ class CronManager:  # pylint: disable=too-many-public-methods
             changed, auto_paused, _ = await self._mutate_jobs_file_locked(
                 apply_success,
             )
-        if changed and job.task_type == "text":
+        if job.task_type == "text":
             await self._append_text_task_message(
                 task_session_id,
                 creator_user_id,
