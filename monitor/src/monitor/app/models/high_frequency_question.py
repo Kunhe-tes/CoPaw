@@ -56,18 +56,18 @@ class HighFrequencyQuestionMessageQueryRequest(BaseModel):
 class HighFrequencyQuestionMessageResponse(BaseModel):
     """Single source message returned for analysis."""
 
-    message_id: str
     user_id: Optional[str] = None
-    session_id: Optional[str] = None
     bbk_id: Optional[str] = None
     content: str
-    message_time: datetime
+    skills_used: list[str] = Field(default_factory=list)
 
 
 class HighFrequencyQuestionMessageListResponse(BaseModel):
     """Message query response."""
 
     total: int
+    message_count: int
+    user_count: int
     data: list[HighFrequencyQuestionMessageResponse] = Field(
         default_factory=list,
     )

@@ -118,12 +118,10 @@ class HighFrequencyQuestionService:
 
         query = f"""
             SELECT
-                trace_id,
                 user_id,
-                session_id,
                 bbk_id,
                 user_message,
-                start_time
+                skills_used
             FROM swe_tracing_traces
             WHERE {where_sql}
             ORDER BY start_time ASC, trace_id ASC
@@ -152,8 +150,11 @@ class HighFrequencyQuestionService:
                 ),
             )
 
+        message_count = len(rows)
         return HighFrequencyQuestionMessageListResponse(
-            total=len(rows),
+            total=message_count,
+            message_count=message_count,
+            user_count=self._count_distinct_users(rows),
             data=[self._row_to_message(row) for row in rows],
         )
 
@@ -359,12 +360,20 @@ class HighFrequencyQuestionService:
         row: dict[str, Any],
     ) -> HighFrequencyQuestionMessageResponse:
         return HighFrequencyQuestionMessageResponse(
-            message_id=str(row["trace_id"]),
             user_id=row.get("user_id"),
-            session_id=row.get("session_id"),
             bbk_id=row.get("bbk_id"),
             content=str(row.get("user_message") or ""),
-            message_time=row["start_time"],
+            skills_used=self._parse_string_list(row.get("skills_used")),
+        )
+
+    def _count_distinct_users(self, rows: list[dict[str, Any]]) -> int:
+        return len(
+            {
+                str(row.get("user_id")).strip()
+                for row in rows
+                if row.get("user_id") is not None
+                and str(row.get("user_id")).strip()
+            },
         )
 
     def _build_insert_params(
@@ -539,6 +548,9 @@ class HighFrequencyQuestionService:
         return {str(key): item for key, item in value.items()}
 
     def _parse_sample_questions(self, value: Any) -> list[str]:
+        return self._parse_string_list(value)
+
+    def _parse_string_list(self, value: Any) -> list[str]:
         if value is None or value == "":
             return []
         if isinstance(value, (bytes, bytearray)):

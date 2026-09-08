@@ -25,13 +25,11 @@ Returns source user messages for offline high-frequency question analysis.
 - The database query MUST use parameter binding.
 - The query MUST read from `swe_tracing_traces`.
 - The query MUST use these fields:
-  - `trace_id` as `message_id`
   - `source_id`
   - `user_id`
-  - `session_id`
   - `bbk_id`
   - `user_message` as `content`
-  - `start_time` as `message_time`
+  - `skills_used`
   - `status`
 - The query MUST filter:
   - `source_id = request.source_id`
@@ -44,6 +42,9 @@ Returns source user messages for offline high-frequency question analysis.
   - `TRIM(user_message)` not in the configured meaningless-text blacklist
   - optional `bbk_id = request.bbk_id`
 - Results MUST be ordered by `start_time ASC, trace_id ASC`.
+- The response MUST include `message_count` as the returned message row count.
+- The response MUST include `user_count` as the count of distinct non-empty
+  `user_id` values in the returned rows.
 - The endpoint MUST return an explicit error if more than 10000 messages match.
 - Logs MUST NOT include full `user_message` content.
 
@@ -52,14 +53,14 @@ Returns source user messages for offline high-frequency question analysis.
 ```json
 {
   "total": 4000,
+  "message_count": 4000,
+  "user_count": 210,
   "data": [
     {
-      "message_id": "trace-001",
       "user_id": "136807",
-      "session_id": "session-001",
       "bbk_id": "110",
       "content": "帮我查询这个客户目前有哪些保险产品",
-      "message_time": "2026-07-29 10:20:00"
+      "skills_used": ["客户分析"]
     }
   ]
 }

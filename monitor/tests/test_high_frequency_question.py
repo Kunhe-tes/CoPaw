@@ -82,6 +82,25 @@ async def test_query_messages_uses_expected_filters():
                 "bbk_id": "110",
                 "user_message": "查保险",
                 "start_time": datetime(2026, 7, 29, 10, 20, 0),
+                "skills_used": '["保险助手", "客户分析"]',
+            },
+            {
+                "trace_id": "trace-002",
+                "user_id": "136807",
+                "session_id": "session-002",
+                "bbk_id": "110",
+                "user_message": "再查一次",
+                "start_time": datetime(2026, 7, 29, 10, 25, 0),
+                "skills_used": "[]",
+            },
+            {
+                "trace_id": "trace-003",
+                "user_id": "246810",
+                "session_id": "session-003",
+                "bbk_id": "110",
+                "user_message": "查理赔",
+                "start_time": datetime(2026, 7, 29, 10, 30, 0),
+                "skills_used": None,
             },
         ],
     )
@@ -95,11 +114,18 @@ async def test_query_messages_uses_expected_filters():
 
     response = await service.query_messages(request)
 
-    assert response.total == 1
-    assert response.data[0].message_id == "trace-001"
+    assert response.total == 3
+    assert response.message_count == 3
+    assert response.user_count == 2
     assert response.data[0].content == "查保险"
+    assert response.data[0].skills_used == ["保险助手", "客户分析"]
+    dumped_message = response.data[0].model_dump()
+    assert "message_id" not in dumped_message
+    assert "session_id" not in dumped_message
+    assert "message_time" not in dumped_message
     sql = db.fetch_all_calls[0][0]
     params = db.fetch_all_calls[0][1]
+    assert "skills_used" in sql
     assert "source_id = %s" in sql
     assert "status = 'completed'" in sql
     assert "session_id NOT LIKE %s" in sql
