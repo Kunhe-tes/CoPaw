@@ -843,9 +843,11 @@ class ChannelManager:
 
         # Send as content parts (single text part; use TextContent so channel
         # getattr(p, "type") / getattr(p, "text") work)
-        await ch.send_content_parts(
-            to_handle,
-            [TextContent(type=ContentType.TEXT, text=text)],
-            merged_meta,
+        return (
+            await ch.send_content_parts(
+                to_handle,
+                [TextContent(type=ContentType.TEXT, text=text)],
+                merged_meta,
+            )
+            is True
         )
-        return True

@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Tests for headers added at the CronManager.run_job boundary."""
 
 from __future__ import annotations
@@ -255,3 +256,32 @@ async def test_manual_run_preserves_headers_overrides_cron_job_id_and_copies(
         },
         "parent_scheduled_fire_at": "2026-07-31T01:00:00Z",
     }
+
+
+@pytest.mark.asyncio
+async def test_manual_text_task_gets_a_unique_delivery_execution_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = _build_agent_job().model_copy(
+        update={
+            "task_type": "text",
+            "request": None,
+            "text": "scheduled text",
+            "meta": {
+                "creator_user_id": "user-a",
+                "task_session_id": "task-session-a",
+            },
+        },
+    )
+
+    _, observed = await _run_and_capture_dispatch_meta(
+        monkeypatch,
+        is_manual=True,
+        dispatch_meta=None,
+        job=job,
+    )
+
+    assert observed is not None
+    assert observed["cron_execution_key"].startswith(
+        f"manual:{job.id}:",
+    )

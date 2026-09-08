@@ -1397,8 +1397,7 @@ class BaseChannel(ABC):
             f"parts_count={len(parts)} "
             f"part_types={[getattr(p, 'type', None) for p in parts]}",
         )
-        await self.send_content_parts(to_handle, parts, meta)
-        return True
+        return await self.send_content_parts(to_handle, parts, meta) is True
 
     @staticmethod
     def _has_sendable_content(parts: List[OutgoingContentPart]) -> bool:
@@ -1449,7 +1448,7 @@ class BaseChannel(ABC):
         to_handle: str,
         parts: List[OutgoingContentPart],
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """
         Send a list of content parts.
         Default: merge text/refusal into one text, append media URLs as
@@ -1487,15 +1486,17 @@ class BaseChannel(ABC):
                 body += f"\n[File: {m.file_url or m.file_id}]"
             elif t == ContentType.AUDIO and getattr(m, "data", None):
                 body += "\n[Audio]"
+        delivered = False
         if body.strip():
             logger.debug(
                 f"channel send_content_parts: to_handle={to_handle} "
                 f"body_len={len(body)} preview="
                 f"{body[:120] + '...' if len(body) > 120 else body}",
             )
-            await self.send(to_handle, body.strip(), meta)
+            delivered = await self.send(to_handle, body.strip(), meta) is True
         for m in media_parts:
             await self.send_media(to_handle, m, meta)
+        return delivered
 
     async def send_media(
         self,
@@ -1571,9 +1572,12 @@ class BaseChannel(ABC):
         to_handle: str,
         text: str,
         meta: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    ) -> bool:
         """Subclass implements: send one text
         (and optional attachments) to to_handle.
+
+        Return True only after the destination has explicitly confirmed the
+        send. A missing return value is not a delivery acknowledgement.
         """
         raise NotImplementedError
 

@@ -156,6 +156,21 @@ async def test_send_event_reports_blank_text_as_unconfirmed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_event_requires_explicit_channel_delivery_ack() -> None:
+    channel = _make_channel()
+    event = _make_completed_event("output")
+    channel.send_content_parts = AsyncMock(return_value=None)
+
+    delivered = await channel.send_event(
+        user_id="user-1",
+        session_id="session-1",
+        event=event,
+    )
+
+    assert delivered is False
+
+
+@pytest.mark.asyncio
 async def test_send_rejects_non_successful_push_response(monkeypatch) -> None:
     class _Response:
         content = b'{"returnCode":"FAIL"}'

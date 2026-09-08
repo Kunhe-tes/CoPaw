@@ -2385,19 +2385,19 @@ class ZhaohuChannel(BaseChannel):
         to_handle: str,
         text: str,
         meta: Optional[dict] = None,
-    ) -> None:
+    ) -> bool:
         """POST a Zhaohu push payload to the configured endpoint."""
         if not self.enabled:
             logger.warning("zhaohu send skipped: channel disabled")
             _raise_cron_delivery_failure(meta, "disabled")
-            return
+            return False
         if not self.push_url:
             logger.warning(
                 "zhaohu send skipped: push_url not configured for %s",
                 to_handle,
             )
             _raise_cron_delivery_failure(meta, "push_url not configured")
-            return
+            return False
         if (
             not self.sys_id
             or not self.robot_open_id
@@ -2408,7 +2408,7 @@ class ZhaohuChannel(BaseChannel):
                 "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
             )
             _raise_cron_delivery_failure(meta, "identity not configured")
-            return
+            return False
         payload = await self._build_push_payload(to_handle, text, meta or {})
         timeout = httpx.Timeout(self.request_timeout, connect=10.0)
         # 自定义SSL上下文
@@ -2440,13 +2440,14 @@ class ZhaohuChannel(BaseChannel):
                 to_handle,
                 detail,
             )
-            return
+            return False
         logger.info(
             "zhaohu push ok: to=%s returnCode=%s expMsgIds=%s",
             to_handle,
             return_code,
             exp_msg_ids,
         )
+        return True
 
     async def _build_push_payload(
         self,

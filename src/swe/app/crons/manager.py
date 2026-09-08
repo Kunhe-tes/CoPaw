@@ -1862,6 +1862,8 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 del passthrough_headers[header_name]
         passthrough_headers["cron_job_id"] = job.id
         dispatch_meta[PASSTHROUGH_HEADERS_META_KEY] = passthrough_headers
+        if is_manual and job.task_type == "text":
+            dispatch_meta["cron_execution_key"] = f"manual:{job.id}:{uuid4()}"
         logger.info(
             "cron run_job: job_id=%s channel=%s task_type=%s is_manual=%s "
             "target_user_id=%s target_session_id=%s",
