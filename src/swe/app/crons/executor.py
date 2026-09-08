@@ -695,9 +695,12 @@ class CronExecutor:
             target_session_id=target_session_id,
             dispatch_meta=dispatch_meta,
         )
+        if not execution_key:
+            raise RuntimeError(
+                "cron text delivery requires execution identity",
+            )
         delivery_meta = dict(dispatch_meta)
-        if execution_key:
-            delivery_meta["cron_delivery_key"] = f"cron:{execution_key}:output"
+        delivery_meta["cron_delivery_key"] = f"cron:{execution_key}:output"
 
         # 保留抽出的 helper，同时继续传递 scope 级租户标识。
         requested_trace_id, b3_trace_id = _resolve_dispatch_trace_ids(
@@ -711,19 +714,27 @@ class CronExecutor:
             b3_trace_id=b3_trace_id,
         )
 
+        business_effects_completed = False
         try:
             delivery_completed = await self._prepare_text_task_delivery(
                 job,
                 execution_key,
                 target_user_id,
             )
+            if (
+                job.dispatch.channel == CONSOLE_CHANNEL
+                and delivery_completed is None
+            ):
+                raise RuntimeError(
+                    "cron text delivery persistence unavailable",
+                )
             if delivery_completed is not True:
                 await self._send_text_to_channel(
                     job,
                     target_user_id,
                     target_session_id,
                     delivery_meta,
-                    require_delivery_receipt=delivery_completed is not None,
+                    require_delivery_receipt=True,
                 )
                 if delivery_completed is not None:
                     await self._mark_text_task_delivery_completed(
@@ -731,8 +742,20 @@ class CronExecutor:
                         execution_key,
                         target_user_id,
                     )
+            business_effects_completed = True
         finally:
-            await self._end_trace_for_text_job(created_trace_id)
+            try:
+                await self._end_trace_for_text_job(created_trace_id)
+            except asyncio.CancelledError:
+                if not business_effects_completed:
+                    raise
+                task = asyncio.current_task()
+                if task is not None and hasattr(task, "uncancel"):
+                    task.uncancel()
+                logger.info(
+                    "cron text trace cleanup cancelled after delivery: job_id=%s",
+                    job.id,
+                )
 
         internal_trace_id = created_trace_id or requested_trace_id
 
@@ -2359,6 +2382,12 @@ class CronExecutor:
         ):
             return
 
+        if (
+            job.dispatch.channel != CONSOLE_CHANNEL
+            and not stream_state.output_delivery_receipt_supported
+        ):
+            raise RuntimeError("cron output delivery receipt unavailable")
+
         delivery_identity = str(
             req.get("cron_execution_key")
             or req.get("cron_persistence_key")
@@ -2389,7 +2418,7 @@ class CronExecutor:
             None,
         )
         if not callable(marker):
-            return
+            raise RuntimeError("cron output delivery receipt unavailable")
         await marker(
             session_id=str(req.get("session_id") or ""),
             user_id=str(req.get("user_id") or ""),

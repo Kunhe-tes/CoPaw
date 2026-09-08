@@ -106,7 +106,18 @@ def _get_current_llm_workload():
     return llm_workload_module.get_current_llm_workload()
 
 
+class _Session:
+    def __init__(self) -> None:
+        self.state: dict[str, object] = {}
+
+    async def mutate_session_state(self, *, mutator, **_kwargs) -> None:
+        self.state = mutator(self.state)
+
+
 class _Runner:
+    def __init__(self) -> None:
+        self.session = _Session()
+
     async def stream_query(self, _req):
         for _item in ():
             yield _item
@@ -135,6 +146,10 @@ def _build_text_job(workspace_dir: str) -> object:
             meta={"workspace_dir": workspace_dir},
         ),
         runtime=JobRuntimeSpec(timeout_seconds=1),
+        meta={
+            "creator_user_id": "user-a",
+            "task_session_id": "task-session-a",
+        },
     )
 
 
@@ -394,7 +409,10 @@ def test_malformed_dispatch_identity_is_not_a_batch(dispatch_meta) -> None:
             True,
         ),
         (
-            {"b3_trace_id": "8267fd70bacf497704fec30eaa353979"},
+            {
+                "b3_trace_id": "8267fd70bacf497704fec30eaa353979",
+                "external_execution_id": "trace-1",
+            },
             False,
         ),
     ],
@@ -534,15 +552,26 @@ async def test_execute_text_job_passes_stable_delivery_key_to_channel() -> (
         def __init__(self) -> None:
             self.texts: list[dict[str, object]] = []
 
-        async def send_text(self, **kwargs) -> None:
+        async def send_text(self, **kwargs) -> bool:
             self.texts.append(kwargs)
+            return True
 
     channel_manager = _RecordingChannelManager()
     executor = CronExecutor(
         runner=_Runner(),
         channel_manager=channel_manager,
     )
-    job = _build_text_job("/tmp/tenant-a/workspaces/alpha")
+    job = _build_text_job("/tmp/tenant-a/workspaces/alpha").model_copy(
+        update={
+            "dispatch": DispatchSpec(
+                channel="zhaohu",
+                target=DispatchTarget(
+                    user_id="user-a",
+                    session_id="session-a",
+                ),
+            ),
+        },
+    )
 
     await executor._execute_text_job(
         job,

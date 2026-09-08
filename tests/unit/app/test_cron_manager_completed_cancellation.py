@@ -2021,7 +2021,7 @@ def test_successful_non_console_task_uses_persisted_session_only(monkeypatch):
         )
         manager = CronManager(
             repo=_Repo(job),
-            runner=_ResponseCompletedOutputRunner(),
+            runner=_ReplayableDeliveryRunner(),
             channel_manager=_ChannelManager(),
         )
         await manager._execute_once(  # pylint: disable=protected-access
@@ -2258,6 +2258,165 @@ def test_unconfirmed_text_delivery_keeps_persisted_retry_state() -> None:
     )
 
 
+def test_text_delivery_remains_successful_when_trace_cleanup_is_cancelled(
+    monkeypatch,
+) -> None:
+    async def _run():
+        trace_cleanup_started = asyncio.Event()
+        session = _TaskSession()
+        executor = CronExecutor(
+            runner=SimpleNamespace(session=session),
+            channel_manager=_ChannelManager(),
+        )
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "request": None,
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "task-session-a",
+                },
+            },
+        )
+
+        async def _create_trace(*_args, **_kwargs):
+            return "trace-text"
+
+        async def _end_trace(*_args, **_kwargs):
+            trace_cleanup_started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(
+            executor,
+            "_create_trace_for_text_job",
+            _create_trace,
+        )
+        monkeypatch.setattr(executor, "_end_trace_for_text_job", _end_trace)
+        task = asyncio.create_task(
+            executor.execute(
+                job,
+                dispatch_meta={"cron_execution_key": "execution-1"},
+            ),
+        )
+        await trace_cleanup_started.wait()
+        task.cancel()
+        result = await task
+        return result, session.state
+
+    result, state = asyncio.run(_run())
+
+    assert result.status == "success"
+    assert (
+        state["task_messages"][0]["metadata"]["output_delivery_completed"]
+        is True
+    )
+
+
+def test_task_text_delivery_requires_an_execution_identity() -> None:
+    async def _run():
+        session = _TaskSession()
+        channel_manager = _ChannelManager()
+        executor = CronExecutor(
+            runner=SimpleNamespace(session=session),
+            channel_manager=channel_manager,
+        )
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "request": None,
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+                "meta": {
+                    "creator_user_id": "user-a",
+                    "task_session_id": "task-session-a",
+                },
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="execution identity"):
+            await executor.execute(job)
+        return session.state, channel_manager
+
+    state, channel_manager = asyncio.run(_run())
+
+    assert state == {}
+    assert channel_manager.texts == []
+
+
+def test_text_delivery_without_a_task_requires_an_execution_identity() -> None:
+    async def _run():
+        channel_manager = _ChannelManager()
+        executor = CronExecutor(
+            runner=SimpleNamespace(),
+            channel_manager=channel_manager,
+        )
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "request": None,
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+                "meta": {},
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="execution identity"):
+            await executor.execute(job)
+        return channel_manager
+
+    channel_manager = asyncio.run(_run())
+
+    assert channel_manager.texts == []
+
+
+def test_console_text_delivery_requires_persisted_task_message() -> None:
+    async def _run():
+        channel_manager = _ChannelManager()
+        executor = CronExecutor(
+            runner=SimpleNamespace(),
+            channel_manager=channel_manager,
+        )
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "request": None,
+                "meta": {},
+            },
+        )
+
+        with pytest.raises(RuntimeError, match="persistence unavailable"):
+            await executor.execute(
+                job,
+                dispatch_meta={"cron_execution_key": "execution-1"},
+            )
+        return channel_manager
+
+    channel_manager = asyncio.run(_run())
+
+    assert channel_manager.texts == []
+
+
 def test_blank_text_task_is_not_recorded_as_success() -> None:
     async def _run():
         executor = CronExecutor(
@@ -2472,31 +2631,46 @@ def test_text_task_replay_recovers_message_after_session_write_failure() -> (
     assert len(state["task_messages"]) == 1
 
 
-def test_legacy_persistence_receipt_without_replay_field_still_succeeds(
+def test_legacy_persistence_receipt_fails_before_external_delivery(
     monkeypatch,
 ):
-    """Adding replay metadata must not break existing Runner adapters."""
+    """External Agent delivery requires a durable receipt implementation."""
     monkeypatch.setattr(
         "swe.app.crons.executor.CronExecutor._resolve_execution_model",
         lambda *_args: None,
     )
 
     async def _run():
+        job = _build_agent_job().model_copy(
+            update={
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+            },
+        )
+        channel_manager = _ChannelManager()
         manager = CronManager(
-            repo=_Repo(_build_agent_job()),
+            repo=_Repo(job),
             runner=_LegacyPersistenceReceiptRunner(),
-            channel_manager=_ChannelManager(),
+            channel_manager=channel_manager,
         )
-        await manager._execute_once(  # pylint: disable=protected-access
-            _build_agent_job(),
-            is_manual=False,
-        )
-        return manager
+        with pytest.raises(
+            RuntimeError,
+            match="output delivery receipt unavailable",
+        ):
+            await manager._execute_once(  # pylint: disable=protected-access
+                job,
+                is_manual=False,
+            )
+        return manager, channel_manager
 
-    manager = asyncio.run(_run())
-    assert (
-        manager.get_state("job-cancel-after-output").last_status == "success"
-    )
+    manager, channel_manager = asyncio.run(_run())
+    assert manager.get_state("job-cancel-after-output").last_status == "error"
+    assert channel_manager.events == []
 
 
 def test_response_cancelled_terminal_does_not_become_timeout(monkeypatch):

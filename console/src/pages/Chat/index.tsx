@@ -121,7 +121,10 @@ import {
   type CronTaskEditFormValues,
 } from "./taskEditSubmit";
 import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
-import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
+import {
+  refreshTaskSessionWithRetry,
+  shouldRefreshCurrentTaskMessages,
+} from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
 import { shouldClearPendingScenarioPreset } from "./scenarioPresetRequest";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
@@ -1552,7 +1555,6 @@ export default function ChatPage() {
   useEffect(() => {
     const hadResult = Boolean(currentTask?.task?.has_scheduled_result);
     if (hadResult && !taskHadResultRef.current) {
-      void chatRef.current?.refreshSession?.();
       setFeedbackRefreshKey((prev) => prev + 1);
     }
     taskHadResultRef.current = hadResult;
@@ -1794,16 +1796,19 @@ export default function ChatPage() {
     const previousTask = previousCurrentTaskRef.current;
     previousCurrentTaskRef.current = currentTask;
 
-    if (
-      !shouldRefreshCurrentTaskMessages({
-        previousTask,
-        currentTask,
-      })
-    ) {
-      return;
-    }
+    const shouldRefresh = Boolean(currentTask?.task?.has_scheduled_result)
+      && (!previousTask
+        || shouldRefreshCurrentTaskMessages({ previousTask, currentTask }));
+    if (!shouldRefresh) return;
 
-    void chatRef.current?.refreshSession?.();
+    let cancelled = false;
+    void refreshTaskSessionWithRetry(
+      () => chatRef.current?.refreshSession?.() ?? Promise.resolve(false),
+      { shouldContinue: () => !cancelled },
+    );
+    return () => {
+      cancelled = true;
+    };
   }, [
     currentTask?.id,
     currentTask?.task?.has_scheduled_result,
