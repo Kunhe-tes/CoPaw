@@ -557,6 +557,8 @@ def _build_task_run_record(
         "memory_end": memory_start + len(memory_entries),
         "preview_text": preview_text,
         "input_hash": _task_run_input_hash(memory_entries),
+        "output_delivery_completed": False,
+        "success_effects_completed": False,
     }
     if execution_key:
         record["execution_key"] = execution_key
@@ -3044,6 +3046,88 @@ class AgentRunner(Runner):
                 return result
             await asyncio.sleep(0.01)
 
+    async def mark_cron_output_delivery_completed(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        execution_key: str = "",
+        persistence_key: str = "",
+    ) -> None:
+        """Persist the successful delivery of a Cron task's final output."""
+        await self._mark_cron_task_run_completed(
+            session_id=session_id,
+            user_id=user_id,
+            execution_key=execution_key,
+            persistence_key=persistence_key,
+            field_name="output_delivery_completed",
+        )
+
+    async def mark_cron_success_effects_completed(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        execution_key: str = "",
+        persistence_key: str = "",
+    ) -> None:
+        """Persist the completed task-success effects for a Cron run."""
+        await self._mark_cron_task_run_completed(
+            session_id=session_id,
+            user_id=user_id,
+            execution_key=execution_key,
+            persistence_key=persistence_key,
+            field_name="success_effects_completed",
+        )
+
+    async def _mark_cron_task_run_completed(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        execution_key: str,
+        persistence_key: str,
+        field_name: str,
+    ) -> None:
+        """Atomically record one completed Cron post-persistence effect."""
+        if self.session is None:
+            raise RuntimeError("Cron task effect cannot access session state")
+        if not session_id or not user_id:
+            raise RuntimeError("Cron task effect has no session identity")
+        if not execution_key and not persistence_key:
+            raise RuntimeError("Cron task effect has no task-run identity")
+
+        async with self.session.execution(
+            session_id,
+            user_id=user_id,
+            timeout_seconds=5.0,
+        ) as session_execution:
+            state = session_execution.state
+            task_runs = state.get(TASK_RUNS_STATE_KEY)
+            if not isinstance(task_runs, list):
+                raise RuntimeError("Cron task effect task run is unavailable")
+            task_run = next(
+                (
+                    run
+                    for run in reversed(task_runs)
+                    if isinstance(run, dict)
+                    and (
+                        run.get("persistence_key") == persistence_key
+                        or (
+                            execution_key
+                            and run.get("execution_key") == execution_key
+                        )
+                    )
+                ),
+                None,
+            )
+            if task_run is None:
+                raise RuntimeError("Cron task effect task run is unavailable")
+            if task_run.get(field_name):
+                return
+            task_run[field_name] = True
+            await session_execution.commit_state(state)
+
     @staticmethod
     def _answer_turn_identity(request: Any) -> TurnIdentity | None:
         channel_meta = getattr(request, "channel_meta", None) or {}
@@ -4085,7 +4169,35 @@ class AgentRunner(Runner):
     ) -> SWEAgent:
         """Create a restricted, frozen-model Agent for Goal completion review."""
         source_context = getattr(runtime.agent, "_request_context", {}) or {}
-        request_context: dict[str, str] = {
+        request_context = self._build_goal_completion_judge_request_context(
+            source_context,
+            approved_tool_call,
+        )
+        model_slot_override, model_provider_override = (
+            self._resolve_goal_completion_judge_model_overrides(runtime, goal)
+        )
+        return SWEAgent(
+            agent_config=runtime.agent_config,
+            env_context=None,
+            enable_memory_manager=False,
+            mcp_clients=[],
+            memory_manager=None,
+            request_context=request_context,
+            workspace_dir=self.workspace_dir,
+            task_tracker=None,
+            enable_workspace_skills=False,
+            model_slot_override=model_slot_override,
+            model_provider_override=model_provider_override,
+            system_prompt_override=_GOAL_COMPLETION_JUDGE_SYSTEM_PROMPT,
+            source_tool_versions=(),
+        )
+
+    @staticmethod
+    def _build_goal_completion_judge_request_context(
+        source_context: dict[str, Any],
+        approved_tool_call: dict[str, Any] | None,
+    ) -> dict[str, str]:
+        request_context = {
             key: str(source_context[key])
             for key in (
                 "session_id",
@@ -4106,12 +4218,17 @@ class AgentRunner(Runner):
             request_context["forced_tool_call_json"] = json.dumps(
                 approved_tool_call,
             )
+        return request_context
+
+    def _resolve_goal_completion_judge_model_overrides(
+        self,
+        runtime: _QueryRuntime,
+        goal: Any,
+    ) -> tuple[Any, Any]:
         resolved_slot = (
             getattr(runtime.agent, "_resolved_model_slot", {}) or {}
         )
         frozen_scope = getattr(goal, "scope", None)
-        model_slot_override = None
-        model_provider_override = None
         provider_id = str(
             getattr(frozen_scope, "effective_model_provider_id", "") or "",
         ) or str(resolved_slot.get("provider_id") or "")
@@ -4147,21 +4264,7 @@ class AgentRunner(Runner):
         )
         if model_provider_override is None:
             raise RuntimeError("Goal completion judge provider is unavailable")
-        return SWEAgent(
-            agent_config=runtime.agent_config,
-            env_context=None,
-            enable_memory_manager=False,
-            mcp_clients=[],
-            memory_manager=None,
-            request_context=request_context,
-            workspace_dir=self.workspace_dir,
-            task_tracker=None,
-            enable_workspace_skills=False,
-            model_slot_override=model_slot_override,
-            model_provider_override=model_provider_override,
-            system_prompt_override=_GOAL_COMPLETION_JUDGE_SYSTEM_PROMPT,
-            source_tool_versions=(),
-        )
+        return model_slot_override, model_provider_override
 
     def _create_goal_completion_reviewer(
         self,

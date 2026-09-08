@@ -364,6 +364,7 @@ async def test_session_cleanup_records_commit_failure_when_close_also_fails() ->
 async def test_session_cleanup_ignores_close_failure_after_commit() -> None:
     """A close failure cannot turn an already committed query into an error."""
     recorded: list[QueryPersistenceResult] = []
+    lifecycle: list[str] = []
 
     class Owner:
         async def _save_state_during_cleanup(self, **_kwargs: Any) -> bool:
@@ -374,9 +375,11 @@ async def test_session_cleanup_ignores_close_failure_after_commit() -> None:
             _request: Any,
             result: QueryPersistenceResult,
         ) -> None:
+            lifecycle.append("record")
             recorded.append(result)
 
     async def _close() -> None:
+        lifecycle.append("close")
         raise RuntimeError("close failed")
 
     execution = SimpleNamespace(
@@ -403,6 +406,7 @@ async def test_session_cleanup_ignores_close_failure_after_commit() -> None:
             committed=True,
         ),
     ]
+    assert lifecycle == ["close", "record"]
 
 
 @pytest.mark.asyncio
@@ -436,6 +440,8 @@ async def test_session_cleanup_reports_matching_task_run_as_idempotent_replay() 
                     "execution_key": "execution-1",
                     "memory_start": 0,
                     "memory_end": 2,
+                    "output_delivery_completed": True,
+                    "success_effects_completed": True,
                 },
             ],
         },
@@ -464,6 +470,8 @@ async def test_session_cleanup_reports_matching_task_run_as_idempotent_replay() 
             commit_attempted=False,
             committed=True,
             idempotent_replay=True,
+            output_delivery_completed=True,
+            success_effects_completed=True,
         ),
     ]
     execution.close.assert_awaited_once()
@@ -499,6 +507,46 @@ def test_agent_runner_returns_persistence_result_for_scheduled_query() -> None:
         user_id="user-1",
         execution_key="receipt-1",
     ) is None
+
+
+@pytest.mark.asyncio
+async def test_agent_runner_persists_cron_output_delivery_receipt(
+    tmp_path: Path,
+) -> None:
+    """Final output delivery is recorded in the persisted task-run state."""
+    runner = AgentRunner()
+    runner.session = SafeJSONSession(str(tmp_path))
+    async with runner.session.execution("session-1", user_id="user-1") as execution:
+        state = execution.state
+        state["task_runs"] = [
+            {
+                "execution_key": "execution-1",
+                "persistence_key": "receipt-1",
+                "output_delivery_completed": False,
+                "success_effects_completed": False,
+            },
+        ]
+        await execution.commit_state(state)
+
+    await runner.mark_cron_output_delivery_completed(
+        session_id="session-1",
+        user_id="user-1",
+        execution_key="execution-1",
+        persistence_key="receipt-1",
+    )
+    await runner.mark_cron_success_effects_completed(
+        session_id="session-1",
+        user_id="user-1",
+        execution_key="execution-1",
+        persistence_key="receipt-1",
+    )
+
+    state = await runner.session.get_session_state_dict(
+        "session-1",
+        user_id="user-1",
+    )
+    assert state["task_runs"][0]["output_delivery_completed"] is True
+    assert state["task_runs"][0]["success_effects_completed"] is True
 
 
 def test_agent_runner_discards_expired_persistence_result(

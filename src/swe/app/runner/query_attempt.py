@@ -642,6 +642,8 @@ async def _save_and_close_session_execution(
     idempotent_replay = False
     commit_error: str | None = None
     assistant_message_count = 0
+    output_delivery_completed = False
+    success_effects_completed = False
     if cleanup_runtime is not None:
         cleanup_runtime.session_state_commit_attempted = True
     try:
@@ -682,6 +684,24 @@ async def _save_and_close_session_execution(
             commit_attempted = True
             committed = True
         if committed:
+            output_delivery_completed = _is_cron_output_delivery_completed(
+                session_execution.state,
+                persistence_key=str(
+                    getattr(request, "cron_persistence_key", "") or "",
+                ),
+                execution_key=str(
+                    getattr(request, "cron_execution_key", "") or "",
+                ),
+            )
+            success_effects_completed = _is_cron_success_effects_completed(
+                session_execution.state,
+                persistence_key=str(
+                    getattr(request, "cron_persistence_key", "") or "",
+                ),
+                execution_key=str(
+                    getattr(request, "cron_execution_key", "") or "",
+                ),
+            )
             assistant_message_count = _count_persisted_assistant_messages(
                 session_execution.state,
                 persistence_key=str(
@@ -725,13 +745,12 @@ async def _save_and_close_session_execution(
             or (None if committed else "session_state_not_persisted")
         ),
         idempotent_replay=idempotent_replay,
+        output_delivery_completed=output_delivery_completed,
+        success_effects_completed=success_effects_completed,
     )
     if cleanup_runtime is not None:
         cleanup_runtime.session_state_committed = committed
         cleanup_runtime.persistence_result = result
-    recorder = getattr(owner, "_record_query_persistence_result", None)
-    if callable(recorder):
-        recorder(request, result)
     if committed:
         try:
             await session_execution.close()
@@ -740,6 +759,9 @@ async def _save_and_close_session_execution(
                 "Failed to close session execution after confirmed persistence",
                 exc_info=True,
             )
+    recorder = getattr(owner, "_record_query_persistence_result", None)
+    if callable(recorder):
+        recorder(request, result)
 
 
 def _count_persisted_assistant_messages(
@@ -757,23 +779,10 @@ def _count_persisted_assistant_messages(
     if not isinstance(content, list):
         return 0
     if persistence_key or execution_key:
-        task_runs = state.get("task_runs")
-        if not isinstance(task_runs, list):
-            return 0
-        task_run = next(
-            (
-                run
-                for run in reversed(task_runs)
-                if isinstance(run, dict)
-                and (
-                    run.get("persistence_key") == persistence_key
-                    or (
-                        execution_key
-                        and run.get("execution_key") == execution_key
-                    )
-                )
-            ),
-            None,
+        task_run = _get_persisted_cron_task_run(
+            state,
+            persistence_key=persistence_key,
+            execution_key=execution_key,
         )
         if task_run is None:
             return 0
@@ -799,6 +808,65 @@ def _count_persisted_assistant_messages(
         if role == "assistant":
             count += 1
     return count
+
+
+def _is_cron_output_delivery_completed(
+    state: Any,
+    *,
+    persistence_key: str = "",
+    execution_key: str = "",
+) -> bool:
+    """Return the durable output-delivery receipt for this scheduled query."""
+    task_run = _get_persisted_cron_task_run(
+        state,
+        persistence_key=persistence_key,
+        execution_key=execution_key,
+    )
+    return bool(task_run and task_run.get("output_delivery_completed"))
+
+
+def _is_cron_success_effects_completed(
+    state: Any,
+    *,
+    persistence_key: str = "",
+    execution_key: str = "",
+) -> bool:
+    """Return the durable success-effects receipt for this scheduled query."""
+    task_run = _get_persisted_cron_task_run(
+        state,
+        persistence_key=persistence_key,
+        execution_key=execution_key,
+    )
+    return bool(task_run and task_run.get("success_effects_completed"))
+
+
+def _get_persisted_cron_task_run(
+    state: Any,
+    *,
+    persistence_key: str,
+    execution_key: str,
+) -> dict[str, Any] | None:
+    """Find this query's task-run record without matching another Cron run."""
+    if not isinstance(state, dict):
+        return None
+    task_runs = state.get("task_runs")
+    if not isinstance(task_runs, list):
+        return None
+    return next(
+        (
+            run
+            for run in reversed(task_runs)
+            if isinstance(run, dict)
+            and (
+                run.get("persistence_key") == persistence_key
+                or (
+                    execution_key
+                    and run.get("execution_key") == execution_key
+                )
+            )
+        ),
+        None,
+    )
 
 
 def _has_persisted_cron_task_run(

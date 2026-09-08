@@ -3183,6 +3183,47 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 job.id,
             )
 
+    @staticmethod
+    def _should_record_success_effects(
+        exec_status: str,
+        execution_meta: Optional[Dict[str, Any]],
+    ) -> bool:
+        """Run task-success effects once, including a recovered replay."""
+        if exec_status != "success":
+            return False
+        meta = execution_meta or {}
+        if not meta.get("idempotent_replay"):
+            return True
+        return bool(
+            meta.get("success_effects_receipt_supported")
+            and not meta.get("success_effects_completed")
+        )
+
+    async def _mark_success_effects_completed(
+        self,
+        input_snapshot: Optional[Dict[str, Any]],
+    ) -> None:
+        """Persist task-success effects so a later replay does not repeat them."""
+        if not isinstance(input_snapshot, dict):
+            return
+        execution_key = str(input_snapshot.get("cron_execution_key") or "")
+        persistence_key = str(input_snapshot.get("cron_persistence_key") or "")
+        if not execution_key and not persistence_key:
+            return
+        marker = getattr(
+            self._runner,
+            "mark_cron_success_effects_completed",
+            None,
+        )
+        if not callable(marker):
+            return
+        await marker(
+            session_id=str(input_snapshot.get("session_id") or ""),
+            user_id=str(input_snapshot.get("user_id") or ""),
+            execution_key=execution_key,
+            persistence_key=persistence_key,
+        )
+
     def _handle_cancelled_after_success(
         self,
         job_id: str,
@@ -3471,10 +3512,16 @@ class CronManager:  # pylint: disable=too-many-public-methods
                     duration_ms = int(
                         (end_time - actual_time).total_seconds() * 1000,
                     )
-                    if exec_status == "success" and not bool(
-                        (execution_meta or {}).get("idempotent_replay"),
+                    if self._should_record_success_effects(
+                        exec_status,
+                        execution_meta,
                     ):
                         await self._handle_success_notifications(job)
+                        await self._mark_success_effects_completed(
+                            input_snapshot,
+                        )
+                        if execution_meta is not None:
+                            execution_meta["success_effects_completed"] = True
                     logger.info(
                         "cron _execute_once: job_id=%s status=%s trace_id=%s",
                         job.id,

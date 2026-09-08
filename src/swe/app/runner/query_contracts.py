@@ -25,6 +25,8 @@ class QueryPersistenceResult:
     committed: bool
     commit_error: str | None = None
     idempotent_replay: bool = False
+    output_delivery_completed: bool = False
+    success_effects_completed: bool = False
 
 
 @dataclass
