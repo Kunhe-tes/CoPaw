@@ -16,7 +16,7 @@ interface RefreshTaskSessionOptions {
 
 const TASK_SESSION_REFRESH_ATTEMPTS = 3;
 const TASK_SESSION_REFRESH_RETRY_DELAY_MS = 500;
-const TASK_SESSION_REFRESH_RECOVERY_DELAY_MS = 5000;
+export const TASK_SESSION_REFRESH_RECOVERY_DELAY_MS = 5000;
 
 function waitForTaskSessionRefresh(delayMs: number): Promise<void> {
   return new Promise((resolve) => {
@@ -48,11 +48,11 @@ export async function refreshTaskSessionWithRetry(
         await wait(options.retryDelayMs ?? TASK_SESSION_REFRESH_RETRY_DELAY_MS);
       }
     }
+    if (options.retryAfterExhaustionMs === undefined) {
+      return false;
+    }
     if (shouldContinue()) {
-      await wait(
-        options.retryAfterExhaustionMs ??
-          TASK_SESSION_REFRESH_RECOVERY_DELAY_MS,
-      );
+      await wait(options.retryAfterExhaustionMs);
     }
   }
 

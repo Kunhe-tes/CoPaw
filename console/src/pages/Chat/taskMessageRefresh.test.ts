@@ -56,6 +56,22 @@ describe("refreshTaskSessionWithRetry", () => {
 
     expect(refreshSession).toHaveBeenCalledWith("task-session-b");
   });
+
+  it("stops after the initial attempts unless recovery is enabled", async () => {
+    const refreshSession = vi
+      .fn<() => Promise<boolean>>()
+      .mockResolvedValue(false);
+
+    await expect(
+      refreshTaskSessionWithRetry(refreshSession, {
+        maxAttempts: 2,
+        retryDelayMs: 0,
+        wait: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+      }),
+    ).resolves.toBe(false);
+
+    expect(refreshSession).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe("shouldRefreshCurrentTaskMessages", () => {

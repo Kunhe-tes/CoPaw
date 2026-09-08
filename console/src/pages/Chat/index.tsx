@@ -123,6 +123,7 @@ import {
 import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
 import {
   refreshTaskSessionWithRetry,
+  TASK_SESSION_REFRESH_RECOVERY_DELAY_MS,
   shouldRefreshCurrentTaskMessages,
 } from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
@@ -1808,6 +1809,7 @@ export default function ChatPage() {
         chatRef.current?.refreshSession?.(sessionId) ?? Promise.resolve(false),
       {
         sessionId: chatId,
+        retryAfterExhaustionMs: TASK_SESSION_REFRESH_RECOVERY_DELAY_MS,
         shouldContinue: () => !cancelled,
       },
     );
