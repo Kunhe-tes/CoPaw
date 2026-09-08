@@ -22,6 +22,15 @@
 4. 任务正常创建时 `task_session_id`、request 和 chat 通常一致，但复用旧 `task_chat_id` 时不会校正旧 chat 的 `session_id`/`user_id`。
 5. `execution_key` 重复时当前追加逻辑静默跳过；通知路径的部分代码还混用了 `task_chat_id` 和 `task_session_id`。
 
+### 1.1 部署前提：当前后端不使用 Redis
+
+本方案明确不以 Redis 为前提，也不新增 Redis 依赖、连接、锁、租约、去重或 outbox：
+
+- 当前生产启动链路由 `Workspace` 注入 `SchedulerAdapter`，外部调度通过 HTTP 完成；没有装配 `CronCoordination`。
+- `src/swe/app/crons/coordination.py`、`CronCoordinationConfig`、`redis>=5.0.0` 依赖和相关单测属于遗留/可选代码，不是当前 Cron 执行链路。
+- 任务执行幂等、结果确认和诊断只使用现有 Runner session、任务状态/消息持久化和文件原子写入能力。
+- 外部发送成功后进程在本地回执写入前崩溃时，无法仅靠当前后端保证 exactly-once；本方案明确采用“本地回执 + 重放可识别”的 at-least-once 语义，并要求下游 channel 依据 `cron_delivery_key` 实现幂等。若下游不支持幂等，必须将该次结果标记为 `delivery_uncertain`，不得伪装为普通成功。
+
 ## 2. 目标行为契约
 
 最终执行状态必须满足以下优先级：
