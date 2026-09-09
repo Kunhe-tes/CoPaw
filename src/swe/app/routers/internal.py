@@ -306,6 +306,21 @@ def _callback_execution_meta(params: dict[str, Any]) -> dict[str, Any] | None:
     return {key: value for key, value in metadata.items() if value} or None
 
 
+def _has_callback_execution_identity(dispatch_meta: dict[str, Any]) -> bool:
+    """Match the CronManager scheduled execution identity contract."""
+    if dispatch_meta.get("cron_execution_key") or dispatch_meta.get(
+        "execution_key",
+    ):
+        return True
+    if dispatch_meta.get("intent_id") and dispatch_meta.get("batch_id"):
+        return True
+    return bool(
+        dispatch_meta.get("scheduled_fire_at")
+        or dispatch_meta.get("parent_scheduled_fire_at")
+        or dispatch_meta.get("external_execution_id"),
+    )
+
+
 def _decode_cron_callback_params(body: Dict[str, Any]) -> dict[str, Any]:
     job_param = body.get("jobParam") or body.get("job_param") or ""
     if not job_param:
@@ -474,6 +489,16 @@ async def _run_job_callback(
         return skip_response
 
     dispatch_meta = _build_dispatch_callback_meta(params) or {}
+    if getattr(job, "task_type", None) in {
+        "agent",
+        "text",
+    } and not _has_callback_execution_identity(dispatch_meta):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "scheduled agent/text callback requires execution identity"
+            ),
+        )
     dispatch_meta.update(
         build_b3_dispatch_meta(getattr(request, "headers", {})),
     )

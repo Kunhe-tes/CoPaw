@@ -1856,9 +1856,20 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if not job.enabled:
             logger.debug("Job %s is disabled, skipping run", job_id)
             return
-        job = await self._ensure_persisted_task_binding(job)
         dispatch_meta = dict(dispatch_meta or {})
         dispatch_meta["cron_is_manual"] = is_manual
+        # Reject scheduled agent/text callbacks before any binding mutation.
+        # External schedulers must provide a per-fire identity for durable
+        # deduplication and delivery tracking.
+        if (
+            not is_manual
+            and job.task_type in {"agent", "text"}
+            and not (_has_cron_execution_identity(dispatch_meta))
+        ):
+            raise RuntimeError(
+                "cron scheduled delivery requires execution identity",
+            )
+        job = await self._ensure_persisted_task_binding(job)
         persisted_headers = (job.dispatch.meta or {}).get(
             PASSTHROUGH_HEADERS_META_KEY,
         )
@@ -1882,12 +1893,6 @@ class CronManager:  # pylint: disable=too-many-public-methods
         dispatch_meta[PASSTHROUGH_HEADERS_META_KEY] = passthrough_headers
         if is_manual:
             dispatch_meta["cron_execution_key"] = f"manual:{job.id}:{uuid4()}"
-        elif job.task_type in {"agent", "text"} and not (
-            _has_cron_execution_identity(dispatch_meta)
-        ):
-            raise RuntimeError(
-                "cron scheduled delivery requires execution identity",
-            )
         logger.info(
             "cron run_job: job_id=%s channel=%s task_type=%s is_manual=%s "
             "target_user_id=%s target_session_id=%s",

@@ -91,14 +91,16 @@ async def test_scheduled_run_requires_an_execution_identity(
         runner=object(),
         channel_manager=object(),
     )
+    ensure_binding = AsyncMock(return_value=job)
     monkeypatch.setattr(
         manager,
         "_ensure_persisted_task_binding",
-        AsyncMock(return_value=job),
+        ensure_binding,
     )
 
     with pytest.raises(RuntimeError, match="execution identity"):
         await manager.run_job(job.id, is_manual=False)
+    ensure_binding.assert_not_awaited()
 
 
 @pytest.mark.asyncio

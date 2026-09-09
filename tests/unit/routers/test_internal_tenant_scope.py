@@ -146,7 +146,10 @@ def test_internal_cron_callback_dispatches_job_param_tenant() -> None:
 def test_internal_cron_callback_forwards_scheduler_execution_identity() -> (
     None
 ):
-    cron_manager = SimpleNamespace(run_job=AsyncMock())
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=SimpleNamespace(task_type="agent")),
+    )
     manager = SimpleNamespace(
         get_agent=AsyncMock(
             return_value=SimpleNamespace(cron_manager=cron_manager),
@@ -183,6 +186,38 @@ def test_internal_cron_callback_forwards_scheduler_execution_identity() -> (
             "external_execution_id": "scheduler-log-1",
         },
     )
+
+
+def test_internal_cron_callback_rejects_missing_scheduler_execution_identity() -> (
+    None
+):
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=SimpleNamespace(task_type="agent")),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "job-1",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == (
+        "scheduled agent/text callback requires execution identity"
+    )
+    cron_manager.run_job.assert_not_awaited()
 
 
 def test_internal_cron_callback_forwards_b3_headers_to_run_job() -> None:

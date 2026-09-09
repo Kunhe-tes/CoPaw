@@ -12,7 +12,7 @@ import pytest
 from agentscope_runtime.engine.schemas.agent_schemas import RunStatus
 
 from swe.app.crons.manager import CronManager
-from swe.app.crons.executor import CronExecutor
+from swe.app.crons.executor import AgentStreamState, CronExecutor
 from swe.app.cron_result_metrics import (
     CRON_EMPTY_MODEL_OUTPUT_TOTAL,
     CRON_SESSION_COMMIT_FAILURE_TOTAL,
@@ -21,6 +21,7 @@ from swe.app.cron_result_metrics import (
     reset_cron_result_metrics_for_test,
 )
 from swe.app.runner.query_contracts import QueryPersistenceResult
+from swe.app.runner.session import SafeJSONSession
 from swe.app.crons.models import (
     CronJobRequest,
     CronJobSpec,
@@ -3529,3 +3530,193 @@ def test_dispatch_managed_weekend_notification_uses_task_timezone():
     )
     assert record["notification_timezone"] == "UTC"
     assert record["suppress_notification"] is False
+
+
+def test_text_delivery_serializes_same_execution_key_on_shared_session(
+    tmp_path,
+):
+    """A second worker must observe the first worker's durable receipt."""
+
+    class _BlockingTextChannel:
+        def __init__(self) -> None:
+            self.send_started = asyncio.Event()
+            self.release_send = asyncio.Event()
+            self.send_attempts = 0
+
+        async def send_text(self, **_kwargs) -> bool:
+            self.send_attempts += 1
+            self.send_started.set()
+            await self.release_send.wait()
+            return True
+
+    async def _run() -> tuple[int, dict]:
+        channel = _BlockingTextChannel()
+        job = _build_agent_job().model_copy(
+            update={
+                "task_type": "text",
+                "text": "scheduled text",
+                "request": None,
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+                "meta": {
+                    "task_session_id": "task-session-a",
+                    "creator_user_id": "user-a",
+                },
+            },
+        )
+        execution_key = "execution-1"
+        delivery_meta = {"cron_delivery_key": "cron:execution-1:output"}
+        first = CronExecutor(
+            runner=SimpleNamespace(session=SafeJSONSession(str(tmp_path))),
+            channel_manager=channel,
+        )
+        second = CronExecutor(
+            runner=SimpleNamespace(session=SafeJSONSession(str(tmp_path))),
+            channel_manager=channel,
+        )
+        first_delivery = asyncio.create_task(
+            first._deliver_text_output(  # pylint: disable=protected-access
+                job,
+                execution_key,
+                "user-a",
+                "session-a",
+                delivery_meta,
+            ),
+        )
+        await channel.send_started.wait()
+        second_delivery = asyncio.create_task(
+            second._deliver_text_output(  # pylint: disable=protected-access
+                job,
+                execution_key,
+                "user-a",
+                "session-a",
+                delivery_meta,
+            ),
+        )
+        await asyncio.sleep(0)
+        assert channel.send_attempts == 1
+        channel.release_send.set()
+        await asyncio.gather(first_delivery, second_delivery)
+        state = await first._runner.session.get_session_state_dict(
+            "task-session-a",
+            user_id="user-a",
+        )
+        return channel.send_attempts, state
+
+    send_attempts, state = asyncio.run(_run())
+
+    assert send_attempts == 1
+    assert (
+        state["task_messages"][0]["metadata"]["output_delivery_completed"]
+        is True
+    )
+
+
+def test_agent_delivery_serializes_same_execution_key_on_shared_session(
+    tmp_path,
+):
+    """A replay cannot send an already-receipted agent result again."""
+
+    class _BlockingEventChannel:
+        def __init__(self) -> None:
+            self.send_started = asyncio.Event()
+            self.release_send = asyncio.Event()
+            self.send_attempts = 0
+
+        async def send_event(self, **_kwargs) -> bool:
+            self.send_attempts += 1
+            self.send_started.set()
+            await self.release_send.wait()
+            return True
+
+    def _stream_state() -> AgentStreamState:
+        return AgentStreamState(
+            output_delivery_receipt_supported=True,
+            completed_message_event=SimpleNamespace(
+                object="message",
+                status=RunStatus.Completed,
+                content=[SimpleNamespace(type="text", text="agent output")],
+            ),
+        )
+
+    async def _run() -> tuple[int, dict]:
+        channel = _BlockingEventChannel()
+        job = _build_agent_job().model_copy(
+            update={
+                "dispatch": DispatchSpec(
+                    channel="zhaohu",
+                    target=DispatchTarget(
+                        user_id="user-a",
+                        session_id="session-a",
+                    ),
+                ),
+            },
+        )
+        req = {
+            "session_id": "session-a",
+            "user_id": "user-a",
+            "cron_execution_key": "execution-1",
+            "cron_persistence_key": "persistence-1",
+        }
+        first_session = SafeJSONSession(str(tmp_path))
+        await first_session.mutate_session_state(
+            session_id="session-a",
+            user_id="user-a",
+            mutator=lambda _state: {
+                "task_runs": [
+                    {
+                        "execution_key": "execution-1",
+                        "persistence_key": "persistence-1",
+                        "output_delivery_completed": False,
+                    },
+                ],
+            },
+        )
+        first = CronExecutor(
+            runner=SimpleNamespace(session=first_session),
+            channel_manager=channel,
+        )
+        second = CronExecutor(
+            runner=SimpleNamespace(session=SafeJSONSession(str(tmp_path))),
+            channel_manager=channel,
+        )
+        first_delivery = asyncio.create_task(
+            first._deliver_persisted_agent_output(  # pylint: disable=protected-access
+                job,
+                "user-a",
+                "session-a",
+                {},
+                _stream_state(),
+                req,
+            ),
+        )
+        await channel.send_started.wait()
+        second_delivery = asyncio.create_task(
+            second._deliver_persisted_agent_output(  # pylint: disable=protected-access
+                job,
+                "user-a",
+                "session-a",
+                {},
+                _stream_state(),
+                req,
+            ),
+        )
+        await asyncio.sleep(0)
+        assert channel.send_attempts == 1
+        channel.release_send.set()
+        await asyncio.gather(first_delivery, second_delivery)
+        state = await first_session.get_session_state_dict(
+            "session-a",
+            user_id="user-a",
+        )
+        return channel.send_attempts, state
+
+    send_attempts, state = asyncio.run(_run())
+
+    assert send_attempts == 1
+    assert state["task_runs"][0]["output_delivery_completed"] is True

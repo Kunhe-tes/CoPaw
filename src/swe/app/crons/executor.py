@@ -716,29 +716,13 @@ class CronExecutor:
 
         business_effects_completed = False
         try:
-            delivery_completed = await self._prepare_text_task_delivery(
+            await self._deliver_text_output(
                 job,
                 execution_key,
                 target_user_id,
+                target_session_id,
+                delivery_meta,
             )
-            if delivery_completed is None:
-                raise RuntimeError(
-                    "cron text delivery persistence unavailable",
-                )
-            if delivery_completed is not True:
-                await self._send_text_to_channel(
-                    job,
-                    target_user_id,
-                    target_session_id,
-                    delivery_meta,
-                    require_delivery_receipt=True,
-                )
-                if delivery_completed is not None:
-                    await self._mark_text_task_delivery_completed(
-                        job,
-                        execution_key,
-                        target_user_id,
-                    )
             business_effects_completed = True
         finally:
             try:
@@ -776,6 +760,81 @@ class CronExecutor:
             "input_snapshot": input_snapshot,
             "executor_leader": "",
         }
+
+    async def _deliver_text_output(
+        self,
+        job: CronJobSpec,
+        execution_key: str,
+        target_user_id: str,
+        target_session_id: str,
+        delivery_meta: Dict[str, Any],
+    ) -> None:
+        """Deliver text while holding the shared session transaction lock."""
+        task_session_id = str(
+            (job.meta or {}).get("task_session_id") or "",
+        )
+        task_user_id = str(
+            (job.meta or {}).get("creator_user_id") or target_user_id,
+        )
+        session = getattr(self._runner, "session", None)
+        execution_factory = getattr(session, "execution", None)
+        if not task_session_id:
+            raise RuntimeError("cron text delivery persistence unavailable")
+        if not callable(execution_factory):
+            # Keep compatibility with lightweight runner test doubles. The
+            # production SafeJSONSession always provides this transaction.
+            delivery_completed = await self._prepare_text_task_delivery(
+                job,
+                execution_key,
+                target_user_id,
+            )
+            if delivery_completed is None:
+                raise RuntimeError(
+                    "cron text delivery persistence unavailable",
+                )
+            if not delivery_completed:
+                await self._send_text_to_channel(
+                    job,
+                    target_user_id,
+                    target_session_id,
+                    delivery_meta,
+                    require_delivery_receipt=True,
+                )
+                await self._mark_text_task_delivery_completed(
+                    job,
+                    execution_key,
+                    target_user_id,
+                )
+            return
+
+        async with execution_factory(
+            task_session_id,
+            user_id=task_user_id,
+            timeout_seconds=5.0,
+        ) as session_execution:
+            delivery_completed = self._merge_text_task_delivery_state(
+                session_execution.state,
+                job,
+                execution_key,
+            )
+            if delivery_completed:
+                return
+            # Make the assistant message durable before invoking the external
+            # channel. The transaction remains locked until the receipt is
+            # committed, preventing a second Pod from sending concurrently.
+            await session_execution.commit_state(session_execution.state)
+            await self._send_text_to_channel(
+                job,
+                target_user_id,
+                target_session_id,
+                delivery_meta,
+                require_delivery_receipt=True,
+            )
+            self._mark_text_task_delivery_state(
+                session_execution.state,
+                execution_key,
+            )
+            await session_execution.commit_state(session_execution.state)
 
     async def _create_trace_for_text_job(
         self,
@@ -888,8 +947,6 @@ class CronExecutor:
         if not callable(mutate):
             raise RuntimeError("cron text delivery persistence unavailable")
 
-        message_id = f"cron-text-{execution_key}"
-        delivery_key = f"cron:{execution_key}:output"
         existing_delivery_completed = False
         timestamp = (
             datetime.now(timezone.utc)
@@ -902,56 +959,13 @@ class CronExecutor:
 
         def _merge(existing_state: dict[str, Any]) -> dict[str, Any]:
             nonlocal existing_delivery_completed
-            state = dict(existing_state)
-            raw_messages = state.get(CRON_TEXT_TASK_MESSAGES_STATE_KEY, [])
-            messages = (
-                list(raw_messages) if isinstance(raw_messages, list) else []
+            existing_delivery_completed = self._merge_text_task_delivery_state(
+                existing_state,
+                job,
+                execution_key,
+                timestamp=timestamp,
             )
-            for message in messages:
-                if (
-                    not isinstance(message, dict)
-                    or message.get("id") != message_id
-                ):
-                    continue
-                content = message.get("content")
-                existing_text = (
-                    "".join(
-                        str(block.get("text") or "")
-                        for block in content
-                        if isinstance(block, dict)
-                        and block.get("type") == "text"
-                    )
-                    if isinstance(content, list)
-                    else ""
-                )
-                if existing_text != job.text.strip():
-                    raise RuntimeError("execution_key_conflict")
-                metadata = message.get("metadata")
-                existing_delivery_completed = bool(
-                    (
-                        metadata.get("output_delivery_completed")
-                        if isinstance(metadata, dict)
-                        else False
-                    ),
-                )
-                state[CRON_TEXT_TASK_MESSAGES_STATE_KEY] = messages
-                return state
-            messages.append(
-                {
-                    "id": message_id,
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "text", "text": job.text.strip()}],
-                    "metadata": {
-                        "cron_task": True,
-                        "cron_delivery_key": delivery_key,
-                        "output_delivery_completed": False,
-                    },
-                    "timestamp": timestamp,
-                },
-            )
-            state[CRON_TEXT_TASK_MESSAGES_STATE_KEY] = messages
-            return state
+            return existing_state
 
         await mutate(
             session_id=task_session_id,
@@ -960,6 +974,98 @@ class CronExecutor:
             create_if_not_exist=True,
         )
         return existing_delivery_completed
+
+    @staticmethod
+    def _merge_text_task_delivery_state(
+        state: dict[str, Any],
+        job: CronJobSpec,
+        execution_key: str,
+        *,
+        timestamp: str | None = None,
+    ) -> bool:
+        message_id = f"cron-text-{execution_key}"
+        delivery_key = f"cron:{execution_key}:output"
+        messages = list(
+            (
+                state.get(CRON_TEXT_TASK_MESSAGES_STATE_KEY, [])
+                if isinstance(
+                    state.get(CRON_TEXT_TASK_MESSAGES_STATE_KEY, []),
+                    list,
+                )
+                else []
+            ),
+        )
+        for message in messages:
+            if (
+                not isinstance(message, dict)
+                or message.get("id") != message_id
+            ):
+                continue
+            content = message.get("content")
+            existing_text = (
+                "".join(
+                    str(block.get("text") or "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+                if isinstance(content, list)
+                else ""
+            )
+            if existing_text != job.text.strip():
+                raise RuntimeError("execution_key_conflict")
+            metadata = message.get("metadata")
+            state[CRON_TEXT_TASK_MESSAGES_STATE_KEY] = messages
+            return bool(
+                (
+                    metadata.get("output_delivery_completed")
+                    if isinstance(metadata, dict)
+                    else False
+                ),
+            )
+        messages.append(
+            {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": job.text.strip()}],
+                "metadata": {
+                    "cron_task": True,
+                    "cron_delivery_key": delivery_key,
+                    "output_delivery_completed": False,
+                },
+                "timestamp": timestamp
+                or datetime.now(timezone.utc)
+                .isoformat()
+                .replace(
+                    "+00:00",
+                    "Z",
+                ),
+            },
+        )
+        state[CRON_TEXT_TASK_MESSAGES_STATE_KEY] = messages
+        return False
+
+    @staticmethod
+    def _mark_text_task_delivery_state(
+        state: dict[str, Any],
+        execution_key: str,
+    ) -> None:
+        message_id = f"cron-text-{execution_key}"
+        messages = state.get(CRON_TEXT_TASK_MESSAGES_STATE_KEY, [])
+        if not isinstance(messages, list):
+            raise RuntimeError("cron text delivery message missing")
+        for index, message in enumerate(messages):
+            if (
+                not isinstance(message, dict)
+                or message.get("id") != message_id
+            ):
+                continue
+            metadata = dict(message.get("metadata") or {})
+            metadata["output_delivery_completed"] = True
+            messages[index] = {**message, "metadata": metadata}
+            state[CRON_TEXT_TASK_MESSAGES_STATE_KEY] = messages
+            return
+        raise RuntimeError("cron text delivery message missing")
 
     async def _mark_text_task_delivery_completed(
         self,
@@ -2419,6 +2525,43 @@ class CronExecutor:
             f"cron:{delivery_identity}:output" if delivery_identity else ""
         )
 
+        session = getattr(self._runner, "session", None)
+        execution_factory = getattr(session, "execution", None)
+        session_id = str(req.get("session_id") or "")
+        user_id = str(req.get("user_id") or "")
+        if callable(execution_factory) and session_id and user_id:
+            async with execution_factory(
+                session_id,
+                user_id=user_id,
+                timeout_seconds=5.0,
+            ) as session_execution:
+                task_run = self._find_cron_task_run(
+                    session_execution.state,
+                    execution_key=str(req.get("cron_execution_key") or ""),
+                    persistence_key=str(req.get("cron_persistence_key") or ""),
+                )
+                if task_run is None:
+                    raise RuntimeError(
+                        "cron output delivery receipt unavailable",
+                    )
+                if task_run.get("output_delivery_completed"):
+                    stream_state.output_delivery_completed = True
+                    return
+                message_delivered = await self._send_agent_stream_events(
+                    job,
+                    target_user_id,
+                    target_session_id,
+                    dispatch_meta,
+                    stream_state,
+                    delivery_key,
+                )
+                if not message_delivered:
+                    raise RuntimeError("cron output delivery not confirmed")
+                task_run["output_delivery_completed"] = True
+                await session_execution.commit_state(session_execution.state)
+                stream_state.output_delivery_completed = True
+                return
+
         message_delivered = await self._send_agent_stream_events(
             job,
             target_user_id,
@@ -2448,6 +2591,31 @@ class CronExecutor:
             persistence_key=str(req.get("cron_persistence_key") or ""),
         )
         stream_state.output_delivery_completed = True
+
+    @staticmethod
+    def _find_cron_task_run(
+        state: dict[str, Any],
+        *,
+        execution_key: str,
+        persistence_key: str,
+    ) -> dict[str, Any] | None:
+        task_runs = state.get("task_runs")
+        if not isinstance(task_runs, list):
+            return None
+        for task_run in reversed(task_runs):
+            if not isinstance(task_run, dict):
+                continue
+            if (
+                persistence_key
+                and task_run.get("persistence_key") == persistence_key
+            ):
+                return task_run
+            if (
+                execution_key
+                and task_run.get("execution_key") == execution_key
+            ):
+                return task_run
+        return None
 
     async def _notify_timeout(self, job: CronJobSpec, tenant_id: str) -> None:
         """Push a timeout notification to the console so the user is aware.
