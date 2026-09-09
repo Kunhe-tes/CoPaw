@@ -2215,6 +2215,10 @@ def test_text_replay_uses_persisted_delivery_receipt(monkeypatch):
         state["task_messages"][0]["metadata"]["output_delivery_completed"]
         is True
     )
+    assert (
+        state["task_messages"][0]["metadata"]["output_delivery_state"]
+        == "completed"
+    )
     assert len(channel_manager.texts) == 1
 
 
@@ -3720,3 +3724,4 @@ def test_agent_delivery_serializes_same_execution_key_on_shared_session(
 
     assert send_attempts == 1
     assert state["task_runs"][0]["output_delivery_completed"] is True
+    assert state["task_runs"][0]["output_delivery_state"] == "completed"

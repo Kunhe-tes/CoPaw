@@ -95,6 +95,9 @@ CRON_TRACE_SUCCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
 CRON_SESSION_CLEANUP_WAIT_SECONDS = 5.0
 CRON_EVENT_ERROR_MESSAGE_MAX_LENGTH = 512
 CRON_TEXT_TASK_MESSAGES_STATE_KEY = "task_messages"
+CRON_DELIVERY_STATE_PENDING = "pending"
+CRON_DELIVERY_STATE_UNCERTAIN = "delivery_uncertain"
+CRON_DELIVERY_STATE_COMPLETED = "completed"
 
 
 async def resolve_user_identity(
@@ -822,6 +825,11 @@ class CronExecutor:
             # Make the assistant message durable before invoking the external
             # channel. The transaction remains locked until the receipt is
             # committed, preventing a second Pod from sending concurrently.
+            self._mark_text_task_delivery_state(
+                session_execution.state,
+                execution_key,
+                delivery_state=CRON_DELIVERY_STATE_UNCERTAIN,
+            )
             await session_execution.commit_state(session_execution.state)
             await self._send_text_to_channel(
                 job,
@@ -833,6 +841,7 @@ class CronExecutor:
             self._mark_text_task_delivery_state(
                 session_execution.state,
                 execution_key,
+                delivery_state=CRON_DELIVERY_STATE_COMPLETED,
             )
             await session_execution.commit_state(session_execution.state)
 
@@ -1031,6 +1040,7 @@ class CronExecutor:
                 "metadata": {
                     "cron_task": True,
                     "cron_delivery_key": delivery_key,
+                    "output_delivery_state": CRON_DELIVERY_STATE_PENDING,
                     "output_delivery_completed": False,
                 },
                 "timestamp": timestamp
@@ -1049,6 +1059,8 @@ class CronExecutor:
     def _mark_text_task_delivery_state(
         state: dict[str, Any],
         execution_key: str,
+        *,
+        delivery_state: str,
     ) -> None:
         message_id = f"cron-text-{execution_key}"
         messages = state.get(CRON_TEXT_TASK_MESSAGES_STATE_KEY, [])
@@ -1061,7 +1073,10 @@ class CronExecutor:
             ):
                 continue
             metadata = dict(message.get("metadata") or {})
-            metadata["output_delivery_completed"] = True
+            metadata["output_delivery_state"] = delivery_state
+            metadata["output_delivery_completed"] = (
+                delivery_state == CRON_DELIVERY_STATE_COMPLETED
+            )
             messages[index] = {**message, "metadata": metadata}
             state[CRON_TEXT_TASK_MESSAGES_STATE_KEY] = messages
             return
@@ -1107,6 +1122,7 @@ class CronExecutor:
                     **message,
                     "metadata": {
                         **metadata,
+                        "output_delivery_state": CRON_DELIVERY_STATE_COMPLETED,
                         "output_delivery_completed": True,
                     },
                 }
@@ -2547,6 +2563,15 @@ class CronExecutor:
                 if task_run.get("output_delivery_completed"):
                     stream_state.output_delivery_completed = True
                     return
+                # Persist an attempt marker before the external side effect.
+                # If the worker exits after the channel accepts the message
+                # but before the receipt commit, replay can identify the
+                # delivery as uncertain and retry with the same idempotency
+                # key.
+                task_run["output_delivery_state"] = (
+                    CRON_DELIVERY_STATE_UNCERTAIN
+                )
+                await session_execution.commit_state(session_execution.state)
                 message_delivered = await self._send_agent_stream_events(
                     job,
                     target_user_id,
@@ -2557,6 +2582,9 @@ class CronExecutor:
                 )
                 if not message_delivered:
                     raise RuntimeError("cron output delivery not confirmed")
+                task_run["output_delivery_state"] = (
+                    CRON_DELIVERY_STATE_COMPLETED
+                )
                 task_run["output_delivery_completed"] = True
                 await session_execution.commit_state(session_execution.state)
                 stream_state.output_delivery_completed = True
