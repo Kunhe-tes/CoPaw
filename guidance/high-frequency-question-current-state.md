@@ -152,7 +152,7 @@ GET  /api/monitor/high-frequency-question/results
 - `title = 用户高频问题分析`
 - `source_id = resolved source_id`
 - `result_json.request` 保存标准化后的 `source_id/start_date/end_date/scope_type/bbk_id`
-- `task_id` 同时作为外部工作流的 `batch_id`
+- `task_id` 是 Monitor 内部异步任务 ID；Monitor 使用同一个值作为传给外部工作流的 `batch_id`
 
 当前后端提交接口不阻止相同条件的重复 running 任务。也就是说，如果没有 24 小时成功结果，多次提交可能创建多个任务。Console 在查询结果为空后，会额外查 TaskCenter 的 running 任务并在前端复用匹配任务，减少用户侧重复提交。
 
@@ -174,7 +174,6 @@ GET  /api/monitor/high-frequency-question/results
 {
   "inputParams": {
     "source_id": "RMASSIST",
-    "task_id": "uuid",
     "batch_id": "uuid",
     "start_time": "2026-07-23 00:00:00",
     "end_time": "2026-07-30 00:00:00",

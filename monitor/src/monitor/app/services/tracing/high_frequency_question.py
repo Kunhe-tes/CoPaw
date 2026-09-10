@@ -744,7 +744,6 @@ class HighFrequencyQuestionService:
         payload = {
             "inputParams": {
                 "source_id": criteria.source_id,
-                "task_id": task_id,
                 "batch_id": task_id,
                 "start_time": criteria.start_time.strftime("%Y-%m-%d %H:%M:%S"),
                 "end_time": criteria.end_time.strftime("%Y-%m-%d %H:%M:%S"),

@@ -441,6 +441,62 @@ def test_submit_scheduled_task_builds_forced_seven_day_request(monkeypatch):
     assert response["batch_id"] == "task-001"
 
 
+def test_call_workflow_sends_batch_id_without_task_id(monkeypatch):
+    captured: dict[str, object] = {}
+
+    class _FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, str]:
+            return {"message": "success"}
+
+    class _FakeClient:
+        def __init__(self, *, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["json"] = json
+            return _FakeResponse()
+
+    monkeypatch.setattr(hfq_service_module, "HFQ_WORKFLOW_URL", "http://workflow")
+    monkeypatch.setattr(hfq_service_module, "HFQ_WORKFLOW_API_KEY", "api-key")
+    monkeypatch.setattr(hfq_service_module, "HFQ_WORKFLOW_OPEN_ID", "open-id")
+    monkeypatch.setattr(hfq_service_module.httpx, "AsyncClient", _FakeClient)
+
+    service = HighFrequencyQuestionService(_FakeDb())
+    request = HighFrequencyQuestionTaskSubmitRequest(
+        source_id="RMASSIST",
+        start_time="2026-09-03 16:07:15",
+        end_time="2026-09-10 16:07:15",
+        bbk_id="100",
+    )
+    criteria = service._normalize_criteria(request)
+
+    asyncio.run(service._call_workflow(task_id="task-001", criteria=criteria))
+
+    payload = captured["json"]
+    assert isinstance(payload, dict)
+    input_params = payload["inputParams"]
+    assert input_params["batch_id"] == "task-001"
+    assert "task_id" not in input_params
+    assert input_params["start_time"] == "2026-09-03 16:07:15"
+    assert input_params["end_time"] == "2026-09-10 16:07:15"
+    assert input_params["bbk_id"] == "100"
+    assert captured["headers"] == {
+        "API-Key": "api-key",
+        "Content-Type": "application/json",
+    }
+
+
 def _result_item(**overrides) -> dict:
     item = {
         "scope_type": "ORG",

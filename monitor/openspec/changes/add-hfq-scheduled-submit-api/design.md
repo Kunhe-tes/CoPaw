@@ -33,7 +33,10 @@ The scheduled endpoint calls the existing `submit_task()` path with
 `force = true`. This keeps batch/task creation, async task row shape, workflow
 payload, workflow completion handling, and result polling identical to the
 interactive task flow. Because `force = true`, every scheduled invocation starts
-a new task and generates a new `task_id`, which is also the workflow `batch_id`.
+a new task and generates a new `task_id`; Monitor uses that same value as the
+workflow `batch_id`.
+
+The external workflow payload receives `batch_id`, not the internal `task_id`.
 
 Actor fields use the existing system scheduler identity.
 

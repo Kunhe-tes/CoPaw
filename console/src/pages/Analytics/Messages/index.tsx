@@ -860,6 +860,9 @@ export default function MessagesPage() {
                       )}
                     </div>
                     <div className={styles.analysisSkillCoverage}>
+                      <span className={styles.analysisSkillTitle}>
+                        技能承载情况
+                      </span>
                       <div className={styles.analysisSkillMetric}>
                         <div className={styles.analysisSkillTrack}>
                           <div
