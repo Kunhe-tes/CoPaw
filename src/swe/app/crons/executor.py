@@ -2310,7 +2310,10 @@ class CronExecutor:
     def _resolve_agent_request_scope_id(job: CronJobSpec) -> str | None:
         if job.scope_id is not None:
             return canonicalize_scope_id(job.scope_id)
-        if getattr(job, "tenant_id", None) == "default" and job.source_id:
+        if (
+            getattr(job, "tenant_id", None) == "default"
+            and job.source_id is not None
+        ):
             return None
         return resolve_scope_id(
             getattr(job, "tenant_id", None),

@@ -780,6 +780,27 @@ def test_build_agent_request_skips_scope_for_default_source_template():
     assert "scope_id" not in req
 
 
+def test_build_agent_request_skips_scope_for_empty_default_source_id():
+    executor = CronExecutor(
+        runner=_Runner(),
+        channel_manager=_ChannelManager(),
+    )
+    job = _build_agent_job(
+        "/tmp/default/workspaces/default",
+    ).model_copy(
+        update={
+            "tenant_id": "default",
+            "source_id": "",
+            "scope_id": None,
+        },
+    )
+
+    req = executor._build_agent_request(job, "default", "session-a")
+
+    assert "source_id" not in req
+    assert "scope_id" not in req
+
+
 def test_build_agent_request_removes_stale_trace_id():
     executor = CronExecutor(
         runner=_Runner(),
