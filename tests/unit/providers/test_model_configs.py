@@ -76,6 +76,27 @@ def test_provider_updates_one_model_config_without_legacy_generate_kwargs() -> (
     assert "generate_kwargs" not in provider.model_dump()
 
 
+def test_provider_disabling_thinking_preserves_reasoning_effort() -> None:
+    provider = _provider()
+    provider.update_model_config(
+        "gpt-5",
+        {
+            "supports_enable_thinking": True,
+            "supported_reasoning_efforts": ["low", "high"],
+            "enable_thinking": True,
+            "reasoning_effort": "high",
+        },
+    )
+
+    updated = provider.update_model_config(
+        "gpt-5",
+        {"enable_thinking": False},
+    )
+
+    assert updated.enable_thinking is False
+    assert updated.reasoning_effort == "high"
+
+
 def test_provider_deleting_model_config_removes_only_target() -> None:
     provider = _provider()
     provider.update_model_config("gpt-5", {"temperature": 0.2})
