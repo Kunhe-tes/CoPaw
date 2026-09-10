@@ -2617,14 +2617,26 @@ class CronExecutor:
     ) -> None:
         task_run["output_delivery_state"] = CRON_DELIVERY_STATE_UNCERTAIN
         await session_execution.commit_state(session_execution.state)
-        message_delivered = await self._send_agent_stream_events(
-            job,
-            target_user_id,
-            target_session_id,
-            dispatch_meta,
-            stream_state,
-            delivery_key,
-        )
+        try:
+            message_delivered = await self._send_agent_stream_events(
+                job,
+                target_user_id,
+                target_session_id,
+                dispatch_meta,
+                stream_state,
+                delivery_key,
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            if job.dispatch.channel != CONSOLE_CHANNEL:
+                raise
+            logger.warning(
+                "cron console output delivery failed; treating as local "
+                "completion: job_id=%s error=%s",
+                job.id,
+                exc,
+                exc_info=True,
+            )
+            message_delivered = False
         if not message_delivered and job.dispatch.channel != CONSOLE_CHANNEL:
             raise RuntimeError("cron output delivery not confirmed")
         task_run["output_delivery_state"] = CRON_DELIVERY_STATE_COMPLETED
