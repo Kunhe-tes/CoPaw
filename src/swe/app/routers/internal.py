@@ -493,12 +493,7 @@ async def _run_job_callback(
         "agent",
         "text",
     } and not _has_callback_execution_identity(dispatch_meta):
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "scheduled agent/text callback requires execution identity"
-            ),
-        )
+        dispatch_meta["cron_execution_key"] = f"legacy:{uuid.uuid4()}"
     dispatch_meta.update(
         build_b3_dispatch_meta(getattr(request, "headers", {})),
     )

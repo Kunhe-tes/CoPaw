@@ -188,7 +188,7 @@ def test_internal_cron_callback_forwards_scheduler_execution_identity() -> (
     )
 
 
-def test_internal_cron_callback_rejects_missing_scheduler_execution_identity() -> (
+def test_internal_cron_callback_generates_identity_for_legacy_scheduler() -> (
     None
 ):
     cron_manager = SimpleNamespace(
@@ -205,19 +205,24 @@ def test_internal_cron_callback_rejects_missing_scheduler_execution_identity() -
     response = client.post(
         "/internal/cron/callback",
         json={
-            "tenant_id": "tenant-a",
-            "source_id": "source-a",
+            "tenant_id": "80074361",
+            "source_id": "RMASSIST",
+            "scopeId": "80074361-RMASSIST",
             "agent_id": "default",
             "task_type": "job",
-            "job_id": "job-1",
+            "job_id": "8819af9e-0bdf-4545-aa6c-7c3045a14ac2",
+            "fromId": "80074361",
         },
     )
 
-    assert response.status_code == 400
-    assert response.json()["detail"] == (
-        "scheduled agent/text callback requires execution identity"
+    assert response.status_code == 200
+    cron_manager.run_job.assert_awaited_once()
+    _, kwargs = cron_manager.run_job.await_args
+    assert kwargs["is_manual"] is False
+    assert kwargs["source_id"] == "RMASSIST"
+    assert kwargs["dispatch_meta"]["cron_execution_key"].startswith(
+        "legacy:",
     )
-    cron_manager.run_job.assert_not_awaited()
 
 
 def test_internal_cron_callback_forwards_b3_headers_to_run_job() -> None:
