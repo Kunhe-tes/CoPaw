@@ -2518,78 +2518,105 @@ class CronExecutor:
         """Deliver persisted output once, retrying only unconfirmed replays."""
         if stream_state.output_delivery_completed:
             return
-        if (
-            stream_state.idempotent_replay
-            and not stream_state.output_delivery_receipt_supported
-        ):
-            if job.dispatch.channel != CONSOLE_CHANNEL:
-                raise RuntimeError("cron output delivery receipt unavailable")
+        if self._skip_unreplayable_console_delivery(job, stream_state):
             return
-
-        if (
-            job.dispatch.channel != CONSOLE_CHANNEL
-            and not stream_state.output_delivery_receipt_supported
+        delivery_key = self._build_output_delivery_key(req)
+        if await self._deliver_with_session_receipt(
+            job,
+            target_user_id,
+            target_session_id,
+            dispatch_meta,
+            stream_state,
+            req,
+            delivery_key,
         ):
-            raise RuntimeError("cron output delivery receipt unavailable")
+            return
+        await self._deliver_with_runner_receipt(
+            job,
+            target_user_id,
+            target_session_id,
+            dispatch_meta,
+            stream_state,
+            req,
+            delivery_key,
+        )
 
+    @staticmethod
+    def _build_output_delivery_key(req: Dict[str, Any]) -> str:
         delivery_identity = str(
             req.get("cron_execution_key")
             or req.get("cron_persistence_key")
             or "",
         )
-        delivery_key = (
-            f"cron:{delivery_identity}:output" if delivery_identity else ""
-        )
+        return f"cron:{delivery_identity}:output" if delivery_identity else ""
 
+    @staticmethod
+    def _skip_unreplayable_console_delivery(
+        job: CronJobSpec,
+        stream_state: AgentStreamState,
+    ) -> bool:
+        if stream_state.output_delivery_receipt_supported:
+            return False
+        if job.dispatch.channel != CONSOLE_CHANNEL:
+            raise RuntimeError("cron output delivery receipt unavailable")
+        return stream_state.idempotent_replay
+
+    async def _deliver_with_session_receipt(
+        self,
+        job: CronJobSpec,
+        target_user_id: str,
+        target_session_id: str,
+        dispatch_meta: Dict[str, Any],
+        stream_state: AgentStreamState,
+        req: Dict[str, Any],
+        delivery_key: str,
+    ) -> bool:
         session = getattr(self._runner, "session", None)
         execution_factory = getattr(session, "execution", None)
         session_id = str(req.get("session_id") or "")
         user_id = str(req.get("user_id") or "")
-        if callable(execution_factory) and session_id and user_id:
-            async with execution_factory(
-                session_id,
-                user_id=user_id,
-                timeout_seconds=5.0,
-            ) as session_execution:
-                task_run = self._find_cron_task_run(
-                    session_execution.state,
-                    execution_key=str(req.get("cron_execution_key") or ""),
-                    persistence_key=str(req.get("cron_persistence_key") or ""),
-                )
-                if task_run is None:
-                    raise RuntimeError(
-                        "cron output delivery receipt unavailable",
-                    )
-                if task_run.get("output_delivery_completed"):
-                    stream_state.output_delivery_completed = True
-                    return
-                # Persist an attempt marker before the external side effect.
-                # If the worker exits after the channel accepts the message
-                # but before the receipt commit, replay can identify the
-                # delivery as uncertain and retry with the same idempotency
-                # key.
-                task_run["output_delivery_state"] = (
-                    CRON_DELIVERY_STATE_UNCERTAIN
-                )
-                await session_execution.commit_state(session_execution.state)
-                message_delivered = await self._send_agent_stream_events(
-                    job,
-                    target_user_id,
-                    target_session_id,
-                    dispatch_meta,
-                    stream_state,
-                    delivery_key,
-                )
-                if not message_delivered:
-                    raise RuntimeError("cron output delivery not confirmed")
-                task_run["output_delivery_state"] = (
-                    CRON_DELIVERY_STATE_COMPLETED
-                )
-                task_run["output_delivery_completed"] = True
-                await session_execution.commit_state(session_execution.state)
+        if not callable(execution_factory) or not session_id or not user_id:
+            return False
+        async with execution_factory(
+            session_id,
+            user_id=user_id,
+            timeout_seconds=5.0,
+        ) as session_execution:
+            task_run = self._find_cron_task_run(
+                session_execution.state,
+                execution_key=str(req.get("cron_execution_key") or ""),
+                persistence_key=str(req.get("cron_persistence_key") or ""),
+            )
+            if task_run is None:
+                raise RuntimeError("cron output delivery receipt unavailable")
+            if task_run.get("output_delivery_completed"):
                 stream_state.output_delivery_completed = True
-                return
+                return True
+            await self._send_and_commit_session_delivery(
+                session_execution,
+                task_run,
+                job,
+                target_user_id,
+                target_session_id,
+                dispatch_meta,
+                stream_state,
+                delivery_key,
+            )
+        return True
 
+    async def _send_and_commit_session_delivery(
+        self,
+        session_execution: Any,
+        task_run: dict[str, Any],
+        job: CronJobSpec,
+        target_user_id: str,
+        target_session_id: str,
+        dispatch_meta: Dict[str, Any],
+        stream_state: AgentStreamState,
+        delivery_key: str,
+    ) -> None:
+        task_run["output_delivery_state"] = CRON_DELIVERY_STATE_UNCERTAIN
+        await session_execution.commit_state(session_execution.state)
         message_delivered = await self._send_agent_stream_events(
             job,
             target_user_id,
@@ -2598,13 +2625,35 @@ class CronExecutor:
             stream_state,
             delivery_key,
         )
-        external_delivery_confirmed = (
-            job.dispatch.channel != CONSOLE_CHANNEL and message_delivered
+        if not message_delivered:
+            raise RuntimeError("cron output delivery not confirmed")
+        task_run["output_delivery_state"] = CRON_DELIVERY_STATE_COMPLETED
+        task_run["output_delivery_completed"] = True
+        await session_execution.commit_state(session_execution.state)
+        stream_state.output_delivery_completed = True
+
+    async def _deliver_with_runner_receipt(
+        self,
+        job: CronJobSpec,
+        target_user_id: str,
+        target_session_id: str,
+        dispatch_meta: Dict[str, Any],
+        stream_state: AgentStreamState,
+        req: Dict[str, Any],
+        delivery_key: str,
+    ) -> None:
+        message_delivered = await self._send_agent_stream_events(
+            job,
+            target_user_id,
+            target_session_id,
+            dispatch_meta,
+            stream_state,
+            delivery_key,
         )
-        if not external_delivery_confirmed:
-            if job.dispatch.channel != CONSOLE_CHANNEL:
-                raise RuntimeError("cron output delivery not confirmed")
+        if job.dispatch.channel == CONSOLE_CHANNEL:
             return
+        if not message_delivered:
+            raise RuntimeError("cron output delivery not confirmed")
         marker = getattr(
             self._runner,
             "mark_cron_output_delivery_completed",

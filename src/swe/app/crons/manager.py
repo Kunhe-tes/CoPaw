@@ -571,6 +571,21 @@ class _Runtime:
     sem: asyncio.Semaphore
 
 
+@dataclass
+class _ExecutionOutcome:
+    actual_time: datetime
+    end_time: Optional[datetime] = None
+    duration_ms: int = 0
+    exec_status: str = "success"
+    error_message: str = ""
+    output_preview: str = ""
+    trace_id: str = ""
+    input_snapshot: Optional[Dict[str, Any]] = None
+    executor_leader: str = ""
+    execution_meta: Optional[Dict[str, Any]] = None
+    source_system_config: Any = None
+
+
 @dataclass(frozen=True)
 class _TaskSessionCleanupSnapshot:
     state: dict[str, Any]
@@ -1856,43 +1871,17 @@ class CronManager:  # pylint: disable=too-many-public-methods
         if not job.enabled:
             logger.debug("Job %s is disabled, skipping run", job_id)
             return
-        dispatch_meta = dict(dispatch_meta or {})
-        dispatch_meta["cron_is_manual"] = is_manual
-        # Reject scheduled agent/text callbacks before any binding mutation.
-        # External schedulers must provide a per-fire identity for durable
-        # deduplication and delivery tracking.
-        if (
-            not is_manual
-            and job.task_type in {"agent", "text"}
-            and not (_has_cron_execution_identity(dispatch_meta))
-        ):
-            raise RuntimeError(
-                "cron scheduled delivery requires execution identity",
-            )
+        dispatch_meta = self._prepare_run_dispatch_meta(
+            job,
+            is_manual,
+            dispatch_meta,
+        )
         job = await self._ensure_persisted_task_binding(job)
-        persisted_headers = (job.dispatch.meta or {}).get(
-            PASSTHROUGH_HEADERS_META_KEY,
+        dispatch_meta = self._bind_run_dispatch_headers(
+            job,
+            is_manual,
+            dispatch_meta,
         )
-        passthrough_headers = (
-            dict(persisted_headers)
-            if isinstance(persisted_headers, dict)
-            else {}
-        )
-        execution_headers = dispatch_meta.get(PASSTHROUGH_HEADERS_META_KEY)
-        if isinstance(execution_headers, dict):
-            for header_name, header_value in execution_headers.items():
-                folded_name = str(header_name).casefold()
-                for existing_name in list(passthrough_headers):
-                    if str(existing_name).casefold() == folded_name:
-                        del passthrough_headers[existing_name]
-                passthrough_headers[header_name] = header_value
-        for header_name in list(passthrough_headers):
-            if str(header_name).casefold() == "cron_job_id":
-                del passthrough_headers[header_name]
-        passthrough_headers["cron_job_id"] = job.id
-        dispatch_meta[PASSTHROUGH_HEADERS_META_KEY] = passthrough_headers
-        if is_manual:
-            dispatch_meta["cron_execution_key"] = f"manual:{job.id}:{uuid4()}"
         logger.info(
             "cron run_job: job_id=%s channel=%s task_type=%s is_manual=%s "
             "target_user_id=%s target_session_id=%s",
@@ -1918,6 +1907,63 @@ class CronManager:  # pylint: disable=too-many-public-methods
                 name=f"cron-run-{job_id}",
             )
         task.add_done_callback(lambda t: self._task_done_cb(t, job))
+
+    @staticmethod
+    def _prepare_run_dispatch_meta(
+        job: CronJobSpec,
+        is_manual: bool,
+        dispatch_meta: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        prepared = dict(dispatch_meta or {})
+        prepared["cron_is_manual"] = is_manual
+        if (
+            not is_manual
+            and job.task_type in {"agent", "text"}
+            and not _has_cron_execution_identity(prepared)
+        ):
+            raise RuntimeError(
+                "cron scheduled delivery requires execution identity",
+            )
+        return prepared
+
+    @staticmethod
+    def _merge_passthrough_headers(
+        persisted_headers: Any,
+        execution_headers: Any,
+        job_id: str,
+    ) -> Dict[str, Any]:
+        headers = (
+            dict(persisted_headers)
+            if isinstance(persisted_headers, dict)
+            else {}
+        )
+        if isinstance(execution_headers, dict):
+            for name, value in execution_headers.items():
+                for existing_name in list(headers):
+                    if str(existing_name).casefold() == str(name).casefold():
+                        del headers[existing_name]
+                headers[name] = value
+        for name in list(headers):
+            if str(name).casefold() == "cron_job_id":
+                del headers[name]
+        headers["cron_job_id"] = job_id
+        return headers
+
+    def _bind_run_dispatch_headers(
+        self,
+        job: CronJobSpec,
+        is_manual: bool,
+        dispatch_meta: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        bound = dict(dispatch_meta)
+        bound[PASSTHROUGH_HEADERS_META_KEY] = self._merge_passthrough_headers(
+            (job.dispatch.meta or {}).get(PASSTHROUGH_HEADERS_META_KEY),
+            bound.get(PASSTHROUGH_HEADERS_META_KEY),
+            job.id,
+        )
+        if is_manual:
+            bound["cron_execution_key"] = f"manual:{job.id}:{uuid4()}"
+        return bound
 
     async def mark_task_read(self, job_id: str, user_id: str) -> bool:
         async with self._lock:
@@ -2421,18 +2467,11 @@ class CronManager:  # pylint: disable=too-many-public-methods
         ):
             return
 
-        if job.task_type == "text":
-            preview = (job.text or "").strip()
-        else:
-            # 即使无法获取 preview，也应该继续更新任务执行记录
-            # 因为自动暂停逻辑依赖未读计数更新
-            if getattr(self._runner, "session", None):
-                preview = await self._load_task_preview_text(
-                    task_session_id,
-                    creator_user_id,
-                )
-            else:
-                preview = ""
+        preview = await self._resolve_task_success_preview(
+            job,
+            task_session_id,
+            creator_user_id,
+        )
         if job.task_type == "text":
             await self._append_text_task_message(
                 task_session_id,
@@ -2447,24 +2486,37 @@ class CronManager:  # pylint: disable=too-many-public-methods
             execution_key,
         )
         async with self._lock:
-            changed, auto_paused, _ = await self._mutate_jobs_file_locked(
+            _, auto_paused, _ = await self._mutate_jobs_file_locked(
                 apply_success,
             )
         if auto_paused:
-            ext_id = self._states.get(
-                job.id,
-                CronJobState(),
-            ).external_job_id
-            if ext_id and self._scheduler_adapter:
-                await self._scheduler_adapter.pause_job(ext_id)
-            # 同步暂停状态到 Monitor 数据库
-            # 概览页面从 Monitor 读取任务状态，需要同步更新
-            updated_job = await self._repo.get_job(job.id)
-            if updated_job and self._monitor_sync_client is not None:
-                await self._monitor_sync_client.sync_job(
-                    updated_job,
-                    agent_id=self._agent_id or "default",
-                )
+            await self._sync_auto_paused_task(job.id)
+
+    async def _resolve_task_success_preview(
+        self,
+        job: CronJobSpec,
+        task_session_id: str,
+        creator_user_id: str,
+    ) -> str:
+        if job.task_type == "text":
+            return (job.text or "").strip()
+        if not getattr(self._runner, "session", None):
+            return ""
+        return await self._load_task_preview_text(
+            task_session_id,
+            creator_user_id,
+        )
+
+    async def _sync_auto_paused_task(self, job_id: str) -> None:
+        ext_id = self._states.get(job_id, CronJobState()).external_job_id
+        if ext_id and self._scheduler_adapter:
+            await self._scheduler_adapter.pause_job(ext_id)
+        updated_job = await self._repo.get_job(job_id)
+        if updated_job and self._monitor_sync_client is not None:
+            await self._monitor_sync_client.sync_job(
+                updated_job,
+                agent_id=self._agent_id or "default",
+            )
 
     @asynccontextmanager
     async def _task_session_write_lock(
@@ -3506,145 +3558,146 @@ class CronManager:  # pylint: disable=too-many-public-methods
             st = self._states.get(job.id, CronJobState())
             st.last_status = "running"
             self._states[job.id] = st
-
-            # Track execution timing for Monitor sync
-            actual_time = datetime.now(timezone.utc)
-            end_time: Optional[datetime] = None
-            duration_ms = 0
-            exec_status = "success"
-            error_message = ""
-            output_preview = ""
-            trace_id = ""
-            input_snapshot: Optional[Dict[str, Any]] = None
-            executor_leader = ""
-            execution_meta: Optional[Dict[str, Any]] = None
-            source_system_config = None
-
+            outcome = _ExecutionOutcome(datetime.now(timezone.utc))
             try:
-                source_system_config = (
-                    await self._resolve_scheduled_run_source_system_config(
-                        source_id=job.source_id,
-                        scope_id=job.scope_id,
-                        boundary_name=f"job:{job.id}",
-                    )
-                )
-                with self._bind_scheduled_run_source_system_config(
-                    source_system_config,
-                ):
-                    # 执行任务并获取执行结果
-                    exec_result = await self._executor.execute(
-                        job,
-                        dispatch_meta=dispatch_meta,
-                    )
-                    trace_id = exec_result.trace_id
-                    output_preview = exec_result.output_preview
-                    input_snapshot = exec_result.input_snapshot
-                    executor_leader = exec_result.executor_leader
-                    execution_meta = exec_result.execution_meta
-                    exec_status = getattr(exec_result, "status", "success")
-                    st.last_status = exec_status
-                    st.last_error = None
-                    end_time = datetime.now(timezone.utc)
-                    duration_ms = int(
-                        (end_time - actual_time).total_seconds() * 1000,
-                    )
-                    if exec_status == "success":
-                        execution_key = str(
-                            (input_snapshot or {}).get(
-                                "cron_execution_key",
-                            )
-                            or "",
-                        )
-                        idempotent_replay = bool(
-                            (execution_meta or {}).get(
-                                "idempotent_replay",
-                            ),
-                        )
-                        replay_effects_supported = bool(
-                            (execution_meta or {}).get(
-                                "output_delivery_replay_supported",
-                            ),
-                        )
-                        if not idempotent_replay or replay_effects_supported:
-                            await self._handle_success_notifications(
-                                job,
-                                execution_key,
-                            )
-                    logger.info(
-                        "cron _execute_once: job_id=%s status=%s trace_id=%s",
-                        job.id,
-                        exec_status,
-                        trace_id[:20] if trace_id else "(empty)",
-                    )
+                await self._run_once_execution(job, dispatch_meta, st, outcome)
             except asyncio.CancelledError as exc:
-                execution_meta = getattr(
-                    exc,
-                    "cron_execution_meta",
-                    execution_meta,
-                )
-                # 从异常获取 trace_id（executor 在失败时附加到异常上）
-                exc_trace_id = getattr(exc, "cron_trace_id", None)
-                if exc_trace_id and not trace_id:
-                    trace_id = exc_trace_id
-                # 检查任务是否实际执行成功
-                # CancelledError 可能是在 finally 块中（trace 结束时）抛出的
-                # 如果任务已执行成功，应该记录为 success 而非 cancelled
+                self._record_once_exception(outcome, exc)
                 if st.last_status == "success":
-                    exec_status, error_message, end_time, duration_ms = (
-                        self._handle_cancelled_after_success(
-                            job.id,
-                            st,
-                            actual_time,
-                            end_time,
-                            duration_ms,
-                        )
+                    (
+                        outcome.exec_status,
+                        outcome.error_message,
+                        outcome.end_time,
+                        outcome.duration_ms,
+                    ) = self._handle_cancelled_after_success(
+                        job.id,
+                        st,
+                        outcome.actual_time,
+                        outcome.end_time,
+                        outcome.duration_ms,
                     )
                 else:
-                    exec_status, error_message, end_time, duration_ms = (
-                        self._handle_execution_cancelled(
-                            job.id,
-                            st,
-                            actual_time,
-                        )
+                    (
+                        outcome.exec_status,
+                        outcome.error_message,
+                        outcome.end_time,
+                        outcome.duration_ms,
+                    ) = self._handle_execution_cancelled(
+                        job.id,
+                        st,
+                        outcome.actual_time,
                     )
                 raise
             except Exception as e:  # pylint: disable=broad-except
-                execution_meta = getattr(
-                    e,
-                    "cron_execution_meta",
-                    execution_meta,
-                )
-                # 从异常获取 trace_id（executor 在失败时附加到异常上）
-                exc_trace_id = getattr(e, "cron_trace_id", None)
-                if exc_trace_id and not trace_id:
-                    trace_id = exc_trace_id
-                exec_status, error_message, end_time, duration_ms = (
-                    self._handle_execution_error(st, actual_time, e)
-                )
+                self._record_once_exception(outcome, e)
+                (
+                    outcome.exec_status,
+                    outcome.error_message,
+                    outcome.end_time,
+                    outcome.duration_ms,
+                ) = self._handle_execution_error(st, outcome.actual_time, e)
                 raise
             finally:
                 with self._bind_scheduled_run_source_system_config(
-                    source_system_config,
+                    outcome.source_system_config,
                 ):
-                    execution_meta = _merge_cron_dispatch_meta(
-                        execution_meta,
+                    outcome.execution_meta = _merge_cron_dispatch_meta(
+                        outcome.execution_meta,
                         dispatch_meta,
                     )
                     await self._finalize_execution_state(
                         job=job,
                         st=st,
-                        exec_status=exec_status,
-                        actual_time=actual_time,
-                        end_time=end_time,
-                        duration_ms=duration_ms,
-                        error_message=error_message,
-                        output_preview=output_preview,
+                        exec_status=outcome.exec_status,
+                        actual_time=outcome.actual_time,
+                        end_time=outcome.end_time,
+                        duration_ms=outcome.duration_ms,
+                        error_message=outcome.error_message,
+                        output_preview=outcome.output_preview,
                         is_manual=is_manual,
-                        trace_id=trace_id,
-                        input_snapshot=input_snapshot,
-                        executor_leader=executor_leader,
-                        execution_meta=execution_meta,
+                        trace_id=outcome.trace_id,
+                        input_snapshot=outcome.input_snapshot,
+                        executor_leader=outcome.executor_leader,
+                        execution_meta=outcome.execution_meta,
                     )
+
+    async def _run_once_execution(
+        self,
+        job: CronJobSpec,
+        dispatch_meta: Dict[str, Any],
+        st: CronJobState,
+        outcome: _ExecutionOutcome,
+    ) -> None:
+        outcome.source_system_config = (
+            await self._resolve_scheduled_run_source_system_config(
+                source_id=job.source_id,
+                scope_id=job.scope_id,
+                boundary_name=f"job:{job.id}",
+            )
+        )
+        with self._bind_scheduled_run_source_system_config(
+            outcome.source_system_config,
+        ):
+            result = await self._executor.execute(
+                job,
+                dispatch_meta=dispatch_meta,
+            )
+            outcome.trace_id = result.trace_id
+            outcome.output_preview = result.output_preview
+            outcome.input_snapshot = result.input_snapshot
+            outcome.executor_leader = result.executor_leader
+            outcome.execution_meta = result.execution_meta
+            outcome.exec_status = getattr(result, "status", "success")
+            st.last_status = outcome.exec_status
+            st.last_error = None
+            outcome.end_time = datetime.now(timezone.utc)
+            outcome.duration_ms = int(
+                (outcome.end_time - outcome.actual_time).total_seconds()
+                * 1000,
+            )
+            if outcome.exec_status == "success":
+                await self._handle_once_success(job, outcome)
+            logger.info(
+                "cron _execute_once: job_id=%s status=%s trace_id=%s",
+                job.id,
+                outcome.exec_status,
+                outcome.trace_id[:20] if outcome.trace_id else "(empty)",
+            )
+
+    async def _handle_once_success(
+        self,
+        job: CronJobSpec,
+        outcome: _ExecutionOutcome,
+    ) -> None:
+        execution_key = str(
+            (outcome.input_snapshot or {}).get("cron_execution_key") or "",
+        )
+        metadata = outcome.execution_meta or {}
+        if not metadata.get("idempotent_replay") or metadata.get(
+            "output_delivery_replay_supported",
+        ):
+            await self._notify_once_success(job, execution_key)
+
+    async def _notify_once_success(
+        self,
+        job: CronJobSpec,
+        execution_key: str,
+    ) -> None:
+        await self._handle_success_notifications(job, execution_key)
+
+    @staticmethod
+    def _record_once_exception(
+        outcome: _ExecutionOutcome,
+        error: BaseException,
+    ) -> None:
+        outcome.execution_meta = getattr(
+            error,
+            "cron_execution_meta",
+            outcome.execution_meta,
+        )
+        trace_id = getattr(error, "cron_trace_id", None)
+        if trace_id and not outcome.trace_id:
+            outcome.trace_id = trace_id
 
     async def run_heartbeat(self) -> None:
         """执行一次心跳任务（供外部调度平台调用）。"""

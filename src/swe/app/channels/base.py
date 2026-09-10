@@ -1402,46 +1402,26 @@ class BaseChannel(ABC):
     @staticmethod
     def _has_sendable_content(parts: List[OutgoingContentPart]) -> bool:
         """Return whether rendered parts have text or supported media."""
-        for part in parts:
-            content_type = getattr(part, "type", None)
-            if (
-                content_type == ContentType.TEXT
-                and str(
-                    getattr(part, "text", "") or "",
-                ).strip()
-            ):
-                return True
-            if (
-                content_type == ContentType.REFUSAL
-                and str(
-                    getattr(part, "refusal", "") or "",
-                ).strip()
-            ):
-                return True
-            if content_type == ContentType.IMAGE and getattr(
-                part,
-                "image_url",
-                None,
-            ):
-                return True
-            if content_type == ContentType.VIDEO and getattr(
-                part,
-                "video_url",
-                None,
-            ):
-                return True
-            if content_type == ContentType.FILE and (
-                getattr(part, "file_url", None)
-                or getattr(part, "file_id", None)
-            ):
-                return True
-            if content_type == ContentType.AUDIO and getattr(
-                part,
-                "data",
-                None,
-            ):
-                return True
-        return False
+        return any(
+            BaseChannel._is_sendable_content_part(part) for part in parts
+        )
+
+    @staticmethod
+    def _is_sendable_content_part(part: OutgoingContentPart) -> bool:
+        content_type = getattr(part, "type", None)
+        if content_type in (ContentType.TEXT, ContentType.REFUSAL):
+            field = "text" if content_type == ContentType.TEXT else "refusal"
+            return bool(str(getattr(part, field, "") or "").strip())
+        media_fields = {
+            ContentType.IMAGE: ("image_url",),
+            ContentType.VIDEO: ("video_url",),
+            ContentType.FILE: ("file_url", "file_id"),
+            ContentType.AUDIO: ("data",),
+        }
+        return any(
+            getattr(part, field, None)
+            for field in media_fields.get(content_type, ())
+        )
 
     async def send_content_parts(
         self,

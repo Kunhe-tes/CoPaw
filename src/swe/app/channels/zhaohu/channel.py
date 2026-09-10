@@ -2387,6 +2387,17 @@ class ZhaohuChannel(BaseChannel):
         meta: Optional[dict] = None,
     ) -> bool:
         """POST a Zhaohu push payload to the configured endpoint."""
+        if not self._validate_send_configuration(to_handle, meta):
+            return False
+        payload = await self._build_push_payload(to_handle, text, meta or {})
+        data = await self._post_push_payload(payload)
+        return self._handle_push_response(to_handle, data, meta)
+
+    def _validate_send_configuration(
+        self,
+        to_handle: str,
+        meta: Optional[dict],
+    ) -> bool:
         if not self.enabled:
             logger.warning("zhaohu send skipped: channel disabled")
             _raise_cron_delivery_failure(meta, "disabled")
@@ -2399,17 +2410,19 @@ class ZhaohuChannel(BaseChannel):
             _raise_cron_delivery_failure(meta, "push_url not configured")
             return False
         if (
-            not self.sys_id
-            or not self.robot_open_id
-            or not to_handle
-            or to_handle.strip() == ""
+            self.sys_id
+            and self.robot_open_id
+            and to_handle
+            and to_handle.strip()
         ):
-            logger.warning(
-                "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
-            )
-            _raise_cron_delivery_failure(meta, "identity not configured")
-            return False
-        payload = await self._build_push_payload(to_handle, text, meta or {})
+            return True
+        logger.warning(
+            "zhaohu send skipped: sys_id or robot_open_id or to_handle missing",
+        )
+        _raise_cron_delivery_failure(meta, "identity not configured")
+        return False
+
+    async def _post_push_payload(self, payload: dict) -> dict:
         timeout = httpx.Timeout(self.request_timeout, connect=10.0)
         # 自定义SSL上下文
         context = ssl.create_default_context()
@@ -2424,6 +2437,14 @@ class ZhaohuChannel(BaseChannel):
                 data = response.json() if response.content else {}
             except ValueError:
                 data = {}
+        return data
+
+    def _handle_push_response(
+        self,
+        to_handle: str,
+        data: dict,
+        meta: Optional[dict],
+    ) -> bool:
         body = data.get("body") or []
         exp_msg_ids = [
             str(item.get("expMsgId"))
