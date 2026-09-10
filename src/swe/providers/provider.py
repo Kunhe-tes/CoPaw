@@ -167,6 +167,7 @@ class Provider(ProviderInfo, ABC):
     def build_generation_kwargs(
         self,
         model_config: ModelRuntimeConfig,
+        model_id: str = "",
     ) -> dict[str, Any]:
         """Map model runtime configuration to this provider's API shape."""
         return model_config.generation_kwargs(self._output_length_key)
