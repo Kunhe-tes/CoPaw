@@ -1039,6 +1039,7 @@ export default function CronJobOverviewPage() {
   const initialDateRange = getInitialDateRange(searchParams);
   const [overviewData, setOverviewData] =
     useState<CronJobOverviewPageData>(emptyOverviewData);
+  const [loading, setLoading] = useState<boolean>(false);
   const overviewRequestSeqRef = useRef(0);
   const taskRankingRequestSeqRef = useRef(0);
   const [summaryLoading, setSummaryLoading] = useState(false);
@@ -1449,11 +1450,7 @@ export default function CronJobOverviewPage() {
   };
 
   const handleBranchExport = async () => {
-    if (
-      branchDimensionLoading ||
-      branchExporting ||
-      !overviewData.branchRankingRows.length
-    )
+    if (loading || branchExporting || !overviewData.branchRankingRows.length)
       return;
     setBranchExporting(true);
     try {
@@ -2145,9 +2142,7 @@ export default function CronJobOverviewPage() {
           className={styles.exportButton}
           onClick={handleBranchExport}
           disabled={
-            branchDimensionLoading ||
-            branchExporting ||
-            !overviewData.branchRankingRows.length
+            loading || branchExporting || !overviewData.branchRankingRows.length
           }
           aria-label="分行维度导出 Excel"
           aria-busy={branchExporting}
