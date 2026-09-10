@@ -2572,6 +2572,64 @@ def test_console_output_does_not_complete_external_delivery_receipt(
     assert runner.delivery_marks == 0
 
 
+def test_console_session_delivery_failure_is_non_fatal(tmp_path):
+    """A local Console send failure must not fail the Cron execution."""
+
+    async def _run():
+        session = SafeJSONSession(str(tmp_path))
+        await session.mutate_session_state(
+            session_id="session-a",
+            user_id="user-a",
+            mutator=lambda _state: {
+                "task_runs": [
+                    {
+                        "execution_key": "execution-1",
+                        "persistence_key": "persistence-1",
+                        "output_delivery_completed": False,
+                    },
+                ],
+            },
+        )
+        executor = CronExecutor(
+            runner=SimpleNamespace(session=session),
+            channel_manager=_UnconfirmedChannelManager(),
+        )
+        stream_state = AgentStreamState(
+            output_delivery_receipt_supported=True,
+            completed_message_event=SimpleNamespace(
+                object="message",
+                status=RunStatus.Completed,
+                content=[SimpleNamespace(type="text", text="output")],
+            ),
+        )
+        job = _build_agent_job()
+        req = {
+            "session_id": "session-a",
+            "user_id": "user-a",
+            "cron_execution_key": "execution-1",
+            "cron_persistence_key": "persistence-1",
+        }
+        await executor._deliver_persisted_agent_output(  # pylint: disable=protected-access
+            job,
+            "user-a",
+            "session-a",
+            {},
+            stream_state,
+            req,
+        )
+        state = await session.get_session_state_dict(
+            "session-a",
+            user_id="user-a",
+        )
+        return state, stream_state
+
+    state, stream_state = asyncio.run(_run())
+
+    assert state["task_runs"][0]["output_delivery_completed"] is True
+    assert state["task_runs"][0]["output_delivery_state"] == "completed"
+    assert stream_state.output_delivery_completed is True
+
+
 def test_legacy_replay_does_not_redeliver_without_delivery_schema(monkeypatch):
     """Old task runs are skipped rather than replaying unknown side effects."""
     monkeypatch.setattr(

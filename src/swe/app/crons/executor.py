@@ -2625,7 +2625,7 @@ class CronExecutor:
             stream_state,
             delivery_key,
         )
-        if not message_delivered:
+        if not message_delivered and job.dispatch.channel != CONSOLE_CHANNEL:
             raise RuntimeError("cron output delivery not confirmed")
         task_run["output_delivery_state"] = CRON_DELIVERY_STATE_COMPLETED
         task_run["output_delivery_completed"] = True
