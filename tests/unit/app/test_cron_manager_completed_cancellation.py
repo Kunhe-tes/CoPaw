@@ -2688,6 +2688,46 @@ def test_console_session_delivery_exception_is_non_fatal(tmp_path):
     assert stream_state.output_delivery_completed is True
 
 
+def test_console_runner_delivery_exception_is_non_fatal():
+    """The runner-receipt fallback ignores local Console send failures."""
+
+    async def _run():
+        runner = _ReplayableDeliveryRunner()
+        channel_manager = _FailOnceChannelManager()
+        executor = CronExecutor(
+            runner=runner,
+            channel_manager=channel_manager,
+        )
+        stream_state = AgentStreamState(
+            output_delivery_receipt_supported=True,
+            completed_message_event=SimpleNamespace(
+                object="message",
+                status=RunStatus.Completed,
+                content=[SimpleNamespace(type="text", text="output")],
+            ),
+        )
+        await executor._deliver_persisted_agent_output(  # pylint: disable=protected-access
+            _build_agent_job(),
+            "user-a",
+            "session-a",
+            {},
+            stream_state,
+            {
+                "session_id": "session-a",
+                "user_id": "user-a",
+                "cron_execution_key": "execution-1",
+                "cron_persistence_key": "persistence-1",
+            },
+        )
+        return runner, channel_manager, stream_state
+
+    runner, channel_manager, stream_state = asyncio.run(_run())
+
+    assert channel_manager.send_attempts == 1
+    assert runner.delivery_marks == 0
+    assert stream_state.output_delivery_completed is False
+
+
 def test_legacy_replay_does_not_redeliver_without_delivery_schema(monkeypatch):
     """Old task runs are skipped rather than replaying unknown side effects."""
     monkeypatch.setattr(
@@ -2771,8 +2811,8 @@ def test_legacy_external_replay_without_delivery_schema_fails(
     assert channel_manager.events == []
 
 
-def test_recovered_replay_records_success_effects_once(monkeypatch):
-    """A recovered replay applies task success effects once per execution key."""
+def test_console_delivery_failure_records_success_effects_once(monkeypatch):
+    """Console delivery failures still apply success effects once."""
     monkeypatch.setattr(
         "swe.app.crons.executor.CronExecutor._resolve_execution_model",
         lambda *_args: None,
@@ -2794,12 +2834,11 @@ def test_recovered_replay_records_success_effects_once(monkeypatch):
             runner=runner,
             channel_manager=channel_manager,
         )
-        with pytest.raises(RuntimeError, match="channel unavailable"):
-            await manager._execute_once(  # pylint: disable=protected-access
-                job,
-                is_manual=False,
-                dispatch_meta={"cron_execution_key": "execution-1"},
-            )
+        await manager._execute_once(  # pylint: disable=protected-access
+            job,
+            is_manual=False,
+            dispatch_meta={"cron_execution_key": "execution-1"},
+        )
         runner.idempotent_replay = True
         await manager._execute_once(  # pylint: disable=protected-access
             job,
