@@ -369,6 +369,33 @@ async def test_session_cleanup_records_commit_failure_when_close_also_fails() ->
 
 
 @pytest.mark.asyncio
+async def test_session_cleanup_propagates_keyboard_interrupt_from_close() -> (
+    None
+):
+    """Cancellation-like BaseException from close must not be swallowed."""
+
+    class Owner:
+        async def _save_state_during_cleanup(self, **_kwargs: Any) -> None:
+            raise RuntimeError("commit failed")
+
+    async def _close() -> None:
+        raise KeyboardInterrupt
+
+    execution = SimpleNamespace(close=_close)
+
+    with pytest.raises(KeyboardInterrupt):
+        await _save_and_close_session_execution(
+            Owner(),
+            cleanup_runtime=None,
+            cleanup_state_loaded=False,
+            retry_state=SimpleNamespace(prev_agent=None),
+            request=SimpleNamespace(user_id="user-1"),
+            session_id="session-1",
+            session_execution=execution,
+        )
+
+
+@pytest.mark.asyncio
 async def test_session_cleanup_ignores_close_failure_after_commit() -> None:
     """A close failure cannot turn an already committed query into an error."""
     recorded: list[QueryPersistenceResult] = []

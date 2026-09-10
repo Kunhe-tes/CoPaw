@@ -2818,6 +2818,146 @@ def _should_stop_follow_up(outcome: _QueryTurnOutcome) -> bool:
     )
 
 
+def _normalize_cron_execution_key(execution_key: str | None) -> str:
+    """Normalize an optional scheduler execution identity."""
+    return execution_key.strip() if isinstance(execution_key, str) else ""
+
+
+def _check_cron_execution_replay(
+    task_runs: list[Any],
+    execution_key: str,
+    current_content: list[Any],
+    existing_state: dict[str, Any],
+    existing_content: list[Any],
+    stripped_count: int,
+) -> tuple[dict[str, Any], list[Any], list[Any], int, bool] | None:
+    """Return the idempotent result or raise on an execution-key conflict."""
+    if not execution_key:
+        return None
+    current_hash = _task_run_input_hash(current_content)
+    for run in task_runs:
+        if (
+            not isinstance(run, dict)
+            or run.get("execution_key") != execution_key
+        ):
+            continue
+        if run.get("input_hash") != current_hash:
+            increment_cron_result_metric(CRON_EXECUTION_KEY_CONFLICT_TOTAL)
+            raise RuntimeError("execution_key_conflict")
+        return (
+            existing_state,
+            existing_content,
+            current_content,
+            stripped_count,
+            False,
+        )
+    return None
+
+
+def _merge_cron_agent_state(
+    existing_state: dict[str, Any],
+    current_agent_state: dict[str, Any],
+    existing_memory: dict[str, Any],
+    current_memory: dict[str, Any],
+    existing_content: list[Any],
+    current_content: list[Any],
+) -> dict[str, Any]:
+    """Merge the current Agent memory delta into the persisted state."""
+    merged_state = dict(existing_state)
+    existing_agent = existing_state.get("agent")
+    merged_agent = (
+        dict(existing_agent)
+        if isinstance(existing_agent, dict) and existing_memory
+        else dict(current_agent_state)
+    )
+    merged_memory = (
+        dict(existing_memory)
+        if isinstance(existing_agent, dict) and existing_memory
+        else dict(current_memory)
+    )
+    merged_memory["content"] = existing_content + current_content
+    merged_agent["memory"] = merged_memory
+    merged_state["agent"] = merged_agent
+    return merged_state
+
+
+def _apply_cron_hook_overlay(
+    merged_state: dict[str, Any],
+    hook_overlay: HookSessionOverlay | None,
+) -> None:
+    """Apply or remove the one-shot hook overlay in a merged state."""
+    if hook_overlay is not None:
+        merged_state["hook_overlay"] = hook_overlay.model_dump(
+            mode="json",
+            by_alias=True,
+        )
+    else:
+        merged_state.pop("hook_overlay", None)
+
+
+@dataclass(frozen=True)
+class _CronTaskRunDetails:
+    """Identity fields stored with one Cron task-run receipt."""
+
+    memory_start: int
+    execution_key: str
+    persistence_key: str | None
+    job_id: str | None
+    session_id: str | None
+    user_id: str | None
+
+
+def _append_cron_task_run(
+    merged_state: dict[str, Any],
+    task_runs: list[Any],
+    current_content: list[Any],
+    details: _CronTaskRunDetails,
+) -> None:
+    """Append the current Cron task-run record when there is new content."""
+    task_run = _build_task_run_record(
+        current_content,
+        memory_start=details.memory_start,
+        execution_key=details.execution_key or None,
+        persistence_key=details.persistence_key or None,
+        job_id=details.job_id,
+        session_id=details.session_id,
+        user_id=details.user_id,
+    )
+    if task_run is not None:
+        task_runs.append(task_run)
+        merged_state[TASK_RUNS_STATE_KEY] = task_runs
+
+
+def _build_goal_judge_request_context(
+    runtime: _QueryRuntime,
+    approved_tool_call: dict[str, Any] | None,
+) -> dict[str, str]:
+    """Build the restricted request context for a Goal completion Judge."""
+    source_context = getattr(runtime.agent, "_request_context", {}) or {}
+    request_context: dict[str, str] = {
+        key: str(source_context[key])
+        for key in (
+            "session_id",
+            "user_id",
+            "channel",
+            "chat_id",
+            "turn_id",
+            "agent_id",
+            "tenant_id",
+            "source_id",
+            "trace_id",
+            "goal_id",
+        )
+        if source_context.get(key) is not None
+    }
+    request_context["agent_role"] = "completion_judge"
+    if approved_tool_call is not None:
+        request_context["forced_tool_call_json"] = json.dumps(
+            approved_tool_call,
+        )
+    return request_context
+
+
 def _build_cron_append_state(
     existing_state: dict[str, Any],
     current_agent_state: dict[str, Any],
@@ -2836,65 +2976,42 @@ def _build_cron_append_state(
     )
     current_memory = current_agent_state.get("memory", {}) or {}
     current_content = list(current_memory.get("content", []) or [])
-    execution_key = (
-        str(execution_key).strip() if isinstance(execution_key, str) else ""
-    )
+    execution_key = _normalize_cron_execution_key(execution_key)
 
     task_runs = list(existing_state.get(TASK_RUNS_STATE_KEY, []) or [])
-    if execution_key:
-        current_hash = _task_run_input_hash(current_content)
-        for run in task_runs:
-            if (
-                not isinstance(run, dict)
-                or run.get("execution_key") != execution_key
-            ):
-                continue
-            stored_hash = run.get("input_hash")
-            if stored_hash != current_hash:
-                increment_cron_result_metric(CRON_EXECUTION_KEY_CONFLICT_TOTAL)
-                raise RuntimeError("execution_key_conflict")
-            return (
-                existing_state,
-                existing_content,
-                current_content,
-                stripped_count,
-                False,
-            )
-
-    merged_state = dict(existing_state)
-    existing_agent = existing_state.get("agent")
-    if isinstance(existing_agent, dict) and existing_memory:
-        merged_agent = dict(existing_agent)
-        merged_memory = dict(existing_memory)
-        merged_memory["content"] = existing_content + current_content
-        merged_agent["memory"] = merged_memory
-        merged_state["agent"] = merged_agent
-    else:
-        merged_agent = dict(current_agent_state)
-        merged_memory = dict(current_memory)
-        merged_memory["content"] = existing_content + current_content
-        merged_agent["memory"] = merged_memory
-        merged_state["agent"] = merged_agent
-    if hook_overlay is not None:
-        merged_state["hook_overlay"] = hook_overlay.model_dump(
-            mode="json",
-            by_alias=True,
-        )
-    else:
-        merged_state.pop("hook_overlay", None)
-
-    task_run = _build_task_run_record(
+    replay = _check_cron_execution_replay(
+        task_runs,
+        execution_key,
         current_content,
-        memory_start=len(existing_content),
-        execution_key=execution_key or None,
-        persistence_key=persistence_key or None,
-        job_id=job_id,
-        session_id=session_id,
-        user_id=user_id,
+        existing_state,
+        existing_content,
+        stripped_count,
     )
-    if task_run is not None:
-        task_runs.append(task_run)
-        merged_state[TASK_RUNS_STATE_KEY] = task_runs
+    if replay is not None:
+        return replay
+
+    merged_state = _merge_cron_agent_state(
+        existing_state,
+        current_agent_state,
+        existing_memory,
+        current_memory,
+        existing_content,
+        current_content,
+    )
+    _apply_cron_hook_overlay(merged_state, hook_overlay)
+    _append_cron_task_run(
+        merged_state,
+        task_runs,
+        current_content,
+        _CronTaskRunDetails(
+            memory_start=len(existing_content),
+            execution_key=execution_key,
+            persistence_key=persistence_key,
+            job_id=job_id,
+            session_id=session_id,
+            user_id=user_id,
+        ),
+    )
 
     return (
         merged_state,
@@ -4167,69 +4284,13 @@ class AgentRunner(Runner):
         approved_tool_call: dict[str, Any] | None = None,
     ) -> SWEAgent:
         """Create a restricted, frozen-model Agent for Goal completion review."""
-        source_context = getattr(runtime.agent, "_request_context", {}) or {}
-        request_context: dict[str, str] = {
-            key: str(source_context[key])
-            for key in (
-                "session_id",
-                "user_id",
-                "channel",
-                "chat_id",
-                "turn_id",
-                "agent_id",
-                "tenant_id",
-                "source_id",
-                "trace_id",
-                "goal_id",
-            )
-            if source_context.get(key) is not None
-        }
-        request_context["agent_role"] = "completion_judge"
-        if approved_tool_call is not None:
-            request_context["forced_tool_call_json"] = json.dumps(
-                approved_tool_call,
-            )
-        resolved_slot = (
-            getattr(runtime.agent, "_resolved_model_slot", {}) or {}
+        request_context = _build_goal_judge_request_context(
+            runtime,
+            approved_tool_call,
         )
-        frozen_scope = getattr(goal, "scope", None)
-        model_slot_override = None
-        model_provider_override = None
-        provider_id = str(
-            getattr(frozen_scope, "effective_model_provider_id", "") or "",
-        ) or str(resolved_slot.get("provider_id") or "")
-        model_name = str(
-            getattr(frozen_scope, "effective_model", "") or "",
+        model_slot_override, model_provider_override = (
+            self._resolve_goal_completion_judge_model(runtime, goal)
         )
-        if model_name == "default":
-            model_name = ""
-        model_name = model_name or str(resolved_slot.get("model") or "")
-        if not provider_id or not model_name:
-            raise RuntimeError(
-                "Goal completion judge frozen model is unavailable",
-            )
-        from ...providers.models import ModelSlotConfig
-        from ...providers.provider_manager import ProviderManager
-
-        model_slot_override = ModelSlotConfig(
-            provider_id=provider_id,
-            model=model_name,
-        )
-        snapshot_provider = getattr(
-            runtime.agent,
-            "_resolved_model_provider",
-            None,
-        )
-        if getattr(snapshot_provider, "id", None) != provider_id:
-            snapshot_provider = None
-        model_provider_override = (
-            snapshot_provider
-            or ProviderManager.get_instance(
-                self.tenant_id,
-            ).get_provider(provider_id)
-        )
-        if model_provider_override is None:
-            raise RuntimeError("Goal completion judge provider is unavailable")
         return SWEAgent(
             agent_config=runtime.agent_config,
             env_context=None,
@@ -4245,6 +4306,50 @@ class AgentRunner(Runner):
             system_prompt_override=_GOAL_COMPLETION_JUDGE_SYSTEM_PROMPT,
             source_tool_versions=(),
         )
+
+    def _resolve_goal_completion_judge_model(
+        self,
+        runtime: _QueryRuntime,
+        goal: Any,
+    ) -> tuple[Any, Any]:
+        """Resolve the Goal-frozen model slot and matching provider."""
+        from ...providers.models import ModelSlotConfig
+        from ...providers.provider_manager import ProviderManager
+
+        resolved_slot = (
+            getattr(runtime.agent, "_resolved_model_slot", {}) or {}
+        )
+        frozen_scope = getattr(goal, "scope", None)
+        provider_id = str(
+            getattr(frozen_scope, "effective_model_provider_id", "") or "",
+        ) or str(resolved_slot.get("provider_id") or "")
+        model_name = str(
+            getattr(frozen_scope, "effective_model", "") or "",
+        )
+        if model_name == "default":
+            model_name = ""
+        model_name = model_name or str(resolved_slot.get("model") or "")
+        if not provider_id or not model_name:
+            raise RuntimeError(
+                "Goal completion judge frozen model is unavailable",
+            )
+        model_slot = ModelSlotConfig(
+            provider_id=provider_id,
+            model=model_name,
+        )
+        snapshot_provider = getattr(
+            runtime.agent,
+            "_resolved_model_provider",
+            None,
+        )
+        if getattr(snapshot_provider, "id", None) != provider_id:
+            snapshot_provider = None
+        provider = snapshot_provider or ProviderManager.get_instance(
+            self.tenant_id,
+        ).get_provider(provider_id)
+        if provider is None:
+            raise RuntimeError("Goal completion judge provider is unavailable")
+        return model_slot, provider
 
     def _create_goal_completion_reviewer(
         self,
