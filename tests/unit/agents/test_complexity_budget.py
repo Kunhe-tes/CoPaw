@@ -46,6 +46,8 @@ def test_targeted_agent_paths_stay_within_complexity_budget() -> None:
         AgentRunner.query_handler,
         BaseChannel._has_sendable_content,
         ZhaohuChannel.send,
+        CronExecutor._build_agent_request,
+        CronExecutor._run_agent_stream,
         CronExecutor._deliver_persisted_agent_output,
         CronManager.run_job,
         CronManager._record_task_execution_success,

@@ -287,6 +287,27 @@ class AgentStreamState:
         return self.completed_message_seen or self.response_completed_seen
 
 
+@dataclass(frozen=True)
+class _AgentStreamEventFlags:
+    completed_message: bool
+    failed_message: bool
+    completed_response: bool
+    failed_response: bool
+    cancelled_response: bool
+
+    @property
+    def requires_terminal_notification(self) -> bool:
+        return (
+            self.failed_message
+            or self.failed_response
+            or self.cancelled_response
+        )
+
+    @property
+    def terminates_stream(self) -> bool:
+        return self.completed_response or self.requires_terminal_notification
+
+
 async def _index_model_output_to_monitor(
     trace_id: str,
     model_output: str,
@@ -2212,6 +2233,21 @@ class CronExecutor:
         dispatch_meta: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build agent request dict from job spec."""
+        req = self._build_base_agent_request(
+            job,
+            target_user_id,
+            target_session_id,
+        )
+        self._apply_cron_execution_identity(job, req, dispatch_meta)
+        self._apply_agent_request_identity_metadata(job, req)
+        return req
+
+    @staticmethod
+    def _build_base_agent_request(
+        job: CronJobSpec,
+        target_user_id: str,
+        target_session_id: str,
+    ) -> Dict[str, Any]:
         req: Dict[str, Any] = job.request.model_dump(mode="json")
         removed_trace_id = req.pop("trace_id", None)
         if removed_trace_id:
@@ -2229,6 +2265,14 @@ class CronExecutor:
         req["cron_timeout_seconds"] = job.runtime.timeout_seconds
         req["cron_job_id"] = job.id
         req["cron_persistence_key"] = str(uuid.uuid4())
+        return req
+
+    @staticmethod
+    def _apply_cron_execution_identity(
+        job: CronJobSpec,
+        req: Dict[str, Any],
+        dispatch_meta: Optional[Dict[str, Any]],
+    ) -> None:
         execution_key = _build_cron_execution_key(
             job_id=job.id,
             target_session_id=req["session_id"],
@@ -2246,31 +2290,32 @@ class CronExecutor:
             )
         if execution_key:
             req["cron_execution_key"] = execution_key
-        # 传递 source_id 用于 tracing 数据隔离
+
+    @staticmethod
+    def _apply_agent_request_identity_metadata(
+        job: CronJobSpec,
+        req: Dict[str, Any],
+    ) -> None:
         if job.source_id:
             req["source_id"] = job.source_id
-        scope_id = (
-            canonicalize_scope_id(job.scope_id)
-            if job.scope_id is not None
-            else (
-                None
-                if getattr(job, "tenant_id", None) == "default"
-                and job.source_id is not None
-                else resolve_scope_id(
-                    getattr(job, "tenant_id", None),
-                    job.source_id,
-                )
-            )
-        )
+        scope_id = CronExecutor._resolve_agent_request_scope_id(job)
         if scope_id:
             req["scope_id"] = scope_id
-        # 传递 bbk_id 用于 tracing 用户标识
         if job.bbk_id:
             req["bbk_id"] = job.bbk_id
-        # 传递 user_name（从 tenant_name 字段获取）
         if job.tenant_name:
             req["user_name"] = job.tenant_name
-        return req
+
+    @staticmethod
+    def _resolve_agent_request_scope_id(job: CronJobSpec) -> str | None:
+        if job.scope_id is not None:
+            return canonicalize_scope_id(job.scope_id)
+        if getattr(job, "tenant_id", None) == "default" and job.source_id:
+            return None
+        return resolve_scope_id(
+            getattr(job, "tenant_id", None),
+            job.source_id,
+        )
 
     def _apply_auth_token(
         self,
@@ -2329,90 +2374,25 @@ class CronExecutor:
         async for event in stream:
             stream_state.event_count += 1
             self._record_agent_stream_event(job, event, stream_state)
-            is_completed_message = self._is_completed_message_event(event)
-            is_failed_message = self._is_failed_message_event(event)
-            is_completed_response = self._is_completed_response_event(event)
-            is_failed_response = self._is_failed_response_event(event)
-            is_cancelled_response = self._is_cancelled_response_event(event)
-            output_entries = self._extract_assistant_output_entries(event)
-            for output_key, text, output_source in output_entries:
-                if (
-                    output_key
-                    and output_key in stream_state._output_event_keys
-                ):
-                    continue
-                if output_key:
-                    stream_state._output_event_keys.add(output_key)
-                stream_state.output_parts.append(text)
-                stream_state.assistant_message_seen = True
-                stream_state.assistant_message_count += 1
-                if not stream_state.output_source:
-                    stream_state.output_source = output_source
-            if is_completed_message:
-                stream_state.completed_message_seen = True
-                stream_state.completed_message_event = event
-                logger.info(
-                    "cron agent completed message received: job_id=%s "
-                    "event_count=%s output_len=%s",
-                    job.id,
-                    stream_state.event_count,
-                    stream_state.output_len,
-                )
-            if is_failed_message:
-                stream_state.failed_message_seen = True
-                self._set_stream_error_from_event(stream_state, event)
-                logger.warning(
-                    "cron agent failed message received: job_id=%s "
-                    "event_count=%s error=%s",
-                    job.id,
-                    stream_state.event_count,
-                    stream_state.error_message,
-                )
-            if is_completed_response:
-                stream_state.response_completed_seen = True
-                stream_state.terminal_response_status = RunStatus.Completed
-            if is_failed_response:
-                stream_state.response_failed_seen = True
-                stream_state.terminal_response_status = getattr(
-                    event,
-                    "status",
-                    RunStatus.Failed,
-                )
-                self._set_stream_error_from_event(stream_state, event)
-            if is_cancelled_response:
-                stream_state.response_cancelled_seen = True
-                stream_state.terminal_response_status = RunStatus.Canceled
-                self._set_stream_error_from_event(stream_state, event)
-            if (
-                is_failed_message
-                or is_failed_response
-                or is_cancelled_response
-            ):
-                await self._channel_manager.send_event(
-                    channel=job.dispatch.channel,
-                    user_id=target_user_id,
-                    session_id=target_session_id,
-                    event=event,
-                    meta=dispatch_meta,
-                )
-                await self._send_agent_terminal_text(
+            flags = self._classify_agent_stream_event(event)
+            self._collect_agent_stream_output(event, stream_state)
+            self._apply_agent_stream_event_state(
+                job,
+                event,
+                flags,
+                stream_state,
+            )
+            if flags.requires_terminal_notification:
+                await self._notify_agent_stream_terminal_event(
                     job,
                     target_user_id,
                     target_session_id,
                     dispatch_meta,
+                    event,
                     stream_state,
                 )
-            if (
-                is_completed_response
-                or is_failed_message
-                or is_failed_response
-                or is_cancelled_response
-            ):
-                # Runtime terminal events are sufficient to decide this Cron
-                # execution. Do not let a stalled tail iterator override them.
-                aclose = getattr(stream, "aclose", None)
-                if callable(aclose):
-                    await aclose()
+            if flags.terminates_stream:
+                await self._close_terminal_agent_stream(stream)
                 stream_state.stream_returned = True
                 break
         stream_state.stream_returned = True
@@ -2437,6 +2417,110 @@ class CronExecutor:
             stream_state.unknown_event_count,
             stream_state.output_len,
         )
+
+    @staticmethod
+    def _classify_agent_stream_event(event: Any) -> _AgentStreamEventFlags:
+        return _AgentStreamEventFlags(
+            completed_message=CronExecutor._is_completed_message_event(event),
+            failed_message=CronExecutor._is_failed_message_event(event),
+            completed_response=(
+                CronExecutor._is_completed_response_event(event)
+            ),
+            failed_response=CronExecutor._is_failed_response_event(event),
+            cancelled_response=(
+                CronExecutor._is_cancelled_response_event(event)
+            ),
+        )
+
+    def _collect_agent_stream_output(
+        self,
+        event: Any,
+        stream_state: AgentStreamState,
+    ) -> None:
+        output_entries = self._extract_assistant_output_entries(event)
+        for output_key, text, output_source in output_entries:
+            if output_key and output_key in stream_state._output_event_keys:
+                continue
+            if output_key:
+                stream_state._output_event_keys.add(output_key)
+            stream_state.output_parts.append(text)
+            stream_state.assistant_message_seen = True
+            stream_state.assistant_message_count += 1
+            if not stream_state.output_source:
+                stream_state.output_source = output_source
+
+    def _apply_agent_stream_event_state(
+        self,
+        job: CronJobSpec,
+        event: Any,
+        flags: _AgentStreamEventFlags,
+        stream_state: AgentStreamState,
+    ) -> None:
+        if flags.completed_message:
+            stream_state.completed_message_seen = True
+            stream_state.completed_message_event = event
+            logger.info(
+                "cron agent completed message received: job_id=%s "
+                "event_count=%s output_len=%s",
+                job.id,
+                stream_state.event_count,
+                stream_state.output_len,
+            )
+        if flags.failed_message:
+            stream_state.failed_message_seen = True
+            self._set_stream_error_from_event(stream_state, event)
+            logger.warning(
+                "cron agent failed message received: job_id=%s "
+                "event_count=%s error=%s",
+                job.id,
+                stream_state.event_count,
+                stream_state.error_message,
+            )
+        if flags.completed_response:
+            stream_state.response_completed_seen = True
+            stream_state.terminal_response_status = RunStatus.Completed
+        if flags.failed_response:
+            stream_state.response_failed_seen = True
+            stream_state.terminal_response_status = getattr(
+                event,
+                "status",
+                RunStatus.Failed,
+            )
+            self._set_stream_error_from_event(stream_state, event)
+        if flags.cancelled_response:
+            stream_state.response_cancelled_seen = True
+            stream_state.terminal_response_status = RunStatus.Canceled
+            self._set_stream_error_from_event(stream_state, event)
+
+    async def _notify_agent_stream_terminal_event(
+        self,
+        job: CronJobSpec,
+        target_user_id: str,
+        target_session_id: str,
+        dispatch_meta: Dict[str, Any],
+        event: Any,
+        stream_state: AgentStreamState,
+    ) -> None:
+        await self._channel_manager.send_event(
+            channel=job.dispatch.channel,
+            user_id=target_user_id,
+            session_id=target_session_id,
+            event=event,
+            meta=dispatch_meta,
+        )
+        await self._send_agent_terminal_text(
+            job,
+            target_user_id,
+            target_session_id,
+            dispatch_meta,
+            stream_state,
+        )
+
+    @staticmethod
+    async def _close_terminal_agent_stream(stream: Any) -> None:
+        aclose = getattr(stream, "aclose", None)
+        if callable(aclose):
+            await aclose()
 
     async def _send_agent_stream_events(
         self,
