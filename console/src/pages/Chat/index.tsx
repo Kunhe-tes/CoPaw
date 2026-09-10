@@ -132,7 +132,11 @@ import {
   type CronTaskEditFormValues,
 } from "./taskEditSubmit";
 import ChatTaskEditFormBody from "./components/ChatTaskEditFormBody";
-import { shouldRefreshCurrentTaskMessages } from "./taskMessageRefresh";
+import {
+  refreshTaskSessionWithRetry,
+  TASK_SESSION_REFRESH_RECOVERY_DELAY_MS,
+  shouldRefreshCurrentTaskMessages,
+} from "./taskMessageRefresh";
 import { resolveCurrentFileUrlNetwork } from "./fileUrlNetwork";
 import { shouldClearPendingScenarioPreset } from "./scenarioPresetRequest";
 import { matchesResolvedChatId } from "./sessionApi/resolvedSessionMapping";
@@ -1595,7 +1599,6 @@ function ChatPageContent() {
   useEffect(() => {
     const hadResult = Boolean(currentTask?.task?.has_scheduled_result);
     if (hadResult && !taskHadResultRef.current) {
-      void chatRef.current?.refreshSession?.();
       setFeedbackRefreshKey((prev) => prev + 1);
     }
     taskHadResultRef.current = hadResult;
@@ -1837,21 +1840,30 @@ function ChatPageContent() {
     const previousTask = previousCurrentTaskRef.current;
     previousCurrentTaskRef.current = currentTask;
 
-    if (
-      !shouldRefreshCurrentTaskMessages({
-        previousTask,
-        currentTask,
-      })
-    ) {
-      return;
-    }
+    const shouldRefresh = shouldRefreshCurrentTaskMessages({
+      previousTask,
+      currentTask,
+    });
+    if (!shouldRefresh || !chatId) return;
 
-    void chatRef.current?.refreshSession?.();
+    let cancelled = false;
+    void refreshTaskSessionWithRetry(
+      (sessionId) =>
+        chatRef.current?.refreshSession?.(sessionId) ?? Promise.resolve(false),
+      {
+        sessionId: chatId,
+        retryAfterExhaustionMs: TASK_SESSION_REFRESH_RECOVERY_DELAY_MS,
+        shouldContinue: () => !cancelled,
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
   }, [
     currentTask?.id,
     currentTask?.task?.has_scheduled_result,
     currentTask?.task?.last_scheduled_run_at,
-    currentTask?.task?.unread_execution_count,
+    chatId,
   ]);
 
   // Show toast when task has no scheduled result yet
