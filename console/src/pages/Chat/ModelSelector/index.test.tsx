@@ -310,6 +310,32 @@ describe("ModelSelector", () => {
     expect(mocks.loadModelData).toHaveBeenCalledWith({ scope: "effective" });
   });
 
+  it("keeps activation successful when the post-activation refresh fails", async () => {
+    render(<ModelSelector />);
+    await waitFor(() => expect(mocks.loadModelData).toHaveBeenCalled());
+    mocks.loadModelData.mockRejectedValueOnce(new Error("refresh failed"));
+    const dispatchSpy = vi
+      .spyOn(window, "dispatchEvent")
+      .mockImplementation(() => true);
+
+    fireEvent.click(screen.getByRole("button", { name: /qwen-max/i }));
+
+    await waitFor(() =>
+      expect(mocks.setActiveLlm).toHaveBeenCalledWith({
+        provider_id: "dashscope",
+        model: "qwen-max",
+        scope: "global",
+      }),
+    );
+    await waitFor(() =>
+      expect(dispatchSpy).toHaveBeenCalledWith(
+        expect.objectContaining({ type: "model-switched" }),
+      ),
+    );
+    expect(mocks.messageError).not.toHaveBeenCalled();
+    dispatchSpy.mockRestore();
+  });
+
   it("keeps the previous active card and reports an error when model activation fails", async () => {
     mocks.setActiveLlm.mockRejectedValueOnce(new Error("activation failed"));
     render(<ModelSelector />);

@@ -210,7 +210,12 @@ export default function ModelSelector() {
         model: modelId,
         scope: "global",
       });
-      await loadModelData({ scope: "effective" });
+      try {
+        await loadModelData({ scope: "effective" });
+      } catch (err) {
+        // Activation already succeeded; a stale refresh must not report a failed switch.
+        console.error("ModelSelector: failed to refresh model data", err);
+      }
       // Notify ChatPage to refresh multimodal capabilities
       window.dispatchEvent(new CustomEvent("model-switched"));
     } catch (err) {

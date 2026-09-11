@@ -220,6 +220,102 @@
   text-align: center;
 }
 
+:global(.dark-mode) {
+  .trigger {
+    color: rgba(255, 255, 255, 0.85);
+
+    &:hover,
+    &.triggerActive {
+      color: #6f95ff;
+      box-shadow: 0 2px 8px rgba(55, 105, 252, 0.2);
+    }
+  }
+
+  .triggerArrow {
+    color: rgba(255, 255, 255, 0.45);
+
+    &.triggerArrowOpen {
+      color: #6f95ff;
+    }
+  }
+
+  .panel {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: #1f1f1f;
+    box-shadow: 0 14px 36px rgba(0, 0, 0, 0.42);
+  }
+
+  .modelCard {
+    border-color: rgba(255, 255, 255, 0.12);
+    background: #262626;
+    color: rgba(255, 255, 255, 0.9);
+
+    &:hover:not(:disabled) {
+      border-color: rgba(111, 149, 255, 0.75);
+      background: #303b59;
+    }
+  }
+
+  .modelCardActive {
+    border-color: #6f95ff;
+    background: linear-gradient(120deg, #293653 0%, #25304a 100%);
+    box-shadow: inset 0 0 0 1px rgba(111, 149, 255, 0.2);
+  }
+
+  .modelId,
+  .runtimeConfigTitle {
+    color: rgba(255, 255, 255, 0.95);
+  }
+
+  .modelMetadata,
+  .reasoningHint,
+  .emptyTip,
+  .spinWrapper {
+    color: rgba(255, 255, 255, 0.55);
+  }
+
+  .runtimeConfig {
+    border-left-color: rgba(255, 255, 255, 0.12);
+    background: #1f1f1f;
+  }
+
+  .runtimeConfigRow {
+    border-bottom-color: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.78);
+  }
+
+  .reasoningLabel {
+    color: rgba(255, 255, 255, 0.78);
+  }
+
+  .reasoningOptions {
+    background: #292929;
+  }
+
+  .reasoningOption {
+    color: rgba(255, 255, 255, 0.85);
+
+    &:global(.ant-btn-default) {
+      border-color: transparent;
+      background: #363636;
+      color: rgba(255, 255, 255, 0.85);
+    }
+
+    &:global(.ant-btn-primary) {
+      background: #3769fc;
+      color: #fff;
+    }
+  }
+
+  .runtimeConfig :global(.ant-switch) {
+    background: rgba(255, 255, 255, 0.25);
+  }
+
+  .runtimeConfig :global(.ant-switch-checked) {
+    background: #3769fc;
+  }
+}
+
 @media (max-width: 640px) {
   .panel,
   .panelWithConfig {
@@ -237,5 +333,9 @@
   .runtimeConfig {
     border-top: 1px solid #e1e6ef;
     border-left: 0;
+  }
+
+  :global(.dark-mode) .runtimeConfig {
+    border-top-color: rgba(255, 255, 255, 0.12);
   }
 }
