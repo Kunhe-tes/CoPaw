@@ -5,7 +5,7 @@
 ## 2. Backend
 
 - [x] 2.1 Add scheduler request model with `source_id` and optional `bbk_id`.
-- [x] 2.2 Add service method that builds the latest seven-day forced task request.
+- [x] 2.2 Add service method that builds the latest seven-calendar-day forced task request.
 - [x] 2.3 Add route that does not require headers and reuses the service method.
 
 ## 3. Verification

@@ -21,11 +21,11 @@ to `scope_type = ALL` and `bbk_id = ALL`.
 
 The service calculates the time window at request handling time:
 
-- `end_time`: current server time with microseconds removed.
-- `start_time`: `end_time - 7 days`.
+- `end_time`: today `23:59:59` by server date.
+- `start_time`: six days before today `00:00:00`.
 
-This matches the default recent seven-day window used by the Console and
-prewarm flow, while avoiding scheduler-side date math.
+This gives the scheduler the latest seven calendar days while avoiding
+scheduler-side date math.
 
 ## Task Creation
 

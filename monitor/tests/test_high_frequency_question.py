@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, time as datetime_time, timedelta
 
 import pytest
 from pydantic import ValidationError
@@ -396,7 +396,7 @@ async def test_submit_task_force_bypasses_recent_result(monkeypatch):
     assert scheduled_tasks
 
 
-def test_submit_scheduled_task_builds_forced_seven_day_request(monkeypatch):
+def test_submit_scheduled_task_builds_forced_seven_calendar_day_request(monkeypatch):
     db = _FakeDb()
     service = HighFrequencyQuestionService(db)
     captured: dict[str, object] = {}
@@ -434,7 +434,9 @@ def test_submit_scheduled_task_builds_forced_seven_day_request(monkeypatch):
     assert request.source_id == "RMASSIST"
     assert request.bbk_id == "110"
     assert request.force is True
-    assert request.end_time - request.start_time == timedelta(days=7)
+    assert request.start_time.time() == datetime_time.min
+    assert request.end_time.time() == datetime_time(23, 59, 59)
+    assert request.end_time.date() - request.start_time.date() == timedelta(days=6)
     assert request.end_time.microsecond == 0
     assert captured["actor_user_id"] == hfq_service_module.SYSTEM_ACTOR_ID
     assert captured["actor_user_name"] == hfq_service_module.SYSTEM_ACTOR_NAME

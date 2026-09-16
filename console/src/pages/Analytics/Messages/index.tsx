@@ -226,12 +226,7 @@ function getTopicSkillCoverage(
 function getTopicSkillMetricText(
   topic: HighFrequencyQuestionResult["topics"][number],
 ) {
-  return `${formatAnalysisCount(
-    topic.skill_used_count,
-  )} 条（${formatAnalysisPercent(
-    topic.skill_used_count,
-    topic.message_count,
-  )}）`;
+  return formatAnalysisPercent(topic.skill_used_count, topic.message_count);
 }
 
 function getTopicBbkDistribution(
@@ -764,7 +759,7 @@ export default function MessagesPage() {
                   <strong>{skillCoveragePercent}</strong>
                   <span>
                     {formatAnalysisCount(analysisResult.total_skill_used_count)}{" "}
-                    条 / {formatAnalysisCount(analysisResult.message_count)} 条
+                    / {formatAnalysisCount(analysisResult.message_count)} 条
                   </span>
                 </div>
                 <div className={styles.analysisSummaryTrack}>
@@ -785,7 +780,7 @@ export default function MessagesPage() {
                   {formatAnalysisCount(analysisResult.skill_gap_topic_count)} /{" "}
                   {formatAnalysisCount(analysisResult.topic_count)}
                 </strong>
-                <span>高频问题存在承载缺口</span>
+                <span>高频问题技能承载缺口</span>
               </div>
             </div>
           </section>

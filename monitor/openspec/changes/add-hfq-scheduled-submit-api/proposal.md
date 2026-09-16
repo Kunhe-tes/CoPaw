@@ -4,7 +4,7 @@
 
 Add a scheduler-facing high-frequency question task submission API that does not
 depend on request headers and always creates a new workflow task for the latest
-seven-day window.
+seven calendar days.
 
 ## Motivation
 
@@ -18,7 +18,8 @@ minimal body-only API for scheduled runs.
 
 - Add a request body containing required `source_id` and optional `bbk_id`.
 - Add a new POST endpoint for scheduler-driven task submission.
-- Server-side calculate `end_time = now` and `start_time = now - 7 days`.
+- Server-side calculate `end_time` as today `23:59:59` and `start_time` as
+  six days before today `00:00:00`.
 - Submit through the existing high-frequency question task flow with force
   enabled so each scheduler call creates a new `batch_id`.
 - Preserve current `/tasks`, `/prewarm`, result lookup, workflow dispatch, and

@@ -302,9 +302,10 @@ class HighFrequencyQuestionService:
         self,
         request: HighFrequencyQuestionScheduledTaskRequest,
     ) -> HighFrequencyQuestionTaskSubmitResponse:
-        """Submit a body-only scheduler task for the latest seven-day range."""
-        end_time = datetime.now().replace(microsecond=0)
-        start_time = end_time - timedelta(days=7)
+        """Submit a body-only scheduler task for the latest seven calendar days."""
+        today = datetime.now().date()
+        start_time = datetime.combine(today - timedelta(days=6), datetime_time.min)
+        end_time = datetime.combine(today, datetime_time.max).replace(microsecond=0)
         return await self.submit_task(
             HighFrequencyQuestionTaskSubmitRequest(
                 source_id=request.source_id,

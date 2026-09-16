@@ -6,7 +6,7 @@
 
 The monitor service SHALL provide a scheduler-facing high-frequency question
 submission API that uses request-body source information and creates a new
-workflow task for the latest seven-day window.
+workflow task for the latest seven calendar days.
 
 #### Scenario: Submit scheduled all-organization task
 
@@ -15,8 +15,8 @@ workflow task for the latest seven-day window.
 - **AND** the JSON body contains `source_id`
 - **AND** the JSON body omits `bbk_id`
 - **WHEN** the service handles the request
-- **THEN** it computes `end_time` from the current server time
-- **AND** computes `start_time = end_time - 7 days`
+- **THEN** it computes `end_time` as today `23:59:59` by server date
+- **AND** computes `start_time` as six days before today `00:00:00`
 - **AND** submits through the existing task flow with `force = true`
 - **AND** returns `state = RUNNING` with a generated `task_id` and `batch_id`
 - **AND** normalizes the scope to `scope_type = ALL` and `bbk_id = ALL`.
