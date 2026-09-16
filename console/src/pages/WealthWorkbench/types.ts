@@ -120,7 +120,7 @@ export interface Customer {
   /** 所属经营场景的技能 ID（触达登记/名单接口入参） */
   skillId: string;
   name: string;
-  /** 重点标签：总行重点 / 分行重点 / 行长指派（真实名单暂无此概念，置空） */
+  /** 重点标签：行长指派 / 分行重点 / 我的关注，可多值 */
   label: string;
   /** 推荐理由（外部 name-list 的 recomReason） */
   reason: string;

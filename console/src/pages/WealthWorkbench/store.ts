@@ -181,6 +181,7 @@ function todayTaskRefs(plans: Plan[]): api.TodayTaskRef[] {
       skillId: n.sceneId,
       sceneName: n.sceneName,
       category: g.category,
+      source: n.source,
     })),
   );
 }
