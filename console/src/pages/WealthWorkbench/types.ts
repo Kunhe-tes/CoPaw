@@ -131,6 +131,8 @@ export interface Customer {
   time: string;
   note: string;
   opportunities?: string[];
+  /** 机构编码（外部 name-list 的 bbkOrgId，用于电访/客户洞察外链签名） */
+  bbkOrgId?: string;
   /** 客户详情跳转链接（外部 name-list 的 filename，可直接 iframe 渲染） */
   link?: string;
 }
