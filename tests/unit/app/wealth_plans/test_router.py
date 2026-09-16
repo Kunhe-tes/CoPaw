@@ -355,7 +355,30 @@ def test_name_list_forwards_touch_filter_context(
 
     class FakeResponse:
         def json(self) -> dict:
-            return {"code": "200", "data": {"list": []}}
+            return {
+                "code": "200",
+                "message": "成功",
+                "data": {
+                    "list": [
+                        {
+                            "custUid": "PNCIF6571543777",
+                            "custNm": "王*",
+                            "sapId": "80280256",
+                            "bbkOrgId": "755480",
+                            "filename": "http://example.test/customer",
+                            "recomReason": "命中条件说明",
+                            "skillList": [
+                                {
+                                    "skillId": "SKILL0001",
+                                    "skillName": "贷款经营",
+                                },
+                            ],
+                            "strongContactTime": "2026-09-16 10:30:00",
+                            "touchMethod": "电话",
+                        },
+                    ],
+                },
+            }
 
     class FakeClient:
         def __init__(self, *args, **kwargs) -> None:
@@ -405,6 +428,19 @@ def test_name_list_forwards_touch_filter_context(
         "posId": "RB0101",
     }
     assert captured["headers"] == {"Cookie": "session=active"}
+    assert resp.json()["items"] == [
+        {
+            "custUid": "PNCIF6571543777",
+            "custNm": "王*",
+            "sapId": "80280256",
+            "bbkOrgId": "755480",
+            "filename": "http://example.test/customer",
+            "recomReason": "命中条件说明",
+            "skillList": [{"skillId": "SKILL0001", "skillName": "贷款经营"}],
+            "strongContactTime": "2026-09-16 10:30:00",
+            "touchMethod": "电话",
+        },
+    ]
 
 
 def test_skill_stats_empty_when_external_absent(client: TestClient) -> None:
@@ -623,19 +659,3 @@ async def test_board_status_distributing_while_running(
     creator_view = client.get("/api/wealth/plans", headers=VIEWER).json()
 
     assert creator_view["items"][0]["board_status"] == "分发中"
-
-
-def test_skill_ids_by_customer_dedupes_and_skips_bad_rows() -> None:
-    """客户视角标签列的数据来源：custuid → 命中技能列表（去重、跳过脏行）。"""
-    rows = [
-        {"custuid": "CUST001", "skillId": "loan_verify"},
-        {"custuid": "cust001", "skillId": "loan_verify"},  # 大小写归一并去重
-        {"custuid": "CUST001", "skillId": "deposit_growth"},
-        {"custuid": "CUST002", "skillId": ""},  # 无技能，跳过
-        {"custuid": "", "skillId": "loan_verify"},  # 无客户，跳过
-        "not-a-dict",
-    ]
-
-    mapping = wealth_router._skill_ids_by_customer(rows)
-
-    assert mapping == {"cust001": ["loan_verify", "deposit_growth"]}

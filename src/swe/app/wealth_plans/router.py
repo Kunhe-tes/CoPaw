@@ -296,32 +296,11 @@ async def _fetch_external_name_list(
         logger.warning("name-list rejected: %s", payload.get("code"))
         return []
     data = payload.get("data") or {}
-    skill_map = _skill_ids_by_customer(data.get("items") or [])
     items: list[NameListItem] = []
     for row in data.get("list") or []:
         if (item := _parse_name_list_item(row)) is not None:
-            item.skillIds = skill_map.get(item.custUid.lower(), [])
             items.append(item)
     return items
-
-
-def _skill_ids_by_customer(rows: Any) -> dict[str, list[str]]:
-    """从原始名单（data.items）提取 custuid → 命中技能列表的映射。
-
-    客户视角不按技能过滤，同一客户可能被多个技能命中；
-    前端标签列据此展示客户命中的场景。
-    """
-    mapping: dict[str, list[str]] = {}
-    for entry in rows:
-        if not isinstance(entry, dict):
-            continue
-        uid = str(entry.get("custuid") or "").strip().lower()
-        skill = str(entry.get("skillId") or "").strip()
-        if uid and skill:
-            bucket = mapping.setdefault(uid, [])
-            if skill not in bucket:
-                bucket.append(skill)
-    return mapping
 
 
 def _parse_name_list_item(row: Any) -> NameListItem | None:

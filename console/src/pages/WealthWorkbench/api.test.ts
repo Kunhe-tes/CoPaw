@@ -149,14 +149,24 @@ describe("WealthWorkbench api", () => {
     expect(String(nameListCalls[0]?.[0])).toContain("sap_id=10086");
   });
 
-  it("fetchTodayCustomers 客户视角：一次查询不带 skillId，按客户聚合并标注命中场景", async () => {
+  it("fetchTodayCustomers 客户视角：直接映射外部聚合名单并标注命中场景", async () => {
     mockRequest.mockImplementation(async (path: unknown) => {
       const p = String(path);
       if (p.startsWith("/wealth/name-list")) {
         return {
           items: [
-            { ...NAME_LIST_FIXTURE[0], skillIds: ["skill-loan-1"] },
-            { ...NAME_LIST_FIXTURE[1], skillIds: ["skill-unknown"] },
+            {
+              ...NAME_LIST_FIXTURE[0],
+              skillList: [
+                { skillId: "skill-loan-1", skillName: "信贷需求挖掘" },
+              ],
+              strongContactTime: "2026-09-16 10:30:00",
+              touchMethod: "电话",
+            },
+            {
+              ...NAME_LIST_FIXTURE[1],
+              skillList: [{ skillId: "skill-unknown", skillName: "未知技能" }],
+            },
           ],
         };
       }
@@ -182,8 +192,18 @@ describe("WealthWorkbench api", () => {
       label: "信贷需求挖掘",
       task: "信贷需求挖掘",
       category: "贷款",
+      reason: "命中贷款核验规则",
+      opportunities: ["命中贷款核验规则"],
+      channel: "电话",
+      time: "2026-09-16 10:30:00",
     });
-    expect(customers[1]).toMatchObject({ id: "CUST002", label: "", task: "" });
+    expect(customers[1]).toMatchObject({
+      id: "CUST002",
+      label: "",
+      task: "",
+      reason: "",
+      opportunities: [],
+    });
   });
 
   it("fetchPendingCustomers / fetchDoneCustomers 以 touched 区分名单口径", async () => {
@@ -199,11 +219,26 @@ describe("WealthWorkbench api", () => {
     }
   });
 
-  it("fetchDoneCustomers 名单全部为已触达，触达方式/时间置空待接口补字段", async () => {
+  it("fetchDoneCustomers 使用 skillName 作为经营任务", async () => {
+    mockRequest.mockResolvedValueOnce({
+      items: [
+        {
+          ...NAME_LIST_FIXTURE[0],
+          skillList: [
+            { skillId: "skill-loan-1", skillName: "外部经营任务名称" },
+          ],
+        },
+      ],
+    });
     const done = await api.fetchDoneCustomers([TASK], "10086");
-    expect(done).toHaveLength(2);
+    expect(done).toHaveLength(1);
     expect(done.every((c) => c.done)).toBe(true);
-    expect(done[0]).toMatchObject({ channel: "", time: "", note: "" });
+    expect(done[0]).toMatchObject({
+      task: "外部经营任务名称",
+      channel: "",
+      time: "",
+      note: "",
+    });
   });
 
   it("resetMockDb 后草稿恢复初始（模拟刷新）", async () => {
