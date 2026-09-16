@@ -57,7 +57,10 @@ function Opportunities({
   customer: Customer;
   multiple?: boolean;
 }) {
-  const items = customer.opportunities ?? [customer.reason];
+  const items = (customer.opportunities ?? [customer.reason]).filter(
+    (item) => item.trim().length > 0,
+  );
+  if (!items.length) return <>--</>;
   if (multiple && items.length > 1) {
     return (
       <ul className={styles.opportunityList}>
@@ -67,7 +70,7 @@ function Opportunities({
       </ul>
     );
   }
-  return <>{customer.reason}</>;
+  return <>{items[0]}</>;
 }
 
 /** 电访 / 客户洞察外链占位：地址待外部系统提供，当前新窗口打开占位页 */

@@ -260,6 +260,11 @@ export async function fetchSkillStats(
 // 客户名单查询：/wealth/name-list（外部接口代理）
 // ---------------------------------------------------------------------------
 
+interface NameListSkillView {
+  skillId: string;
+  skillName: string;
+}
+
 interface NameListItemView {
   custUid: string;
   custNm: string;
@@ -267,8 +272,9 @@ interface NameListItemView {
   bbkOrgId?: string | null;
   filename?: string | null;
   recomReason?: string | null;
-  /** 客户命中的技能列表（SWE 代理层从 data.items 关联补齐） */
-  skillIds?: string[];
+  skillList?: NameListSkillView[];
+  strongContactTime?: string | null;
+  touchMethod?: string | null;
 }
 
 interface NameListResponse {
@@ -317,7 +323,7 @@ export interface TodayTaskRef {
 /**
  * 拉取今日任务对应的客户经营清单。
  * 经营视角：按技能去重并发查询（skillId + sapId），同一客户在同一任务下只出现一次；
- * 客户视角：一次查询该经理名下全部技能客户（仅 sapId），同一客户聚合为一条。
+ * 客户视角：一次查询该经理名下全部技能客户（仅 sapId），直接使用外部已聚合名单。
  */
 export async function fetchTodayCustomers(
   tasks: TodayTaskRef[],
@@ -356,8 +362,8 @@ export async function fetchTodayCustomers(
         category: task.category,
         task: task.sceneName,
         done: false,
-        channel: "",
-        time: "",
+        channel: item.touchMethod ?? "",
+        time: item.strongContactTime ?? "",
         note: "",
         opportunities: reason ? [reason] : [],
         link: item.filename ?? undefined,
@@ -380,10 +386,7 @@ export async function fetchPendingCustomers(
   return fetchCustomerViewCustomers(tasks, sapId, { touched: TOUCHED_PENDING });
 }
 
-/**
- * 已完成名单：客户视角口径（仅 sapId + touched=1），名单内客户均为已触达。
- * 接口暂不返回触达方式/完成时间/经营结果，对应列置空，待字段补齐。
- */
+/** 已完成名单：客户视角口径（仅 sapId + touched=1），名单内客户均为已触达。 */
 export async function fetchDoneCustomers(
   tasks: TodayTaskRef[],
   sapId?: string,
@@ -395,7 +398,7 @@ export async function fetchDoneCustomers(
 }
 
 /**
- * 客户视角名单：一次查询（不带 skillId），按客户聚合。
+ * 客户视角名单：一次查询（不带 skillId），直接映射外部已聚合的 data.list。
  * 重点标签列展示客户命中的场景名（skillId → 今日任务树场景名映射，
  * 不在今日树中的技能不产生标签）。
  */
@@ -406,43 +409,35 @@ async function fetchCustomerViewCustomers(
 ): Promise<Customer[]> {
   const sceneBySkill = new Map(tasks.map((t) => [t.skillId, t]));
   const list = await fetchNameList(undefined, sapId, opts.touched);
-  const byCust = new Map<string, NameListItemView[]>();
-  for (const item of list) {
-    const bucket = byCust.get(item.custUid) ?? [];
-    bucket.push(item);
-    byCust.set(item.custUid, bucket);
-  }
-  const customers: Customer[] = [];
-  for (const [custUid, entries] of byCust) {
-    const first = entries[0];
-    if (!first) continue;
-    const skillIds = [...new Set(entries.flatMap((e) => e.skillIds ?? []))];
+  return list.map((item) => {
+    const skillList = item.skillList ?? [];
+    const skillIds = [...new Set(skillList.map((s) => s.skillId))];
+    const skillNames = [
+      ...new Set(skillList.map((s) => s.skillName).filter(Boolean)),
+    ];
     const scenes = skillIds
       .map((sid) => sceneBySkill.get(sid))
       .filter((t): t is TodayTaskRef => Boolean(t));
-    const reasons = [
-      ...new Set(
-        entries.map((e) => e.recomReason ?? "").filter((r) => r.length > 0),
-      ),
-    ];
-    customers.push({
-      id: custUid,
-      custUid,
+    const reason = item.recomReason ?? "";
+    return {
+      id: item.custUid,
+      custUid: item.custUid,
       skillId: scenes[0]?.skillId ?? skillIds[0] ?? "",
-      name: first.custNm,
+      name: item.custNm,
       label: scenes.map((t) => t.sceneName).join("、"),
-      reason: reasons[0] ?? "",
+      reason,
       category: scenes[0]?.category ?? "",
-      task: scenes.map((t) => t.sceneName).join("、"),
+      task: opts.done
+        ? skillNames.join("、")
+        : scenes.map((t) => t.sceneName).join("、"),
       done: opts.done ?? false,
-      channel: "",
-      time: "",
+      channel: item.touchMethod ?? "",
+      time: item.strongContactTime ?? "",
       note: "",
-      opportunities: reasons,
-      link: first.filename ?? undefined,
-    });
-  }
-  return customers;
+      opportunities: reason ? [reason] : [],
+      link: item.filename ?? undefined,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
