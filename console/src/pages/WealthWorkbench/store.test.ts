@@ -562,7 +562,7 @@ describe("WealthWorkbench store", () => {
     expect(custCustomers).toHaveLength(2);
     expect(custCustomers[0]).toMatchObject({
       id: "CUST001",
-      label: "信贷需求挖掘",
+      label: "我的关注",
       task: "信贷需求挖掘",
     });
   });

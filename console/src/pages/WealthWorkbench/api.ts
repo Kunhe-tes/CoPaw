@@ -317,7 +317,15 @@ export interface TodayTaskRef {
   skillId: string;
   sceneName: string;
   category: string;
+  /** 所属规划来源：我的关注 / 行长关注 / 分行关注 */
+  source: string;
 }
+
+const CUSTOMER_LABEL_BY_PLAN_SOURCE: Record<string, string> = {
+  行长关注: "行长指派",
+  分行关注: "分行重点",
+  我的关注: "我的关注",
+};
 
 /**
  * 拉取今日任务对应的客户经营清单。
@@ -399,8 +407,8 @@ export async function fetchDoneCustomers(
 
 /**
  * 客户视角名单：一次查询（不带 skillId），直接映射外部已聚合的 data.list。
- * 重点标签列展示客户命中的场景名（skillId → 今日任务树场景名映射，
- * 不在今日树中的技能不产生标签）。
+ * 重点标签列按命中技能所属规划的创建角色展示；不在今日任务树中的
+ * 技能无法关联本地规划来源，因此不产生标签。
  */
 async function fetchCustomerViewCustomers(
   tasks: TodayTaskRef[],
@@ -418,13 +426,20 @@ async function fetchCustomerViewCustomers(
     const scenes = skillIds
       .map((sid) => sceneBySkill.get(sid))
       .filter((t): t is TodayTaskRef => Boolean(t));
+    const labels = [
+      ...new Set(
+        scenes
+          .map((scene) => CUSTOMER_LABEL_BY_PLAN_SOURCE[scene.source])
+          .filter(Boolean),
+      ),
+    ];
     const reason = item.recomReason ?? "";
     return {
       id: item.custUid,
       custUid: item.custUid,
       skillId: scenes[0]?.skillId ?? skillIds[0] ?? "",
       name: item.custNm,
-      label: scenes.map((t) => t.sceneName).join("、"),
+      label: labels.join("、"),
       reason,
       category: scenes[0]?.category ?? "",
       task: opts.done
