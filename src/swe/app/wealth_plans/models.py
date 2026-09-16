@@ -223,6 +223,7 @@ class SceneSkillItem(BaseModel):
     cronExample: str | None = None
     mcpRelationList: list[str] = Field(default_factory=list)
     skillBbkLabel: str | None = None
+    bbkId: str | None = None
 
 
 class SceneSkillListResponse(BaseModel):
