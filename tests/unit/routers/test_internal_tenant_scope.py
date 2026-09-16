@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 import pytest
 
 from swe.app.identity_resolver import ResolvedIdentity
+from swe.app.crons.manager import CronManager
 from swe.app.routers import internal as internal_router
 from swe.app.routers.internal import router
 from swe.app.workspace.tenant_pool import BootstrapOutcome
@@ -107,6 +108,97 @@ def test_internal_reload_rejects_invalid_source_id() -> None:
     manager.reload_agent.assert_not_called()
 
 
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("dispatch_service", [False, True])
+@pytest.mark.parametrize("deleted_after_lookup", [False, True])
+def test_internal_cron_callback_skips_missing_job(
+    encoded: bool,
+    dispatch_service: bool,
+    deleted_after_lookup: bool,
+) -> None:
+    job = SimpleNamespace(meta={}, task_type="agent")
+    repo = SimpleNamespace(
+        get_job=AsyncMock(
+            side_effect=[job if deleted_after_lookup else None, None],
+        ),
+    )
+    cron_manager = CronManager(
+        repo=repo,
+        runner=object(),
+        channel_manager=object(),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    payload = {
+        "tenant_id": "tenant-a",
+        "source_id": "source-a",
+        "agent_id": "default",
+        "task_type": "job",
+        "job_id": "job-1",
+    }
+    if dispatch_service:
+        payload.update(
+            callback_source="dispatch_service",
+            dispatch_intent_id=7,
+            dispatch_batch_id="batch-1",
+            dispatch_attempt=1,
+        )
+    if encoded:
+        payload = {
+            "jobParam": base64.urlsafe_b64encode(
+                json.dumps(payload).encode(),
+            ).decode(),
+        }
+
+    response = _build_client(manager).post(
+        "/internal/cron/callback",
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "skipped": "job_not_found",
+        "job_id": "job-1",
+    }
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        KeyError("provider_id"),
+        KeyError("Job not found: different-job"),
+        RuntimeError("database unavailable"),
+    ],
+)
+def test_internal_cron_callback_preserves_execution_errors(error) -> None:
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(side_effect=error),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+
+    response = _build_client(manager).post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "tenant-a",
+            "source_id": "source-a",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "job-1",
+        },
+    )
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == str(error)
+
+
 def test_internal_cron_callback_dispatches_job_param_tenant() -> None:
     cron_manager = SimpleNamespace(run_job=AsyncMock())
     manager = SimpleNamespace(
@@ -140,6 +232,88 @@ def test_internal_cron_callback_dispatches_job_param_tenant() -> None:
         "job-1",
         is_manual=False,
         source_id=None,
+    )
+
+
+def test_internal_cron_callback_forwards_scheduler_execution_identity() -> (
+    None
+):
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=SimpleNamespace(task_type="agent")),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+    job_param = base64.urlsafe_b64encode(
+        json.dumps(
+            {
+                "tenant_id": "runtime-scope",
+                "agent_id": "default",
+                "task_type": "job",
+                "job_id": "job-1",
+            },
+        ).encode(),
+    ).decode()
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "jobParam": job_param,
+            "logId": "scheduler-log-1",
+            "triggerTime": "2026-09-08T02:30:00Z",
+        },
+    )
+
+    assert response.status_code == 200
+    cron_manager.run_job.assert_awaited_once_with(
+        "job-1",
+        is_manual=False,
+        source_id=None,
+        dispatch_meta={
+            "scheduled_fire_at": "2026-09-08T02:30:00Z",
+            "external_execution_id": "scheduler-log-1",
+        },
+    )
+
+
+def test_internal_cron_callback_generates_identity_for_legacy_scheduler() -> (
+    None
+):
+    cron_manager = SimpleNamespace(
+        run_job=AsyncMock(),
+        get_job=AsyncMock(return_value=SimpleNamespace(task_type="agent")),
+    )
+    manager = SimpleNamespace(
+        get_agent=AsyncMock(
+            return_value=SimpleNamespace(cron_manager=cron_manager),
+        ),
+    )
+    client = _build_client(manager)
+
+    response = client.post(
+        "/internal/cron/callback",
+        json={
+            "tenant_id": "80074361",
+            "source_id": "RMASSIST",
+            "scopeId": "80074361-RMASSIST",
+            "agent_id": "default",
+            "task_type": "job",
+            "job_id": "8819af9e-0bdf-4545-aa6c-7c3045a14ac2",
+            "fromId": "80074361",
+        },
+    )
+
+    assert response.status_code == 200
+    cron_manager.run_job.assert_awaited_once()
+    _, kwargs = cron_manager.run_job.await_args
+    assert kwargs["is_manual"] is False
+    assert kwargs["source_id"] == "RMASSIST"
+    assert kwargs["dispatch_meta"]["cron_execution_key"].startswith(
+        "legacy:",
     )
 
 
@@ -431,6 +605,7 @@ def test_dispatch_service_callback_runs_batch_managed_child(
             "dispatch_intent_id": 7,
             "dispatch_batch_id": "batch-1",
             "dispatch_attempt": 2,
+            "execution_key": "child-1:batch-1:1",
         },
     )
 
@@ -454,6 +629,7 @@ def test_dispatch_service_callback_runs_batch_managed_child(
             "parent_scheduled_fire_at": "",
             "provider_id": "default",
             "model_id": "default",
+            "cron_execution_key": "child-1:batch-1:1",
         },
     )
 

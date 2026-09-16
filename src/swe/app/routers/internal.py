@@ -55,6 +55,19 @@ _ASSET_INVALID_UTF8_DETAIL = "Asset file is not valid UTF-8"
 _CONTENT_INVALID_UTF8_DETAIL = "Content is not valid UTF-8"
 _INVALID_PREVIEW_TARGET_DETAIL = "Invalid preview target"
 _DISPATCH_CALLBACK_SOURCE = "dispatch_service"
+_CALLBACK_EXECUTION_IDENTITY_FIELDS = (
+    "cron_execution_key",
+    "execution_key",
+    "scheduled_fire_at",
+    "fire_time",
+    "trigger_time",
+    "fireTime",
+    "triggerTime",
+    "external_execution_id",
+    "execution_id",
+    "log_id",
+    "logId",
+)
 _PREVIEW_PLACEHOLDER_HTML = """<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -172,18 +185,20 @@ def _is_dispatch_service_callback(params: dict[str, Any]) -> bool:
 def _build_dispatch_callback_meta(
     params: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if not _is_dispatch_service_callback(params):
-        return None
-    intent_id, batch_id, dispatch_attempt = _require_dispatch_callback_ids(
-        params,
-    )
-    return {
-        "source": _DISPATCH_CALLBACK_SOURCE,
-        "intent_id": intent_id,
-        "batch_id": batch_id,
-        "dispatch_attempt": dispatch_attempt,
-        **_dispatch_callback_context(params),
-    }
+    context = _dispatch_callback_context(params)
+    if _is_dispatch_service_callback(params):
+        intent_id, batch_id, dispatch_attempt = _require_dispatch_callback_ids(
+            params,
+        )
+        return {
+            "source": _DISPATCH_CALLBACK_SOURCE,
+            "intent_id": intent_id,
+            "batch_id": batch_id,
+            "dispatch_attempt": dispatch_attempt,
+            **context,
+            **(_callback_execution_meta(params) or {}),
+        }
+    return _callback_execution_meta(params)
 
 
 def _require_dispatch_callback_ids(
@@ -262,6 +277,11 @@ def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
             "model_id",
             default="default",
         ),
+    }
+
+
+def _callback_execution_meta(params: dict[str, Any]) -> dict[str, Any] | None:
+    metadata = {
         "cron_execution_key": _dispatch_callback_value(
             params,
             "cron_execution_key",
@@ -272,13 +292,33 @@ def _dispatch_callback_context(params: dict[str, Any]) -> dict[str, Any]:
             "scheduled_fire_at",
             "fire_time",
             "trigger_time",
+            "fireTime",
+            "triggerTime",
         ),
         "external_execution_id": _dispatch_callback_value(
             params,
             "external_execution_id",
             "execution_id",
+            "log_id",
+            "logId",
         ),
     }
+    return {key: value for key, value in metadata.items() if value} or None
+
+
+def _has_callback_execution_identity(dispatch_meta: dict[str, Any]) -> bool:
+    """Match the CronManager scheduled execution identity contract."""
+    if dispatch_meta.get("cron_execution_key") or dispatch_meta.get(
+        "execution_key",
+    ):
+        return True
+    if dispatch_meta.get("intent_id") and dispatch_meta.get("batch_id"):
+        return True
+    return bool(
+        dispatch_meta.get("scheduled_fire_at")
+        or dispatch_meta.get("parent_scheduled_fire_at")
+        or dispatch_meta.get("external_execution_id"),
+    )
 
 
 def _decode_cron_callback_params(body: Dict[str, Any]) -> dict[str, Any]:
@@ -286,7 +326,13 @@ def _decode_cron_callback_params(body: Dict[str, Any]) -> dict[str, Any]:
     if not job_param:
         return body
     try:
-        return json.loads(base64.urlsafe_b64decode(job_param))
+        params = json.loads(base64.urlsafe_b64decode(job_param))
+        if not isinstance(params, dict):
+            raise ValueError("jobParam payload must be an object")
+        for key in _CALLBACK_EXECUTION_IDENTITY_FIELDS:
+            if body.get(key):
+                params[key] = body[key]
+        return params
     except Exception as exc:
         logger.warning("Failed to decode jobParam: %s", exc)
         raise HTTPException(
@@ -443,13 +489,33 @@ async def _run_job_callback(
         return skip_response
 
     dispatch_meta = _build_dispatch_callback_meta(params) or {}
+    if getattr(job, "task_type", None) in {
+        "agent",
+        "text",
+    } and not _has_callback_execution_identity(dispatch_meta):
+        dispatch_meta["cron_execution_key"] = f"legacy:{uuid.uuid4()}"
     dispatch_meta.update(
         build_b3_dispatch_meta(getattr(request, "headers", {})),
     )
     run_kwargs = {"is_manual": False, "source_id": source_id}
     if dispatch_meta:
         run_kwargs["dispatch_meta"] = dispatch_meta
-    await mgr.run_job(job_id, **run_kwargs)
+    try:
+        result = await mgr.run_job(job_id, **run_kwargs)
+    except KeyError as exc:
+        if exc.args != (f"Job not found: {job_id}",):
+            raise
+        logger.info(
+            "Callback skipped for missing job: "
+            "tenant=%s source=%s agent=%s job=%s",
+            tenant_id,
+            source_id,
+            agent_id,
+            job_id,
+        )
+        return {"status": "ok", "skipped": "job_not_found", "job_id": job_id}
+    if result is False:
+        return {"status": "ok", "skipped": "job_disabled", "job_id": job_id}
     return None
 
 
@@ -1565,10 +1631,6 @@ async def refresh_external_cron_jobs(request: Request):
 # pylint: disable=too-many-statements
 async def internal_cron_callback(
     request: Request,
-    x_internal_token: Optional[str] = Header(
-        default=None,
-        alias="X-Internal-Token",
-    ),
     body: Dict[str, Any] = Body(...),
 ):
     """外部调度平台统一回调端点。
@@ -1578,8 +1640,8 @@ async def internal_cron_callback(
     2. body 顶层直接携带 tenant_id / agent_id / task_type / job_id
 
     根据 task_type 分发到对应的 CronManager 方法。
+    不校验内部 token；部署必须将此执行入口隔离在可信内网。
     """
-    _verify_internal_token(x_internal_token)
     params = _decode_cron_callback_params(body)
     tenant_id, source_id, agent_id, task_type, job_id = (
         _require_cron_callback_params(params)

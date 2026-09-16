@@ -116,7 +116,11 @@ class FakeProvider:
 
         return ModelRuntimeConfig()
 
-    def build_generation_kwargs(self, _config) -> dict[str, Any]:
+    def build_generation_kwargs(
+        self,
+        _config,
+        model_id: str = "",
+    ) -> dict[str, Any]:
         return dict(self.generation_kwargs)
 
 
@@ -195,6 +199,10 @@ def build_agent_job(
             meta={"workspace_dir": str(workspace_dir)},
         ),
         runtime=JobRuntimeSpec(timeout_seconds=timeout_seconds),
+        meta={
+            "task_session_id": "session-critical",
+            "creator_user_id": "user-critical",
+        },
     )
 
 
@@ -219,6 +227,10 @@ def build_text_job(
             ),
             meta={"workspace_dir": str(workspace_dir)},
         ),
+        meta={
+            "task_session_id": "session-critical",
+            "creator_user_id": "user-critical",
+        },
     )
 
 
