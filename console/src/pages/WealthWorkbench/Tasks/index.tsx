@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import cx from "classnames";
+import DOMPurify from "dompurify";
 import styles from "../index.module.less";
 import { Icon } from "../components/Icon";
 import { useCanAccess, useWealthStore } from "../store";
@@ -49,8 +50,42 @@ function sourceTagClass(source: string) {
     : "";
 }
 
-/** 经营机会单元格：多条时以列表展示（原型 opportunitiesHTML） */
-function Opportunities({
+function OpportunityHtml({ value }: { value: string }) {
+  const html = DOMPurify.sanitize(value, {
+    ALLOWED_ATTR: [],
+    FORBID_TAGS: [
+      "style",
+      "form",
+      "input",
+      "button",
+      "textarea",
+      "select",
+      "option",
+      "iframe",
+      "object",
+      "embed",
+    ],
+  });
+
+  if (/^\s*<li(?:\s|>)/i.test(html)) {
+    return (
+      <ul
+        className={styles.opportunityList}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
+    );
+  }
+
+  return (
+    <div
+      className={styles.opportunityHtml}
+      dangerouslySetInnerHTML={{ __html: html }}
+    />
+  );
+}
+
+/** 经营机会单元格：支持外部接口返回的简单 HTML 列表。 */
+export function Opportunities({
   customer,
   multiple,
 }: {
@@ -65,12 +100,14 @@ function Opportunities({
     return (
       <ul className={styles.opportunityList}>
         {items.map((t, i) => (
-          <li key={i}>{t}</li>
+          <li key={i}>
+            <OpportunityHtml value={t} />
+          </li>
         ))}
       </ul>
     );
   }
-  return <>{items[0]}</>;
+  return <OpportunityHtml value={items[0]} />;
 }
 
 /** 电访 / 客户洞察外链占位：地址待外部系统提供，当前新窗口打开占位页 */

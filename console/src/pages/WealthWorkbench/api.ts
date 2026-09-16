@@ -89,6 +89,7 @@ interface SceneSkillItem {
   cronExample?: string | null;
   mcpRelationList: string[];
   skillBbkLabel?: string | null;
+  bbkId?: string | null;
 }
 
 interface SceneSkillListResponse {
