@@ -19,6 +19,7 @@ from .models import (
     PlanTargetRecord,
     WealthPlanRecord,
 )
+from .roles import can_view_branch_wide
 
 logger = logging.getLogger(__name__)
 
@@ -179,35 +180,49 @@ class WealthPlanStore:
 
     async def list_for_viewer(
         self,
-        _sap_id: str,
-        _role: str,
+        sap_id: str,
+        role: str,
         bbk_id: str | None,
     ) -> list[WealthPlanRecord]:
-        """按所属分行查询看板列表，并按创建时间倒序。
+        """按所属分行及角色可见范围查询，并按创建时间倒序。
 
-        所有角色只能查看本行（同 bbk_id）的规划；bbk_id 缺失时不返回数据。
+        行长/中台查看本行全部规划；其余角色仅查看自己创建或分发给自己的
+        本行规划。bbk_id 缺失时不返回数据。
         """
         if not bbk_id:
             return []
+        branch_wide = can_view_branch_wide(role)
         if not self.is_available:
             records = [
                 record
                 for record in self._plans.values()
-                if self._visible_to(record, bbk_id)
+                if self._visible_to(record, sap_id, branch_wide, bbk_id)
             ]
             records.sort(
                 key=lambda r: r.created_at or datetime.min,
                 reverse=True,
             )
             return copy.deepcopy(records)
-        rows = await self.db.fetch_all(
-            f"""
-            SELECT p.* FROM {_PLAN_TABLE} p
-            WHERE p.bbk_id = %s
-            ORDER BY p.created_at DESC
-            """,
-            (bbk_id,),
-        )
+        if branch_wide:
+            rows = await self.db.fetch_all(
+                f"""
+                SELECT p.* FROM {_PLAN_TABLE} p
+                WHERE p.bbk_id = %s
+                ORDER BY p.created_at DESC
+                """,
+                (bbk_id,),
+            )
+        else:
+            rows = await self.db.fetch_all(
+                f"""
+                SELECT DISTINCT p.* FROM {_PLAN_TABLE} p
+                LEFT JOIN {_TARGET_TABLE} t ON t.plan_id = p.id
+                WHERE p.bbk_id = %s
+                  AND (p.sap_id = %s OR t.sap_id = %s)
+                ORDER BY p.created_at DESC
+                """,
+                (bbk_id, sap_id, sap_id),
+            )
         return [
             _row_to_plan(
                 row,
@@ -416,6 +431,12 @@ class WealthPlanStore:
     @staticmethod
     def _visible_to(
         record: WealthPlanRecord,
+        sap_id: str,
+        branch_wide: bool,
         bbk_id: str,
     ) -> bool:
-        return record.bbk_id == bbk_id
+        if record.bbk_id != bbk_id:
+            return False
+        if branch_wide or record.sap_id == sap_id:
+            return True
+        return any(target.sap_id == sap_id for target in record.targets)
