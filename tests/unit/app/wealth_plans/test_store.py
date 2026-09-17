@@ -64,7 +64,9 @@ async def test_create_and_get_roundtrip() -> None:
 
 
 @pytest.mark.asyncio
-async def test_list_for_viewer_is_scoped_only_by_branch() -> None:
+async def test_list_for_viewer_scopes_personal_roles_by_branch_and_relation() -> (
+    None
+):
     store = WealthPlanStore()
     await store.create(
         make_plan("plan-1", sap_id="zhangwl", targets=["chenjy"]),
@@ -79,13 +81,21 @@ async def test_list_for_viewer_is_scoped_only_by_branch() -> None:
         ),
     )
 
-    rm_view = await store.list_for_viewer("wangly", "rm", "100")
-    unknown_view = await store.list_for_viewer("wangly", "unknown", "100")
+    creator_view = await store.list_for_viewer("zhangwl", "rm", "100")
+    target_view = await store.list_for_viewer("chenjy", "rm", "100")
+    rm_outsider_view = await store.list_for_viewer("wangly", "rm", "100")
+    unknown_outsider_view = await store.list_for_viewer(
+        "wangly",
+        "unknown",
+        "100",
+    )
     other_branch_view = await store.list_for_viewer("zhangwl", "rm", "200")
     no_bbk_view = await store.list_for_viewer("zhangwl", "rm", None)
 
-    assert {r.id for r in rm_view} == {"plan-1", "plan-2"}
-    assert {r.id for r in unknown_view} == {"plan-1", "plan-2"}
+    assert {r.id for r in creator_view} == {"plan-1"}
+    assert {r.id for r in target_view} == {"plan-1"}
+    assert rm_outsider_view == []
+    assert unknown_outsider_view == []
     assert {r.id for r in other_branch_view} == {"plan-3"}
     assert no_bbk_view == []
 
@@ -112,12 +122,14 @@ async def test_list_for_viewer_branch_wide_for_president_and_middle() -> None:
 
     assert {r.id for r in president_view} == {"plan-1", "plan-2"}
     assert {r.id for r in middle_view} == {"plan-1", "plan-2"}
-    assert {r.id for r in rm_view} == {"plan-1", "plan-2"}
+    assert rm_view == []
     assert no_bbk_view == []
 
 
 @pytest.mark.asyncio
-async def test_list_for_viewer_database_query_uses_only_branch() -> None:
+async def test_list_for_viewer_database_query_combines_branch_and_relation() -> (
+    None
+):
     db = AsyncMock()
     db.fetch_all.return_value = []
     store = WealthPlanStore(db)
@@ -125,7 +137,26 @@ async def test_list_for_viewer_database_query_uses_only_branch() -> None:
     assert await store.list_for_viewer("wangly", "unknown", "100") == []
 
     sql, params = db.fetch_all.await_args.args
-    assert "WHERE p.bbk_id = %s" in " ".join(sql.split())
+    normalized_sql = " ".join(sql.split())
+    assert "WHERE p.bbk_id = %s" in normalized_sql
+    assert "p.sap_id = %s OR t.sap_id = %s" in normalized_sql
+    assert params == ("100", "wangly", "wangly")
+
+
+@pytest.mark.asyncio
+async def test_list_for_viewer_database_query_is_branch_wide_for_management() -> (
+    None
+):
+    db = AsyncMock()
+    db.fetch_all.return_value = []
+    store = WealthPlanStore(db)
+
+    assert await store.list_for_viewer("wangly", "president", "100") == []
+
+    sql, params = db.fetch_all.await_args.args
+    normalized_sql = " ".join(sql.split())
+    assert "WHERE p.bbk_id = %s" in normalized_sql
+    assert "p.sap_id" not in normalized_sql
     assert params == ("100",)
 
 
