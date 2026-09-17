@@ -278,16 +278,22 @@ def test_list_branch_wide_for_president_and_middle(client: TestClient) -> None:
         "X-Bbk-Id": "100",
         "X-Position-Id": "RB1101",
     }
-    middle = {**president, "X-Position-Id": "RB0304"}
+    middle = {**president, "X-Position-Id": "RB0301"}
+    other_middle = {**president, "X-Position-Id": "RB0305"}
+    former_middle = {**president, "X-Position-Id": "RB0304"}
     rm = {**president, "X-Position-Id": "RB0101"}
     other_branch = {**president, "X-Bbk-Id": "200"}
 
-    for headers in (president, middle):
+    for headers in (president, middle, other_middle):
         items = client.get("/api/wealth/plans", headers=headers).json()[
             "items"
         ]
         assert [p["id"] for p in items] == [created["id"]]
         assert items[0]["editable"] is False  # 可见但只读
+    assert (
+        client.get("/api/wealth/plans", headers=former_middle).json()["items"]
+        == []
+    )
     assert client.get("/api/wealth/plans", headers=rm).json()["items"] == []
     assert (
         client.get("/api/wealth/plans", headers=other_branch).json()["items"]
