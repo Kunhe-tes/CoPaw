@@ -743,10 +743,14 @@
     font-size: 18px;
     color: #6d82a4;
   }
-  .step.active .stepNum {
+  .stepNum.stepActive {
     background: var(--blue);
     color: #fff;
     box-shadow: 0 0 0 5px #f1f7ff;
+  }
+  .stepNum.stepComplete {
+    background: #e8f3ff;
+    color: var(--blue);
   }
   .step small {
     display: block;
@@ -862,6 +866,13 @@
     font-size: 13px;
     color: var(--text);
     margin: 6px 0 3px;
+  }
+  .sceneDescription {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
   }
   .scene .status {
     font-size: 12px;
