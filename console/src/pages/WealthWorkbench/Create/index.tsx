@@ -132,6 +132,14 @@ function TargetNamesSummary({ sapIds }: { sapIds: string[] }) {
   );
 }
 
+export function SceneDescription({ description }: { description: string }) {
+  return (
+    <p className={styles.sceneDescription} title={description}>
+      {description}
+    </p>
+  );
+}
+
 /**
  * 单个场景的排程配置块：执行频率模型与控制台定时任务一致
  * （每小时 / 每日 / 每周 / 自定义 cron），序列化复用 @/utils/parseCron。
@@ -528,7 +536,7 @@ export default function Create() {
                         {s.name}
                         <span className={styles.tag}>{s.category}</span>
                       </div>
-                      <p>{s.desc}</p>
+                      <SceneDescription description={s.desc} />
                       <span className={styles.status}>
                         <i className={styles.dot}></i>
                         AI能力已就绪
