@@ -140,6 +140,28 @@ export function SceneDescription({ description }: { description: string }) {
   );
 }
 
+export function StepIndicator({
+  active,
+  completed,
+  number,
+}: {
+  active: boolean;
+  completed: boolean;
+  number: number;
+}) {
+  return (
+    <span
+      className={cx(
+        styles.stepNum,
+        active && styles.stepActive,
+        completed && styles.stepComplete,
+      )}
+    >
+      {completed ? "✓" : number}
+    </span>
+  );
+}
+
 /**
  * 单个场景的排程配置块：执行频率模型与控制台定时任务一致
  * （每小时 / 每日 / 每周 / 自定义 cron），序列化复用 @/utils/parseCron。
@@ -315,7 +337,7 @@ export default function Create() {
   const navigate = useNavigate();
 
   const [filterCategory, setFilterCategory] = useState("全部");
-  const [activeSteps, setActiveSteps] = useState<number[]>([0, 1]);
+  const [activeStep, setActiveStep] = useState(0);
   const dragId = useRef<string | null>(null);
 
   const sceneRef = useRef<HTMLElement>(null);
@@ -352,7 +374,7 @@ export default function Create() {
         ? directionRef.current
         : targetRef.current;
     el?.scrollIntoView({ behavior: "smooth" });
-    setActiveSteps([index]);
+    setActiveStep(index);
   };
 
   const onPublish = () => {
@@ -460,30 +482,33 @@ export default function Create() {
       </div>
 
       <div className={`${styles.panel} ${styles.steps}`}>
-        {stepDefs.map((s, i) => (
-          <span key={s.n} style={{ display: "contents" }}>
-            {i > 0 && <div className={styles.stepLine}></div>}
-            <button
-              className={cx(
-                styles.step,
-                activeSteps.includes(i) && styles.active,
-              )}
-              onClick={() => scrollTo(s.target, i)}
-            >
-              <span className={styles.stepNum}>
-                {s.n === 1 && draft.items.length ? "✓" : s.n}
-              </span>
-              <span>
-                <strong>
-                  {s.n}
-                  {"　"}
-                  {s.title}
-                </strong>
-                <small>{s.sub}</small>
-              </span>
-            </button>
-          </span>
-        ))}
+        {stepDefs.map((s, i) => {
+          const completed = s.n === 1 && draft.items.length > 0;
+          return (
+            <span key={s.n} style={{ display: "contents" }}>
+              {i > 0 && <div className={styles.stepLine}></div>}
+              <button
+                className={styles.step}
+                aria-current={activeStep === i ? "step" : undefined}
+                onClick={() => scrollTo(s.target, i)}
+              >
+                <StepIndicator
+                  active={!completed && activeStep === i}
+                  completed={completed}
+                  number={s.n}
+                />
+                <span>
+                  <strong>
+                    {s.n}
+                    {"　"}
+                    {s.title}
+                  </strong>
+                  <small>{s.sub}</small>
+                </span>
+              </button>
+            </span>
+          );
+        })}
       </div>
 
       <div className={`${styles.panel} ${styles.createPanel}`}>
