@@ -57,7 +57,7 @@ from .publish import (
     delete_removed_scene_jobs,
     launch_publish,
 )
-from .roles import can_view_branch_wide, resolve_role
+from .roles import resolve_role
 from .store import WealthPlanStore, new_plan_id
 
 logger = logging.getLogger(__name__)
@@ -371,7 +371,7 @@ async def create_plan(
 
 @router.get("/plans", response_model=PlanListResponse)
 async def list_plans(request: Request) -> PlanListResponse:
-    """看板列表：客户经理看自己创建 + 分发给自己的；行长/中台看本行全部。"""
+    """看板列表：所有角色仅查看本行（同 bbk_id）的规划。"""
     store = _get_store(request)
     viewer = _request_sap_id(request)
     records = await store.list_for_viewer(
@@ -447,20 +447,14 @@ async def delete_plan(request: Request, plan_id: str) -> dict[str, bool]:
 async def _get_visible_plan(
     store: WealthPlanStore,
     plan_id: str,
-    viewer: str,
-    role: str,
+    _viewer: str,
+    _role: str,
     bbk_id: str | None,
 ) -> WealthPlanRecord:
     record = await store.get(plan_id)
     if record is None:
         raise HTTPException(status_code=404, detail="plan not found")
-    is_creator = record.sap_id == viewer
-    is_target = any(t.sap_id == viewer for t in record.targets)
-    # 行长/中台可读本行（同 bbk_id）全部规划，但仍只读、不可编辑
-    is_branch_peer = (
-        can_view_branch_wide(role) and bool(bbk_id) and record.bbk_id == bbk_id
-    )
-    if not is_creator and not is_target and not is_branch_peer:
+    if not bbk_id or record.bbk_id != bbk_id:
         raise HTTPException(status_code=403, detail="forbidden")
     return record
 

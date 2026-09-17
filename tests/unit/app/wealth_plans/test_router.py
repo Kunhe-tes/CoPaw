@@ -744,7 +744,7 @@ async def test_board_status_aggregates_broadcast(
     creator_view = client.get("/api/wealth/plans", headers=VIEWER).json()
     target_view = client.get(
         "/api/wealth/plans",
-        headers={"X-User-Id": "chenjy"},
+        headers={"X-User-Id": "chenjy", "X-Bbk-Id": "100"},
     ).json()
 
     assert creator_view["items"][0]["board_status"] == "已自动下发"
@@ -786,11 +786,11 @@ async def test_board_status_recipient_failure(
     creator_view = client.get("/api/wealth/plans", headers=VIEWER).json()
     chenjy_view = client.get(
         "/api/wealth/plans",
-        headers={"X-User-Id": "chenjy"},
+        headers={"X-User-Id": "chenjy", "X-Bbk-Id": "100"},
     ).json()
     liuxt_view = client.get(
         "/api/wealth/plans",
-        headers={"X-User-Id": "liuxt"},
+        headers={"X-User-Id": "liuxt", "X-Bbk-Id": "100"},
     ).json()
 
     assert creator_view["items"][0]["board_status"] == "分发失败"

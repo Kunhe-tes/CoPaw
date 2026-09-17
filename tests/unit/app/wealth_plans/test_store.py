@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from swe.app.wealth_plans.models import (
@@ -112,6 +114,19 @@ async def test_list_for_viewer_branch_wide_for_president_and_middle() -> None:
     assert {r.id for r in middle_view} == {"plan-1", "plan-2"}
     assert {r.id for r in rm_view} == {"plan-1", "plan-2"}
     assert no_bbk_view == []
+
+
+@pytest.mark.asyncio
+async def test_list_for_viewer_database_query_uses_only_branch() -> None:
+    db = AsyncMock()
+    db.fetch_all.return_value = []
+    store = WealthPlanStore(db)
+
+    assert await store.list_for_viewer("wangly", "unknown", "100") == []
+
+    sql, params = db.fetch_all.await_args.args
+    assert "WHERE p.bbk_id = %s" in " ".join(sql.split())
+    assert params == ("100",)
 
 
 @pytest.mark.asyncio
